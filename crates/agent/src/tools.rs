@@ -1582,11 +1582,32 @@ fn read_request(index: usize, value: serde_json::Value) -> Result<Request, ToolE
             "request {index}: no request kind {op}; draft.query \"ops\" lists them all"
         )));
     }
-    serde_json::from_value(value).map_err(|error| {
+    let request: Request = serde_json::from_value(value.clone()).map_err(|error| {
         ToolError::BadArguments(format!(
             "request {index} {op}: {error}; draft.query \"ops {op}\" shows its fields"
         ))
-    })
+    })?;
+    // A field the kind does not have is read as nothing, and the caller
+    // would take the request to have done what the field asked. It is
+    // found by giving it a value no field would keep: a field the kind has
+    // then fails to read or reads differently, and one it lacks changes
+    // nothing.
+    if let serde_json::Value::Object(fields) = &value {
+        for key in fields.keys().filter(|key| *key != "op") {
+            let mut probe = fields.clone();
+            probe.insert(key.clone(), serde_json::json!(987_654_321.5));
+            let ignored = serde_json::from_value::<Request>(serde_json::Value::Object(probe))
+                .is_ok_and(|same| same == request);
+            if ignored {
+                return Err(ToolError::BadArguments(format!(
+                    "request {index} {op} has no field {key}, so it would do nothing; \
+                     draft.query \"ops {op}\" shows its fields, and another request may be \
+                     the one that sets it"
+                )));
+            }
+        }
+    }
+    Ok(request)
 }
 
 /// The file endings `export.start` writes: a still, and H.264 movies.
@@ -2550,6 +2571,21 @@ mod tests {
             unknown.content
         );
         assert!(unknown.content.len() < 200, "{}", unknown.content);
+        // A field the kind does not have is refused, not dropped: the
+        // color of new text is another request's to set.
+        let made_up = run(
+            r##"{"expected_revision":0,"requests":[{"op":"add_text","track_id":"t",
+                "segment_id":"s","material_id":"m","start":0,"duration":1000000,
+                "content":"Hello","face":"Inter.ttf","text_color":"#FFFF00"}]}"##,
+        );
+        assert!(made_up.is_error);
+        assert!(
+            made_up
+                .content
+                .contains("request 0 add_text has no field text_color"),
+            "{}",
+            made_up.content
+        );
         let nameless = run(r#"{"expected_revision":0,"requests":[{"segment_id":"a"}]}"#);
         assert!(nameless.content.contains("request 0 has no \"op\""));
         let empty = run(r#"{"expected_revision":0,"requests":[]}"#);
@@ -2567,6 +2603,25 @@ mod tests {
             missing.content
         );
         assert_eq!(registry.draft.session().revision(), 0);
+    }
+
+    #[test]
+    fn every_documented_request_reads_with_all_its_fields_and_an_empty_face() {
+        // No field of a real request is mistaken for a made-up one.
+        for op in crate::ops::ops() {
+            let value: serde_json::Value = serde_json::from_str(op.example).unwrap();
+            if let Err(error) = super::read_request(0, value) {
+                panic!("{}: {error}", op.name);
+            }
+        }
+        // A field given the value it has by default is still a field.
+        let plain =
+            serde_json::json!({"op":"set_text_color","segment_id":"t","color":"","face":""});
+        assert!(super::read_request(0, plain).is_ok());
+        let nulls = serde_json::json!({"op":"add_caption","source_id":"a","track_id":"c",
+            "segment_id":"s","material_id":"m","span":null,"face":"",
+            "words":{"start_time":[],"end_time":[],"text":[]}});
+        assert!(super::read_request(0, nulls).is_ok());
     }
 
     #[test]

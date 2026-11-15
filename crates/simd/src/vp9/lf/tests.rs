@@ -121,8 +121,11 @@ fn two_edges_at_once_match_two_scalar_ones() {
             assert_eq!(got, want, "case {case} {wd:?} {thr:?}");
         }
     }
+    // Off x86-64 the fallback answers `false` and nothing is compared.
     #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("avx2") {
         assert!(ran > 5000);
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    assert_eq!(ran, 0);
 }

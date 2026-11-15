@@ -141,6 +141,33 @@ pub fn reachable(from: &[u8], to: &[u8], w: usize, h: usize) -> bool {
     all > 0 && good * 10 >= all * 7
 }
 
+/// Whether `to` cuts from `from` (luma, `w`×`h`): over a sample of 16×16
+/// blocks, the best match each finds in the search range leaves more than
+/// twice the error of its own mean (libvpx compares inter and intra
+/// errors the same way). Within one scene the match leaves at most 0.95 of
+/// it, grain and all; across a cut 11 to 50 times it, even to another
+/// picture of the same subject. (A cut to fine texture everywhere, which
+/// its own mean predicts no better than anything does, is not seen; the
+/// blocks of the frame after it choose intra all the same.)
+pub fn cut(from: &[u8], to: &[u8], w: usize, h: usize) -> bool {
+    let (mut inter, mut intra) = (0u64, 0u64);
+    for by in (0..h.saturating_sub(15)).step_by(64) {
+        for bx in (0..w.saturating_sub(15)).step_by(64) {
+            let (_, sse) = search(to, from, w, h, bx, by, 16, 16);
+            inter += sse;
+            let (mut s, mut s2) = (0u64, 0u64);
+            for r in 0..16 {
+                for &v in &to[(by + r) * w + bx..(by + r) * w + bx + 16] {
+                    s += u64::from(v);
+                    s2 += u64::from(v) * u64::from(v);
+                }
+            }
+            intra += s2 - s * s / 256;
+        }
+    }
+    inter > intra * 2
+}
+
 /// Adds one picture's block to the accumulators: `strength` `None` is the
 /// centre picture itself (full weight).
 #[allow(clippy::too_many_arguments)]

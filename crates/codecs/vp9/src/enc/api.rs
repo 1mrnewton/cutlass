@@ -111,6 +111,10 @@ pub struct Vp9Encoder {
     queue: std::collections::VecDeque<Queued>,
     /// Where the overlay of the alt-ref coded last goes (`since_key`).
     overlay_at: Option<u32>,
+    /// The luma of the picture coded last, tight, for finding a cut.
+    last_luma: Vec<u8>,
+    /// Whether the lookahead found that the next picture starts a scene.
+    cut_next: bool,
 }
 
 /// A picture in the lookahead.
@@ -154,6 +158,8 @@ impl Vp9Encoder {
             cancel: Arc::new(AtomicBool::new(false)),
             queue: std::collections::VecDeque::new(),
             overlay_at: None,
+            last_luma: Vec::new(),
+            cut_next: false,
         })
     }
 
@@ -300,6 +306,10 @@ impl Vp9Encoder {
         let cw = w.div_ceil(2);
         // This picture has index `since_key` (0 for a key frame); the next
         // golden position is the alt-ref's target.
+        // A cut (which no alt-ref spans: `reachable` fails across it).
+        if self.is_cut((&f.planes[0], w)) {
+            self.cut_next = true;
+        }
         let key_next = self.force_key || self.since_key >= self.opts.keyint;
         let idx = if key_next { 0 } else { self.since_key };
         let target = (idx / GF_INTERVAL + 1) * GF_INTERVAL;
@@ -379,11 +389,17 @@ impl Vp9Encoder {
         seconds: f64,
     ) -> Result<(Vec<u8>, bool), CodecError> {
         let key = self.force_key || self.since_key >= self.opts.keyint;
+        // A cut starts a golden frame: LAST and GOLDEN take the new scene,
+        // each block still chooses intra or inter, and the probabilities
+        // the stream has learnt are kept (a key frame would reset them, and
+        // costs more on a cut to another picture of the same subject).
+        let cut = !key && (self.cut_next || self.is_cut(planes[0]));
+        self.cut_next = false;
         // A golden frame every `GF_INTERVAL` frames, coded finer: the
         // frames after it predict from it. After an alt-ref, the golden
         // frame is its overlay, coded as an inter frame.
-        let golden = !key && self.since_key.is_multiple_of(GF_INTERVAL);
-        let overlay = golden && self.overlay_at == Some(self.since_key);
+        let golden = !key && (cut || self.since_key.is_multiple_of(GF_INTERVAL));
+        let overlay = golden && !cut && self.overlay_at == Some(self.since_key);
         let kind = if key {
             0
         } else if golden && !overlay {
@@ -391,7 +407,8 @@ impl Vp9Encoder {
         } else {
             2
         };
-        if key || overlay {
+        if key || overlay || cut {
+            // (An alt-ref of the scene before a cut has nothing to show.)
             self.overlay_at = None;
         }
         self.enc.load(planes);
@@ -411,7 +428,35 @@ impl Vp9Encoder {
         self.rc.account(coded.data.len(), seconds, kind, qindex);
         self.force_key = false;
         self.since_key = if coded.key { 1 } else { self.since_key + 1 };
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (y, stride) = planes[0];
+        self.last_luma.clear();
+        for r in 0..h {
+            self.last_luma
+                .extend_from_slice(&y[r * stride..r * stride + w]);
+        }
         Ok((coded.data, coded.key))
+    }
+
+    /// Whether luma `y` (rows `stride` apart) cuts from the picture coded
+    /// last: few of its blocks are anywhere near in that one, so that a
+    /// key frame costs little more than an inter frame and starts the
+    /// scene's references afresh (libvpx's scene cut detection).
+    fn is_cut(&self, (y, stride): (&[u8], usize)) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        if self.last_luma.len() != w * h || self.since_key == 0 {
+            return false;
+        }
+        let tight: std::borrow::Cow<'_, [u8]> = if stride == w {
+            std::borrow::Cow::Borrowed(&y[..w * h])
+        } else {
+            std::borrow::Cow::Owned(
+                (0..h)
+                    .flat_map(|r| y[r * stride..r * stride + w].iter().copied())
+                    .collect(),
+            )
+        };
+        super::arf::cut(&self.last_luma, &tight, w, h)
     }
 
     /// The decoder configuration (`vpcC`, version 1) for the given colour

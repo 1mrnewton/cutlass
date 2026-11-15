@@ -1243,3 +1243,71 @@ fn a_second_pass_spends_the_bitrate_where_the_first_found_detail() {
     let moving: u64 = second[20..].iter().sum();
     assert!(moving * 2 > total, "{moving} of {total}");
 }
+
+#[test]
+fn a_cut_starts_a_golden_frame_and_keeps_the_stream_going() {
+    // Ten frames of a moving ramp, then ten of a smooth gradient: nothing
+    // in the second predicts from the first better than its own mean.
+    let gradient = |shift: u32| {
+        let mut f = moving(128, 128, 0);
+        for (i, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let (r, c) = (i / 128, i % 128);
+            *v = (40 + (r + c + shift as usize) / 4).min(255) as u8;
+        }
+        f
+    };
+    let opts = super::Vp9Options {
+        qindex: 100,
+        lag: Some(0),
+        threads: 1,
+        speed: 6,
+        ..super::Vp9Options::default()
+    };
+    let mut encoder = Vp9Encoder::with_options(128, 128, opts).expect("encoder");
+    let mut packets = Vec::new();
+    for index in 0..20u32 {
+        let frame = if index < 10 {
+            moving(128, 128, index)
+        } else {
+            gradient(index)
+        };
+        packets.extend(
+            encoder
+                .push(&VideoInput {
+                    frame,
+                    pts: i64::from(index),
+                    duration: 1,
+                    timescale: 30,
+                })
+                .expect("push"),
+        );
+    }
+    assert_eq!(packets.len(), 20);
+    // Each header read against the state of a decoder that has decoded
+    // the frames before it.
+    let mut dec = Decoder::new();
+    let headers: Vec<header::Header> = packets
+        .iter()
+        .map(|p| {
+            let h = header::parse(dec.persist(), &p.data)
+                .expect("header")
+                .header;
+            dec.decode(&p.data).expect("decode");
+            h
+        })
+        .collect();
+    // The cut is not a key frame, but it refreshes LAST and GOLDEN.
+    assert!(!headers[10].key_frame);
+    assert_eq!(headers[10].refresh_flags, 0x03);
+    // The frames around it refresh only LAST.
+    assert_eq!(headers[9].refresh_flags, 0x01);
+    assert_eq!(headers[11].refresh_flags, 0x01);
+    // And the stream decodes through it.
+    let params = CodecParams::with_format(CodecId::Vp9, 128, 128, PixelFormat::Yuv420p);
+    let mut decoder = Vp9Decoder::open(&params).expect("decoder");
+    let mut shown = 0;
+    for p in &packets {
+        shown += decoder.push_all(p).expect("decode").len();
+    }
+    assert_eq!(shown, 20);
+}

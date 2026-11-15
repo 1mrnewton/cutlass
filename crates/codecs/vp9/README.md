@@ -98,8 +98,20 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   speed 6 hits 1, 2, 3 and 4 Mb/s within 5% and takes 9% / 19% off
   one pass's bits at the same PSNR-Y / averaged PSNR, in 6.8 s against
   5.1 s. libvpx's own two passes (good, cpu-used 2) are 18% / 26% ahead
-  of it there, in 13.0 s: they start each scene with a key frame, and
-  this encoder does not yet detect a cut.
+  of it there, in 13.0 s (before cuts were found, below).
+- Cuts: a picture whose sampled 16×16 blocks match the last picture
+  worse than twice the error of their own means (libvpx compares inter
+  and intra errors the same way) starts a golden frame: LAST and GOLDEN
+  take the new scene, an alt-ref of the old one is dropped, every block
+  still chooses intra or inter, and the probabilities the stream has
+  learnt are kept. (A key frame, as libvpx codes a cut, did worse here on
+  a cut to another picture of the same subject: 13% more bits at one
+  pass.) Within one scene the ratio stays under 0.95, grain and all, so
+  no single-scene stream changes. On 90 frames of 720p with two cuts to
+  other content (FFmpeg's `mandelbrot`, the grainy pan, `testsrc2`), at
+  speed 6: −13% / −12% of the bits at the same PSNR-Y / averaged PSNR at
+  one pass, −6.5% / −5.3% at two; on the clip with two cuts between
+  related pictures, −4% / −3.6% and −7.1% / −3.6%.
 
 ## How it works
 

@@ -511,10 +511,18 @@ fn avi(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
 }
 
 fn mpeg_audio(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    // Two ADTS frames, after an ID3v2 tag or not, are raw AAC. An ID3v2 tag
+    // alone also matches MP3, so ADTS is asked first.
+    if matches!(
+        cutlass_adts::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return adts(path);
+    }
     match cutlass_mp3_container::probe(header) {
         cutlass_mp3_container::Probe::Matched => {}
         cutlass_mp3_container::Probe::NeedMore { .. } | cutlass_mp3_container::Probe::Reject => {
-            return adts(path, header);
+            return Ok(None);
         }
     }
     let file = File::open(path).map_err(|error| io_error(path, error))?;
@@ -537,26 +545,25 @@ fn mpeg_audio(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> 
     Ok(Some(Probed::Audio { duration }))
 }
 
-/// A raw AAC stream (ADTS, usually `.aac`) is recognised and refused:
-/// no reader the apps register plays it, since it cannot seek, so an
-/// import would add a clip that never sounds.
-fn adts(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
-    let Some((first, second)) = header.first().zip(header.get(1)) else {
-        return Ok(None);
-    };
-    if *first != 0xFF || second & 0xF0 != 0xF0 {
-        return Ok(None);
-    }
+/// A raw AAC stream (ADTS, usually `.aac`). Its length is every frame's
+/// 1024 samples, counted by walking the frame headers: the file stores none.
+fn adts(path: &Path) -> Result<Option<Probed>, ProbeError> {
     let file = File::open(path).map_err(|error| io_error(path, error))?;
-    if cutlass_adts::AdtsFile::open(file).is_err() {
-        return Ok(None);
-    }
-    Err(ProbeError::new(RAW_AAC))
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let demux = cutlass_adts::AdtsSeekFile::open(file, length)
+        .map_err(|error| ProbeError::new(format!("adts refused the file: {error}")))?;
+    let Some(rate) = cutlass_container::Demux::streams(&demux)
+        .first()
+        .and_then(|stream| stream.params().sample_rate())
+    else {
+        return Err(ProbeError::new("adts opened a file with no sample rate"));
+    };
+    let duration = samples_to_micros(demux.samples(), rate)?;
+    Ok(Some(Probed::Audio { duration }))
 }
-
-/// Why a raw AAC file is refused, and what plays instead.
-pub const RAW_AAC: &str =
-    "raw AAC (.aac) files cannot be played yet; the same sound in an .m4a or .mp4 can";
 
 fn unavailable(header: &[u8]) -> Option<&'static str> {
     if header.starts_with(b"OggS") {
@@ -1155,10 +1162,28 @@ mod tests {
     }
 
     #[test]
-    fn a_raw_aac_file_is_refused_with_what_plays_instead() {
+    fn a_raw_aac_file_is_audio_as_long_as_its_frames() {
         let temp = Temp::new();
-        let aac = temp.write("sound.aac", &adts_frames(8));
-        let error = probe(&aac).expect_err("raw aac");
-        assert_eq!(error.message(), super::RAW_AAC);
+        let aac = temp.write("sound.aac", &adts_frames(48));
+        // 48 frames of 1024 samples at 48 kHz.
+        assert_eq!(
+            probe(&aac).expect("raw aac"),
+            Probed::Audio {
+                duration: 1_024_000
+            }
+        );
+    }
+
+    #[test]
+    fn a_raw_aac_file_behind_an_id3_tag_is_still_aac() {
+        let temp = Temp::new();
+        let mut bytes = b"ID3\x04\x00\x00\x00\x00\x00\x10".to_vec();
+        bytes.extend([0u8; 16]);
+        bytes.extend(adts_frames(3));
+        let aac = temp.write("tagged.aac", &bytes);
+        assert_eq!(
+            probe(&aac).expect("tagged aac"),
+            Probed::Audio { duration: 64_000 }
+        );
     }
 }

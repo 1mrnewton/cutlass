@@ -203,7 +203,12 @@ pub struct State {
     /// The tile's first column and its width, in 8×8 units.
     pub col0: usize,
     pub width: usize,
+    /// The motion of 8×8 block `(r, c)` is `mvs[r * mv_stride + c -
+    /// mv_base]`: the tile's own columns (`width`, `col0`), or the whole
+    /// frame's (`mi_cols`, 0) while the frame's map is lent to it.
     pub mvs: Vec<MvRef>,
+    pub mv_stride: usize,
+    pub mv_base: usize,
     pub segmap: Vec<u8>,
     pub above: Vec<Nb>,
     pub above_part: Vec<u8>,
@@ -219,6 +224,8 @@ impl State {
             col0: 0,
             width: 0,
             mvs: Vec::new(),
+            mv_stride: 0,
+            mv_base: 0,
             segmap: Vec::new(),
             above: Vec::new(),
             above_part: Vec::new(),
@@ -237,6 +244,8 @@ impl State {
         let a8 = width.div_ceil(8) * 8;
         self.col0 = col0;
         self.width = width;
+        self.mv_stride = width;
+        self.mv_base = col0;
         // Every block writes its cells' motion (and grid entries) before
         // anything reads them: only a new size needs the buffers made.
         if self.mvs.len() != cells {
@@ -480,9 +489,9 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                 mv: b.mv,
                 refs: b.refs,
             };
-            let tw = self.f.width;
+            let (tw, base) = (self.f.mv_stride, self.f.mv_base);
             for y in 0..b.y_mis {
-                let at = (row + y) * tw + col - self.col0;
+                let at = (row + y) * tw + col - base;
                 fill(&mut self.f.mvs[at..at + b.x_mis], r);
             }
         }
@@ -1069,7 +1078,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         {
             return None;
         }
-        Some(self.f.mvs[r as usize * self.f.width + c as usize - self.col0])
+        Some(self.f.mvs[r as usize * self.f.mv_stride + c as usize - self.f.mv_base])
     }
 
     /// libvpx `dec_find_mv_refs`: up to two candidate vectors for `frame`,

@@ -118,6 +118,8 @@ pub struct FrameParse<'p> {
     masks: Vec<lpf::Mask>,
     grid: Vec<LfMi>,
     mvs: Vec<MvRef>,
+    /// Whether the tiles wrote their motion straight into `mvs`.
+    mvs_in_place: bool,
 }
 
 impl<'p> FrameParse<'p> {
@@ -231,6 +233,7 @@ impl<'p> FrameParse<'p> {
             masks,
             grid,
             mvs,
+            mvs_in_place: false,
         })
     }
 
@@ -286,8 +289,20 @@ impl<'p> FrameParse<'p> {
             (self.mi_cols, self.mi_rows),
         );
         let tile_cols = self.cols.len();
+        // One column after another on this thread: each writes its motion
+        // into the frame's map, lent to it, instead of its own one to be
+        // copied over at the end.
+        self.mvs_in_place = true;
         for (tc, (col, syn)) in self.cols.iter_mut().zip(self.tiles.iter_mut()).enumerate() {
-            parse_row(col, syn, &shared, &self.data, tc, tile_cols, sb_row)?;
+            let st = &mut col.state;
+            std::mem::swap(&mut st.mvs, &mut self.mvs);
+            let local = (st.mv_stride, st.mv_base);
+            (st.mv_stride, st.mv_base) = (self.mi_cols, 0);
+            let r = parse_row(col, syn, &shared, &self.data, tc, tile_cols, sb_row);
+            let st = &mut col.state;
+            (st.mv_stride, st.mv_base) = local;
+            std::mem::swap(&mut st.mvs, &mut self.mvs);
+            r?;
         }
         merge_row(&self.cols, &shared, &mut self.masks, &mut self.grid, sb_row);
         Ok(())
@@ -317,7 +332,16 @@ impl<'p> FrameParse<'p> {
             };
         if tile_cols == 1 {
             if let (Some(col), Some(syn)) = (self.cols.first_mut(), self.tiles.first_mut()) {
-                run(0, col, syn)?;
+                // The one column is the frame: it writes the frame's map.
+                let st = &mut col.state;
+                std::mem::swap(&mut st.mvs, &mut self.mvs);
+                (st.mv_stride, st.mv_base) = (self.mi_cols, 0);
+                let r = run(0, col, syn);
+                let st = &mut col.state;
+                (st.mv_stride, st.mv_base) = (st.width, st.col0);
+                std::mem::swap(&mut st.mvs, &mut self.mvs);
+                self.mvs_in_place = true;
+                r?;
             }
         } else {
             // The first column here, the rest on threads of their own: the
@@ -366,8 +390,10 @@ impl<'p> FrameParse<'p> {
             let (c0, w) = (st.col0, st.width);
             if w > 0 {
                 for r in 0..self.mi_rows {
-                    mvs[r * mi_cols + c0..r * mi_cols + c0 + w]
-                        .copy_from_slice(&st.mvs[r * w..r * w + w]);
+                    if !self.mvs_in_place {
+                        mvs[r * mi_cols + c0..r * mi_cols + c0 + w]
+                            .copy_from_slice(&st.mvs[r * w..r * w + w]);
+                    }
                     segmap[r * mi_cols + c0..r * mi_cols + c0 + w]
                         .copy_from_slice(&st.segmap[r * w..r * w + w]);
                 }

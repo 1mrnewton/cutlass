@@ -1,0 +1,18 @@
+# The desktop tests that draw a whole window with the real wgpu renderer run
+# one at a time. egui_kittest gives the GPU a fixed 10 seconds per frame, and
+# on the Windows runner (no GPU) two of these drawing at once can push a frame
+# past that: `the_text_and_caption_inspector_paint` failed main twice with
+# "PollError: The requested Wait timed out" while the stickers test drew
+# beside it. Every other test still runs in parallel with them.
+[test-groups]
+wgpu-render = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = '''
+package(cutlass) & (
+    test(=view::tests::the_stickers_shelf_licenses_and_project_settings_paint)
+    | test(=view::tests::the_inspector_tabs_stay_put_while_its_body_scrolls)
+    | test(=view::tests::the_text_and_caption_inspector_paint)
+)
+'''
+test-group = 'wgpu-render'

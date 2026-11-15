@@ -19599,6 +19599,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
+    /// The title's Basic page with its placement, blend and style sections
+    /// open: each switch turns its part on and off, and each section
+    /// paints. With `CUTLASS_RENDER_DIR` set the pictures are kept there.
+    #[test]
+    fn the_title_style_sections_switch_and_paint() {
+        use cutlass_model::SegmentId;
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-text-parts-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        shell.select(Some(SegmentId::new("words")));
+        shell.set_text_face("sample.ttf").unwrap();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 3200.0))
+            .wgpu()
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, {
+                    let mut view = ViewState::new();
+                    view.library_shelf = Shelf::Stickers;
+                    view
+                }),
+            );
+        harness.run_steps(4);
+        for section in ["position", "blend"] {
+            harness
+                .state_mut()
+                .1
+                .inspector
+                .open
+                .insert(section.to_owned());
+        }
+        harness.run_steps(4);
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            harness.run_steps(8);
+            let image = harness.render().expect("the renderer draws the window");
+            if let Some(dir) = &keep {
+                std::fs::create_dir_all(dir).unwrap();
+                image.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+        };
+        let inspection = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>| {
+            harness.state().0.inspection().unwrap()
+        };
+        picture(&mut harness, "title-parts-uniform");
+        // Uniform scale turns off: the width and the height have a slider
+        // each, and on again one Scale drives both.
+        assert!(inspection(&harness).uniform_scale);
+        assert_eq!(harness.query_all_by_label("Scale X").count(), 0);
+        harness.get_by_label("Uniform scale").click();
+        harness.run_steps(4);
+        assert!(!inspection(&harness).uniform_scale);
+        assert!(harness.query_all_by_label("Scale X").count() > 0);
+        assert!(harness.query_all_by_label("Scale Y").count() > 0);
+        picture(&mut harness, "title-parts-stretch");
+        harness.get_by_label("Uniform scale").click();
+        harness.run_steps(4);
+        assert!(inspection(&harness).uniform_scale);
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
     #[test]
     fn a_narrow_transport_drops_guides_then_zoom() {
         let room = |width| {

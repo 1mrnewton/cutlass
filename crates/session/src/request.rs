@@ -236,7 +236,8 @@ pub enum Request {
     /// axis on its own. The picture keeps its size either way.
     SetUniformScale { segment_id: SegmentId, on: bool },
     /// Store the picture's width and height scales, each on its own, as
-    /// they are drawn with uniform scale off. The switch stays as it was.
+    /// they are drawn with uniform scale off; a negative one flips that
+    /// axis. The switch stays as it was.
     SetScaleAxes {
         segment_id: SegmentId,
         x: f64,

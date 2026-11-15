@@ -364,6 +364,8 @@ pub struct Inspection {
     pub volume: f64,
     pub scale_x: f64,
     pub scale_y: f64,
+    /// One scale drives both axes; off, `scale_x` and `scale_y` are apart.
+    pub uniform_scale: bool,
     pub rotation: f64,
     pub transform_x: f64,
     pub transform_y: f64,
@@ -4684,8 +4686,16 @@ impl Shell {
         let line_width = styled(cutlass_model::TextStyleKey::LineWidth, line_width);
         // A keyed clip shows its pose where the playhead is.
         let keyed = cutlass_editor::keyed_pose(draft, id, self.playhead).map(|(_, pose)| pose);
+        // Keyed, each axis shows its keyed value with uniform scale off.
         let (scale_x, scale_y) =
-            keyed.map_or(picture_scale(segment), |pose| (pose.scale, pose.scale));
+            keyed.map_or(picture_scale(segment), |pose| match cutlass_model::clip_at(
+                segment,
+                &draft.keyframe_graph_list,
+                self.playhead,
+            ) {
+                Some((clip, uniform)) if !uniform.on => (clip.scale.x, clip.scale.y),
+                _ => (pose.scale, pose.scale),
+            });
         Some(Inspection {
             segment_id: segment.id.clone(),
             start: segment.target.start,
@@ -4702,6 +4712,7 @@ impl Shell {
             .unwrap_or(segment.volume),
             scale_x,
             scale_y,
+            uniform_scale: segment.uniform_scale.on,
             rotation: keyed.map_or(segment.clip.rotation, |pose| pose.rotation),
             transform_x: keyed.map_or(segment.clip.transform.x, |pose| pose.x),
             transform_y: keyed.map_or(segment.clip.transform.y, |pose| pose.y),
@@ -6149,6 +6160,36 @@ impl Shell {
         self.refuse_locked(&segment_id)?;
         let request = self.keyed_request(&segment_id, |pose| pose.scale = scale);
         self.apply(request.unwrap_or(Request::SetScale { segment_id, scale }))
+    }
+
+    /// Turn the selected picture's uniform scale on or off. It keeps its
+    /// size either way. One undo step.
+    pub fn set_uniform_scale(&mut self, on: bool) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a placement belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetUniformScale { segment_id, on })
+    }
+
+    /// Scale the selected picture's width by `x` and its height by `y`, as
+    /// drawn with uniform scale off; a negative one flips that axis. On a keyed clip with the playhead on
+    /// it, the two axes are keyed there. One undo step.
+    pub fn set_scale_axes(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a placement belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        if !(x.is_finite() && y.is_finite() && x != 0.0 && y != 0.0) {
+            return Err(ShellError::Unavailable(
+                "a scale is more than nothing".to_owned(),
+            ));
+        }
+        let mut values = vec![x, y];
+        // The name that drives both is keyed too when the clip keys it.
+        if self.selected_segment().is_some_and(|segment| {
+            cutlass_model::has_keys(segment, &cutlass_model::SCALE_KEYS[2..])
+        }) {
+            values.push(x);
+        }
+        let request = self.key_setting_here(KeyedSetting::Scale, values);
+        self.apply(request.unwrap_or(Request::SetScaleAxes { segment_id, x, y }))
     }
 
     /// On a clip with keys, with the playhead on it, the request that keys
@@ -14773,6 +14814,32 @@ mod tests {
             "the position is not a finite number"
         );
         assert_eq!(desktop.inspection().unwrap().scale_x, 2.0);
+
+        // Uniform scale off, the axes scale apart; on again, the width
+        // drives both. Each is one undo step.
+        assert!(desktop.inspection().unwrap().uniform_scale);
+        desktop.set_uniform_scale(false).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert!(!inspection.uniform_scale);
+        assert_eq!((inspection.scale_x, inspection.scale_y), (2.0, 2.0));
+        desktop.set_scale_axes(1.5, 0.5).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!((inspection.scale_x, inspection.scale_y), (1.5, 0.5));
+        // The one Scale of a pinch keeps the stretch.
+        desktop.set_scale(3.0).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!((inspection.scale_x, inspection.scale_y), (3.0, 1.0));
+        assert!(desktop.set_scale_axes(0.0, 1.0).is_err());
+        desktop.set_uniform_scale(true).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert!(inspection.uniform_scale);
+        assert_eq!((inspection.scale_x, inspection.scale_y), (3.0, 3.0));
+        for _ in 0..4 {
+            desktop.undo().unwrap();
+        }
+        let inspection = desktop.inspection().unwrap();
+        assert!(inspection.uniform_scale);
+        assert_eq!(inspection.scale_x, 2.0);
 
         let main = desktop.draft().unwrap().tracks[0].id.clone();
         desktop

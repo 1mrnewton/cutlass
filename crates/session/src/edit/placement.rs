@@ -95,14 +95,15 @@ pub fn set_uniform_scale(
 }
 
 /// Store the picture's width and height scales, each on its own. They are
-/// what is drawn with uniform scale off; the switch stays as it was.
+/// what is drawn with uniform scale off; a negative one flips that axis.
+/// The switch stays as it was.
 pub fn set_scale_axes(
     draft: &mut Draft,
     segment_id: &SegmentId,
     x: f64,
     y: f64,
 ) -> Result<(), EditError> {
-    if !(x.is_finite() && y.is_finite() && x > 0.0 && y > 0.0) {
+    if !(x.is_finite() && y.is_finite() && x != 0.0 && y != 0.0) {
         return Err(EditError::Scale);
     }
     let (track_index, segment_index) = locate(draft, segment_id)?;

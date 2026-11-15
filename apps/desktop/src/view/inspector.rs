@@ -762,16 +762,38 @@ pub(super) fn placement(
         if let Some(shape) = &shape {
             super::shape::size_row(shell, ui, state, shape);
         }
-        let scale = (inspection.scale_x * 100.0).round();
-        let scaled = keyed_row(ui, scale_keys.as_ref(), playhead, &mut scale_step, |ui| {
-            slider(ui, state, "scale", "Scale", scale, 1.0..=500.0, |v| {
-                format!("{v:.0}%")
-            })
-        });
-        if let Some(value) = scaled {
-            send(shell, |shell| shell.set_scale(value / 100.0));
+        let percent = |v: f64| format!("{v:.0}%");
+        if inspection.uniform_scale {
+            let scale = (inspection.scale_x * 100.0).round();
+            let scaled = keyed_row(ui, scale_keys.as_ref(), playhead, &mut scale_step, |ui| {
+                slider(ui, state, "scale", "Scale", scale, 1.0..=500.0, percent)
+            });
+            if let Some(value) = scaled {
+                send(shell, |shell| shell.set_scale(value / 100.0));
+            }
+        } else {
+            // Off, the width and the height scale apart; a flip keeps its
+            // sign.
+            let (x, y) = (inspection.scale_x, inspection.scale_y);
+            let wide = (x.abs() * 100.0).round();
+            let tall = (y.abs() * 100.0).round();
+            let width = keyed_row(ui, scale_keys.as_ref(), playhead, &mut scale_step, |ui| {
+                slider(ui, state, "scale-x", "Scale X", wide, 1.0..=500.0, percent)
+            });
+            let height = keyed_row(ui, scale_keys.as_ref(), playhead, &mut scale_step, |ui| {
+                slider(ui, state, "scale-y", "Scale Y", tall, 1.0..=500.0, percent)
+            });
+            if width.is_some() || height.is_some() {
+                let sign = |axis: f64| if axis < 0.0 { -1.0 } else { 1.0 };
+                let new_x = width.map_or(x, |v| sign(x) * v / 100.0);
+                let new_y = height.map_or(y, |v| sign(y) * v / 100.0);
+                send(shell, |shell| shell.set_scale_axes(new_x, new_y));
+            }
         }
-        switch_row(ui, "Uniform scale", true, false).on_disabled_hover_text(LATER);
+        if switch_row(ui, "Uniform scale", inspection.uniform_scale, true).clicked() {
+            let on = !inspection.uniform_scale;
+            send(shell, |shell| shell.set_uniform_scale(on));
+        }
         // The prototype counts canvas pixels from the middle, with Y down.
         let (x, y) =
             cutlass_editor::canvas_pixels((inspection.transform_x, inspection.transform_y), canvas);

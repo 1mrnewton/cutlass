@@ -2746,6 +2746,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-aac",
  "cutlass-ac3",
+ "cutlass-adts",
  "cutlass-aiff",
  "cutlass-alac",
  "cutlass-av1",

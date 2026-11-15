@@ -2388,6 +2388,7 @@ dependencies = [
  "cutlass-ac3",
  "cutlass-adts",
  "cutlass-agent",
+ "cutlass-agent-cloud",
  "cutlass-aiff",
  "cutlass-alac",
  "cutlass-audio",
@@ -2502,6 +2503,16 @@ dependencies = [
  "cutlass-settings",
  "rhai",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cutlass-agent-cloud"
+version = "0.1.0"
+dependencies = [
+ "cutlass-agent",
+ "cutlass-download",
+ "cutlass-settings",
  "serde_json",
 ]
 

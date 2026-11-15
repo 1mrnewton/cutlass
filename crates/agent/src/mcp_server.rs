@@ -135,6 +135,7 @@ pub(crate) fn registry_name(name: &str) -> Option<&'static str> {
     TOOL_NAMES
         .iter()
         .copied()
+        .chain([crate::delegate::DELEGATE])
         .find(|tool| tool.replace('.', "_") == name)
 }
 
@@ -154,7 +155,10 @@ fn tool_list() -> Vec<Value> {
 
 /// Tools whose arguments are a JSON object rather than one `input` text.
 pub(crate) fn takes_object(tool: &str) -> bool {
-    matches!(tool, "draft.apply" | "sandbox.run" | "track.start")
+    matches!(
+        tool,
+        "draft.apply" | "sandbox.run" | "track.start" | "settings.set" | "mcp.call"
+    )
 }
 
 pub(crate) fn input_schema(tool: &str) -> Value {
@@ -205,6 +209,36 @@ pub(crate) fn input_schema(tool: &str) -> Value {
             "required": ["target", "at_us", "box"],
         });
     }
+    if tool == "mcp.call" {
+        return json!({
+            "type": "object",
+            "properties": {
+                "server": { "type": "string", "description": "The server's name in settings." },
+                "tool": {
+                    "type": "string",
+                    "description": "The tool to call, or tools/list for the server's tools.",
+                },
+                "arguments": { "type": "object", "description": "The tool's arguments." },
+            },
+            "required": ["server", "tool"],
+        });
+    }
+    if tool == "settings.set" {
+        return json!({
+            "type": "object",
+            "properties": {
+                "expected_generation": {
+                    "type": "integer",
+                    "description": "The generation settings_get returned.",
+                },
+                "changes": {
+                    "type": "object",
+                    "description": "Merged into the settings settings_get shows; null removes a key.",
+                },
+            },
+            "required": ["expected_generation", "changes"],
+        });
+    }
     if tool == "draft.apply" {
         return json!({
             "type": "object",
@@ -240,7 +274,9 @@ pub(crate) fn input_schema(tool: &str) -> Value {
 /// How a tool reads its text, or empty for a tool that takes none.
 fn input_hint(tool: &str) -> &'static str {
     match tool {
-        "draft.query" => "project | full | track <id> | segment <id> | range <start_us> <end_us>",
+        "draft.query" => {
+            "project | full | track <id> | segment <id> | range <start_us> <end_us> | ops | ops <kind> ..."
+        }
         "player.seek" => "<time_us>",
         "media.probe" => "A file path.",
         "speech.start" => "<start_us> <duration_us>",
@@ -249,9 +285,7 @@ fn input_hint(tool: &str) -> &'static str {
         "catalog.search" => "Words to search for.",
         "package.ensure" => "A package id.",
         "export.start" => "new <path> | replace <path>",
-        "skill.load" => "A skill name, or what the skill is for.",
-        "mcp.call" => "The server, the tool and the arguments, one to a line.",
-        "settings.set" => "Settings change only in the app.",
+        "skill.load" => "A skill name, or what the skill is for, or list.",
         _ => "",
     }
 }

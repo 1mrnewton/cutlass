@@ -8,6 +8,7 @@ use std::fmt;
 
 use cutlass_session::Request;
 use cutlass_settings::Settings;
+use serde::{Deserialize, Serialize};
 
 /// A tool the model is allowed to call.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,7 +20,7 @@ pub struct ToolDefinition {
 }
 
 /// One call the model asked the harness to run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     /// Caller-chosen id for this call.
     pub id: String,
@@ -29,8 +30,9 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
-/// One item in a model transcript.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One item in a model transcript. It is saved as JSON with a `role`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
     /// Text from the user.
     User {

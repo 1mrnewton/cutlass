@@ -4,8 +4,8 @@
 //! the window's playhead.
 
 use cutlass_agent::{
-    ApprovalAction, Approver, DraftTools, Export, McpClient, McpError, McpTransport, Player,
-    Registry, SettingsTool, Speech, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking,
+    ApprovalAction, Approver, DraftTools, Export, McpClient, Player, Registry, SettingsTool,
+    Speech, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking,
 };
 use cutlass_codec::CodecId;
 use cutlass_model::Micros;
@@ -123,21 +123,6 @@ impl Export for Exports {
     }
 }
 
-struct NoServers;
-
-impl McpTransport for NoServers {
-    fn call(
-        &mut self,
-        server_name: &str,
-        _tool: &str,
-        _arguments: &str,
-    ) -> Result<String, McpError> {
-        Err(McpError::Transport(format!(
-            "the assistant does not call other servers yet, so {server_name} was not reached"
-        )))
-    }
-}
-
 /// What one assistant tool call did, and the approval it waits for when
 /// it needs one the user has not given.
 pub struct AgentRun {
@@ -223,15 +208,19 @@ impl Shell {
             .settings_file
             .clone()
             .unwrap_or_else(|| (Shell::settings_path(), 0));
-        let settings = SettingsTool::held(path, generation, self.settings.clone());
+        let settings = SettingsTool::held(path.clone(), generation, self.settings.clone());
         let jobs = std::mem::take(&mut self.agent_speech_jobs);
         let track_jobs = std::mem::take(&mut self.agent_track_jobs);
         let tracks = Tracks {
             now: self.agent_tracks_now(),
             started: None,
         };
-        let sandbox =
-            crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder());
+        let mut servers = std::mem::take(&mut self.mcp_servers);
+        servers.configure(&self.settings.mcp_servers);
+        let sandbox = cutlass_agent::Switched::from_settings(
+            &self.settings,
+            crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder()),
+        );
         let mut registry = Registry::new(
             DraftTools::new(session),
             settings,
@@ -247,7 +236,7 @@ impl Shell {
                     allowed,
                     wanted: None,
                 },
-                McpClient::new(NoServers),
+                McpClient::new(servers),
                 tracks,
             ),
         );
@@ -255,6 +244,8 @@ impl Shell {
         registry.set_track_jobs(track_jobs);
         let mut outcome = registry.run_tool(call);
         let wants = registry.approver.wanted.take();
+        let settings_now = registry.settings.get();
+        let servers = std::mem::take(registry.mcp.transport_mut());
         let session = registry.draft.session().clone();
         let moves = std::mem::take(&mut registry.player);
         let exported = registry.export.path.take();
@@ -268,6 +259,16 @@ impl Shell {
             },
         );
         drop(registry);
+        self.mcp_servers = servers;
+        if settings_now.generation != generation {
+            // The settings tool already wrote the file at this generation.
+            cutlass_logger::info!(
+                "settings changed by the assistant: {}",
+                super::changed_settings(&self.settings, &settings_now.settings).join(", ")
+            );
+            self.settings = settings_now.settings;
+            self.settings_file = Some((path, settings_now.generation));
+        }
         self.agent_speech_jobs = jobs;
         self.keep_track_ids(&tracks.now);
         if let Some((id, ask)) = tracks.started
@@ -483,6 +484,36 @@ mod tests {
             .run_agent_tool(&call("settings.get", ""), &[])
             .outcome;
         assert!(!settings.is_error, "{}", settings.content);
+
+        // A settings change lands in the window's settings and its file.
+        let file = temp.path.join("settings-home").join("settings.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        desktop.keep_settings_file(file.clone(), 0);
+        let set = desktop
+            .run_agent_tool(
+                &call(
+                    "settings.set",
+                    r#"{"expected_generation":0,"changes":{"step_cap":40}}"#,
+                ),
+                &[],
+            )
+            .outcome;
+        assert!(!set.is_error, "{}", set.content);
+        assert_eq!(desktop.settings().step_cap, 40);
+        assert_eq!(cutlass_settings::load(&file).unwrap().settings.step_cap, 40);
+        // Turning on the cloud model waits for the user's allow.
+        let cloud = desktop.run_agent_tool(
+            &call(
+                "settings.set",
+                r#"{"expected_generation":1,"changes":{"model":{"cloud":true}}}"#,
+            ),
+            &[],
+        );
+        assert_eq!(
+            cloud.wants,
+            Some(cutlass_agent::ApprovalAction::EnableCloudModel)
+        );
+        assert!(!desktop.settings().model.cloud);
     }
 
     #[test]

@@ -26,6 +26,14 @@ pub struct ToolOutcome {
 pub trait ToolSink {
     /// Runs `call` and returns its outcome.
     fn run_tool(&mut self, call: &ToolCall) -> ToolOutcome;
+
+    /// A helper started on `call`, an `agent.delegate`; its own calls come
+    /// next, then [`ToolSink::helper_finished`]. A host that shows each
+    /// step shows the hand-off here.
+    fn helper_started(&mut self, _call: &ToolCall) {}
+
+    /// The helper on `call` finished with `outcome`.
+    fn helper_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome) {}
 }
 
 /// The rounds, transcript, and final completion of one ask.

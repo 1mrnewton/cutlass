@@ -8,14 +8,19 @@
 
 #![forbid(unsafe_code)]
 
+mod anthropic;
 mod approval;
 mod chat;
+mod chat_file;
+mod delegate;
 mod draft;
 mod forward;
 mod r#loop;
 mod mcp;
+mod mcp_connection;
 mod mcp_server;
 mod model;
+mod ops;
 mod sandbox;
 #[cfg(feature = "script")]
 mod script;
@@ -24,8 +29,18 @@ mod skill;
 mod subagent;
 mod tools;
 
+pub use anthropic::{
+    ANTHROPIC_URL, ANTHROPIC_VERSION, ClaudeModel, DEFAULT_CLAUDE_MODEL, FALLBACK_BETA,
+    parse_claude_reply, wants_fallback,
+};
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
-pub use chat::{ChatModel, ChatTransport, LoopbackHttp, SYSTEM_PROMPT, parse_reply};
+pub use chat::{
+    ChatModel, ChatTransport, LoopbackHttp, SYSTEM_PROMPT, parse_reply, prompt_context,
+};
+pub use chat_file::{load_chat, save_chat};
+pub use delegate::{
+    CHILD_TOOLS, DELEGATE, Delegating, definitions_with_delegate, delegate_definition,
+};
 pub use draft::{
     ApplyInput, ApplyMode, ApplyResult, DraftError, DraftQuery, DraftTools, FullSnapshot,
     ProjectSnapshot, QueryView, RangeSnapshot, SegmentSnapshot, TrackSnapshot, request_name,
@@ -33,14 +48,16 @@ pub use draft::{
 pub use forward::{Forward, Forwarded, ProjectSocket, Wake};
 pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run, run_after};
 pub use mcp::{McpClient, McpError, McpTransport};
+pub use mcp_connection::{LIST_TOOLS, McpConnection, McpWire};
 pub use mcp_server::{MCP_PROTOCOL_VERSION, McpServer};
 pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
     ToolDefinition,
 };
+pub use ops::{Op, describe as describe_ops, ops};
 pub use sandbox::{
     LocalSandbox, OnlineSandbox, ProcessExecutor, Sandbox, SandboxError, SandboxExecutor,
-    SandboxPolicy, SandboxRoute, route_for,
+    SandboxPolicy, SandboxRoute, Switched, route_for,
 };
 #[cfg(feature = "script")]
 pub use script::{run_script, serve_script};

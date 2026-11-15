@@ -27,6 +27,82 @@ impl Http {
     }
 }
 
+/// What a POST answered: the status, the headers in lower case, and the
+/// body as text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Posted {
+    /// The HTTP status.
+    pub status: u16,
+    /// Each header's name, in lower case, and its value.
+    pub headers: Vec<(String, String)>,
+    /// The body, read to the end.
+    pub body: String,
+}
+
+impl Posted {
+    /// The first header named `name`, which is matched in lower case.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+impl Http {
+    /// A client that waits up to `reply` for an answer and its body, for a
+    /// server that thinks before it answers, such as a language model.
+    #[must_use]
+    pub fn patient(reply: Duration) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(15)))
+            .timeout_recv_body(Some(reply))
+            .timeout_recv_response(Some(reply))
+            .http_status_as_error(false)
+            .build();
+        Self {
+            agent: config.into(),
+        }
+    }
+
+    /// POST `body` to `url` with `headers`. Any status is an answer; only a
+    /// failure to reach the server or to read its body is an error. The
+    /// error never repeats a header, as one may carry a key.
+    pub fn post(&self, url: &str, headers: &[(&str, &str)], body: &str) -> Result<Posted, String> {
+        let mut request = self.agent.post(url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let mut response = request
+            .send(body)
+            .map_err(|error| format!("{url}: {error}"))?;
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                Some((
+                    name.as_str().to_ascii_lowercase(),
+                    value.to_str().ok()?.to_owned(),
+                ))
+            })
+            .collect();
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(64 * 1024 * 1024)
+            .read_to_string()
+            .map_err(|error| format!("{url}: {error}"))?;
+        Ok(Posted {
+            status,
+            headers,
+            body,
+        })
+    }
+}
+
 impl Default for Http {
     fn default() -> Self {
         Self::new()

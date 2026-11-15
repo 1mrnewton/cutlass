@@ -773,6 +773,8 @@ pub struct Shell {
     settings_file: Option<(PathBuf, u64)>,
     /// Where the looks saved with "Save as preset" are kept, and the looks.
     presets_file: Option<PathBuf>,
+    /// The assistant's notes, when this shell has a file for them.
+    notes_file: Option<PathBuf>,
     /// The effect studio: its document, folder and preview pictures.
     studio: studio::StudioState,
     saved_looks: Vec<cutlass_editor::SavedLook>,
@@ -885,6 +887,8 @@ pub struct Shell {
     wants_speech_model: bool,
     /// The update check, the offer, and the restart after an install.
     updates: update::Updates,
+    /// The MCP servers the assistant has started, kept for its next calls.
+    mcp_servers: crate::mcp_servers::McpServers,
     /// The assistant's speech jobs, carried from one tool call to the next.
     agent_speech_jobs: std::collections::BTreeMap<String, cutlass_agent::SpeechJob>,
     /// The assistant's tracking jobs, carried from one tool call to the next.
@@ -963,6 +967,7 @@ impl Shell {
             settings,
             settings_file: None,
             presets_file: None,
+            notes_file: None,
             studio: studio::StudioState::new(),
             saved_looks: Vec::new(),
             waiting_imports: std::collections::VecDeque::new(),
@@ -1025,6 +1030,7 @@ impl Shell {
             hearings: 0,
             wants_speech_model: false,
             updates: update::Updates::default(),
+            mcp_servers: crate::mcp_servers::McpServers::default(),
             agent_speech_jobs: std::collections::BTreeMap::new(),
             agent_track_jobs: std::collections::BTreeMap::new(),
             agent_tracks: follow::AgentTracks::default(),
@@ -1258,6 +1264,57 @@ impl Shell {
             .map(|bytes| cutlass_editor::read_looks(&bytes))
             .unwrap_or_default();
         self.presets_file = Some(path);
+    }
+
+    /// Keep the assistant's notes at `path` from now on.
+    pub fn keep_notes_file(&mut self, path: PathBuf) {
+        self.notes_file = Some(path);
+    }
+
+    /// Where the open project's conversation with the assistant is kept,
+    /// beside the notes, while Memory is on; `None` with Memory off, no
+    /// project open, or no notes folder.
+    #[must_use]
+    pub fn assistant_chat_file(&self) -> Option<PathBuf> {
+        if !self.settings.memory {
+            return None;
+        }
+        let project = self.project_folder()?;
+        let notes = self.notes_file.as_ref()?;
+        // The notes sit in the Assistant folder of the Cutlass folder.
+        let root = notes.parent()?.parent()?;
+        Some(Home::at(root).ok()?.assistant_chat_file(project))
+    }
+
+    /// The assistant's notes; empty when there are none.
+    #[must_use]
+    pub fn assistant_notes(&self) -> String {
+        self.notes_file
+            .as_ref()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_default()
+    }
+
+    /// Write the assistant's notes; empty notes delete the file.
+    pub fn set_assistant_notes(&mut self, notes: &str) -> Result<(), ShellError> {
+        let Some(path) = &self.notes_file else {
+            return Err(ShellError::Unavailable(
+                "this window keeps no notes".to_owned(),
+            ));
+        };
+        let failed = |error: std::io::Error| {
+            ShellError::Unavailable(format!("the notes were not saved: {error}"))
+        };
+        if notes.trim().is_empty() {
+            return match std::fs::remove_file(path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(failed(error)),
+                _ => Ok(()),
+            };
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(failed)?;
+        }
+        std::fs::write(path, notes).map_err(failed)
     }
 
     /// The looks saved with "Save as preset", oldest first.

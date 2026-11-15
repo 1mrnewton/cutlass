@@ -347,9 +347,41 @@ pub struct ModelChoice {
     /// The model the local runner loads, by its name there.
     #[serde(default = "default_local_name")]
     pub local_name: String,
+    /// Whose API the cloud model is: [`ModelChoice::CLAUDE`] or
+    /// [`ModelChoice::OPENAI`], which is any chat completions service.
+    #[serde(default = "default_cloud_provider")]
+    pub cloud_provider: String,
+    /// The chat completions address of an [`ModelChoice::OPENAI`] service;
+    /// empty takes OpenAI's own.
+    #[serde(default)]
+    pub cloud_url: String,
+    /// The cloud model, by the name its service takes.
+    #[serde(default = "default_cloud_name")]
+    pub cloud_name: String,
     /// Keys this record does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+impl ModelChoice {
+    /// Anthropic's Messages API.
+    pub const CLAUDE: &'static str = "claude";
+    /// A chat completions service, such as OpenAI's or a router's.
+    pub const OPENAI: &'static str = "openai";
+}
+
+/// The cloud model a new setting starts with.
+pub const DEFAULT_CLOUD_NAME: &str = "claude-opus-5-5";
+
+/// OpenAI's chat completions address.
+pub const OPENAI_CHAT_URL: &str = "https://api.openai.com/v1/chat/completions";
+
+fn default_cloud_provider() -> String {
+    ModelChoice::CLAUDE.to_owned()
+}
+
+fn default_cloud_name() -> String {
+    DEFAULT_CLOUD_NAME.to_owned()
 }
 
 /// Ollama's chat completions address.
@@ -373,6 +405,9 @@ impl Default for ModelChoice {
             cloud: false,
             local_url: default_local_url(),
             local_name: default_local_name(),
+            cloud_provider: default_cloud_provider(),
+            cloud_url: String::new(),
+            cloud_name: default_cloud_name(),
             rest: Map::new(),
         }
     }

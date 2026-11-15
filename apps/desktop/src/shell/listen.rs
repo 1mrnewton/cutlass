@@ -47,6 +47,15 @@ impl Shell {
             .unwrap_or_default()
     }
 
+    /// Whether the project at `path` is the one this shell holds and
+    /// listens on, which it has no one to ask for.
+    pub(super) fn holds(&self, path: &std::path::Path) -> bool {
+        let Some(socket) = &self.socket else {
+            return false;
+        };
+        cutlass_store::held_address(path).is_some_and(|(address, _)| address == socket.address())
+    }
+
     /// Ask the host that holds the project at `path` to let it go, as a
     /// window opening it does. True when it did: a `cutlass mcp` with no
     /// window saves, lets go and sends its later calls to this window.
@@ -165,6 +174,13 @@ mod tests {
         assert_eq!(segments.len(), 2, "the window holds the split");
         desktop.undo().unwrap();
         assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
+
+        // The window has no one to ask for the project it holds itself:
+        // opening it again is refused at once, not after a wait.
+        assert!(desktop.holds(&temp.path));
+        let asked = std::time::Instant::now();
+        assert!(desktop.open_folder(&temp.path).is_err());
+        assert!(asked.elapsed() < std::time::Duration::from_secs(2));
 
         // Closing the project stops the socket and clears the address.
         desktop.close_project().unwrap();

@@ -1674,7 +1674,10 @@ impl Shell {
             // A window asks a `cutlass mcp` that holds the project to hand
             // it over, and reads the folder again as that host saved it.
             Err(StoreError::Held { .. })
-                if may_ask && self.wake.is_some() && Self::ask_holder_to_yield(path) =>
+                if may_ask
+                    && self.wake.is_some()
+                    && !self.holds(path)
+                    && Self::ask_holder_to_yield(path) =>
             {
                 return self.open_folder_once(path, false);
             }

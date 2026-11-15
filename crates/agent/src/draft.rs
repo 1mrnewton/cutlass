@@ -357,7 +357,7 @@ impl fmt::Display for QueryView {
 
 /// A track id as a query writes it: one without an id, from an older
 /// project, is `""`.
-fn shown_track(id: &TrackId) -> &str {
+pub(crate) fn shown_track(id: &TrackId) -> &str {
     if id.as_str().is_empty() {
         "\"\""
     } else {

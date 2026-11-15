@@ -28,6 +28,7 @@ mod settings_tool;
 mod skill;
 mod subagent;
 mod tools;
+mod view;
 
 pub use anthropic::{
     ANTHROPIC_URL, ANTHROPIC_VERSION, ClaudeModel, DEFAULT_CLAUDE_MODEL, FALLBACK_BETA,
@@ -70,6 +71,7 @@ pub use tools::{
     Speech, SpeechJob, SpeechPoll, TOOL_NAMES, ToolError, TrackAsk, TrackJob, Tracking,
     assistant_approvals, pending_approvals, tool_definitions,
 };
+pub use view::{ask_with_view, typed, view_note};
 
 #[cfg(test)]
 mod tests {

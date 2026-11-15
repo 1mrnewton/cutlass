@@ -389,6 +389,11 @@ pub(crate) struct VideoLayer<'a> {
 /// axis and uses the absolute value. `sin` and `cos` are the counterclockwise
 /// rotation, with positive Y up. `dx` is pixels to the right and `dy` is
 /// pixels up. One translation unit is half the canvas on that axis.
+///
+/// The picture turns and is sized about its pivot, a share of its own half
+/// size from its middle with Y up. The translation says where the middle
+/// sits when the picture is neither turned nor sized, so the pivot leaves
+/// such a picture where it is.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PictureTransform {
     scale_x: f64,
@@ -399,6 +404,8 @@ pub(crate) struct PictureTransform {
     flip_v: bool,
     dx: f64,
     dy: f64,
+    pivot_x: f64,
+    pivot_y: f64,
     opacity: u8,
     geometry_identity: bool,
     /// Keep the picture's own size instead of fitting it to the canvas.
@@ -437,6 +444,8 @@ pub(crate) fn picture_transform(
         || !clip.rotation.is_finite()
         || !clip.transform.x.is_finite()
         || !clip.transform.y.is_finite()
+        || !clip.pivot.x.is_finite()
+        || !clip.pivot.y.is_finite()
         || !clip.alpha.is_finite()
     {
         return None;
@@ -472,6 +481,8 @@ pub(crate) fn picture_transform(
         flip_v,
         dx,
         dy,
+        pivot_x: clip.pivot.x,
+        pivot_y: clip.pivot.y,
         opacity,
         geometry_identity,
         native: false,
@@ -1168,13 +1179,17 @@ pub(crate) fn gpu_place(
     let (fw, fh) = transform.drawn_size(picture, canvas)?;
     let (fw, fh) = (f64::from(fw), f64::from(fh));
     let (pw, ph) = (f64::from(pw), f64::from(ph));
-    let cx = f64::from(cw) / 2.0 + transform.dx;
-    let cy = f64::from(ch) / 2.0 - transform.dy;
+    // The pivot, in drawn pixels from the picture's middle. It stays where
+    // it is on the canvas while the picture turns and is sized about it.
+    let (ox, oy) = transform.pivot_in((fw, fh));
+    let cx = f64::from(cw) / 2.0 + transform.dx + ox;
+    let cy = f64::from(ch) / 2.0 - transform.dy - oy;
     let (sin, cos) = (transform.sin, transform.cos);
     let (sx, sy) = (transform.scale_x, transform.scale_y);
-    // lx = (cos*(x-cx) + sin*(cy-y)) / sx ; ly = (-sin*(x-cx) + cos*(cy-y)) / sy
-    let lx = [cos / sx, -sin / sx, (-cos * cx + sin * cy) / sx];
-    let ly = [-sin / sy, -cos / sy, (sin * cx + cos * cy) / sy];
+    // lx = ox + (cos*(x-cx) + sin*(cy-y)) / sx
+    // ly = oy + (-sin*(x-cx) + cos*(cy-y)) / sy
+    let lx = [cos / sx, -sin / sx, (-cos * cx + sin * cy) / sx + ox];
+    let ly = [-sin / sy, -cos / sy, (sin * cx + cos * cy) / sy + oy];
     // su = lx * pw/fw + pw/2 ; sv = -ly * ph/fh + ph/2
     let mut su = lx.map(|value| value * pw / fw);
     su[2] += pw / 2.0;
@@ -1252,6 +1267,12 @@ impl PictureTransform {
             }
         }
         contain_size(pw, ph, canvas.0, canvas.1)
+    }
+
+    /// The pivot in pixels from the middle of a picture drawn `fitted` wide
+    /// and tall at scale 1, right and up.
+    fn pivot_in(self, fitted: (f64, f64)) -> (f64, f64) {
+        (self.pivot_x * fitted.0 / 2.0, self.pivot_y * fitted.1 / 2.0)
     }
 
     /// The clip's opacity, 0 to 255.
@@ -1642,13 +1663,15 @@ fn sample_transformed(
     else {
         return Sample::Miss;
     };
+    let pivot = transform.pivot_in((f64::from(fitted_w), f64::from(fitted_h)));
     let draw = Draw {
         src_w,
         src_h,
         fitted_w: f64::from(fitted_w),
         fitted_h: f64::from(fitted_h),
-        center_x: f64::from(canvas_w) / 2.0 + transform.dx,
-        center_y: f64::from(canvas_h) / 2.0 - transform.dy,
+        center_x: f64::from(canvas_w) / 2.0 + transform.dx + pivot.0,
+        center_y: f64::from(canvas_h) / 2.0 - transform.dy - pivot.1,
+        pivot,
         transform,
     };
     if draw.drawn_w() <= 0.0 || draw.drawn_h() <= 0.0 {
@@ -1695,8 +1718,11 @@ struct Draw {
     src_h: u32,
     fitted_w: f64,
     fitted_h: f64,
+    /// Where the pivot sits on the canvas: the picture turns about it.
     center_x: f64,
     center_y: f64,
+    /// The pivot in fitted pixels from the picture's middle, right and up.
+    pivot: (f64, f64),
     transform: PictureTransform,
 }
 
@@ -1713,11 +1739,16 @@ impl Draw {
 fn cover_box(draw: &Draw, canvas_w: u32, canvas_h: u32) -> Option<(u32, u32, u32, u32)> {
     let half_w = draw.drawn_w() / 2.0;
     let half_h = draw.drawn_h() / 2.0;
+    // Each corner from the pivot, at the size drawn.
+    let (px, py) = (
+        draw.pivot.0 * draw.transform.scale_x,
+        draw.pivot.1 * draw.transform.scale_y,
+    );
     let corners = [
-        (half_w, half_h),
-        (half_w, -half_h),
-        (-half_w, half_h),
-        (-half_w, -half_h),
+        (half_w - px, half_h - py),
+        (half_w - px, -half_h - py),
+        (-half_w - px, half_h - py),
+        (-half_w - px, -half_h - py),
     ];
     let mut min_x = f64::INFINITY;
     let mut max_x = f64::NEG_INFINITY;
@@ -1763,9 +1794,10 @@ fn source_point(x: u32, y: u32, draw: &Draw) -> Option<(f64, f64)> {
     let rel_x = f64::from(x) + 0.5 - draw.center_x;
     let rel_y = f64::from(y) + 0.5 - draw.center_y;
     let up_y = -rel_y;
-    let local_x = (rel_x * draw.transform.cos + up_y * draw.transform.sin) / draw.transform.scale_x;
-    let local_y =
-        (-rel_x * draw.transform.sin + up_y * draw.transform.cos) / draw.transform.scale_y;
+    let local_x = draw.pivot.0
+        + (rel_x * draw.transform.cos + up_y * draw.transform.sin) / draw.transform.scale_x;
+    let local_y = draw.pivot.1
+        + (-rel_x * draw.transform.sin + up_y * draw.transform.cos) / draw.transform.scale_y;
     let half_w = draw.fitted_w / 2.0;
     let half_h = draw.fitted_h / 2.0;
     // The covered span is half-open on the right and on the bottom, matching
@@ -2194,6 +2226,138 @@ mod tests {
         let rgba = paint(3, 3, solid(1, 1, [6, 0, 0, 255]), clip, third);
         assert_eq!(&rgba[16..20], &[6, 0, 0, 255]);
         assert_eq!(&rgba[0..4], &[0, 0, 0, 0]);
+    }
+
+    /// The canvas pixels of an 8 by 8 frame the clip covers, as (x, y).
+    fn covered(clip: Clip, uniform: UniformScale) -> Vec<(u32, u32)> {
+        let rgba = paint(8, 8, solid(8, 8, [9, 0, 0, 255]), clip, uniform);
+        let mut hit = Vec::new();
+        for y in 0..8 {
+            for x in 0..8 {
+                if rgba[((y * 8 + x) * 4 + 3) as usize] > 0 {
+                    hit.push((x, y));
+                }
+            }
+        }
+        hit
+    }
+
+    fn square(x: std::ops::Range<u32>, y: std::ops::Range<u32>) -> Vec<(u32, u32)> {
+        y.flat_map(|y| x.clone().map(move |x| (x, y))).collect()
+    }
+
+    #[test]
+    fn a_clip_is_sized_and_turned_about_its_pivot() {
+        let quarter = UniformScale {
+            value: 0.25,
+            ..UniformScale::default()
+        };
+        // The picture fills the frame, moved two pixels right and two up,
+        // so its lower left corner is at (2, 6).
+        let moved = Clip {
+            transform: Point::new(0.5, 0.5),
+            ..Clip::default()
+        };
+        // About its middle, a quarter of its size sits around (6, 2).
+        assert_eq!(covered(moved.clone(), quarter.clone()), square(5..7, 1..3));
+        // About its lower left corner, the corner stays and the picture
+        // shrinks into it.
+        let cornered = Clip {
+            pivot: Point::new(-1.0, -1.0),
+            ..moved.clone()
+        };
+        assert_eq!(
+            covered(cornered.clone(), quarter.clone()),
+            square(2..4, 4..6)
+        );
+        // Turned a quarter counterclockwise about that corner, it swings
+        // to the corner's left.
+        let swung = Clip {
+            rotation: 90.0,
+            ..cornered.clone()
+        };
+        assert_eq!(covered(swung, quarter.clone()), square(0..2, 4..6));
+        // A pivot does not move a picture that is neither turned nor sized.
+        assert_eq!(
+            paint(
+                8,
+                8,
+                solid(8, 8, [9, 0, 0, 255]),
+                Clip {
+                    scale: Point::new(1.0, 1.0),
+                    ..cornered.clone()
+                },
+                UniformScale::default()
+            ),
+            paint(
+                8,
+                8,
+                solid(8, 8, [9, 0, 0, 255]),
+                moved,
+                UniformScale::default()
+            )
+        );
+        // A pivot that is not a number draws nothing, as a bad scale does.
+        let broken = Clip {
+            pivot: Point::new(f64::NAN, 0.0),
+            ..Clip::default()
+        };
+        assert!(picture_transform(&broken, &UniformScale::default(), 8, 8).is_none());
+    }
+
+    #[test]
+    fn the_gpu_places_a_pivoted_clip_where_the_cpu_samples_it() {
+        let clip = Clip {
+            rotation: 30.0,
+            transform: Point::new(0.25, -0.5),
+            pivot: Point::new(-0.6, 0.8),
+            flip: Flip {
+                horizontal: true,
+                ..Flip::default()
+            },
+            ..Clip::default()
+        };
+        let uniform = UniformScale {
+            value: 0.7,
+            ..UniformScale::default()
+        };
+        let (canvas, picture) = ((16_u32, 12_u32), (8_u32, 4_u32));
+        let transform = transform_of(clip, uniform, canvas.0, canvas.1);
+        let Affine([a, b, c, d, e, f]) = gpu_place(transform, picture, canvas).expect("placed");
+        let (fitted_w, fitted_h) = transform.drawn_size(picture, canvas).expect("fitted");
+        let pivot = transform.pivot_in((f64::from(fitted_w), f64::from(fitted_h)));
+        let draw = Draw {
+            src_w: picture.0,
+            src_h: picture.1,
+            fitted_w: f64::from(fitted_w),
+            fitted_h: f64::from(fitted_h),
+            center_x: f64::from(canvas.0) / 2.0 + transform.dx + pivot.0,
+            center_y: f64::from(canvas.1) / 2.0 - transform.dy - pivot.1,
+            pivot,
+            transform,
+        };
+        let mut sampled = 0;
+        for y in 0..canvas.1 {
+            for x in 0..canvas.0 {
+                let Some((u, v)) = source_point(x, y, &draw) else {
+                    continue;
+                };
+                let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+                assert!((a * px + b * py + c - u).abs() < 1e-9, "{x} {y}");
+                assert!((d * px + e * py + f - v).abs() < 1e-9, "{x} {y}");
+                sampled += 1;
+            }
+        }
+        assert!(sampled > 20, "{sampled}");
+        // Every pixel the picture covers is inside the box that is scanned.
+        let (x0, x1, y0, y1) = cover_box(&draw, canvas.0, canvas.1).expect("box");
+        for y in 0..canvas.1 {
+            for x in 0..canvas.0 {
+                if source_point(x, y, &draw).is_some() {
+                    assert!((x0..x1).contains(&x) && (y0..y1).contains(&y), "{x} {y}");
+                }
+            }
+        }
     }
 
     #[test]

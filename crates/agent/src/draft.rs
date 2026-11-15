@@ -80,6 +80,9 @@ pub struct SegmentSnapshot {
     pub source_start: Option<Micros>,
     /// Source duration, when the segment stores a source range.
     pub source_duration: Option<Micros>,
+    /// The blend into the next clip, when the segment carries one: its
+    /// effect id (or its material id when it has none) and its length.
+    pub transition: Option<(String, Micros)>,
 }
 
 /// One track and its segments at one revision.
@@ -193,6 +196,9 @@ impl fmt::Display for QueryView {
                 if let Some(source_duration) = segment.source_duration {
                     write!(formatter, " source_duration={}", source_duration.0)?;
                 }
+                if let Some((effect, duration)) = &segment.transition {
+                    write!(formatter, " transition={effect}+{}", duration.0)?;
+                }
                 Ok(())
             }
             Self::Range(range) => {
@@ -241,6 +247,9 @@ impl fmt::Display for QueryView {
                             segment.target.start.0,
                             segment.target.duration.0
                         )?;
+                        if let Some((effect, duration)) = transition_of(draft, segment) {
+                            write!(formatter, " transition={effect}+{}", duration.0)?;
+                        }
                     }
                 }
                 Ok(())
@@ -628,7 +637,7 @@ fn track_view(revision: u64, draft: &Draft, track_id: &TrackId) -> Result<QueryV
         segments: track
             .segments
             .iter()
-            .map(|segment| segment_snapshot(revision, segment))
+            .map(|segment| segment_snapshot(revision, draft, segment))
             .collect(),
     }))
 }
@@ -641,7 +650,9 @@ fn segment_view(
     for track in &draft.tracks {
         for segment in &track.segments {
             if &segment.id == segment_id {
-                return Ok(QueryView::Segment(segment_snapshot(revision, segment)));
+                return Ok(QueryView::Segment(segment_snapshot(
+                    revision, draft, segment,
+                )));
             }
         }
     }
@@ -670,7 +681,7 @@ fn range_view(
                 continue;
             }
             if matches!(segment.target.overlaps(&span), Ok(true)) {
-                segments.push(segment_snapshot(revision, segment));
+                segments.push(segment_snapshot(revision, draft, segment));
             }
         }
     }
@@ -684,7 +695,7 @@ fn full_view(revision: u64, draft: &Draft) -> QueryView {
     })
 }
 
-fn segment_snapshot(revision: u64, segment: &Segment) -> SegmentSnapshot {
+fn segment_snapshot(revision: u64, draft: &Draft, segment: &Segment) -> SegmentSnapshot {
     let source = segment.source_range.as_ref();
     SegmentSnapshot {
         revision,
@@ -694,7 +705,28 @@ fn segment_snapshot(revision: u64, segment: &Segment) -> SegmentSnapshot {
         duration: segment.target.duration,
         source_start: source.map(|range| range.start),
         source_duration: source.map(|range| range.duration),
+        transition: transition_of(draft, segment),
     }
+}
+
+/// The blend `segment` carries into the next clip: the transition its
+/// material refs name, as its effect id (or material id) and length.
+fn transition_of(draft: &Draft, segment: &Segment) -> Option<(String, Micros)> {
+    segment.extra_material_refs.iter().find_map(|reference| {
+        draft
+            .materials
+            .transitions
+            .iter()
+            .find(|transition| &transition.id == reference)
+            .map(|transition| {
+                let effect = if transition.effect_id.is_empty() {
+                    transition.id.as_str().to_owned()
+                } else {
+                    transition.effect_id.clone()
+                };
+                (effect, transition.duration)
+            })
+    })
 }
 
 fn preview(
@@ -1056,6 +1088,79 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, DraftError::InvalidRange);
         assert_eq!(tools.session().revision(), 1);
+    }
+
+    #[test]
+    fn queries_show_the_blend_a_clip_carries_into_the_next() {
+        let (mut tools, track) = open_tools();
+        let blend = |id: &str, effect_id: &str| Request::SetTransition {
+            segment_id: SegmentId::new("a"),
+            transition: Box::new(cutlass_model::MaterialTransition {
+                id: MaterialId::new(id),
+                effect_id: effect_id.to_owned(),
+                duration: Micros(500_000),
+                ..cutlass_model::MaterialTransition::default()
+            }),
+        };
+        tools
+            .apply(apply_input(
+                None,
+                0,
+                vec![
+                    place(&track, "a", 0, 1_000_000),
+                    place(&track, "b", 1_000_000, 1_000_000),
+                    blend("tr", "cutlass-dissolve"),
+                ],
+                ApplyMode::Commit,
+            ))
+            .unwrap();
+        let segment = |tools: &DraftTools, id: &str| {
+            tools
+                .query(&DraftQuery::Segment {
+                    segment_id: SegmentId::new(id),
+                })
+                .unwrap()
+        };
+        let view = segment(&tools, "a");
+        let QueryView::Segment(outgoing) = &view else {
+            panic!("segment query returned {view}");
+        };
+        assert_eq!(
+            outgoing.transition,
+            Some(("cutlass-dissolve".to_owned(), Micros(500_000)))
+        );
+        assert!(
+            view.to_string()
+                .ends_with(" transition=cutlass-dissolve+500000"),
+            "{view}"
+        );
+        let incoming = segment(&tools, "b").to_string();
+        assert!(!incoming.contains("transition="), "{incoming}");
+        let full = tools.query(&DraftQuery::Full).unwrap().to_string();
+        assert!(
+            full.contains(
+                "segment=a material=media start=0 duration=1000000 \
+                 transition=cutlass-dissolve+500000 segment=b"
+            ),
+            "{full}"
+        );
+        assert_eq!(full.matches("transition=").count(), 1, "{full}");
+
+        // A blend with no effect id is named by its material id, which
+        // never holds a space, so the words still split.
+        tools
+            .apply(apply_input(
+                None,
+                1,
+                vec![blend("tr", "")],
+                ApplyMode::Commit,
+            ))
+            .unwrap();
+        assert!(
+            segment(&tools, "a")
+                .to_string()
+                .ends_with(" transition=tr+500000")
+        );
     }
 
     #[test]

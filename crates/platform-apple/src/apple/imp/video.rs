@@ -252,11 +252,12 @@ impl Decoder for VideoDecoder {
                 self.open_format(&extra)?;
             }
         }
-        let access = access_unit(self.codec, &packet.data)?;
-        let mut status = self.submit(&access, packet)?;
+        // The first submit gives its unit to the sample buffer, so a retry
+        // on a new session builds the unit again.
+        let mut status = self.submit(access_unit(self.codec, &packet.data)?, packet)?;
         if session_lost(status) {
             self.reopen()?;
-            status = self.submit(&access, packet)?;
+            status = self.submit(access_unit(self.codec, &packet.data)?, packet)?;
         }
         unit_status(status, "videotoolbox")?;
         self.collect()
@@ -333,9 +334,10 @@ impl VideoDecoder {
         }
     }
 
-    /// Hand `access` to the session. The status is the session's own, so a
-    /// lost session can be told apart from a bad unit.
-    fn submit(&self, access: &[u8], packet: &Packet) -> Result<sys::OSStatus, CodecError> {
+    /// Hand `access` to the session, which owns it from here on. The status
+    /// is the session's own, so a lost session can be told apart from a bad
+    /// unit.
+    fn submit(&self, access: Vec<u8>, packet: &Packet) -> Result<sys::OSStatus, CodecError> {
         let (Some(session), Some(format)) = (self.session.as_ref(), self.format.as_ref()) else {
             return Err(CodecError::Malformed {
                 at_bit: 0,
@@ -887,18 +889,18 @@ fn create_decompress(
 fn decode_access(
     session: *mut std::ffi::c_void,
     format: &Cf,
-    bytes: &[u8],
+    access: Vec<u8>,
     pts: i64,
     timescale: u32,
 ) -> Result<sys::OSStatus, CodecError> {
-    let block = block_from(bytes)?;
+    let size = access.len();
+    let block = block_owning(access)?;
     let scale = i32::try_from(timescale).unwrap_or(30);
     let timing = CMSampleTimingInfo {
         duration: cf::time(1, scale),
         presentation: cf::time(pts, scale),
         decode: cf::time_invalid(),
     };
-    let size = bytes.len();
     let mut sample = ptr::null_mut();
     // SAFETY: `block` and `format` are live and retained by the sample.
     // `timing` and `size` are one entry each, for the one sample, and are
@@ -922,13 +924,11 @@ fn decode_access(
         what: "sample buffer",
     })?;
     // SAFETY: `session` is the decoder's live session and `sample` a live
-    // sample buffer, which the session retains while it decodes. The source
-    // refcon and info out pointer are null, which is allowed.
-    // The sample's block borrows `bytes` (see `block_from`), and with
-    // asynchronous decode the session may still hold the sample after this
-    // returns and the caller frees `bytes`. This relies on VideoToolbox
-    // having read the data before `VTDecompressionSessionDecodeFrame`
-    // returns, which its documentation does not promise.
+    // sample buffer, which the session retains for as long as it decodes,
+    // asynchronously too. The sample retains its block, and the block owns
+    // the unit's bytes until it is finalized (see `block_owning`), so no
+    // memory the session can still read is freed when this returns. The
+    // source refcon and info out pointer are null, which is allowed.
     let status = unsafe {
         sys::VTDecompressionSessionDecodeFrame(
             session,
@@ -941,30 +941,63 @@ fn decode_access(
     Ok(status)
 }
 
-fn block_from(bytes: &[u8]) -> Result<Cf, CodecError> {
+/// A block buffer that owns `bytes`: they are freed when CoreMedia
+/// finalizes the block, on whichever thread releases it last, not when
+/// this returns. `bytes` must not be empty.
+fn block_owning(mut bytes: Vec<u8>) -> Result<Cf, CodecError> {
+    let len = bytes.len();
+    // Moving the vector into the box leaves its buffer where it is.
+    let data = bytes.as_mut_ptr();
+    let held = Box::into_raw(Box::new(bytes));
+    let source = sys::CMBlockBufferCustomBlockSource {
+        version: 0,
+        allocate: None,
+        free: Some(free_owned_block),
+        refcon: held.cast(),
+    };
     let mut raw = ptr::null_mut();
-    // SAFETY: the block wraps `bytes` (`len` bytes) without copying, and
-    // `kCFAllocatorNull` means it never frees them; CoreMedia only reads the
-    // memory, despite the `*mut` in the signature. The block is valid only
-    // while `bytes` is. `raw` is a live out pointer (Create rule).
+    // SAFETY: `data` is the start of the boxed vector's `len` bytes, which
+    // nothing else refers to now, so CoreMedia may read or write them. The
+    // header says the custom source is copied during the call and its free
+    // routine "will be called once when the CMBlockBuffer is disposed",
+    // with the refcon, so `free_owned_block` turns `held` back into its box
+    // exactly once, after the last reference to the block is gone. `raw`
+    // is a live out pointer (Create rule).
     let status = unsafe {
         sys::CMBlockBufferCreateWithMemoryBlock(
             ptr::null(),
-            bytes.as_ptr().cast_mut().cast(),
-            bytes.len(),
-            sys::kCFAllocatorNull,
+            data.cast(),
+            len,
             ptr::null(),
+            &source,
             0,
-            bytes.len(),
+            len,
             0,
             &mut raw,
         )
     };
+    // A failed create may or may not have called the free routine, so the
+    // box is left to leak rather than freed twice.
     unit_status(status, "videotoolbox")?;
     Cf::from_owned(raw).ok_or(CodecError::Malformed {
         at_bit: 0,
         what: "block buffer",
     })
+}
+
+/// The free routine of [`block_owning`]'s custom block source.
+unsafe extern "C" fn free_owned_block(
+    refcon: *mut std::ffi::c_void,
+    _block: *mut std::ffi::c_void,
+    _size: usize,
+) {
+    if refcon.is_null() {
+        return;
+    }
+    // SAFETY: the refcon is the `Box<Vec<u8>>` that `block_owning` leaked
+    // for this block, and CoreMedia calls this once, when the block is
+    // disposed, so the box is rebuilt and dropped once.
+    drop(unsafe { Box::from_raw(refcon.cast::<Vec<u8>>()) });
 }
 
 /// Runs on a VideoToolbox thread, once per unit, in display order.
@@ -2063,6 +2096,90 @@ mod tests {
                 Output::Audio(_) => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn the_custom_block_source_has_the_header_layout() {
+        use std::mem::{align_of, offset_of, size_of};
+        type Source = sys::CMBlockBufferCustomBlockSource;
+        assert_eq!(offset_of!(Source, version), 0);
+        assert_eq!(offset_of!(Source, allocate), 4);
+        assert_eq!(offset_of!(Source, free), 4 + size_of::<usize>());
+        assert_eq!(offset_of!(Source, refcon), 4 + 2 * size_of::<usize>());
+        assert_eq!(size_of::<Source>(), 4 + 3 * size_of::<usize>());
+        assert_eq!(align_of::<Source>(), 4);
+    }
+
+    #[test]
+    fn a_block_keeps_its_bytes_after_they_are_handed_over() {
+        let expected: Vec<u8> = (0..4096u32).map(|i| (i * 31 % 251) as u8).collect();
+        let block = block_owning(expected.clone()).expect("block");
+        // Freed memory of the same size is likely to be handed out again.
+        let noise: Vec<Vec<u8>> = (0..64).map(|_| vec![0xEE; expected.len()]).collect();
+        let mut data = ptr::null_mut();
+        let mut total = 0usize;
+        // SAFETY: `block` is live; the out pointers are live locals.
+        let status = unsafe {
+            sys::CMBlockBufferGetDataPointer(
+                block.as_ptr(),
+                0,
+                ptr::null_mut(),
+                &mut total,
+                &mut data,
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(total, expected.len());
+        // SAFETY: the block is one piece of `total` bytes, alive with `block`.
+        let held = unsafe { std::slice::from_raw_parts(data, total) };
+        assert_eq!(held, expected.as_slice());
+        drop(noise);
+        drop(block);
+        assert!(block_owning(Vec::new()).is_err());
+    }
+
+    /// Asynchronous decode may read a unit after `push` returns. Each packet
+    /// here is freed as soon as `push` returns and its memory is filled with
+    /// other bytes, and every round must still match the first decode.
+    #[test]
+    fn decoding_from_packets_freed_after_push_matches_every_round() {
+        let Some((packets, config)) = encoded(CodecId::H264, 12) else {
+            return;
+        };
+        let expected: Vec<Vec<u8>> = yuv_pictures(open_decoder, &packets, &config)
+            .iter()
+            .map(|picture| match picture.samples() {
+                PictureSamples::Cpu(bytes) => bytes.to_vec(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(expected.len(), 12);
+        let mut params = CodecParams::with_format(CodecId::H264, 64, 48, PixelFormat::Yuv420p);
+        params.extra = config;
+        for _ in 0..40 {
+            let mut decoder = open_decoder(&params).expect("open");
+            let mut outputs = Vec::new();
+            let mut noise = Vec::new();
+            for packet in &packets {
+                let copy = packet.clone();
+                outputs.extend(decoder.push(&copy).expect("push"));
+                let size = copy.data.len();
+                drop(copy);
+                noise.push(vec![0xA5u8; size]);
+            }
+            outputs.extend(decoder.drain().expect("drain"));
+            let got: Vec<Vec<u8>> = outputs
+                .iter()
+                .filter_map(|output| match output {
+                    Output::Picture(picture) => match picture.samples() {
+                        PictureSamples::Cpu(bytes) => Some(bytes.to_vec()),
+                        _ => None,
+                    },
+                    Output::Audio(_) => None,
+                })
+                .collect();
+            assert_eq!(got, expected);
+        }
     }
 
     /// A textured picture that moves `n` quarter samples right and down,

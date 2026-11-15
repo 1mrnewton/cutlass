@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_encode::video::{VideoEncoder, VideoInput};
 use cutlass_encode::{
-    CodecError, CodecId, CodecParams, EncodeFactory, Packet, PixelFormat, Plane, VideoFrame,
+    CodecError, CodecId, CodecParams, ColorRange, EncodeFactory, MatrixCoefficients, Packet,
+    PixelFormat, Plane, VideoFrame,
 };
 
 use super::{EncPixel, FrameEncoder, FrameParams};
@@ -27,6 +28,39 @@ pub enum Chroma {
     Yuv440,
     /// Full size (profile 1).
     Yuv444,
+}
+
+/// The colour space a stream signals (VP9's `color_space`; libvpx's
+/// `color-space`, FFmpeg's `-colorspace`). The encoder codes the samples
+/// as given; this only tells a player how to show them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorSpace {
+    Unknown,
+    /// ITU-R BT.601 (the default, as libvpx's).
+    #[default]
+    Bt601,
+    Bt709,
+    Smpte170,
+    Smpte240,
+    Bt2020,
+    /// RGB: the planes are G, B, R (FFmpeg's `gbrp`), 4:4:4 only
+    /// (profiles 1 and 3), always full range.
+    Srgb,
+}
+
+impl ColorSpace {
+    /// The code in the key frame header.
+    fn code(self) -> u8 {
+        match self {
+            Self::Unknown => 0,
+            Self::Bt601 => 1,
+            Self::Bt709 => 2,
+            Self::Smpte170 => 3,
+            Self::Smpte240 => 4,
+            Self::Bt2020 => 5,
+            Self::Srgb => 7,
+        }
+    }
 }
 
 /// How the encoder codes.
@@ -76,6 +110,70 @@ pub struct Vp9Options {
     /// low bits ([`Vp9Encoder::push_planes16`]; FFmpeg's `yuv420p10le`
     /// and the like).
     pub bit_depth: u8,
+    /// The colour space the key frames signal (libvpx's `color-space`).
+    pub color_space: ColorSpace,
+    /// Full (`true`) or studio range (libvpx's `color-range`).
+    pub full_range: bool,
+    /// The size a player should show the pictures at, when not their own
+    /// (VP9's render size; FFmpeg sets it from a sample aspect ratio).
+    pub render_size: Option<(u32, u32)>,
+    /// The loop filter's sharpness, 0 to 7 (libvpx's `sharpness`): higher
+    /// filters edges less, keeping more detail at some PSNR.
+    pub sharpness: u8,
+    /// Error resilient frames (libvpx's `error-resilient`): each frame
+    /// starts from the default probabilities and uses neither the
+    /// previous frame's motion nor its segmentation, so that a lost frame
+    /// spoils only the frames that predict from its picture. Costs bits.
+    pub error_resilient: bool,
+    /// Frame parallel decodability (libvpx's `frame-parallel`): the
+    /// probabilities carry only the headers' explicit updates, without
+    /// adapting to each frame's symbols, so that a decoder can parse a
+    /// frame before the one before it is through. Costs a few bits.
+    pub frame_parallel: bool,
+    /// libvpx's `static-thresh`: an inter block whose prediction error is
+    /// below this threshold (16 × it over a 64×64 block, scaled to the
+    /// block, at least the DC quantizer step squared over 64) codes no
+    /// residual. 0: off.
+    pub static_thresh: u32,
+    /// Alt-ref frames with the lookahead (libvpx's `auto-alt-ref`; on by
+    /// default).
+    pub alt_ref: bool,
+    /// The alt-ref temporal filter's strength, 0 (none) to 6 (libvpx's
+    /// `arnr-strength`); `None`: 3 to 5 by quantizer (3 in two passes).
+    pub arnr_strength: Option<u8>,
+    /// The pictures the alt-ref filter averages, 1 to 15, centred on the
+    /// target (libvpx's `arnr-maxframes`); `None`: 7.
+    pub arnr_max_frames: Option<u8>,
+    /// With a bitrate: bits under the target so far by up to this share
+    /// of it, in percent, are not spent later (libvpx's `undershoot-pct`).
+    /// 0: every bit is.
+    pub undershoot_pct: u32,
+    /// With a bitrate: bits over the target so far by up to this share of
+    /// it, in percent, are not paid back (libvpx's `overshoot-pct`). 0:
+    /// every bit is.
+    pub overshoot_pct: u32,
+    /// A scene cut at least this many frames after the last key frame
+    /// starts a key frame (libvpx's automatic key frames past
+    /// `kf-min-dist`; FFmpeg's `-keyint_min`), so that a player can seek
+    /// to it. 0: cuts start golden frames, which cost less.
+    pub keyint_min: u32,
+    /// Constrained quality (libvpx's `end-usage=cq`, FFmpeg's `-crf` with
+    /// a bitrate): with a bitrate, no inter frame is finer than this
+    /// quantizer index (key and golden frames by their own steps from
+    /// it), so that easy content takes fewer bits than the bitrate.
+    pub cq_level: Option<u8>,
+    /// With a bitrate, the most bits a key frame may take, in percent of
+    /// a frame's share of the bitrate (libvpx's `max-intra-rate`). 0: no
+    /// limit.
+    pub max_intra_pct: u32,
+    /// Tile columns, log2 of the count (libvpx's `tile-columns`; as many
+    /// as the width allows), each coded on its own thread; `None`: one
+    /// per thread.
+    pub tile_columns: Option<u8>,
+    /// The level the `vpcC` configuration names (10 × the level, e.g. 31
+    /// for 3.1; libvpx's `level`, which also holds the stream to it). 0:
+    /// unset.
+    pub level: u8,
 }
 
 /// The lookahead below speed 9 unless set: with it, alt-refs take 10 to
@@ -110,6 +208,57 @@ impl Vp9Options {
         (w.div_ceil(1 << sx), h.div_ceil(1 << sy))
     }
 
+    /// What every frame signals.
+    fn stream(&self) -> super::Stream {
+        super::Stream {
+            sharpness: self.sharpness,
+            color_space: self.color_space.code(),
+            full_range: self.full_range || self.color_space == ColorSpace::Srgb,
+            render_size: self.render_size,
+            error_resilient: self.error_resilient,
+            frame_parallel: self.frame_parallel,
+            static_thresh: self.static_thresh,
+        }
+    }
+
+    /// The frame encoder these options code with.
+    fn frame_encoder<P: EncPixel>(&self, width: u32, height: u32) -> FrameEncoder<P> {
+        let mut enc =
+            FrameEncoder::with_depth(width, height, self.threads(), self.ss(), self.bit_depth);
+        enc.set_tile_rows(self.tile_rows);
+        if let Some(log2) = self.tile_columns {
+            enc.set_tile_columns(log2);
+        }
+        enc.set_stream(self.stream());
+        enc
+    }
+
+    /// Whether the options make a stream.
+    fn check(&self) -> Result<(), CodecError> {
+        let bad = |what| Err(CodecError::Unsupported { what });
+        if self.sharpness > 7 {
+            return bad("vp9 sharpness past 7");
+        }
+        if self.color_space == ColorSpace::Srgb && self.chroma != Chroma::Yuv444 {
+            return bad("vp9 sRGB without 4:4:4");
+        }
+        if let Some((w, h)) = self.render_size
+            && (w == 0 || h == 0 || w > 65536 || h > 65536)
+        {
+            return bad("vp9 render size");
+        }
+        if self.arnr_strength.is_some_and(|s| s > 6) {
+            return bad("vp9 arnr strength past 6");
+        }
+        if self.arnr_max_frames.is_some_and(|n| n == 0 || n > 15) {
+            return bad("vp9 arnr frames outside 1 to 15");
+        }
+        if self.tile_columns.is_some_and(|t| t > 6) {
+            return bad("vp9 tile columns past 6");
+        }
+        Ok(())
+    }
+
     fn threads(&self) -> usize {
         match self.threads {
             0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
@@ -134,6 +283,23 @@ impl Default for Vp9Options {
             tile_rows: 0,
             aq: false,
             bit_depth: 8,
+            color_space: ColorSpace::Bt601,
+            full_range: false,
+            render_size: None,
+            sharpness: 0,
+            error_resilient: false,
+            frame_parallel: false,
+            static_thresh: 0,
+            alt_ref: true,
+            arnr_strength: None,
+            arnr_max_frames: None,
+            undershoot_pct: 0,
+            overshoot_pct: 0,
+            keyint_min: 0,
+            cq_level: None,
+            max_intra_pct: 0,
+            tile_columns: None,
+            level: 0,
         }
     }
 }
@@ -235,6 +401,7 @@ impl Vp9Encoder {
 
     pub fn with_options(width: u32, height: u32, opts: Vp9Options) -> Result<Self, CodecError> {
         check_size(width, height)?;
+        opts.check()?;
         let lane = match opts.bit_depth {
             8 => Lane::Eight(Core::new(width, height, opts)),
             10 | 12 => Lane::Deep(Core::new(width, height, opts)),
@@ -260,10 +427,19 @@ impl Vp9Encoder {
                 what: "vp9 pixel format",
             });
         };
+        // The colour the parameters name (BT.601 when they name none).
+        let color_space = match params.matrix {
+            MatrixCoefficients::Bt709 => ColorSpace::Bt709,
+            MatrixCoefficients::Bt2020 => ColorSpace::Bt2020,
+            MatrixCoefficients::Rgb if chroma == Chroma::Yuv444 => ColorSpace::Srgb,
+            _ => ColorSpace::Bt601,
+        };
         let opts = Vp9Options {
             bitrate: params.bitrate,
             chroma,
             bit_depth,
+            color_space,
+            full_range: params.range == ColorRange::Full,
             ..Vp9Options::default()
         };
         Self::with_options(params.width, params.height, opts)
@@ -395,8 +571,8 @@ impl Vp9Encoder {
     }
 
     /// The decoder configuration (`vpcC`, version 1) for the given colour
-    /// codes: the profile, level unset, the bit depth and chroma, limited
-    /// range.
+    /// codes: the profile, [`Vp9Options::level`], the bit depth, chroma
+    /// and range.
     pub fn vpcc_with_colour(&self, [primaries, transfer, matrix]: [u8; 3]) -> Vec<u8> {
         let o = self.opts();
         let profile = u8::from(o.chroma != Chroma::Yuv420) | if o.bit_depth > 8 { 2 } else { 0 };
@@ -413,8 +589,8 @@ impl Vp9Encoder {
             0,
             0,
             profile,
-            0,
-            (o.bit_depth << 4) | (chroma << 1),
+            o.level,
+            (o.bit_depth << 4) | (chroma << 1) | u8::from(o.stream().full_range),
             primaries,
             transfer,
             matrix,
@@ -489,17 +665,7 @@ impl<P: EncPixel> Core<P> {
             width,
             height,
             opts,
-            enc: {
-                let mut enc = FrameEncoder::with_depth(
-                    width,
-                    height,
-                    opts.threads(),
-                    opts.ss(),
-                    opts.bit_depth,
-                );
-                enc.set_tile_rows(opts.tile_rows);
-                enc
-            },
+            enc: opts.frame_encoder(width, height),
             since_key: 0,
             force_key: true,
             rc: Rate::new(opts, u64::from(width) * u64::from(height)),
@@ -624,6 +790,9 @@ impl<P: EncPixel> Core<P> {
         };
         let (w, h) = (self.width as usize, self.height as usize);
         let cw = self.opts.chroma_dims(w, h).0;
+        if self.shown == 0 && self.rc.wants_probe() {
+            self.probe(&f)?;
+        }
         // This picture has index `since_key` (0 for a key frame); the next
         // golden position is the alt-ref's target.
         // A cut (which no alt-ref spans: `reachable` fails across it); the
@@ -635,6 +804,7 @@ impl<P: EncPixel> Core<P> {
         let k = target.saturating_sub(idx) as usize; // the target is queue[k - 1]
         let mut arf_source = None;
         if !key_next
+            && self.opts.alt_ref
             && idx == self.gold.0 + 1
             // (One pass: only after a golden place, not after a cut.)
             && (self.rc.pass2.is_some() || idx % GF_INTERVAL == 1)
@@ -652,8 +822,9 @@ impl<P: EncPixel> Core<P> {
             )
         {
             let c = k - 1;
-            let lo = c.saturating_sub(3);
-            let hi = (c + 3).min(self.queue.len() - 1);
+            let radius = usize::from(self.opts.arnr_max_frames.unwrap_or(7) - 1) / 2;
+            let lo = c.saturating_sub(radius);
+            let hi = (c + radius).min(self.queue.len() - 1);
             let pics: Vec<super::arf::Picture<'_, P>> = (lo..=hi)
                 .map(|i| super::arf::Picture {
                     planes: [
@@ -668,7 +839,9 @@ impl<P: EncPixel> Core<P> {
             // fewer bits at the same averaged PSNR, 0.6% on the clip from
             // a fractal to `testsrc2`.)
             let q = self.rc.peek_q();
-            let strength = if self.pooled() {
+            let strength = if let Some(s) = self.opts.arnr_strength {
+                u32::from(s)
+            } else if self.pooled() {
                 3
             } else if q > 100 {
                 5
@@ -744,12 +917,24 @@ impl<P: EncPixel> Core<P> {
         ahead: Option<(bool, (isize, isize))>,
     ) -> Result<(Vec<u8>, bool), CodecError> {
         let cut = ahead.map(|a| a.0);
-        let key = self.force_key || self.since_key >= self.opts.keyint;
+        let forced = self.force_key || self.since_key >= self.opts.keyint;
         // A cut starts a golden frame: LAST and GOLDEN take the new scene,
         // each block still chooses intra or inter, and the probabilities
         // the stream has learnt are kept (a key frame would reset them, and
         // costs more on a cut to another picture of the same subject).
-        let cut = !key && cut.unwrap_or_else(|| self.is_cut(planes[0]));
+        let cut = !forced && cut.unwrap_or_else(|| self.is_cut(planes[0]));
+        // What looks a cut may be the picture moved far ([`super::arf::jump`]):
+        // then it is an inter frame whose blocks also search there.
+        let jump = if cut { self.jump_of(planes[0]) } else { None };
+        let cut = cut && jump.is_none();
+        if let Some(g) = jump {
+            self.enc.set_global(g);
+        }
+        // (With `keyint_min`, a cut far enough from the last key frame is
+        // one.)
+        let min = self.opts.keyint_min;
+        let key = forced || (cut && min > 0 && self.since_key >= min);
+        let cut = cut && !key;
         // A golden frame every `GF_INTERVAL` frames, coded finer: the
         // frames after it predict from it. After an alt-ref, the golden
         // frame is its overlay, coded as an inter frame.
@@ -808,7 +993,9 @@ impl<P: EncPixel> Core<P> {
         self.enc.load(planes);
         let qindex = self.rc.qindex(kind, seconds, cut);
         // Between an alt-ref and its overlay, ALTREF is ahead.
-        let altref_future = !key && !overlay && self.overlay_at.is_some();
+        // (Error resilient frames take no compound prediction.)
+        let altref_future =
+            !key && !overlay && self.overlay_at.is_some() && !self.opts.error_resilient;
         let coded = self.enc.encode(FrameParams {
             key,
             golden,
@@ -860,6 +1047,48 @@ impl<P: EncPixel> Core<P> {
                 .extend_from_slice(&y[r * stride..r * stride + w]);
         }
         Ok((coded.data, coded.key))
+    }
+
+    /// One pass at a variable bitrate, before the first picture: the
+    /// pictures of the lookahead (`first` and the queue) coded fast at a
+    /// fixed quantizer, whose bits start the rate control's model in
+    /// place of a guess (a first pass over the lookahead, see
+    /// [`Rate::probe`]).
+    fn probe(&mut self, first: &Queued<P>) -> Result<(), CodecError> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let cw = self.opts.chroma_dims(w, h).0;
+        let q = self.rc.first_pass_qindex(first.seconds);
+        let mut enc = FrameEncoder::<P>::with_depth(
+            self.width,
+            self.height,
+            self.opts.threads(),
+            self.opts.ss(),
+            self.opts.bit_depth,
+        );
+        let mut bits = Vec::new();
+        for (i, f) in std::iter::once(first)
+            .chain(self.queue.iter())
+            .take(PROBE_FRAMES)
+            .enumerate()
+        {
+            enc.load([(&f.planes[0], w), (&f.planes[1], cw), (&f.planes[2], cw)]);
+            let coded = enc.encode(FrameParams {
+                key: i == 0,
+                golden: false,
+                hidden: false,
+                qindex: q,
+                speed: 10,
+                altref_future: false,
+                aq: false,
+                second_pass: false,
+                golden_slot: 1,
+                also_refresh: 0,
+                noise: 0.0,
+            })?;
+            bits.push(coded.data.len() as f64 * 8.0);
+        }
+        self.rc.probe(&bits, q);
+        Ok(())
     }
 
     /// Whether the reference pool is kept: two passes ([`POOL`]).
@@ -936,15 +1165,21 @@ impl<P: EncPixel> Core<P> {
         super::arf::cut(&self.last_luma, &tight, w, h)
     }
 
+    /// [`super::arf::jump`] of luma `y` (rows `stride` apart) from the
+    /// picture coded last.
+    fn jump_of(&self, (y, stride): (&[P], usize)) -> Option<(isize, isize)> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        if self.last_luma.len() != w * h {
+            return None;
+        }
+        let tight: Vec<P> = (0..h)
+            .flat_map(|r| y[r * stride..r * stride + w].iter().copied())
+            .collect();
+        super::arf::jump(&self.last_luma, &tight, w, h)
+    }
+
     fn reset(&mut self) {
-        self.enc = FrameEncoder::with_depth(
-            self.width,
-            self.height,
-            self.opts.threads(),
-            self.opts.ss(),
-            self.opts.bit_depth,
-        );
-        self.enc.set_tile_rows(self.opts.tile_rows);
+        self.enc = self.opts.frame_encoder(self.width, self.height);
         self.force_key = true;
         self.since_key = 0;
         self.rc = Rate::new(self.opts, u64::from(self.width) * u64::from(self.height));
@@ -1108,6 +1343,8 @@ impl EngineEncoder {
         }
         let mut planar = params.clone();
         planar.pixel = PixelFormat::Yuv420p;
+        // Export converts with BT.709, which the stream signals too.
+        planar.matrix = MatrixCoefficients::Bt709;
         let inner = Vp9Encoder::open(&planar)?;
         let extradata = inner.vpcc_with_colour([1, 1, 1]);
         Ok(Self { inner, extradata })
@@ -1206,6 +1443,9 @@ const POOL_FIRST: u8 = 3;
 
 /// Frames from one golden frame to the next (at most, in two passes).
 const GF_INTERVAL: u32 = 12;
+
+/// The pictures of the lookahead [`Core::probe`] codes.
+const PROBE_FRAMES: usize = 17;
 
 /// In two passes, how far (in samples) the content may move from one
 /// golden frame to the next ([`super::arf::motion`] a picture times the
@@ -1431,6 +1671,14 @@ struct Rate {
     pass2: Option<Pass2>,
     /// Bits spent so far.
     spent: f64,
+    /// What the last key frame took past a frame's share, and the frames
+    /// since (see [`KEY_SPREAD`]).
+    key_extra: (f64, f64),
+    /// One pass at a variable bitrate: the key frame and inter frame
+    /// models [`Core::probe`] measured.
+    probed: Option<(f64, f64)>,
+    /// The next golden-type frame is an alt-ref.
+    arf_next: bool,
 }
 
 /// How bits fall with the quantizer step: bits ∝ step^-EXP.
@@ -1439,6 +1687,27 @@ const EXP: f64 = 1.25;
 /// Bits a sample of an inter frame at quantizer step 1 (bits ∝ step^-EXP):
 /// a start for the model, from a detailed 720p picture moving.
 const FIRST_K: f64 = 48.0;
+
+/// One pass at a variable bitrate: the weight of each inter frame in the
+/// inter frames' model of bits against the step, once the frames so far
+/// outnumber its inverse (a running mean until then). The model moved by
+/// 0.4 of each frame before: on a clip of three scenes, 11% fewer bits at
+/// the same PSNR-Y (9% averaged over the planes), 5% on a still scene
+/// with two cuts, 0.5 to 1% on a grainy pan.
+const INTER_MODEL_WEIGHT: f64 = 0.05;
+
+/// One pass at a variable bitrate: the frames over which a key frame's
+/// bits past a frame's share fall due, and over which the first key
+/// frame's quantizer is planned.
+const KEY_SPREAD: f64 = 30.0;
+
+/// The most frames' worth of bits the first key frame is planned to take
+/// (what the lookahead's still pictures would leave it is much more).
+const KEY_MOST: f64 = 20.0;
+
+/// The frames the probe's inter model counts as in the model's running
+/// mean.
+const PROBE_WEIGHT: f64 = 5.0;
 
 /// The range of [`Vp9Encoder::first_pass_qindex`].
 const FIRST_PASS_Q: (u8, u8) = (40, 200);
@@ -1472,12 +1741,73 @@ impl Rate {
             frames: 0,
             pass2: None,
             spent: 0.0,
+            key_extra: (0.0, 0.0),
+            probed: None,
+            arf_next: false,
         }
     }
 
     /// The quantizer of a frame of type `kind` (key, golden or alt-ref,
     /// inter); `cut` for a golden frame that starts a scene.
     fn qindex(&mut self, kind: usize, seconds: f64, cut: bool) -> u8 {
+        let q = self.qindex_in(kind, seconds, cut);
+        if kind == 0 && self.opts.bitrate > 0 && self.opts.max_intra_pct > 0 {
+            q.max(self.intra_cap(seconds)).min(self.opts.max_q.max(q))
+        } else {
+            q
+        }
+    }
+
+    /// The finest quantizer a key frame may take under
+    /// [`Vp9Options::max_intra_pct`]: the step at which the key frame
+    /// model (two passes: the first pass's bits of this frame, at the
+    /// scale measured on key frames) spends at most that share of a
+    /// frame's bits; the first key frame of one pass takes key frames to
+    /// cost four inter frames at the same step.
+    fn intra_cap(&self, seconds: f64) -> u8 {
+        let cap =
+            (f64::from(self.opts.bitrate) * seconds.max(1e-3) * f64::from(self.opts.max_intra_pct)
+                / 100.0)
+                .max(1.0);
+        let bd = self.opts.bit_depth;
+        let step = if let Some(p) = &self.pass2 {
+            let b = p
+                .first
+                .get(self.frames as usize)
+                .map_or(p.mean, |f| f.0)
+                .max(1.0);
+            let k = if p.pred[0] > 0.0 && p.spent[0] > 0.0 {
+                p.spent[0] / p.pred[0]
+            } else {
+                K_START
+            };
+            step_of(p.q, bd) * (k * b / cap).powf(1.0 / EXP)
+        } else {
+            let m = self.model[0].unwrap_or(4.0 * FIRST_K * self.pixels);
+            (m / cap).powf(1.0 / EXP)
+        };
+        q_of_step(step, bd)
+    }
+
+    /// The finest quantizer of a frame of type `kind`: `min_q`, or with
+    /// [`Vp9Options::cq_level`] that level's step scaled as the frame
+    /// type's.
+    fn floor(&self, kind: usize) -> u8 {
+        match self.opts.cq_level {
+            None => self.opts.min_q,
+            Some(cq) => {
+                let bd = self.opts.bit_depth;
+                let q = q_of_step(step_of(cq, bd) * STEP_SCALE[kind], bd);
+                q.max(self.opts.min_q).min(self.opts.max_q)
+            }
+        }
+    }
+
+    fn qindex_in(&mut self, kind: usize, seconds: f64, cut: bool) -> u8 {
+        let floor = [self.floor(0), self.floor(1), self.floor(2)];
+        let o = self.opts;
+        let banded = o.undershoot_pct > 0 || o.overshoot_pct > 0;
+        let band = |diff: f64, budget: f64| band(diff, budget, o.undershoot_pct, o.overshoot_pct);
         if self.opts.bitrate == 0 {
             let q = self.opts.qindex;
             if q == 0 {
@@ -1517,26 +1847,46 @@ impl Rate {
             });
             let more = (END_FRAMES - (frames - done) as f64).max(0.0);
             let need = k[0] * p.left[0] + k[1] * p.left[1] + k[2] * p.left[2] + all * p.mean * more;
-            let left = (total - self.spent)
+            let spent_now = if banded {
+                let budget = total * done as f64 / frames as f64;
+                budget + band(self.spent - budget, budget)
+            } else {
+                self.spent
+            };
+            let left = (total - spent_now)
                 .max(total * 0.02 * (frames - done) as f64 / frames as f64)
                 + total / frames as f64 * more;
             let base = s1 * (need.max(1.0) / left.max(1.0)).powf(1.0 / EXP);
             p.base = base;
-            let scale = STEP_SCALE[if cut { 0 } else { kind }];
-            let q = q_of_step(base * scale, self.opts.bit_depth)
-                .clamp(self.opts.min_q, self.opts.max_q);
+            let class = if cut { 0 } else { kind };
+            let q = q_of_step(base * STEP_SCALE[class], self.opts.bit_depth)
+                .clamp(floor[class], self.opts.max_q);
             if kind == 2 {
                 self.last_q = q;
             }
             return q;
+        }
+        if self.per_frame == 0.0
+            && let Some((key, inter)) = self.probed
+        {
+            // The first frame, after the probe: the inter step at which
+            // the key frame and the inter frames after it spend
+            // [`KEY_SPREAD`] frames' bits, the key frame at most
+            // [`KEY_MOST`] frames' worth.
+            let target = (f64::from(self.opts.bitrate) * seconds.max(1e-3)).max(1.0);
+            let n = KEY_SPREAD;
+            let step = ((key + (n - 1.0) * inter) / (n * target)).powf(1.0 / EXP);
+            let bd = self.opts.bit_depth;
+            self.last_q = q_of_step(step, bd).clamp(floor[2], self.opts.max_q);
+            let own = (step * STEP_SCALE[kind]).max((key / (KEY_MOST * target)).powf(1.0 / EXP));
+            return q_of_step(own, bd).clamp(floor[kind], self.opts.max_q);
         }
         if self.per_frame == 0.0 {
             // The first frame: the inter quantizer that a typical picture
             // would take at this many bits a sample, finer for its type.
             let target = f64::from(self.opts.bitrate) * seconds.max(1e-3) * SHARE[2];
             let step = (FIRST_K * self.pixels / target.max(1.0)).powf(1.0 / EXP);
-            self.last_q =
-                q_of_step(step, self.opts.bit_depth).clamp(self.opts.min_q, self.opts.max_q);
+            self.last_q = q_of_step(step, self.opts.bit_depth).clamp(floor[2], self.opts.max_q);
             // At a constant bitrate the first key frame takes a coarser
             // step, not a finer one: the buffer cannot hold the ten frames'
             // worth a fine one costs.
@@ -1546,7 +1896,7 @@ impl Rate {
                 STEP_SCALE[kind]
             };
             return q_of_step(step * scale, self.opts.bit_depth)
-                .clamp(self.opts.min_q, self.opts.max_q);
+                .clamp(floor[kind], self.opts.max_q);
         }
         let m = match (self.model[kind], self.model[0]) {
             (Some(m), _) => m,
@@ -1562,10 +1912,59 @@ impl Rate {
             let buffer = f64::from(self.opts.cbr_buffer_ms) / 1000.0 / seconds;
             horizon = horizon.min((buffer / 2.0).max(2.0));
         }
+        if !cbr {
+            // At a variable bitrate the frame types' steps are the inter
+            // frames' scaled (as with a fixed quantizer and in two passes),
+            // and the inter step is the one at which the frames to come,
+            // golden ones among them, spend the bitrate: frame types
+            // budgeted apart left alt-refs coarser than the frames that
+            // predict from them (on a grainy pan 2 dB of PSNR at 1 Mb/s).
+            let bd = self.opts.bit_depth;
+            if kind != 2 {
+                let arf = std::mem::take(&mut self.arf_next);
+                // A golden frame that is no alt-ref (no lookahead, or none
+                // reached its end) takes a key frame's step: it is what the
+                // frames up to the next one predict from (9% fewer bits on
+                // a grainy pan without lookahead, 19% at speed 10).
+                let class = if cut || (kind == 1 && !arf) { 0 } else { kind };
+                return q_of_step(step_of(self.last_q, bd) * STEP_SCALE[class], bd)
+                    .clamp(floor[class], self.opts.max_q);
+            }
+            let golden = self.model[1]
+                .or(self.model[0].map(|k| k * 0.5))
+                .unwrap_or(m * 3.0);
+            let w = 1.0 / f64::from(GF_INTERVAL);
+            let unit = match (self.model[2], self.probed) {
+                (None, Some((_, inter))) => inter,
+                _ => (1.0 - w) * m + w * golden * STEP_SCALE[1].powf(-EXP),
+            };
+            let mut debt = if banded {
+                band(self.debt, self.per_frame * f64::from(self.frames))
+            } else {
+                self.debt
+            };
+            // What the last key frame took past a frame's share falls due
+            // over the [`KEY_SPREAD`] frames after it, not at once.
+            let (extra, since) = self.key_extra;
+            debt -= extra * (1.0 - since / KEY_SPREAD).max(0.0);
+            let target = (self.per_frame - debt / horizon).max(self.per_frame * 0.2);
+            let step = (unit / target).powf(1.0 / EXP);
+            let q = q_of_step(step, bd).clamp(floor[2], self.opts.max_q).clamp(
+                self.last_q.saturating_sub(24),
+                self.last_q.saturating_add(24),
+            );
+            self.last_q = q;
+            return q;
+        }
         let share = if cbr { SHARE_CBR[kind] } else { SHARE[kind] };
-        let target = (self.per_frame * share - self.debt / horizon).max(self.per_frame * 0.2);
+        let debt = if banded {
+            band(self.debt, self.per_frame * f64::from(self.frames))
+        } else {
+            self.debt
+        };
+        let target = (self.per_frame * share - debt / horizon).max(self.per_frame * 0.2);
         let step = (m / target).powf(1.0 / EXP);
-        let q = q_of_step(step, self.opts.bit_depth).clamp(self.opts.min_q, self.opts.max_q);
+        let q = q_of_step(step, self.opts.bit_depth).clamp(floor[kind], self.opts.max_q);
         // Inter frames move the quantizer at most a few steps a frame (more
         // at a constant bitrate, which must follow the content).
         let reach = if cbr { 48 } else { 24 };
@@ -1586,6 +1985,30 @@ impl Rate {
             self.last_q = q;
         }
         q
+    }
+
+    /// Whether the first picture waits for [`Core::probe`].
+    fn wants_probe(&self) -> bool {
+        self.opts.bitrate > 0
+            && self.opts.cbr_buffer_ms == 0
+            && self.pass2.is_none()
+            && self.per_frame == 0.0
+    }
+
+    /// The bits of the lookahead's pictures coded fast at quantizer `q`
+    /// (a key frame, then inter frames): the models of the key frame and
+    /// of an inter frame, at the scale between such a pass and the encode
+    /// (as two passes start, [`K_START`]).
+    fn probe(&mut self, bits: &[f64], q: u8) {
+        let Some((&key, inter)) = bits.split_first() else {
+            return;
+        };
+        if inter.is_empty() {
+            return;
+        }
+        let mean = inter.iter().sum::<f64>() / inter.len() as f64;
+        let s = K_START * step_of(q, self.opts.bit_depth).powf(EXP);
+        self.probed = Some((s * key, s * mean));
     }
 
     /// See [`Vp9Encoder::first_pass_qindex`]: the inter quantizer the
@@ -1611,6 +2034,7 @@ impl Rate {
     /// An alt-ref is coded now for the picture `ahead` after the next
     /// shown one.
     fn alt_ref(&mut self, ahead: usize) {
+        self.arf_next = true;
         let at = self.frames as usize + ahead;
         if let Some(p) = &mut self.pass2 {
             p.alt_ref(at);
@@ -1650,9 +2074,30 @@ impl Rate {
             self.debt -= self.per_frame;
         }
         self.debt += bits;
+        if kind == 0 && seconds > 0.0 {
+            self.key_extra = ((bits - self.per_frame).max(0.0), 0.0);
+        } else if seconds > 0.0 {
+            self.key_extra.1 += 1.0;
+        }
         let m = bits * step_of(qindex, self.opts.bit_depth).powf(EXP);
-        self.model[kind] = Some(match self.model[kind] {
-            Some(old) => old * 0.6 + m * 0.4,
+        // (The probe's inter model counts as [`PROBE_WEIGHT`] frames.)
+        let prior = (kind == 2).then_some(self.probed.map(|p| p.1)).flatten();
+        let first = self.probed.map_or(0.0, |_| PROBE_WEIGHT);
+        self.model[kind] = Some(match self.model[kind].or(prior) {
+            Some(old) => {
+                // One pass at a variable bitrate: the inter frames' model
+                // moves slowly once it has settled, so that the quantizer
+                // holds steady across content that costs less or more for a
+                // while (a scene of its own) instead of spending each
+                // picture's share on it; the debt still pays back the
+                // difference.
+                let a = if kind == 2 && self.opts.cbr_buffer_ms == 0 {
+                    INTER_MODEL_WEIGHT.max(1.0 / (f64::from(self.frames.max(1)) + first))
+                } else {
+                    0.4
+                };
+                old * (1.0 - a) + m * a
+            }
             None => m,
         });
         if kind == 0 && self.model[2].is_none() {
@@ -1661,6 +2106,17 @@ impl Rate {
                 self.opts.bit_depth,
             );
         }
+    }
+}
+
+/// `diff` bits over (positive) or under the target `budget` so far, less
+/// what [`Vp9Options::overshoot_pct`] and `undershoot_pct` (`over` and
+/// `under`) let stand.
+fn band(diff: f64, budget: f64, under: u32, over: u32) -> f64 {
+    if diff < 0.0 {
+        (diff + budget * f64::from(under) / 100.0).min(0.0)
+    } else {
+        (diff - budget * f64::from(over) / 100.0).max(0.0)
     }
 }
 

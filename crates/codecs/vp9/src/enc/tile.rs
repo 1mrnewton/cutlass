@@ -227,6 +227,12 @@ pub struct Shared<'a, P> {
     pub second_pass: bool,
     /// See [`super::FrameParams::noise`].
     pub noise: f32,
+    /// See [`super::Stream::static_thresh`].
+    pub static_thresh: u32,
+    /// A vector the whole picture moved by from LAST, far past where the
+    /// searches reach (see [`super::FrameEncoder::set_global`]): a start
+    /// of every block's search on LAST.
+    pub global: Option<Mv>,
 }
 
 /// The context energy of a level (libvpx `vp9_pt_energy_class`): 0, 1, 2,
@@ -490,10 +496,106 @@ pub struct Rdq {
     energy: Vec<u8>,
 }
 
+/// The superblock rows of one tile column coded on several threads at
+/// once, in a wavefront (libvpx's `row-mt`): a row codes a superblock
+/// once the row above has finished the superblock above it and the one
+/// to the right of that, and first takes from them everything a
+/// superblock reads of the row above: the contexts, the motion and the
+/// search's seed vectors along its bottom, and the last line of its
+/// samples (intra prediction reads only that line, and only above the
+/// block itself). Each thread codes into its own state and picture, put
+/// together after the frame's tiles ([`super::FrameEncoder`]): the frame
+/// is the same as when one thread codes the rows one after another.
+pub struct Lanes<P> {
+    ex: std::sync::Mutex<Exchange<P>>,
+    ready: std::sync::Condvar,
+}
+
+struct Exchange<P> {
+    /// The superblocks finished in each superblock row.
+    done: Vec<usize>,
+    /// For each superblock column, the bottom of the row finished there
+    /// last (the row below takes it before the one after can finish).
+    edges: Vec<Edge<P>>,
+    /// A thread stopped: none waits any longer.
+    failed: bool,
+}
+
+/// The bottom of a coded superblock, for the row below.
+#[derive(Clone)]
+struct Edge<P> {
+    above: [Nb; 8],
+    above_part: [u8; 8],
+    above_nz: [[u8; 16]; 3],
+    /// Its 8×8 rows of motion.
+    mvs: [MvRef; 64],
+    /// The search seeds of its last 8×8 row.
+    seeds: [Mv; 8],
+    /// The last line of each plane's samples.
+    pix: [Vec<P>; 3],
+    /// Seeds it put in the superblock row below, in order.
+    spill: Vec<(usize, Mv)>,
+}
+
+impl<P: Copy> Lanes<P> {
+    /// For a tile column of `sb_cols` superblocks across and `sb_rows`
+    /// down.
+    pub fn new(sb_rows: usize, sb_cols: usize) -> Self {
+        let edge = Edge {
+            above: [Nb::default(); 8],
+            above_part: [0; 8],
+            above_nz: [[0; 16]; 3],
+            mvs: [MvRef::default(); 64],
+            seeds: [Mv::ZERO; 8],
+            pix: [Vec::new(), Vec::new(), Vec::new()],
+            spill: Vec::new(),
+        };
+        Self {
+            ex: std::sync::Mutex::new(Exchange {
+                done: vec![0; sb_rows],
+                edges: vec![edge; sb_cols],
+                failed: false,
+            }),
+            ready: std::sync::Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Exchange<P>> {
+        match self.ex.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    /// Lets every thread waiting go on: one of them has stopped.
+    pub fn fail(&self) {
+        self.lock().failed = true;
+        self.ready.notify_all();
+    }
+
+    /// The exchange once superblock row `row` has finished `need`
+    /// superblocks.
+    fn wait(&self, row: usize, need: usize) -> std::sync::MutexGuard<'_, Exchange<P>> {
+        let mut g = self.lock();
+        while g.done[row] < need && !g.failed {
+            g = match self.ready.wait(g) {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+        }
+        g
+    }
+}
+
 /// The encoder of one tile.
 pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     s: &'s Shared<'s, P>,
     f: &'t mut State,
+    /// The tile column's rows on other threads, when they are.
+    lanes: Option<&'t Lanes<P>>,
+    /// With lanes, the seeds the superblock being coded put in the row
+    /// below ([`Tile::put_seeds`]).
+    spill: Vec<(usize, Mv)>,
     w: &'t mut Out,
     rec: &'t mut Recon<'r, 'v, P>,
     col0: usize,
@@ -556,6 +658,7 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
 impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     /// `seeds`: the vectors found so far (one per 8×8 block of the frame),
     /// back from [`Tile::finish`] of the row above.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         s: &'s Shared<'s, P>,
         f: &'t mut State,
@@ -564,6 +667,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         (col0, col1): (usize, usize),
         mut seeds: Vec<Mv>,
         bufs: TileBufs<P>,
+        lanes: Option<&'t Lanes<P>>,
     ) -> Self {
         seeds.resize(s.mi_cols * s.mi_rows, Mv::ZERO);
         let TileBufs {
@@ -594,6 +698,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         Self {
             s,
             f,
+            lanes,
+            spill: Vec::new(),
             w,
             rec,
             col0,
@@ -658,34 +764,153 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let mut mi_col = self.col0;
         let fast = self.fast();
         while mi_col < self.col1 {
-            if fast {
-                // Partition from the motion search's SAD, one pass.
-                let mut split = [false; 21];
-                match self.s.prepass {
-                    Some(pre) => {
-                        let p = pre[(mi_row / 8) * self.s.mi_cols.div_ceil(8) + mi_col / 8];
-                        split = p.split;
-                        self.found = p.found;
-                    }
-                    None => {
-                        self.choose_into(mi_row, mi_col, 3, &mut split);
-                    }
-                }
-                let part = split.map(|s| if s { PARTITION_SPLIT } else { PARTITION_NONE });
-                self.partition(mi_row, mi_col, BLOCK_64X64, 4, &part);
-                mi_col += 8;
-                continue;
+            if let Some(l) = self.lanes
+                && mi_row > 0
+            {
+                self.take_edges(l, mi_row, mi_col);
             }
-            self.save(mi_row, mi_col, (8, 8), 0);
-            self.trial = true;
-            self.part = [PARTITION_NONE; 21];
-            self.rd_node(mi_row, mi_col, 3);
-            self.restore(0);
-            self.trial = false;
-            let part = self.part;
-            self.partition(mi_row, mi_col, BLOCK_64X64, 4, &part);
+            self.spill.clear();
+            self.sb(mi_row, mi_col, fast);
+            if let Some(l) = self.lanes {
+                self.give_edge(l, mi_row, mi_col);
+            }
             mi_col += 8;
         }
+    }
+
+    /// Codes the superblock at `(mi_row, mi_col)`.
+    fn sb(&mut self, mi_row: usize, mi_col: usize, fast: bool) {
+        if fast {
+            // Partition from the motion search's SAD, one pass.
+            let mut split = [false; 21];
+            match self.s.prepass {
+                Some(pre) => {
+                    let p = pre[(mi_row / 8) * self.s.mi_cols.div_ceil(8) + mi_col / 8];
+                    split = p.split;
+                    self.found = p.found;
+                }
+                None => {
+                    self.choose_into(mi_row, mi_col, 3, &mut split);
+                }
+            }
+            let part = split.map(|s| if s { PARTITION_SPLIT } else { PARTITION_NONE });
+            self.partition(mi_row, mi_col, BLOCK_64X64, 4, &part);
+            return;
+        }
+        self.save(mi_row, mi_col, (8, 8), 0);
+        self.trial = true;
+        self.part = [PARTITION_NONE; 21];
+        self.rd_node(mi_row, mi_col, 3);
+        self.restore(0);
+        self.trial = false;
+        let part = self.part;
+        self.partition(mi_row, mi_col, BLOCK_64X64, 4, &part);
+    }
+
+    /// Seeds the searches after with `mv` over `bw` 8×8 blocks across and
+    /// down from `(row, col)` (as many down as across, also under a block
+    /// wider than tall: into the superblock row below, which, coded on
+    /// another lane, takes them with the edge, see [`Lanes`]).
+    fn put_seeds(&mut self, row: usize, col: usize, bw: usize, mv: Mv) {
+        let s = self.s;
+        let end = (row | 7) + 1;
+        for r in 0..bw.min(s.mi_rows - row) {
+            for c in 0..bw.min(s.mi_cols - col) {
+                let at = (row + r) * s.mi_cols + col + c;
+                self.seeds[at] = mv;
+                if row + r >= end && self.lanes.is_some() {
+                    self.spill.push((at, mv));
+                }
+            }
+        }
+    }
+
+    /// The tile's superblock columns.
+    fn sb_cols(&self) -> usize {
+        (self.col1 - self.col0).div_ceil(8)
+    }
+
+    /// Waits for the row above to finish the superblocks above and above
+    /// right of `(mi_row, mi_col)`, and takes their bottoms (see
+    /// [`Lanes`]).
+    fn take_edges(&mut self, l: &Lanes<P>, mi_row: usize, mi_col: usize) {
+        let s = self.s;
+        let c = (mi_col - self.col0) / 8;
+        let need = (c + 2).min(self.sb_cols());
+        let ex = l.wait(mi_row / 8 - 1, need);
+        for k in c..need {
+            let e = &ex.edges[k];
+            let a = k * 8;
+            let cw = 8.min(self.f.width - a);
+            self.f.above[a..a + 8].copy_from_slice(&e.above);
+            self.f.above_part[a..a + 8].copy_from_slice(&e.above_part);
+            for p in 0..3 {
+                let sx = plane_ss(s, p).0;
+                let (a4, n4) = ((a * 2) >> sx, 16 >> sx);
+                let n4 = n4.min(self.f.above_nz[p].len() - a4);
+                self.f.above_nz[p][a4..a4 + n4].copy_from_slice(&e.above_nz[p][..n4]);
+            }
+            for r in 0..8 {
+                let at = (mi_row - 8 + r) * self.f.width + a;
+                self.f.mvs[at..at + cw].copy_from_slice(&e.mvs[r * 8..r * 8 + cw]);
+            }
+            let at = (mi_row - 1) * s.mi_cols + self.col0 + a;
+            self.seeds[at..at + cw].copy_from_slice(&e.seeds[..cw]);
+            for &(at, mv) in &e.spill {
+                self.seeds[at] = mv;
+            }
+            let views = self.rec.views();
+            #[allow(clippy::needless_range_loop)]
+            for p in 0..3 {
+                let (sx, sy) = plane_ss(s, p);
+                let (x, y) = (((self.col0 + a) * 8) >> sx, ((mi_row * 8) >> sy) - 1);
+                let n = e.pix[p].len();
+                views[p].at(y, x)[..n].copy_from_slice(&e.pix[p]);
+            }
+        }
+    }
+
+    /// Hands the row below the bottom of the superblock at `(mi_row,
+    /// mi_col)` just coded.
+    fn give_edge(&mut self, l: &Lanes<P>, mi_row: usize, mi_col: usize) {
+        let s = self.s;
+        let c = (mi_col - self.col0) / 8;
+        let a = c * 8;
+        let below = mi_row + 8 < s.mi_rows;
+        let cw = 8.min(self.f.width - a);
+        let mut ex = l.lock();
+        if below {
+            let e = &mut ex.edges[c];
+            e.above.copy_from_slice(&self.f.above[a..a + 8]);
+            e.above_part.copy_from_slice(&self.f.above_part[a..a + 8]);
+            for p in 0..3 {
+                let sx = plane_ss(s, p).0;
+                let (a4, n4) = ((a * 2) >> sx, 16 >> sx);
+                let n4 = n4.min(self.f.above_nz[p].len() - a4);
+                e.above_nz[p][..n4].copy_from_slice(&self.f.above_nz[p][a4..a4 + n4]);
+            }
+            for r in 0..8 {
+                let at = (mi_row + r) * self.f.width + a;
+                e.mvs[r * 8..r * 8 + cw].copy_from_slice(&self.f.mvs[at..at + cw]);
+            }
+            let at = (mi_row + 7) * s.mi_cols + self.col0 + a;
+            e.seeds[..cw].copy_from_slice(&self.seeds[at..at + cw]);
+            e.spill.clear();
+            e.spill.extend_from_slice(&self.spill);
+            let views = self.rec.views();
+            #[allow(clippy::needless_range_loop)]
+            for p in 0..3 {
+                let (sx, sy) = plane_ss(s, p);
+                let x0 = ((self.col0 + a) * 8) >> sx;
+                let x1 = ((self.col0 + a + cw) * 8) >> sx;
+                let y = (((mi_row + 8) * 8) >> sy) - 1;
+                e.pix[p].clear();
+                e.pix[p].extend_from_slice(&views[p].at(y, x0)[..x1 - x0]);
+            }
+        }
+        ex.done[mi_row / 8] = c + 1;
+        drop(ex);
+        l.ready.notify_all();
     }
 
     // Partition decision --------------------------------------------------
@@ -757,11 +982,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.cur_ref = 0;
         let (mv, sad) = self.search(row, col, bsize);
         self.found[Self::slot(row, col, bsize)] = (mv, sad);
-        for r in 0..bw.min(s.mi_rows - row) {
-            for c in 0..bw.min(s.mi_cols - col) {
-                self.seeds[(row + r) * s.mi_cols + col + c] = mv;
-            }
-        }
+        self.put_seeds(row, col, bw, mv);
         sad + lam * u64::from(mv_bits(mv)) / 256 + lam * 3
     }
 
@@ -1381,11 +1602,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             };
             if r == 0 {
                 let (bw, _) = MI_WH[usize::from(bsize)];
-                for rr in 0..bw.min(s.mi_rows - row) {
-                    for c in 0..bw.min(s.mi_cols - col) {
-                        self.seeds[(row + rr) * s.mi_cols + col + c] = mv;
-                    }
-                }
+                self.put_seeds(row, col, bw, mv);
             }
             let (mv, sad) = if sad < u64::MAX / 4 {
                 self.refine(row, col, bsize, mv, sad)
@@ -2176,7 +2393,14 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.pool.push(t.4);
         }
         let mut eobs = 0;
-        let (coded, dropped) = self.residual(&b, &rec, &mut toks, &mut eobs);
+        // (libvpx's static threshold: a prediction near enough codes no
+        // residual.)
+        let breakout = inter && !s.h.lossless && s.static_thresh > 0 && self.static_skip(&b);
+        let (coded, dropped) = if breakout {
+            (0.0, 0.0)
+        } else {
+            self.residual(&b, &rec, &mut toks, &mut eobs)
+        };
         if bsize < BLOCK_8X8 && !inter {
             b.bmode = self.sub;
             b.mode = b.bmode[3];
@@ -2290,6 +2514,33 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         }
         self.coded_skip = b.skip;
         if self.trial { self.block_sse(&b) } else { 0.0 }
+    }
+
+    /// Whether an inter block's prediction is near enough the source for
+    /// [`Shared::static_thresh`] to code no residual: libvpx's encode
+    /// breakout, a threshold of `static_thresh` × 16 a 64×64 block (at
+    /// least the DC step squared over 64, at most 36000, on the 8-bit
+    /// scale), scaled to the block's area, on luma and on each chroma
+    /// plane at its own area. The prediction must be in place.
+    fn static_skip(&mut self, b: &Blk) -> bool {
+        let s = self.s;
+        let shift = 2 * u32::from(s.h.bit_depth - 8);
+        let dc = u64::from(s.dq[usize::from(b.seg)][0][0].unsigned_abs());
+        let floor = (u64::from(s.static_thresh) << 4).min(36_000);
+        let thresh = ((dc * dc) >> (6 + shift)).clamp(floor, 36_000) << shift;
+        for p in 0..3 {
+            let (sx, sy) = plane_ss(self.s, p);
+            let (_, _, vw, vh) = self.visible(b, p);
+            let (x, y) = ((b.col * 8) >> sx, (b.row * 8) >> sy);
+            let (src, sst) = (s.src.planes[p], s.src.strides[p]);
+            let v = &mut self.rec.views()[p];
+            let stride = v.stride;
+            let sse = P::sse(&src[y * sst + x..], sst, v.at(y, x), stride, vw * 4, vh * 4);
+            if sse * 4096 >= thresh * (vw * vh * 16) as u64 {
+                return false;
+            }
+        }
+        true
     }
 
     /// The SSE of the block's reconstruction against the source, inside
@@ -4007,8 +4258,14 @@ fn search_in<P: EncPixel>(
     let w = w.min((s.mi_cols - col) * 8);
     let h = h.min((s.mi_rows - row) * 8);
     // Starting points.
-    let mut cands = [Mv::ZERO; 6];
+    let mut cands = [Mv::ZERO; 7];
     let mut nc = 1;
+    if cur_ref == 0
+        && let Some(g) = s.global
+    {
+        cands[nc] = g;
+        nc += 1;
+    }
     let seed = |r: isize, c: isize| -> Option<Mv> {
         if r < 0 || c < 0 || r as usize >= s.mi_rows || c as usize >= s.mi_cols {
             None

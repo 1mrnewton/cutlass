@@ -1,5 +1,14 @@
 //! Encodes raw video to an IVF file:
-//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|422|440|444] [bits=8|10|12]`.
+//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|422|440|444] [bits=8|10|12]`
+//! and the libvpx-like options `min_q=` `max_q=` (quantizer indices),
+//! `crf=0..63` (a quality level: constant quality, or with `rate=`
+//! constrained quality), `cq=QINDEX`, `sharpness=0..7`,
+//! `colorspace=0..7` (VP9's codes; 7 is sRGB), `range=1` (full),
+//! `render=WxH`, `error_resilient=1`, `frame_parallel=1`,
+//! `static_thresh=N`, `alt_ref=0`, `arnr_strength=0..6`,
+//! `arnr_frames=1..15`, `undershoot=PCT`, `overshoot=PCT`,
+//! `keyint_min=N`, `max_intra=PCT`, `tile_columns=0..6`, `level=N`
+//! (10 × the level) and `lossless=1`.
 //! With `bits=10` or `12` the input has little-endian 16-bit samples
 //! (FFmpeg's `yuv420p10le` and the like).
 
@@ -8,7 +17,7 @@
 use std::io::{Read, Write};
 use std::time::Instant;
 
-use cutlass_vp9::{Chroma, Vp9Encoder, Vp9Options};
+use cutlass_vp9::{Chroma, ColorSpace, Vp9Encoder, Vp9Options};
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
@@ -22,8 +31,17 @@ fn main() -> Result<(), String> {
     let mut fps = 30u32;
     let mut twopass = false;
     let mut first_speed = 10u8;
+    let mut crf = None;
     for a in &args[5..] {
         let (k, v) = a.split_once('=').ok_or("option")?;
+        if k == "render" {
+            let (rw, rh) = v.split_once('x').ok_or("render=WxH")?;
+            opts.render_size = Some((
+                rw.parse().map_err(|_| "render width")?,
+                rh.parse().map_err(|_| "render height")?,
+            ));
+            continue;
+        }
         let n: u32 = v.parse().map_err(|_| "option value")?;
         match k {
             "q" => opts.qindex = n as u8,
@@ -48,7 +66,49 @@ fn main() -> Result<(), String> {
             }
             "first_speed" => first_speed = n as u8,
             "bits" => opts.bit_depth = n as u8,
+            "min_q" => opts.min_q = n as u8,
+            "max_q" => opts.max_q = n as u8,
+            "crf" => crf = Some(Vp9Encoder::qindex_of_level(n as u8)),
+            "cq" => opts.cq_level = Some(n as u8),
+            "sharpness" => opts.sharpness = n as u8,
+            "colorspace" => {
+                opts.color_space = match n {
+                    0 => ColorSpace::Unknown,
+                    2 => ColorSpace::Bt709,
+                    3 => ColorSpace::Smpte170,
+                    4 => ColorSpace::Smpte240,
+                    5 => ColorSpace::Bt2020,
+                    7 => ColorSpace::Srgb,
+                    _ => ColorSpace::Bt601,
+                }
+            }
+            "range" => opts.full_range = n != 0,
+            "error_resilient" => opts.error_resilient = n != 0,
+            "frame_parallel" => opts.frame_parallel = n != 0,
+            "static_thresh" => opts.static_thresh = n,
+            "alt_ref" => opts.alt_ref = n != 0,
+            "arnr_strength" => opts.arnr_strength = Some(n as u8),
+            "arnr_frames" => opts.arnr_max_frames = Some(n as u8),
+            "undershoot" => opts.undershoot_pct = n,
+            "overshoot" => opts.overshoot_pct = n,
+            "keyint_min" => opts.keyint_min = n,
+            "max_intra" => opts.max_intra_pct = n,
+            "tile_columns" => opts.tile_columns = Some(n as u8),
+            "level" => opts.level = n as u8,
+            "lossless" => {
+                if n != 0 {
+                    opts.qindex = 0;
+                }
+            }
             _ => return Err(format!("unknown option {k}")),
+        }
+    }
+    // FFmpeg's `-crf`: constant quality, or with a bitrate constrained.
+    if let Some(q) = crf {
+        if opts.bitrate > 0 {
+            opts.cq_level = Some(q);
+        } else {
+            opts.qindex = q;
         }
     }
     let mut input = std::fs::File::open(&args[1]).map_err(|e| e.to_string())?;

@@ -336,6 +336,70 @@ pub fn cut<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> bool {
     inter > intra * 2
 }
 
+/// How far (in sums of 4×4 samples) [`jump`] looks.
+const JUMP_RANGE: isize = 80;
+
+/// When `to` cuts from `from` by [`cut`] (luma, `w`×`h`), whether it is
+/// the same picture moved far, as a camera that jumps: the vector (whole
+/// samples, across then down) at which most 32×32 blocks of detail of a
+/// sample find a match in `from` within [`JUMP_RANGE`] sums, or `None`
+/// for a cut. Blocks the same vector predicts leave under a quarter of
+/// their own variance; a cut to another picture leaves no vector more
+/// than a few blocks agree on.
+pub fn jump<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> Option<(isize, isize)> {
+    let (sf, st) = (Small::new(from, w, h), Small::new(to, w, h));
+    let mut votes: Vec<(isize, isize)> = Vec::new();
+    let mut detail = 0usize;
+    for by in (16..h.saturating_sub(47)).step_by(96) {
+        for bx in (16..w.saturating_sub(47)).step_by(96) {
+            let (mut s, mut s2) = (0u64, 0u64);
+            for r in 0..32 {
+                for &v in &to[(by + r) * w + bx..(by + r) * w + bx + 32] {
+                    let v = v.get() as u64;
+                    s += v;
+                    s2 += v * v;
+                }
+            }
+            let var = s2 - s * s / 1024;
+            // Flat blocks match anywhere.
+            if var < 1024 * 16 {
+                continue;
+            }
+            detail += 1;
+            let c = st.find_near(&sf, bx / 4, by / 4, 8, 8, (0, 0), JUMP_RANGE);
+            // The sums' match, to the sample.
+            let mut best = (u64::MAX, c);
+            for dy in -3..=3 {
+                for dx in -3..=3 {
+                    let (x, y) = (bx as isize + c.0 + dx, by as isize + c.1 + dy);
+                    if x < 0 || y < 0 || x as usize + 32 > w || y as usize + 32 > h {
+                        continue;
+                    }
+                    let (x, y) = (x as usize, y as usize);
+                    let sse = P::sse(&to[by * w + bx..], w, &from[y * w + x..], w, 32, 32);
+                    if sse < best.0 {
+                        best = (sse, (c.0 + dx, c.1 + dy));
+                    }
+                }
+            }
+            if best.0 * 4 < var {
+                votes.push(best.1);
+            }
+        }
+    }
+    votes.sort_unstable();
+    let mut best = (0usize, (0isize, 0isize));
+    let mut i = 0;
+    while i < votes.len() {
+        let j = votes[i..].iter().take_while(|&&v| v == votes[i]).count();
+        if j > best.0 {
+            best = (j, votes[i]);
+        }
+        i += j;
+    }
+    (best.0 >= 4 && best.0 * 3 >= detail && best.1 != (0, 0)).then_some(best.1)
+}
+
 /// Adds one picture's block to the accumulators: `strength` `None` is the
 /// centre picture itself (full weight).
 #[allow(clippy::too_many_arguments)]

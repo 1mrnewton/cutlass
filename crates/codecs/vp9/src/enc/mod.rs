@@ -70,6 +70,45 @@ pub struct FrameParams {
     pub noise: f32,
 }
 
+/// What every frame of the stream signals, set once for the stream.
+#[derive(Clone, Copy, Debug)]
+pub struct Stream {
+    /// The loop filter's sharpness, 0 to 7 (libvpx's `sharpness`).
+    pub sharpness: u8,
+    /// The colour space code of the key frames' colour config (0
+    /// unknown, 1 BT.601, 2 BT.709, 3 SMPTE-170, 4 SMPTE-240, 5 BT.2020,
+    /// 7 sRGB, in profiles 1 and 3 only).
+    pub color_space: u8,
+    /// Full (`true`) or studio range.
+    pub full_range: bool,
+    /// The size the picture is meant to be shown at, when not its own.
+    pub render_size: Option<(u32, u32)>,
+    /// Every frame decodable without the probabilities, motion and
+    /// segmentation of the frames before it (`error_resilient_mode`).
+    pub error_resilient: bool,
+    /// No backward adaptation of the probabilities
+    /// (`frame_parallel_decoding_mode`), so that a decoder can start a
+    /// frame's parse before the one before it is parsed through.
+    pub frame_parallel: bool,
+    /// libvpx's `static-thresh`: an inter block whose prediction error is
+    /// under this threshold (scaled to its size) codes no residual.
+    pub static_thresh: u32,
+}
+
+impl Default for Stream {
+    fn default() -> Self {
+        Self {
+            sharpness: 0,
+            color_space: 1,
+            full_range: false,
+            render_size: None,
+            error_resilient: false,
+            frame_parallel: false,
+            static_thresh: 0,
+        }
+    }
+}
+
 /// Speeds at and below which a frame with a future ALTREF lets each block
 /// choose compound prediction.
 pub const COMPOUND_SPEED: u8 = 6;
@@ -188,6 +227,15 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// area that frame predicted from it (in 1/1024), and how many frames
     /// in a row it has been left out of the search.
     ref_use: [(usize, u32, u8); 3],
+    /// What every frame signals.
+    stream: Stream,
+    /// The threads the encoder was made for.
+    threads: usize,
+    /// Threads coding each tile column's rows (see [`tile::Lanes`]); 0:
+    /// from the threads.
+    row_lanes: usize,
+    /// The next frame's whole-picture motion from LAST, if far.
+    global: Option<Mv>,
 }
 
 /// What one tile column's encoder keeps from frame to frame.
@@ -256,6 +304,10 @@ impl<P: EncPixel> FrameEncoder<P> {
             pre_seeds: Vec::new(),
             aq: None,
             ref_use: [(0, 1024, 0); 3],
+            stream: Stream::default(),
+            threads: threads.max(1),
+            row_lanes: 0,
+            global: None,
         }
     }
 
@@ -264,6 +316,37 @@ impl<P: EncPixel> FrameEncoder<P> {
     /// size and let a decoder start each row's coder at once.
     pub fn set_tile_rows(&mut self, log2: u8) {
         self.log2_tile_rows = log2.min(2);
+    }
+
+    /// Codes `1 << log2` tile columns (as the width allows; libvpx's
+    /// `tile-columns`), each on its own thread, instead of one per
+    /// thread.
+    pub fn set_tile_columns(&mut self, log2: u8) {
+        self.log2_tiles = log2.min(6);
+    }
+
+    /// What every frame signals from now on.
+    pub fn set_stream(&mut self, stream: Stream) {
+        self.stream = stream;
+    }
+
+    /// The next frame's picture moved by `(x, y)` whole samples from
+    /// LAST's, as a whole (a jump of the camera that the searches, which
+    /// reach a few dozen samples, would take for a cut): every block's
+    /// search on LAST starts there too.
+    pub fn set_global(&mut self, (x, y): (isize, isize)) {
+        self.global = Some(Mv {
+            row: (y * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+            col: (x * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+        });
+    }
+
+    /// Codes each tile column's superblock rows on `n` threads at once
+    /// (0: two or more when the encoder has threads; 1: one after
+    /// another). The frames are the same either way.
+    #[cfg(test)]
+    pub fn set_row_lanes(&mut self, n: usize) {
+        self.row_lanes = n;
     }
 
     /// The picture the last frame reconstructed (what a decoder shows).
@@ -386,7 +469,16 @@ impl<P: EncPixel> FrameEncoder<P> {
         b.write_bit(false); // show_existing_frame
         b.write_bit(!key); // frame_type
         b.write_bit(!hidden); // show_frame
-        b.write_bit(false); // error_resilient_mode
+        let st = self.stream;
+        b.write_bit(st.error_resilient);
+        let render = |b: &mut BitWriter| match st.render_size {
+            Some((w, h)) => {
+                b.write_bit(true);
+                b.write(w - 1, 16);
+                b.write(h - 1, 16);
+            }
+            None => b.write_bit(false), // render size = frame size
+        };
         if key {
             b.write(0x49, 8);
             b.write(0x83, 8);
@@ -394,21 +486,27 @@ impl<P: EncPixel> FrameEncoder<P> {
             if self.bd > 8 {
                 b.write_bit(self.bd == 12); // ten_or_twelve_bit
             }
-            b.write(1, 3); // BT.601
-            b.write_bit(false); // studio range
-            if profile1 {
-                b.write_bit(self.ss.0 == 1);
-                b.write_bit(self.ss.1 == 1);
-                b.write_bit(false); // reserved
+            b.write(u32::from(st.color_space), 3);
+            if st.color_space != 7 {
+                b.write_bit(st.full_range);
+                if profile1 {
+                    b.write_bit(self.ss.0 == 1);
+                    b.write_bit(self.ss.1 == 1);
+                    b.write_bit(false); // reserved
+                }
+            } else if profile1 {
+                b.write_bit(false); // sRGB: 4:4:4, reserved
             }
             b.write(self.width - 1, 16);
             b.write(self.height - 1, 16);
-            b.write_bit(false); // render size = frame size
+            render(&mut b);
         } else {
             if hidden {
                 b.write_bit(false); // intra_only
             }
-            b.write(0, 2); // reset_frame_context
+            if !st.error_resilient {
+                b.write(0, 2); // reset_frame_context
+            }
             // LAST, and GOLDEN on a golden frame; an alt-ref only ALTREF.
             let refresh = if hidden {
                 0x04
@@ -424,7 +522,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                 b.write_bit(i == 2 && future); // sign bias
             }
             b.write_bit(true); // size from the first reference
-            b.write_bit(false); // render size = frame size
+            render(&mut b);
             b.write_bit(true); // allow_high_precision_mv
             if switchable {
                 b.write_bit(true); // a filter per block
@@ -433,8 +531,10 @@ impl<P: EncPixel> FrameEncoder<P> {
                 b.write(1, 2); // EIGHTTAP
             }
         }
-        b.write_bit(true); // refresh_frame_context
-        b.write_bit(false); // frame_parallel_decoding_mode
+        if !st.error_resilient {
+            b.write_bit(true); // refresh_frame_context
+            b.write_bit(st.frame_parallel);
+        }
         b.write(0, 2); // frame_context_idx
         // Loop filter: libvpx's level from the quantizer.
         let level = if lossless {
@@ -443,7 +543,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             filter_level(qindex, key, self.bd)
         };
         b.write(u32::from(level), 6);
-        b.write(0, 3); // sharpness
+        b.write(u32::from(st.sharpness.min(7)), 3);
         b.write_bit(true); // mode_ref_delta_enabled (the defaults)
         b.write_bit(false); // no update
         b.write(u32::from(qindex), 8);
@@ -627,6 +727,8 @@ impl<P: EncPixel> FrameEncoder<P> {
             tok: &tok,
             second_pass: fp.second_pass,
             noise: fp.noise,
+            static_thresh: self.stream.static_thresh,
+            global: self.global.take(),
         };
         // Fast inter frames: the motion search of every superblock first,
         // its rows shared out evenly among the threads (tile columns carry
@@ -699,11 +801,27 @@ impl<P: EncPixel> FrameEncoder<P> {
         let edges: Vec<usize> = (0..=ntiles)
             .map(|i| tile_edge(i, mi_cols, h.log2_tile_cols))
             .collect();
-        while self.work.len() < ntiles {
+        // Each tile column's superblock rows on `lanes` threads at once,
+        // in a wavefront (see [`tile::Lanes`]): tile columns alone keep
+        // threads waiting for the busiest column.
+        let lanes = if self.row_lanes > 0 {
+            self.row_lanes
+        } else if self.threads > 1 {
+            (2 * self.threads).div_ceil(ntiles).clamp(2, 8)
+        } else {
+            1
+        }
+        .min(sb_rows.max(1));
+        while self.work.len() < ntiles * lanes {
             self.work.push(TileWork::new(&dims));
         }
         let plane_len: [usize; 3] = std::array::from_fn(|p| dims.stride[p] * dims.rows[p]);
-        let run = |t: &mut TileWork<P>, col0: usize, col1: usize| -> Result<(), CodecError> {
+        let run = |t: &mut TileWork<P>,
+                   col0: usize,
+                   col1: usize,
+                   lane: usize,
+                   sync: Option<&tile::Lanes<P>>|
+         -> Result<(), CodecError> {
             for (p, buf) in t.pix.iter_mut().enumerate() {
                 buf.resize(plane_len[p], P::default());
             }
@@ -731,7 +849,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                 },
             ];
             let mut seeds = std::mem::take(&mut t.seeds);
-            for r in 0..sb_rows {
+            for r in (lane..sb_rows).step_by(lanes) {
                 let mut rec = Recon::new(&ctx, &mut views, &mut t.scratch);
                 let mut tile = Tile::new(
                     &shared,
@@ -741,6 +859,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                     (col0, col1),
                     seeds,
                     std::mem::take(&mut t.bufs),
+                    sync,
                 );
                 tile.sb_row(r * 8);
                 (seeds, t.bufs) = tile.finish();
@@ -749,18 +868,34 @@ impl<P: EncPixel> FrameEncoder<P> {
             t.seeds = seeds;
             Ok(())
         };
-        let work = &mut self.work[..ntiles];
-        if ntiles == 1 {
-            run(&mut work[0], 0, mi_cols)?;
+        let work = &mut self.work[..ntiles * lanes];
+        if ntiles * lanes == 1 {
+            run(&mut work[0], 0, mi_cols, 0, None)?;
         } else {
+            let syncs: Vec<tile::Lanes<P>> = (0..ntiles)
+                .map(|i| tile::Lanes::new(sb_rows, (edges[i + 1] - edges[i]).div_ceil(8)))
+                .collect();
             let results: Vec<Result<(), CodecError>> = std::thread::scope(|sc| {
                 let handles: Vec<_> = work
                     .iter_mut()
                     .enumerate()
-                    .map(|(i, t)| {
+                    .map(|(k, t)| {
+                        let (i, lane) = (k / lanes, k % lanes);
                         let (c0, c1) = (edges[i], edges[i + 1]);
+                        let sync = (lanes > 1).then(|| &syncs[i]);
                         let run = &run;
-                        sc.spawn(move || run(t, c0, c1))
+                        sc.spawn(move || {
+                            // (A lane that stops lets the others stop
+                            // waiting for it.)
+                            let _guard = Release(sync);
+                            let r = run(t, c0, c1, lane, sync);
+                            if r.is_err()
+                                && let Some(l) = sync
+                            {
+                                l.fail();
+                            }
+                            r
+                        })
                     })
                     .collect();
                 handles
@@ -776,7 +911,13 @@ impl<P: EncPixel> FrameEncoder<P> {
             for r in results {
                 r?;
             }
+            if lanes > 1 {
+                for (i, chunk) in work.chunks_mut(lanes).enumerate() {
+                    merge_lanes(chunk, (edges[i], edges[i + 1]), &dims, sb_rows, needs_grid);
+                }
+            }
         }
+        let work: Vec<&TileWork<P>> = self.work[..ntiles * lanes].iter().step_by(lanes).collect();
         // The tiles' state into the frame's, and the probability updates
         // it pays for. Then, at once: each plane's columns into the
         // picture and its loop filter, and each tile's symbols into its
@@ -838,7 +979,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                 })
                 .collect()
         };
-        let work = &*work;
+        let work = &work[..];
         let (m, l, g, ed, gr) = (&masks, &levels, &geo, &edges, &grid);
         let tiles = std::thread::scope(|sc| {
             for (p, mut v) in writer.tails().map(View::of).into_iter().enumerate() {
@@ -861,7 +1002,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                 });
             }
             let write = &write;
-            let hs: Vec<_> = work.iter().map(|t| sc.spawn(move || write(t))).collect();
+            let hs: Vec<_> = work.iter().map(|&t| sc.spawn(move || write(t))).collect();
             hs.into_iter()
                 .map(|h| {
                     h.join().unwrap_or(Err(CodecError::Malformed {
@@ -931,6 +1072,81 @@ impl<P: EncPixel> FrameEncoder<P> {
             },
         ))
     }
+}
+
+/// Releases a tile column's other lanes when its thread unwinds.
+struct Release<'a, P: Copy>(Option<&'a tile::Lanes<P>>);
+
+impl<P: Copy> Drop for Release<'_, P> {
+    fn drop(&mut self) {
+        if std::thread::panicking()
+            && let Some(l) = self.0
+        {
+            l.fail();
+        }
+    }
+}
+
+/// Puts the rows a tile column's other lanes coded (see [`tile::Lanes`])
+/// into its first lane's work: their motion, filter masks and grid,
+/// segments, samples and symbol counts, and every row's symbols in
+/// order.
+fn merge_lanes<P: EncPixel>(
+    chunk: &mut [TileWork<P>],
+    (c0, c1): (usize, usize),
+    dims: &Dims,
+    sb_rows: usize,
+    grid: bool,
+) {
+    let lanes = chunk.len();
+    let Some((first, rest)) = chunk.split_first_mut() else {
+        return;
+    };
+    let (w, tsb) = (c1 - c0, (c1 - c0).div_ceil(8));
+    let mi_rows = dims.height.div_ceil(8);
+    for (j, t) in rest.iter().enumerate() {
+        for r in (j + 1..sb_rows).step_by(lanes) {
+            let (lo, hi) = (r * 8 * w, ((r * 8 + 8).min(mi_rows)) * w);
+            first.state.mvs[lo..hi].copy_from_slice(&t.state.mvs[lo..hi]);
+            first.state.segmap[lo..hi].copy_from_slice(&t.state.segmap[lo..hi]);
+            if grid {
+                first.state.grid[lo..hi].copy_from_slice(&t.state.grid[lo..hi]);
+            }
+            first.state.masks[r * tsb..(r + 1) * tsb]
+                .copy_from_slice(&t.state.masks[r * tsb..(r + 1) * tsb]);
+            for p in 0..3 {
+                let (sx, sy) = if p == 0 {
+                    (0, 0)
+                } else {
+                    (dims.ss_x, dims.ss_y)
+                };
+                let stride = dims.stride[p];
+                let (x0, x1) = ((c0 * 8) >> sx, ((c1 * 8) >> sx).min(stride));
+                let (y0, y1) = ((r * 64) >> sy, (((r + 1) * 64) >> sy).min(dims.rows[p]));
+                for y in y0..y1 {
+                    let at = y * stride;
+                    first.pix[p][at + x0..at + x1].copy_from_slice(&t.pix[p][at + x0..at + x1]);
+                }
+            }
+        }
+        first.state.counts.add(&t.state.counts);
+    }
+    let mut out = Vec::with_capacity(chunk_symbols(first, rest));
+    let mut ends = Vec::with_capacity(sb_rows);
+    for r in 0..sb_rows {
+        let (j, k) = (r % lanes, r / lanes);
+        let t = if j == 0 { &*first } else { &rest[j - 1] };
+        let start = k.checked_sub(1).map_or(0, |k| t.row_ends[k]);
+        out.extend_from_slice(&t.out[start..t.row_ends[k]]);
+        ends.push(out.len());
+    }
+    first.out = out;
+    first.row_ends = ends;
+}
+
+/// The symbols of a tile column's lanes.
+fn chunk_symbols<P: EncPixel>(first: &TileWork<P>, rest: &[TileWork<P>]) -> usize {
+    first.out.len() + rest.iter().map(|t| t.out.len()).sum::<usize>()
 }
 
 /// A frame's probability updates and its tiles, written with them.

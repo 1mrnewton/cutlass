@@ -154,3 +154,109 @@ fn round_trips_every_speed() {
         round_trip_threads(136, 72, 3, 100, 2, speed);
     }
 }
+
+#[test]
+fn row_lanes_code_the_frames_rows_one_after_another_do() {
+    // Two tile columns of five superblocks and six superblock rows (the
+    // last part of one), at speeds with rectangles, with the full search
+    // and on the fast path.
+    let (w, h) = (600usize, 328usize);
+    let cw = w.div_ceil(2);
+    for speed in [2, 5, 8] {
+        let run = |lanes: usize| -> Vec<Vec<u8>> {
+            let mut enc = FrameEncoder::new(w as u32, h as u32, 4);
+            enc.set_row_lanes(lanes);
+            (0..5)
+                .map(|t| {
+                    let src = source(w, h, t);
+                    enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
+                    enc.encode(FrameParams {
+                        key: t == 0,
+                        golden: t == 3,
+                        hidden: false,
+                        qindex: 100,
+                        speed,
+                        altref_future: false,
+                        aq: false,
+                        second_pass: false,
+                        golden_slot: 1,
+                        also_refresh: 0,
+                        noise: 0.0,
+                    })
+                    .expect("encode")
+                    .data
+                })
+                .collect()
+        };
+        let one = run(1);
+        for lanes in [2, 3] {
+            assert!(run(lanes) == one, "speed {speed}, {lanes} lanes");
+        }
+    }
+}
+
+/// A detailed, non-repeating luma picture `w`×`h` cut from a larger one
+/// at `(x, y)`, with flat chroma.
+fn texture(w: usize, h: usize, (x, y): (usize, usize)) -> [Vec<u8>; 3] {
+    let at = |c: usize, r: usize| -> u32 {
+        let k = (((c + x) / 4) as u32).wrapping_mul(73_856_093)
+            ^ (((r + y) / 4) as u32).wrapping_mul(19_349_663);
+        40 + (k.wrapping_mul(2_654_435_761) >> 24) % 170
+    };
+    let mut luma = vec![0u8; w * h];
+    for r in 0..h {
+        for c in 0..w {
+            luma[r * w + c] = ((at(c, r) + at(c + 1, r)) / 2) as u8;
+        }
+    }
+    let n = w.div_ceil(2) * h.div_ceil(2);
+    [luma, vec![120; n], vec![136; n]]
+}
+
+#[test]
+fn a_far_jump_is_found_and_searched_from() {
+    let (w, h) = (640usize, 320usize);
+    let a = texture(w, h, (200, 100));
+    let b = texture(w, h, (100, 60));
+    // `b`'s blocks are `a`'s 100 to the left and 40 up.
+    assert_eq!(super::arf::jump(&a[0], &b[0], w, h), Some((-100, -40)));
+    // Another picture altogether: no jump.
+    let other: Vec<u8> = (0..w * h)
+        .map(|i| (30 + (i % w + i / w) / 8) as u8)
+        .collect();
+    assert_eq!(super::arf::jump(&a[0], &other, w, h), None);
+    // Coded after `a`, `b` takes far fewer bits with the jump given.
+    let cw = w.div_ceil(2);
+    let code = |global: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 2);
+        let mut sizes = Vec::new();
+        for (t, pic) in [&a, &b].into_iter().enumerate() {
+            if t == 1 && global {
+                enc.set_global((-100, -40));
+            }
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            let coded = enc
+                .encode(FrameParams {
+                    key: t == 0,
+                    golden: false,
+                    hidden: false,
+                    qindex: 120,
+                    speed: 6,
+                    altref_future: false,
+                    aq: false,
+                    second_pass: false,
+                    golden_slot: 1,
+                    also_refresh: 0,
+                    noise: 0.0,
+                })
+                .expect("encode");
+            sizes.push(coded.data.len());
+        }
+        sizes[1]
+    };
+    let (with, without) = (code(true), code(false));
+    assert!(
+        with * 2 < without,
+        "{with} bytes with the jump, {without} without"
+    );
+}

@@ -86,6 +86,20 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   half-second windows stay within −24% and +13% of the rate (−49% and
   +32% on average; libvpx's realtime 6 CBR −45% and +5%) at 39.9 dB
   averaged PSNR, against libvpx's 38.2 dB.
+- Two passes (FFmpeg's `-pass 1` and `-pass 2`): a first pass over the
+  pictures at a fixed quantizer, fast (the `vp9enc` example runs it at
+  speed 10 with `twopass=1`), gives each picture's bits to
+  `Vp9Encoder::set_second_pass`. The second pass codes at one quantizer
+  for every frame (as a fixed quantizer, which puts the bits where the
+  pictures need them), the one that spends the bitrate: frame i takes
+  about k·b_i·(s/s₁)^-1.25 bits, with b_i its first-pass bits and k the
+  passes' scale, measured on the frames coded so far. On 90 frames of
+  720p that cut from a still picture to the grainy pan to the clean clip,
+  speed 6 hits 1, 2, 3 and 4 Mb/s within 5% and takes 9% / 19% off
+  one pass's bits at the same PSNR-Y / averaged PSNR, in 6.8 s against
+  5.1 s. libvpx's own two passes (good, cpu-used 2) are 18% / 26% ahead
+  of it there, in 13.0 s: they start each scene with a key frame, and
+  this encoder does not yet detect a cut.
 
 ## How it works
 

@@ -193,6 +193,28 @@ impl Vp9Encoder {
         self.rc.last_q
     }
 
+    /// The second pass of a two-pass encode (FFmpeg's `-pass 2`), from
+    /// the first: a pass over the same pictures at the fixed quantizer
+    /// `first_q` (no bitrate), whose packets took `first_bits` bits each.
+    /// With a bitrate, every frame is then coded at the one quantizer that
+    /// should spend it (bits fall as the step to the power 1.25), which
+    /// puts the bits where the pictures need them; as the coding goes, the
+    /// step follows how what has been spent compares with the share of the
+    /// budget the first pass gives the pictures so far.
+    pub fn set_second_pass(&mut self, first_bits: &[u64], first_q: u8) {
+        let mut cum = Vec::with_capacity(first_bits.len());
+        let mut sum = 0.0;
+        for &b in first_bits {
+            sum += b as f64;
+            cum.push(sum);
+        }
+        self.rc.pass2 = Some(Pass2 {
+            cum,
+            q: first_q.max(1),
+            steps: Vec::new(),
+        });
+    }
+
     /// Makes the next frame a key frame.
     pub fn force_keyframe(&mut self) {
         self.force_key = true;
@@ -630,6 +652,14 @@ const SHARE: [f64; 3] = [
 /// far the coded bits run from the target. Without a bitrate, the
 /// quantizer is fixed for inter frames and finer by `STEP_SCALE` for key
 /// and golden frames.
+/// A first pass's bits, summed picture by picture, at its quantizer.
+struct Pass2 {
+    cum: Vec<f64>,
+    q: u8,
+    /// The inter step each picture was coded at.
+    steps: Vec<f64>,
+}
+
 struct Rate {
     opts: Vp9Options,
     /// Bits over (positive) or under the target so far.
@@ -641,6 +671,10 @@ struct Rate {
     pixels: f64,
     /// Frames coded so far.
     frames: u32,
+    /// The first pass of two.
+    pass2: Option<Pass2>,
+    /// Bits spent so far.
+    spent: f64,
 }
 
 /// How bits fall with the quantizer step: bits ∝ step^-EXP.
@@ -664,6 +698,8 @@ impl Rate {
             per_frame: 0.0,
             pixels: pixels as f64,
             frames: 0,
+            pass2: None,
+            spent: 0.0,
         }
     }
 
@@ -675,6 +711,42 @@ impl Rate {
             }
             return q_of_step(step_of(q) * STEP_SCALE[kind])
                 .clamp(self.opts.min_q, q.max(self.opts.min_q));
+        }
+        if let Some(p) = &mut self.pass2 {
+            // Two passes. Frame i's bits are about k·b_i·(s/s1)^-EXP, with
+            // b_i its first-pass bits at step s1 and s the inter step it is
+            // coded at; k, the two passes' scale (a faster first pass
+            // spends more), is measured on the frames coded so far. The
+            // step chosen spends what is left of the budget on what is
+            // left of the first pass; frame types take their steps from it
+            // as a fixed quantizer does.
+            let frames = p.cum.len().max(1);
+            let s1 = step_of(p.q);
+            let first = p.cum.last().copied().unwrap_or(1.0).max(1.0);
+            let total = f64::from(self.opts.bitrate) * seconds.max(1e-3) * frames as f64;
+            let done = (self.frames as usize).min(frames);
+            let bits_at = |i: usize| p.cum[i] - if i == 0 { 0.0 } else { p.cum[i - 1] };
+            let predicted: f64 = (0..done)
+                .map(|i| bits_at(i) * (p.steps.get(i).copied().unwrap_or(s1) / s1).powf(-EXP))
+                .sum();
+            let k = if done >= 2 && predicted > 0.0 {
+                (self.spent / predicted).clamp(0.1, 10.0)
+            } else {
+                1.0
+            };
+            let left_first = (first - if done == 0 { 0.0 } else { p.cum[done - 1] }).max(1.0);
+            let left =
+                (total - self.spent).max(total * 0.02 * (frames - done) as f64 / frames as f64);
+            let base = s1 * (k * left_first / left.max(1.0)).powf(1.0 / EXP);
+            let q = q_of_step(base * STEP_SCALE[kind]).clamp(self.opts.min_q, self.opts.max_q);
+            if p.steps.len() <= done {
+                p.steps.resize(done + 1, s1);
+            }
+            p.steps[done] = step_of(q) / STEP_SCALE[kind];
+            if kind == 2 {
+                self.last_q = q;
+            }
+            return q;
         }
         if self.per_frame == 0.0 {
             // The first frame: the inter quantizer that a typical picture
@@ -742,6 +814,7 @@ impl Rate {
             return;
         }
         let bits = bytes as f64 * 8.0;
+        self.spent += bits;
         if seconds > 0.0 {
             // A shown picture: its budget; a hidden one only spends.
             self.frames = self.frames.saturating_add(1);

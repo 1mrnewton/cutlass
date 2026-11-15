@@ -1182,3 +1182,64 @@ fn a_constant_bitrate_holds_every_half_second_near_the_rate() {
     assert_eq!(Vp9Encoder::qindex_of_level(63), 255);
     assert_eq!(Vp9Encoder::qindex_of_level(10), 40);
 }
+
+#[test]
+fn a_second_pass_spends_the_bitrate_where_the_first_found_detail() {
+    // Twenty still pictures, then twenty moving: the second pass gives the
+    // moving ones the bits.
+    let frame = |index: u32| moving(160, 96, if index < 20 { 0 } else { index * 3 });
+    let run = |opts: super::Vp9Options, first: Option<(&[u64], u8)>| {
+        let mut encoder = Vp9Encoder::with_options(160, 96, opts).expect("encoder");
+        if let Some((bits, q)) = first {
+            encoder.set_second_pass(bits, q);
+        }
+        let mut sizes = Vec::new();
+        for index in 0..40u32 {
+            let packets = encoder
+                .push(&VideoInput {
+                    frame: frame(index),
+                    pts: i64::from(index),
+                    duration: 1,
+                    timescale: 30,
+                })
+                .expect("push");
+            sizes.extend(packets.iter().map(|p| p.data.len() as u64 * 8));
+        }
+        sizes.extend(
+            VideoEncoder::drain(&mut encoder)
+                .expect("drain")
+                .iter()
+                .map(|p| p.data.len() as u64 * 8),
+        );
+        sizes
+    };
+    let base = super::Vp9Options {
+        threads: 2,
+        speed: 8,
+        ..super::Vp9Options::default()
+    };
+    let first = run(
+        super::Vp9Options {
+            qindex: 120,
+            speed: 10,
+            ..base
+        },
+        None,
+    );
+    assert_eq!(first.len(), 40);
+    let rate = 150_000u32;
+    let second = run(
+        super::Vp9Options {
+            bitrate: rate,
+            ..base
+        },
+        Some((&first, 120)),
+    );
+    let total: u64 = second.iter().sum();
+    let target = f64::from(rate) * 40.0 / 30.0;
+    let ratio = total as f64 / target;
+    assert!((0.85..=1.15).contains(&ratio), "{ratio:.2} of the bitrate");
+    // The moving half takes most of it.
+    let moving: u64 = second[20..].iter().sum();
+    assert!(moving * 2 > total, "{moving} of {total}");
+}

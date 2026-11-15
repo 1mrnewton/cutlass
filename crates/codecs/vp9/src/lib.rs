@@ -27,7 +27,7 @@ mod txfm;
 mod prove;
 
 pub use decode::{Decoder, Vp9Decoder};
-pub use enc::api::{EngineEncoder, Vp9Encoder, Vp9Options, register_engine_encoders};
+pub use enc::api::{Chroma, EngineEncoder, Vp9Encoder, Vp9Options, register_engine_encoders};
 
 use cutlass_decode::video::VideoDecoder;
 use cutlass_decode::{CodecError, CodecId, CodecParams, VideoDecodeFactory};

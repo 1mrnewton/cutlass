@@ -1,17 +1,17 @@
 //! Encodes raw 4:2:0 video to an IVF file:
-//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|444]`.
+//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|422|440|444]`.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::io::{Read, Write};
 use std::time::Instant;
 
-use cutlass_vp9::{Vp9Encoder, Vp9Options};
+use cutlass_vp9::{Chroma, Vp9Encoder, Vp9Options};
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
-        return Err("usage: vp9enc <in.yuv> <width> <height> <out.ivf> [q=N|rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|444]".into());
+        return Err("usage: vp9enc <in.yuv> <width> <height> <out.ivf> [q=N|rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|422|440|444]".into());
     }
     let w: usize = args[2].parse().map_err(|_| "width")?;
     let h: usize = args[3].parse().map_err(|_| "height")?;
@@ -36,7 +36,14 @@ fn main() -> Result<(), String> {
             "tile_rows" => opts.tile_rows = n as u8,
             "cbr" => opts.cbr_buffer_ms = n,
             "twopass" => twopass = n != 0,
-            "chroma" => opts.chroma_444 = n == 444,
+            "chroma" => {
+                opts.chroma = match n {
+                    422 => Chroma::Yuv422,
+                    440 => Chroma::Yuv440,
+                    444 => Chroma::Yuv444,
+                    _ => Chroma::Yuv420,
+                }
+            }
             "first_speed" => first_speed = n as u8,
             _ => return Err(format!("unknown option {k}")),
         }
@@ -44,10 +51,11 @@ fn main() -> Result<(), String> {
     let mut input = std::fs::File::open(&args[1]).map_err(|e| e.to_string())?;
     let mut out =
         std::io::BufWriter::new(std::fs::File::create(&args[4]).map_err(|e| e.to_string())?);
-    let (cw, ch) = if opts.chroma_444 {
-        (w, h)
-    } else {
-        (w.div_ceil(2), h.div_ceil(2))
+    let (cw, ch) = match opts.chroma {
+        Chroma::Yuv420 => (w.div_ceil(2), h.div_ceil(2)),
+        Chroma::Yuv422 => (w.div_ceil(2), h),
+        Chroma::Yuv440 => (w, h.div_ceil(2)),
+        Chroma::Yuv444 => (w, h),
     };
     let size = w * h + 2 * cw * ch;
     let mut buf = vec![0u8; size];

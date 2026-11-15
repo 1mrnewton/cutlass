@@ -226,6 +226,13 @@ pub fn uv_tx(bsize: u8, tx: u8, ss_x: u32, ss_y: u32) -> u8 {
     tx.min(max_tx(plane))
 }
 
+/// Whether a block of `bsize` has chroma of a size the format allows
+/// (libvpx refuses one of 8×8 and up that has not: 8×16, 16×32 and 32×64
+/// in 4:2:2, the 2:1 ones in 4:4:0).
+pub fn uv_valid(bsize: u8, ss_x: u32, ss_y: u32) -> bool {
+    bsize < BLOCK_8X8 || plane_block_size(bsize, ss_x, ss_y) < BLOCK_INVALID
+}
+
 fn plane_block_size(bsize: u8, ss_x: u32, ss_y: u32) -> u8 {
     const SS_SIZE: [[[u8; 2]; 2]; 13] = [
         [[BLOCK_4X4, BLOCK_INVALID], [BLOCK_INVALID, BLOCK_INVALID]],

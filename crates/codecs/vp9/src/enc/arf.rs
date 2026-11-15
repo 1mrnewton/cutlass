@@ -21,7 +21,7 @@ pub fn filter(
     h: usize,
     strength: u32,
     threads: usize,
-    ss: usize,
+    ss: (usize, usize),
 ) -> [Vec<u8>; 3] {
     let bands = h.div_ceil(16);
     let threads = threads.clamp(1, bands.max(1));
@@ -51,17 +51,17 @@ fn band(
     h: usize,
     strength: u32,
     by: usize,
-    ss: usize,
+    (sx, sy): (usize, usize),
 ) -> [Vec<u8>; 3] {
-    // Chroma subsampled by `ss` both ways (1: 4:2:0, 0: 4:4:4).
-    let (cw, ch) = (w.div_ceil(1 << ss), h.div_ceil(1 << ss));
+    // Chroma subsampled `sx` across and `sy` down.
+    let (cw, ch) = (w.div_ceil(1 << sx), h.div_ceil(1 << sy));
     let dims = [(w, h), (cw, ch), (cw, ch)];
     let bh = 16.min(h - by);
     // The band's rows in each plane.
     let rows = [
         (by, by + bh),
-        (by >> ss, (by + bh).div_ceil(1 << ss)),
-        (by >> ss, (by + bh).div_ceil(1 << ss)),
+        (by >> sy, (by + bh).div_ceil(1 << sy)),
+        (by >> sy, (by + bh).div_ceil(1 << sy)),
     ];
     let mut acc: [Vec<u32>; 3] =
         std::array::from_fn(|p| vec![0; dims[p].0 * (rows[p].1 - rows[p].0)]);
@@ -92,11 +92,11 @@ fn band(
                 continue;
             }
             for p in 0..3 {
-                let ss = if p > 0 { ss } else { 0 };
+                let (sx, sy) = if p > 0 { (sx, sy) } else { (0, 0) };
                 let (pw, ph) = dims[p];
-                let (x0, y0) = (bx >> ss, by >> ss);
-                let (n_w, n_h) = (((bx + bw + ss) >> ss) - x0, ((by + bh + ss) >> ss) - y0);
-                let (dx, dy) = (mv.0 >> ss, mv.1 >> ss);
+                let (x0, y0) = (bx >> sx, by >> sy);
+                let (n_w, n_h) = (((bx + bw + sx) >> sx) - x0, ((by + bh + sy) >> sy) - y0);
+                let (dx, dy) = (mv.0 >> sx, mv.1 >> sy);
                 apply(
                     target.planes[p],
                     pic.planes[p],

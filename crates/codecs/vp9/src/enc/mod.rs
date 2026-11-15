@@ -26,7 +26,7 @@ use cutlass_decode::CodecError;
 use crate::bits::{BitWriter, BoolWriter};
 use crate::dec::frame::{self, Dims, Mv, Pic};
 use crate::dec::lf;
-use crate::dec::parse::State;
+use crate::dec::parse::{LfMi, State};
 use crate::dec::recon::{Ctx, Recon, Scratch, View};
 use crate::dec::ref_pics;
 use crate::decode::Decoder;
@@ -473,6 +473,9 @@ impl FrameEncoder {
             bd: 8,
         };
         let filter_on = h.filter_level != 0;
+        // Chroma subsampled one way only filters from a grid of the
+        // blocks' sizes and transforms, as the decoder's.
+        let needs_grid = filter_on && h.ss_x != h.ss_y;
         let mut writer = frame::writer(&dims, self.dec.spare8());
         let prev_mvs = if h.use_prev_mvs {
             self.dec.prev_mvs()
@@ -595,7 +598,7 @@ impl FrameEncoder {
             }
             let tsb = (col1 - col0).div_ceil(8);
             t.state
-                .reset(col0, col1 - col0, mi_rows, sb_rows * tsb, false);
+                .reset(col0, col1 - col0, mi_rows, sb_rows * tsb, needs_grid);
             t.out.clear();
             t.row_ends.clear();
             let [y, u, v] = &mut t.pix;
@@ -670,6 +673,11 @@ impl FrameEncoder {
         let buf = Arc::clone(writer.shared());
         let mut masks = vec![lpf::Mask::default(); sb_rows * sb_cols];
         let mut mvs = vec![frame::MvRef::default(); mi_cols * mi_rows];
+        let mut grid = if needs_grid {
+            vec![LfMi::default(); mi_cols * mi_rows]
+        } else {
+            Vec::new()
+        };
         let mut counts = prob::Counts::new();
         for (i, t) in work.iter().enumerate() {
             let (c0, c1) = (edges[i], edges[i + 1]);
@@ -682,6 +690,10 @@ impl FrameEncoder {
             }
             for r in 0..mi_rows {
                 mvs[r * mi_cols + c0..r * mi_cols + c1].copy_from_slice(&st.mvs[r * w..r * w + w]);
+                if needs_grid {
+                    grid[r * mi_cols + c0..r * mi_cols + c1]
+                        .copy_from_slice(&st.grid[r * w..r * w + w]);
+                }
             }
             counts.add(&st.counts);
         }
@@ -716,11 +728,12 @@ impl FrameEncoder {
                 .collect()
         };
         let work = &*work;
-        let (m, l, g, ed) = (&masks, &levels, &geo, &edges);
+        let (m, l, g, ed, gr) = (&masks, &levels, &geo, &edges, &grid);
         let tiles = std::thread::scope(|sc| {
             for (p, mut v) in writer.tails().map(View::of).into_iter().enumerate() {
                 sc.spawn(move || {
                     let ss = if p == 0 { 0 } else { dims.ss_x };
+                    // (Rows are whole: tile columns split only across.)
                     let stride = v.stride;
                     for (i, t) in work.iter().enumerate() {
                         let (x0, x1) = ((ed[i] * 8) >> ss, ((ed[i + 1] * 8) >> ss).min(stride));
@@ -731,7 +744,7 @@ impl FrameEncoder {
                     }
                     if filter_on {
                         for r in 0..sb_rows {
-                            lf::sb_row_plane(&mut v, p, m, &[], l, g, r);
+                            lf::sb_row_plane(&mut v, p, m, gr, l, g, r);
                         }
                     }
                 });

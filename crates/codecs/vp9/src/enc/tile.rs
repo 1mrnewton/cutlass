@@ -887,8 +887,13 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 (PARTITION_HORZ, 0usize, [(0, 0), (hbs, 0)]),
                 (PARTITION_VERT, 1, [(0, 0), (0, hbs)]),
             ] {
-                self.restore(before);
                 let sub = geom::subsize(p, bsize);
+                // Halves whose chroma has no size of its own (4:2:2's tall
+                // ones, 4:4:0's wide ones) are not allowed.
+                if !geom::uv_valid(sub, s.h.ss_x, s.h.ss_y) {
+                    continue;
+                }
+                self.restore(before);
                 let c0 = self.cost;
                 self.part_symbol(row, col, bsize, p);
                 let mut j = (self.cost - c0) as f64 * lam;

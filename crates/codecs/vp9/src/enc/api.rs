@@ -15,6 +15,20 @@ use super::{FrameEncoder, FrameParams};
 /// The quantizer index a factory encoder with no bitrate keeps.
 pub const DEFAULT_Q: u8 = 60;
 
+/// The chroma planes' size against luma's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Chroma {
+    /// Half across and down (profile 0).
+    #[default]
+    Yuv420,
+    /// Half across (profile 1).
+    Yuv422,
+    /// Half down (profile 1).
+    Yuv440,
+    /// Full size (profile 1).
+    Yuv444,
+}
+
 /// How the encoder codes.
 #[derive(Clone, Copy, Debug)]
 pub struct Vp9Options {
@@ -45,10 +59,10 @@ pub struct Vp9Options {
     /// smaller shares and a frame over its budget is paid back within
     /// half the buffer.
     pub cbr_buffer_ms: u32,
-    /// Full-resolution chroma, 4:4:4 (profile 1, FFmpeg's `-pix_fmt
-    /// yuv444p`), instead of 4:2:0 (profile 0): the chroma planes pushed
-    /// are then as large as luma.
-    pub chroma_444: bool,
+    /// The chroma planes' size: 4:2:0 (profile 0, the default) or, in
+    /// profile 1, 4:2:2, 4:4:0 or 4:4:4 (FFmpeg's `-pix_fmt yuv422p`,
+    /// `yuv440p`, `yuv444p`). The chroma planes pushed are that size.
+    pub chroma: Chroma,
     /// Tile rows, log2 of the count (0 to 2; libvpx's `tile-rows`). They
     /// restart the arithmetic coder at each tile row and change nothing
     /// else.
@@ -77,7 +91,12 @@ impl Vp9Options {
 
     /// Chroma subsampling across and down.
     fn ss(&self) -> (usize, usize) {
-        if self.chroma_444 { (0, 0) } else { (1, 1) }
+        match self.chroma {
+            Chroma::Yuv420 => (1, 1),
+            Chroma::Yuv422 => (1, 0),
+            Chroma::Yuv440 => (0, 1),
+            Chroma::Yuv444 => (0, 0),
+        }
     }
 
     /// The chroma planes' size for a `w`×`h` picture.
@@ -106,7 +125,7 @@ impl Default for Vp9Options {
             threads: 0,
             lag: None,
             cbr_buffer_ms: 0,
-            chroma_444: false,
+            chroma: Chroma::Yuv420,
             tile_rows: 0,
             aq: false,
         }
@@ -188,9 +207,11 @@ impl Vp9Encoder {
                 what: "vp9 encoder",
             });
         }
-        let chroma_444 = match params.pixel {
-            PixelFormat::Yuv420p => false,
-            PixelFormat::Yuv444p => true,
+        let chroma = match params.pixel {
+            PixelFormat::Yuv420p => Chroma::Yuv420,
+            PixelFormat::Yuv422p => Chroma::Yuv422,
+            PixelFormat::Yuv440p => Chroma::Yuv440,
+            PixelFormat::Yuv444p => Chroma::Yuv444,
             _ => {
                 return Err(CodecError::Unsupported {
                     what: "vp9 pixel format",
@@ -199,7 +220,7 @@ impl Vp9Encoder {
         };
         let opts = Vp9Options {
             bitrate: params.bitrate,
-            chroma_444,
+            chroma,
             ..Vp9Options::default()
         };
         Self::with_options(params.width, params.height, opts)
@@ -380,7 +401,7 @@ impl Vp9Encoder {
                 h,
                 strength,
                 self.opts.threads(),
-                self.opts.ss().0,
+                self.opts.ss(),
             ));
         }
         let mut data = Vec::new();
@@ -518,10 +539,11 @@ impl VideoEncoder for Vp9Encoder {
 
     fn push(&mut self, input: &VideoInput) -> Result<Vec<Packet>, CodecError> {
         let f = &input.frame;
-        let want = if self.opts.chroma_444 {
-            PixelFormat::Yuv444p
-        } else {
-            PixelFormat::Yuv420p
+        let want = match self.opts.chroma {
+            Chroma::Yuv420 => PixelFormat::Yuv420p,
+            Chroma::Yuv422 => PixelFormat::Yuv422p,
+            Chroma::Yuv440 => PixelFormat::Yuv440p,
+            Chroma::Yuv444 => PixelFormat::Yuv444p,
         };
         if f.format != want {
             return Err(CodecError::Unsupported {

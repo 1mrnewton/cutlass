@@ -181,8 +181,17 @@ threads; one core is the fastest of five, pinned with `taskset`.
 | 4:4:4 | 4 | 0.70 s | 0.79 s | 0.88 | 80 MB / 78 MB |
 
 On four threads Cutlass is ahead of FFmpeg on both streams (it won all 7
-runs on each); on one core the two are level (medians of fifteen runs:
-Cutlass won 7 of 15 on 4:4:4 and 4 of 15 on 4:2:0, within 1%). (The
+runs on each). On one core, in 31 runs alternating with FFmpeg's
+(ratio of the medians, with a 95% bootstrap interval):
+
+| Stream, 1 core | Cutlass / FFmpeg | 95% interval | Cutlass faster |
+| --- | ---: | --- | --- |
+| 4:2:0 (`m420.ivf`) | 0.997 | 0.972–1.030 | 14 of 31 |
+| 4:4:4 (`mandel.ivf`) | 1.011 | 0.972–1.032 | 12 of 31 |
+| 4:2:0 at 60 frames, q 60 (`q60.ivf`) | 0.948 | 0.929–0.973 | 25 of 31 |
+
+On the two main streams the two are level: neither is measurably the
+faster. On the third Cutlass is ahead. (The
 4:4:4 stream started at 38.8 s on one core.) What moved the decoder most
 recently:
 

@@ -174,6 +174,17 @@ pub struct Vp9Options {
     /// for 3.1; libvpx's `level`, which also holds the stream to it). 0:
     /// unset.
     pub level: u8,
+    /// With a bitrate in one pass: frames dropped while the rate's buffer
+    /// runs low (libvpx's `drop-frame`, FFmpeg's `-drop-threshold`), in
+    /// percent of its optimal level (five sixths of the buffer:
+    /// `cbr_buffer_ms`, or libvpx's 6 seconds at a variable bitrate).
+    /// Under it every other inter frame is dropped, more as it stays
+    /// under; under empty every one. A dropped frame is not coded: no
+    /// packet comes out for it ([`Vp9Encoder::encode_planes`] gives empty
+    /// data), and the frames after it predict from the one before it. Key
+    /// frames, golden frames, alt-refs and the frames they come with are
+    /// never dropped. 0: none is.
+    pub drop_frame_pct: u32,
 }
 
 /// The lookahead below speed 9 unless set: with it, alt-refs take 10 to
@@ -256,6 +267,9 @@ impl Vp9Options {
         if self.tile_columns.is_some_and(|t| t > 6) {
             return bad("vp9 tile columns past 6");
         }
+        if self.drop_frame_pct > 100 {
+            return bad("vp9 drop-frame threshold past 100");
+        }
         Ok(())
     }
 
@@ -300,6 +314,7 @@ impl Default for Vp9Options {
             max_intra_pct: 0,
             tile_columns: None,
             level: 0,
+            drop_frame_pct: 0,
         }
     }
 }
@@ -705,7 +720,10 @@ impl<P: EncPixel> Core<P> {
                 .chroma_dims(self.width as usize, self.height as usize),
             &planes,
         )?;
-        self.code(planes, seconds, None)
+        // (A dropped frame gives no data.)
+        Ok(self
+            .code(planes, seconds, None, true)?
+            .unwrap_or((Vec::new(), false)))
     }
 
     /// Takes one picture into the lookahead; returns the pictures coded.
@@ -726,8 +744,8 @@ impl<P: EncPixel> Core<P> {
             &planes,
         )?;
         if self.opts.lag() == 0 {
-            let (d, k) = self.code(planes, seconds, None)?;
-            return Ok(vec![(d, k, clock)]);
+            let coded = self.code(planes, seconds, None, true)?;
+            return Ok(coded.map(|(d, k)| (d, k, clock)).into_iter().collect());
         }
         let (w, h) = (self.width as usize, self.height as usize);
         let c = self.opts.chroma_dims(w, h);
@@ -769,7 +787,7 @@ impl<P: EncPixel> Core<P> {
         });
         let mut out = Vec::new();
         while self.queue.len() > self.opts.lag() as usize {
-            out.push(self.code_front()?);
+            out.extend(self.code_front()?);
         }
         Ok(out)
     }
@@ -778,15 +796,15 @@ impl<P: EncPixel> Core<P> {
     fn flush(&mut self) -> Result<Coded, CodecError> {
         let mut out = Vec::new();
         while !self.queue.is_empty() {
-            out.push(self.code_front()?);
+            out.extend(self.code_front()?);
         }
         Ok(out)
     }
 
     /// Codes the oldest picture of the lookahead, after an alt-ref when one
-    /// starts here.
+    /// starts here; `None` when it is dropped.
     #[allow(clippy::type_complexity)]
-    fn code_front(&mut self) -> Result<(Vec<u8>, bool, (i64, i64, u32)), CodecError> {
+    fn code_front(&mut self) -> Result<Option<(Vec<u8>, bool, (i64, i64, u32))>, CodecError> {
         let Some(f) = self.queue.pop_front() else {
             return Err(CodecError::InvalidApi {
                 what: "empty lookahead",
@@ -907,27 +925,36 @@ impl<P: EncPixel> Core<P> {
             self.overlay_at = Some(target);
             data = coded.data;
         }
-        let (frame, key) = self.code(
+        // (The picture after an alt-ref goes with it: it is not dropped.)
+        let may_drop = data.is_empty();
+        let Some((frame, key)) = self.code(
             [(&f.planes[0], w), (&f.planes[1], cw), (&f.planes[2], cw)],
             f.seconds,
             Some((cut, f.step)),
-        )?;
+            may_drop,
+        )?
+        else {
+            return Ok(None);
+        };
         let data = if data.is_empty() {
             frame
         } else {
             superframe(&[&data, &frame])
         };
-        Ok((data, key, (f.pts, f.duration, f.timescale)))
+        Ok(Some((data, key, (f.pts, f.duration, f.timescale))))
     }
 
     /// Codes one shown picture; `cut` is whether it cuts from the picture
-    /// before it, when the lookahead has found that already.
+    /// before it, when the lookahead has found that already. `None`: the
+    /// picture was dropped ([`Vp9Options::drop_frame_pct`]; only when
+    /// `may_drop`).
     fn code(
         &mut self,
         planes: [(&[P], usize); 3],
         seconds: f64,
         ahead: Option<(bool, (isize, isize))>,
-    ) -> Result<(Vec<u8>, bool), CodecError> {
+        may_drop: bool,
+    ) -> Result<Option<(Vec<u8>, bool)>, CodecError> {
         let cut = ahead.map(|a| a.0);
         let forced = self.force_key || self.since_key >= self.opts.keyint;
         // A cut starts a golden frame: LAST and GOLDEN take the new scene,
@@ -938,7 +965,8 @@ impl<P: EncPixel> Core<P> {
         // What looks a cut may be the picture moved far ([`super::arf::jump`]):
         // then it is an inter frame whose blocks also search there.
         let jump = if cut { self.jump_of(planes[0]) } else { None };
-        let cut = cut && jump.is_none();
+        let jumped = jump.is_some();
+        let cut = cut && !jumped;
         if let Some(g) = jump {
             self.enc.set_global(g);
         }
@@ -962,6 +990,20 @@ impl<P: EncPixel> Core<P> {
         if key || overlay || cut {
             // (An alt-ref of the scene before a cut has nothing to show.)
             self.overlay_at = None;
+        }
+        // An inter frame that is no golden frame (nor a cut, nor a jump)
+        // may be dropped while the buffer runs low: it spends its share of
+        // the rate on nothing, and the next frame predicts from the one
+        // coded last.
+        if may_drop && !golden && !jumped && kind == 2 && self.rc.drop_frame() {
+            self.rc.dropped(seconds);
+            self.since_key += 1;
+            if self.pooled()
+                && let Some((_, step)) = ahead
+            {
+                self.pos = (self.pos.0 + step.0, self.pos.1 + step.1);
+            }
+            return Ok(None);
         }
         // With the reference pool: the picture's tight planes (the
         // realtime pool's, none).
@@ -1077,7 +1119,7 @@ impl<P: EncPixel> Core<P> {
             self.last_luma
                 .extend_from_slice(&y[r * stride..r * stride + w]);
         }
-        Ok((coded.data, coded.key))
+        Ok(Some((coded.data, coded.key)))
     }
 
     /// One pass at a variable bitrate, before the first picture: the
@@ -1931,7 +1973,15 @@ struct Rate {
     probed: Option<(f64, f64)>,
     /// The next golden-type frame is an alt-ref.
     arf_next: bool,
+    /// [`Vp9Options::drop_frame_pct`]: the buffer's fullness in bits, and
+    /// libvpx's decimation factor and count (`vp9_test_drop`).
+    buffer: f64,
+    decimation: (u32, u32),
 }
+
+/// [`Vp9Options::drop_frame_pct`] at a variable bitrate: libvpx's buffer
+/// (`rc_buf_sz`), in milliseconds.
+const DROP_BUFFER_MS: u32 = 6000;
 
 /// At this speed (no lookahead by default, so no alt-refs) one pass at a
 /// variable bitrate budgets the golden frames to come at the key frame's
@@ -2007,7 +2057,68 @@ impl Rate {
             key_extra: (0.0, 0.0),
             probed: None,
             arf_next: false,
+            // (libvpx's buffer starts at 4 of its 6 seconds.)
+            buffer: Self::buffer_size(&opts) * 4.0 / 6.0,
+            decimation: (0, 0),
         }
+    }
+
+    /// The buffer of [`Vp9Options::drop_frame_pct`], in bits.
+    fn buffer_size(opts: &Vp9Options) -> f64 {
+        let ms = match opts.cbr_buffer_ms {
+            0 => DROP_BUFFER_MS,
+            ms => ms,
+        };
+        f64::from(opts.bitrate) * f64::from(ms) / 1000.0
+    }
+
+    /// Whether the next inter frame is dropped ([`Vp9Options::drop_frame_pct`]):
+    /// libvpx's `vp9_test_drop`. Under the drop mark, every other frame
+    /// is dropped, then (while still under it) one frame of every
+    /// decimation factor + 1 coded; under empty, every frame.
+    fn drop_frame(&mut self) -> bool {
+        let o = self.opts;
+        if o.drop_frame_pct == 0 || o.bitrate == 0 || self.pass2.is_some() || self.frames == 0 {
+            return false;
+        }
+        if self.buffer < 0.0 {
+            return true;
+        }
+        let optimal = Self::buffer_size(&o) * 5.0 / 6.0;
+        let mark = f64::from(o.drop_frame_pct) / 100.0 * optimal;
+        let (factor, count) = &mut self.decimation;
+        if self.buffer > mark && *factor > 0 {
+            *factor -= 1;
+        } else if self.buffer <= mark && *factor == 0 {
+            *factor = 1;
+        }
+        if *factor == 0 {
+            *count = 0;
+            return false;
+        }
+        if *count > 0 {
+            *count -= 1;
+            true
+        } else {
+            *count = *factor;
+            false
+        }
+    }
+
+    /// A shown picture `seconds` long was dropped: its share of the rate
+    /// goes to the frames after it.
+    fn dropped(&mut self, seconds: f64) {
+        self.frames = self.frames.saturating_add(1);
+        self.per_frame = f64::from(self.opts.bitrate) * seconds;
+        self.debt -= self.per_frame;
+        self.key_extra.1 += 1.0;
+        self.fill(self.per_frame, 0.0);
+    }
+
+    /// The buffer takes `budget` bits in and `bits` out, holding at most
+    /// its size.
+    fn fill(&mut self, budget: f64, bits: f64) {
+        self.buffer = (self.buffer + budget - bits).min(Self::buffer_size(&self.opts));
     }
 
     /// The quantizer of a frame of type `kind` (key, golden or alt-ref,
@@ -2351,6 +2462,8 @@ impl Rate {
             self.debt -= self.per_frame;
         }
         self.debt += bits;
+        let budget = if seconds > 0.0 { self.per_frame } else { 0.0 };
+        self.fill(budget, bits);
         if kind == 0 && seconds > 0.0 {
             self.key_extra = ((bits - self.per_frame).max(0.0), 0.0);
         } else if seconds > 0.0 {

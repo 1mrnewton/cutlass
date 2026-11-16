@@ -2261,3 +2261,65 @@ fn the_first_key_frame_is_planned_from_the_lookahead() {
     let total = packet_bytes(&packets) as f64 * 8.0 / 2.0;
     assert!((total / f64::from(rate) - 1.0).abs() < 0.3, "{total} b/s");
 }
+
+/// Luma of full-range noise, new in every picture: no quantizer the rate
+/// control has codes it within a small rate.
+fn static_noise(w: u32, h: u32, i: u32) -> VideoFrame {
+    let mut f = moving(w, h, 0);
+    for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+        let n = ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 24;
+        *v = n as u8;
+    }
+    f
+}
+
+#[test]
+fn a_low_buffer_drops_frames() {
+    let (w, h) = (128u32, 64u32);
+    let n = 60;
+    let opts = super::Vp9Options {
+        bitrate: 60_000,
+        cbr_buffer_ms: 500,
+        speed: 9,
+        ..lag0(60)
+    };
+    let run = |o: super::Vp9Options| {
+        let p = encode_with(o, (w, h), n, |i| static_noise(w, h, i));
+        assert_decodes(&p, (w, h), p.len());
+        p
+    };
+    let kept = run(opts);
+    assert_eq!(kept.len(), n as usize);
+    let dropping = run(super::Vp9Options {
+        drop_frame_pct: 30,
+        ..opts
+    });
+    // Some frames are dropped, the key frame and those coded keep their
+    // place, and the stream comes near the rate (at the coarsest
+    // quantizer it is four times over without).
+    assert!(dropping.len() < kept.len(), "{} packets", dropping.len());
+    assert!(dropping.len() > 5, "{} packets", dropping.len());
+    assert!(dropping[0].keyframe && dropping[0].pts == 0);
+    assert!(dropping.windows(2).all(|p| p[0].pts < p[1].pts));
+    let rate = |p: &[Packet]| packet_bytes(p) as f64 * 8.0 / (f64::from(n) / 30.0);
+    let (with, without) = (rate(&dropping), rate(&kept));
+    assert!(without > 2.0 * 60_000.0, "{without} without dropping");
+    assert!(with < 1.5 * 60_000.0, "{with} with dropping");
+    // A rate the pictures fit in drops none.
+    let easy = encode_with(
+        super::Vp9Options {
+            drop_frame_pct: 30,
+            bitrate: 400_000,
+            ..opts
+        },
+        (w, h),
+        n,
+        |i| moving(w, h, i),
+    );
+    assert_eq!(easy.len(), n as usize);
+    let past = super::Vp9Options {
+        drop_frame_pct: 101,
+        ..opts
+    };
+    assert!(Vp9Encoder::with_options(w, h, past).is_err());
+}

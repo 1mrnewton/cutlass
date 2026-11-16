@@ -8,7 +8,8 @@
 //! `static_thresh=N`, `alt_ref=0`, `arnr_strength=0..6`,
 //! `arnr_frames=1..15`, `undershoot=PCT`, `overshoot=PCT`,
 //! `keyint_min=N`, `max_intra=PCT`, `tile_columns=0..6`, `level=N`
-//! (10 × the level) and `lossless=1`.
+//! (10 × the level) and `lossless=1`; `drop=PCT` (FFmpeg's
+//! `-drop-threshold`: dropped frames leave gaps in the IVF timestamps).
 //! With `bits=10` or `12` the input has little-endian 16-bit samples
 //! (FFmpeg's `yuv420p10le` and the like).
 
@@ -95,6 +96,7 @@ fn main() -> Result<(), String> {
             "max_intra" => opts.max_intra_pct = n,
             "tile_columns" => opts.tile_columns = Some(n as u8),
             "level" => opts.level = n as u8,
+            "drop" => opts.drop_frame_pct = n,
             "lossless" => {
                 if n != 0 {
                     opts.qindex = 0;
@@ -170,16 +172,18 @@ fn main() -> Result<(), String> {
         });
         for buf in rx {
             let clock = (n as i64, 1, fps);
-            for (data, _, _) in push(&mut enc, &buf, &mut wide, (w, h, cw, ch), fps, clock)? {
-                packets.push(data);
+            for (data, _, (pts, _, _)) in
+                push(&mut enc, &buf, &mut wide, (w, h, cw, ch), fps, clock)?
+            {
+                packets.push((data, pts));
             }
             n += 1;
             let _ = back_tx.send(buf);
         }
         Ok(())
     })?;
-    for (data, _, _) in enc.flush().map_err(|e| e.to_string())? {
-        packets.push(data);
+    for (data, _, (pts, _, _)) in enc.flush().map_err(|e| e.to_string())? {
+        packets.push((data, pts));
     }
     let secs = start.elapsed().as_secs_f64();
     let mut hdr = Vec::new();
@@ -195,10 +199,10 @@ fn main() -> Result<(), String> {
     hdr.extend_from_slice(&0u32.to_le_bytes());
     out.write_all(&hdr).map_err(|e| e.to_string())?;
     let mut total = 0;
-    for (i, p) in packets.iter().enumerate() {
+    for (p, pts) in &packets {
         out.write_all(&(p.len() as u32).to_le_bytes())
             .map_err(|e| e.to_string())?;
-        out.write_all(&(i as u64).to_le_bytes())
+        out.write_all(&(*pts as u64).to_le_bytes())
             .map_err(|e| e.to_string())?;
         out.write_all(p).map_err(|e| e.to_string())?;
         total += p.len();

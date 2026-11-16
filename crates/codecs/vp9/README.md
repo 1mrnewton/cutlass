@@ -1565,7 +1565,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-qmin`, `-qmax` | `min-q`, `max-q` | `min_q`, `max_q` as indices (`min_q=`, `max_q=`: added to `vp9enc`) |
 | `-undershoot-pct`, `-overshoot-pct` | `undershoot-pct`, `overshoot-pct` | `undershoot_pct`, `overshoot_pct`: dead bands on what is paid back (added) |
 | `-max-intra-rate` | `max-intra-rate` | `max_intra_pct` (added) |
-| `-drop-threshold` | `drop-frame` | missing: no frame is dropped |
+| `-drop-threshold` | `drop-frame` | `drop_frame_pct` (`drop=`, added): one pass at a bitrate; see "Options measured" |
 | `-g` | `kf-max-dist` | `keyint` |
 | `-keyint_min` | `kf-min-dist` | `keyint_min`: a cut that far from the last key frame is one (added); intervals are fixed as with `-keyint_min` = `-g` |
 | `-force_key_frames` | `VPX_EFLAG_FORCE_KF` | `Vp9Encoder::force_keyframe` (the engine's `force_keyframe`) |
@@ -1602,6 +1602,40 @@ brackets). "Added" is new in this round; each has a test in
 | `-colorspace`, `-color_range` | `color-space`, `color-range` | `color_space`, `full_range` (`colorspace=`, `range=`), and from `CodecParams` (added) |
 | `-aspect` / sample aspect ratio | `VP9E_SET_RENDER_SIZE` | `render_size` (`render=WxH`, added) |
 | regions of interest (side data) | ROI map | missing |
+
+### Options measured
+
+**Frame dropping** (`drop_frame_pct`, FFmpeg's `-drop-threshold`). One
+pass at a bitrate keeps libvpx's buffer model beside its own: the buffer
+starts at 4/6 of its size (`cbr_buffer_ms`, or libvpx's 6 s at a
+variable bitrate), takes each frame's share of the rate in and its bits
+out, and holds at most its size. While it is under the threshold (in
+percent of its optimal level, 5/6 of its size) every other inter frame is
+dropped, and one frame in 1 + the decimation factor is coded while it
+stays under (libvpx's `vp9_test_drop`); under empty every inter frame is.
+A dropped frame gives no packet (`push_planes` returns nothing for it,
+`encode_planes` empty data), its share of the rate goes to the frames
+after it, and they predict from the frame coded before it. Key frames,
+golden frames, cuts and the frame an alt-ref comes with are never
+dropped, nor a frame of two passes. libvpx drops in one-pass CBR only.
+Constant bitrate with a 1 s buffer, `drop=30` against FFmpeg's
+`-deadline realtime -cpu-used 8 -b:v R -minrate R -maxrate R -bufsize R
+-drop-threshold 30`, four threads, the README's three clips (packets,
+rate, the most a 1 s buffer held past the rate, PSNR-Y with each dropped
+frame shown as the one before):
+
+| Clip, 250 kb/s | Speed 10 | Speed 10, `drop=30` | Speed 9, `drop=30` | libvpx rt 8 | libvpx rt 8, 30 |
+| --- | --- | --- | --- | --- | --- |
+| Three scenes | 90, 413 kb/s, 2.25 s, 30.7 dB | 57, 281, 0.90, 27.1 | 88, 251, 0.49, 31.5 | 90, 335, 1.13, 29.7 | 74, 290, 0.78, 28.3 |
+| Still and jumps | 90, 668, 5.02, 28.5 | 37, 305, 0.73, 23.7 | 90, 251, 0.33, 31.9 | 90, 435, 2.22, 28.4 | 57, 304, 0.86, 26.1 |
+| Grainy pan | 60, 695, 3.56, 28.4 | 28, 337, 0.75, 24.2 | 60, 256, 0.20, 31.1 | 60, 382, 1.05, 27.9 | 45, 319, 0.58, 26.0 |
+
+Speed 10 runs out of quantizer at this rate (it codes at the coarsest),
+so it is the one that drops: it comes within 12 to 35% of the rate (from
+65 to 178% over), as libvpx's realtime 8 comes within 16 to 28% (from 34
+to 74% over). Speed 9 holds the rate on its own quantizers and drops at
+most two frames. At 500 kb/s speed 10 drops 1, 13 and 8 frames (to 508,
+572 and 603 kb/s from 508, 657 and 692), libvpx 0, 8 and 0.
 
 Decoders: FFmpeg's `vp9` and `libvpx-vp9` decoders have no options of
 their own; of the generic ones, frame threads and slice (tile) threads

@@ -925,7 +925,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                    col1: usize,
                    lane: usize,
                    sync: Option<&tile::Lanes<P>>,
-                   pipe: Option<&[mpsc::Sender<Band<P>>]>,
+                   pipe: Option<&mpsc::Sender<(usize, Band<P>)>>,
                    mut lazy: Option<Lazy<'_, '_, P>>,
                    early: Option<&EarlyTile<'_>>|
          -> Result<(), CodecError> {
@@ -1003,7 +1003,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                 if let Some(pipe) = pipe {
                     // The row's samples and filter masks, for the loop
                     // filter (a receiver gone has failed: the frame does).
-                    for (p, tx) in pipe.iter().enumerate() {
+                    for (p, view) in views.iter().enumerate() {
                         let (sx, sy) = if p == 0 {
                             (0, 0)
                         } else {
@@ -1019,7 +1019,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                         };
                         let mut pix = Vec::with_capacity((x1 - x0) * (y1 - y0));
                         for y in y0..y1 {
-                            pix.extend_from_slice(&views[p].data[y * stride + x0..y * stride + x1]);
+                            pix.extend_from_slice(&view.data[y * stride + x0..y * stride + x1]);
                         }
                         let band = Band {
                             cols: (col0, col1),
@@ -1027,7 +1027,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                             pix,
                             masks: t.state.masks[r * tsb..(r + 1) * tsb].to_vec(),
                         };
-                        if tx.send(band).is_err() {
+                        if pipe.send((p, band)).is_err() {
                             return Err(CodecError::Malformed {
                                 at_bit: 0,
                                 what: "vp9 encoder loop filter",
@@ -1079,17 +1079,18 @@ impl<P: EncPixel> FrameEncoder<P> {
             let (results, written) = std::thread::scope(|sc| {
                 // Piped: each plane's rows go into the picture and through
                 // the loop filter as every tile column finishes them.
+                // (One thread for the three planes: fewer threads to start
+                // each frame.)
                 let mut lf_threads = Vec::new();
-                let mut txs = Vec::new();
+                let mut txs = None;
                 if piped {
-                    for (p, v) in writer.tails().map(View::of).into_iter().enumerate() {
-                        let (tx, rx) = mpsc::channel();
-                        txs.push(tx);
-                        let (l, g) = (&levels, &geo);
-                        lf_threads.push(
-                            sc.spawn(move || lf_rows(v, p, rx, (ntiles, sb_rows), filter_on, l, g)),
-                        );
-                    }
+                    let views = writer.tails().map(View::of);
+                    let (tx, rx) = mpsc::channel();
+                    txs = Some(tx);
+                    let (l, g) = (&levels, &geo);
+                    lf_threads.push(
+                        sc.spawn(move || lf_rows(views, rx, (ntiles, sb_rows), filter_on, l, g)),
+                    );
                 }
                 // Early: each tile's symbol writer, and what its coder
                 // sends it.
@@ -1134,7 +1135,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                         let (c0, c1) = (edges[i], edges[i + 1]);
                         let sync = (lanes > 1).then(|| &syncs[i]);
                         let run = &run;
-                        let pipe = piped.then(|| txs.clone());
+                        let pipe = txs.clone();
                         let end = ends.next().flatten();
                         sc.spawn(move || {
                             // (A lane that stops lets the others stop
@@ -1142,7 +1143,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                             // still lets the updates be decided.)
                             let _guard = Release(sync);
                             let _arrive = end.as_ref().map(Arrive);
-                            let r = run(t, c0, c1, lane, sync, pipe.as_deref(), lazy, end.as_ref());
+                            let r = run(t, c0, c1, lane, sync, pipe.as_ref(), lazy, end.as_ref());
                             if r.is_err()
                                 && let Some(l) = sync
                             {
@@ -1471,26 +1472,31 @@ struct Band<P> {
     masks: Vec<lpf::Mask>,
 }
 
-/// Puts the rows of plane `p` that the tile columns send into the picture
-/// `v`, and filters each superblock row once every tile column has sent
+/// Puts the rows of each plane that the tile columns send into its picture
+/// in `views`, and filters each superblock row once every tile column has sent
 /// it: a row's filter reads and writes no sample under it, and the row
 /// above is filtered first, so the picture is the one filtering the whole
 /// frame after coding it makes. Whether every row came.
 fn lf_rows<P: EncPixel>(
-    mut v: View<'_, P>,
-    p: usize,
-    rx: mpsc::Receiver<Band<P>>,
+    mut views: [View<'_, P>; 3],
+    rx: mpsc::Receiver<(usize, Band<P>)>,
     (ntiles, sb_rows): (usize, usize),
     filter_on: bool,
     levels: &lpf::Levels,
     g: &lf::Geo,
 ) -> bool {
-    let (sx, sy) = if p == 0 { (0, 0) } else { (g.ss_x, g.ss_y) };
-    let stride = v.stride;
-    let mut masks = vec![lpf::Mask::default(); sb_rows * g.sb_cols];
-    let mut have = vec![0usize; sb_rows];
-    let mut next = 0;
-    for b in rx {
+    let mut masks: [Vec<lpf::Mask>; 3] =
+        std::array::from_fn(|_| vec![lpf::Mask::default(); sb_rows * g.sb_cols]);
+    let mut have = [
+        vec![0usize; sb_rows],
+        vec![0usize; sb_rows],
+        vec![0usize; sb_rows],
+    ];
+    let mut next = [0usize; 3];
+    for (p, b) in rx {
+        let v = &mut views[p];
+        let (sx, sy) = if p == 0 { (0, 0) } else { (g.ss_x, g.ss_y) };
+        let stride = v.stride;
         let (x0, x1) = ((b.cols.0 * 8) >> sx, ((b.cols.1 * 8) >> sx).min(stride));
         let w = x1 - x0;
         let y0 = (b.row * 64) >> sy;
@@ -1499,16 +1505,16 @@ fn lf_rows<P: EncPixel>(
             v.data[at..at + w].copy_from_slice(line);
         }
         let at = b.row * g.sb_cols + b.cols.0 / 8;
-        masks[at..at + b.masks.len()].copy_from_slice(&b.masks);
-        have[b.row] += 1;
-        while next < sb_rows && have[next] == ntiles {
+        masks[p][at..at + b.masks.len()].copy_from_slice(&b.masks);
+        have[p][b.row] += 1;
+        while next[p] < sb_rows && have[p][next[p]] == ntiles {
             if filter_on {
-                lf::sb_row_plane(&mut v, p, &masks, &[], levels, g, next);
+                lf::sb_row_plane(v, p, &masks[p], &[], levels, g, next[p]);
             }
-            next += 1;
+            next[p] += 1;
         }
     }
-    next == sb_rows
+    next.iter().all(|&n| n == sb_rows)
 }
 
 /// Releases a tile column's other lanes when its thread unwinds.

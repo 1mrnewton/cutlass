@@ -154,13 +154,30 @@ fn main() -> Result<(), String> {
     let mut packets = Vec::new();
     let start = Instant::now();
     let mut n = 0;
-    while n < frames && input.read_exact(&mut buf).is_ok() {
-        let clock = (n as i64, 1, fps);
-        for (data, _, _) in push(&mut enc, &buf, &mut wide, (w, h, cw, ch), fps, clock)? {
-            packets.push(data);
+    // The pictures are read on a thread of their own, a few ahead of the
+    // encoder (as FFmpeg's demuxer runs on its own thread), their buffers
+    // handed back to be filled again.
+    std::thread::scope(|sc| -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
+        let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        sc.spawn(move || {
+            for _ in 0..frames {
+                let mut b = back_rx.try_recv().unwrap_or_else(|_| vec![0u8; size]);
+                if input.read_exact(&mut b).is_err() || tx.send(b).is_err() {
+                    break;
+                }
+            }
+        });
+        for buf in rx {
+            let clock = (n as i64, 1, fps);
+            for (data, _, _) in push(&mut enc, &buf, &mut wide, (w, h, cw, ch), fps, clock)? {
+                packets.push(data);
+            }
+            n += 1;
+            let _ = back_tx.send(buf);
         }
-        n += 1;
-    }
+        Ok(())
+    })?;
     for (data, _, _) in enc.flush().map_err(|e| e.to_string())? {
         packets.push(data);
     }

@@ -1021,9 +1021,36 @@ their own cores (medians of five), 0.89, 0.90 and 0.88 (0.89, 0.84 and
 and 0.90 (0.97, 1.00 and 0.86 before in the same runs, where the
 previous round measured 0.91, 0.91 and 0.82: the machine's load moves
 these by several points, and in this sitting FFmpeg ran relatively
-faster). So speed 10 is over 0.95 of FFmpeg's time on four threads on
+faster). So speed 10 was over 0.95 of FFmpeg's time on four threads on
 two clips here, 3 to 4% over the build before. Speed 9: 0.95, 1.02 and 0.86 on four threads
 (0.94, 1.01 and 0.82 before).
+
+The pool costs no CPU time (the same task-clock, ±5%, as the build
+before it); the four threads were idle more. Speed 10 kept 2.2 of the
+four cores busy, and its main thread did about 30% of the wall time on
+its own: half of that starting and waking threads (each frame started
+four tile threads, three loop-filter threads and four symbol writers),
+the rest copies and reading the input. Two changes, both byte-identical
+(41 of 41 configurations of the identity check):
+
+- **One loop-filter thread for the three planes** (`lf_rows`), fed by
+  one channel of each plane's rows: two threads fewer to start each
+  frame, and fewer waking on the four cores the tile threads already
+  fill. 6 to 11% less time at speed 10 on four threads.
+- **The example reads the input on a thread of its own** (`vp9enc`, a
+  few pictures ahead, as FFmpeg's demuxer runs on its own thread): 1 to
+  4% less.
+
+Tried and dropped, both byte-identical and no faster: building the
+motion profile in bands on threads, and the cut check on threads.
+
+Now, against realtime 8 on four threads (interleaved, medians of seven
+or nine rounds of all four rates): speed 10 0.90, 0.95 and 0.82 (the
+build with the pool, before these two changes, 1.03, 1.02 and 0.90 in
+the same runs; the build before the pool 0.95–0.97, 0.93–0.97 and
+0.85–0.87); speed 9 0.86, 0.88 and 0.76 (0.95, 0.96 and 0.88; before
+the pool 0.91, 0.96 and 0.83). On one thread (paired, pinned, medians
+of five) speed 10 is 0.90, 0.88 and 0.85.
 
 | Constant quality, `-crf` | Y | U | V | FFmpeg avg | 6:1:1 |
 | --- | ---: | ---: | ---: | ---: | ---: |

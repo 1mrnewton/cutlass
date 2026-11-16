@@ -281,6 +281,16 @@ pub struct Vp9Options {
     /// pattern again; [`Vp9Encoder::temporal_layer`] tells the layer of
     /// the picture coded last. 0 or 1: one layer.
     pub temporal_layers: u8,
+    /// Two passes over a corpus (libvpx's `vbr-corpus-complexity`,
+    /// FFmpeg's `-corpus-complexity`): the corpus's complexity, the mean
+    /// of [`Vp9Encoder::first_pass_complexity`] over its clips, each
+    /// weighed by its length (this encoder's own measure, not libvpx's
+    /// numbers). Each clip then
+    /// spends the bitrate times its complexity over the corpus's (from a
+    /// quarter to four times), so that the corpus as a whole comes to the
+    /// bitrate and its easy clips leave bits to its hard ones. 0: each
+    /// clip at the bitrate.
+    pub corpus_complexity: u32,
 }
 
 /// The lookahead below speed 9 unless set: with it, alt-refs take 10 to
@@ -440,6 +450,7 @@ impl Default for Vp9Options {
             tune: Tune::Psnr,
             noise_sensitivity: 0,
             temporal_layers: 1,
+            corpus_complexity: 0,
         }
     }
 }
@@ -696,6 +707,21 @@ impl Vp9Encoder {
         Ok(())
     }
 
+    /// A clip's complexity for [`Vp9Options::corpus_complexity`], from
+    /// its first pass (as [`Vp9Encoder::set_second_pass`] takes it): ten
+    /// times the mean bits a 16×16 block of luma its pictures take at
+    /// quantizer index 100 (the first pass's bits, scaled from its
+    /// quantizer as bits fall with the step to the power 1.25). The mean
+    /// over a corpus's clips, each weighed by its length, is its
+    /// complexity.
+    pub fn first_pass_complexity(&self, first_bits: &[u64], first_q: u8) -> u32 {
+        let c = match &self.lane {
+            Lane::Eight(c) => c.complexity(first_bits, first_q),
+            Lane::Deep(c) => c.complexity(first_bits, first_q),
+        };
+        c.round().min(f64::from(u32::MAX)) as u32
+    }
+
     /// Makes the next frame a key frame.
     pub fn force_keyframe(&mut self) {
         on_lane!(self, c => c.force_key = true);
@@ -886,6 +912,23 @@ impl<P: EncPixel> Core<P> {
 
     fn set_second_pass(&mut self, first_bits: &[u64], first_q: u8) {
         self.rc.pass2 = Some(Pass2::new(first_bits, first_q, self.opts.keyint));
+        if self.opts.corpus_complexity > 0 {
+            let c = self.complexity(first_bits, first_q);
+            self.rc.budget = (c / f64::from(self.opts.corpus_complexity))
+                .clamp(1.0 / CORPUS_RANGE, CORPUS_RANGE);
+        }
+    }
+
+    /// See [`Vp9Encoder::first_pass_complexity`].
+    fn complexity(&self, first_bits: &[u64], first_q: u8) -> f64 {
+        if first_bits.is_empty() {
+            return 0.0;
+        }
+        let blocks = (self.width.div_ceil(16) * self.height.div_ceil(16)) as f64;
+        let bd = self.opts.bit_depth;
+        let at = (step_of(first_q, bd) / step_of(CORPUS_Q, bd)).powf(EXP);
+        let mean = first_bits.iter().sum::<u64>() as f64 / first_bits.len() as f64;
+        10.0 * mean * at / blocks
     }
 
     /// Codes one picture: `planes` are Y, U, V with their strides.
@@ -2235,6 +2278,10 @@ struct Rate {
     layer: Option<usize>,
     layer_model: [Option<f64>; 3],
     layer_q: [Option<u8>; 3],
+    /// Two passes with [`Vp9Options::corpus_complexity`]: the clip's
+    /// share of the bitrate (its complexity over the corpus's); 1
+    /// otherwise.
+    budget: f64,
 }
 
 /// With temporal layers, the share of a frame's budget each layer's
@@ -2326,6 +2373,7 @@ impl Rate {
             layer: None,
             layer_model: [None; 3],
             layer_q: [None; 3],
+            budget: 1.0,
         }
     }
 
@@ -2474,7 +2522,8 @@ impl Rate {
                 p.scene_at(self.frames as usize, kind == 0);
             }
             let s1 = step_of(p.q, self.opts.bit_depth);
-            let total = f64::from(self.opts.bitrate) * seconds.max(1e-3) * frames as f64;
+            let total =
+                f64::from(self.opts.bitrate) * seconds.max(1e-3) * frames as f64 * self.budget;
             let done = (self.frames as usize).min(frames);
             let (spent, pred) = (p.spent.iter().sum::<f64>(), p.pred.iter().sum::<f64>());
             // (The prior and the pictures past the end at the scene's weight.)
@@ -2811,6 +2860,11 @@ fn layer_of(layers: u8, at: u32) -> (u8, u8, u8) {
         _ => (2, 0x00, 0x03),
     }
 }
+
+/// [`Vp9Options::corpus_complexity`]: the quantizer index its measure is
+/// at, and how far a clip's share of the bitrate may be from 1.
+const CORPUS_Q: u8 = 100;
+const CORPUS_RANGE: f64 = 4.0;
 
 /// Cyclic refresh ([`AqMode::CyclicRefresh`]): the share of the
 /// superblocks each inter frame refreshes, in percent (libvpx's

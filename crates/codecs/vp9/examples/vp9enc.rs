@@ -15,7 +15,8 @@
 //! with `keep_layers=N` writing only the packets of the lowest N; and a
 //! region of interest map: `roi_q=N` (the middle half N quantizer
 //! indices finer), `roi_ref=0..3` (its one reference), `roi_skip=1` (the
-//! top eighth of the rows skipped).
+//! top eighth of the rows skipped); with `twopass=1`, `corpus=N` (the
+//! corpus's complexity; the clip's own is printed).
 //! With `bits=10` or `12` the input has little-endian 16-bit samples
 //! (FFmpeg's `yuv420p10le` and the like).
 
@@ -116,6 +117,7 @@ fn main() -> Result<(), String> {
             "drop" => opts.drop_frame_pct = n,
             "noise" => opts.noise_sensitivity = n as u8,
             "layers" => opts.temporal_layers = n as u8,
+            "corpus" => opts.corpus_complexity = n,
             "keep_layers" => keep_layers = n as u8,
             "roi_q" => roi.0 = Some(n as i16),
             "roi_ref" => roi.1 = Some(n as u8),
@@ -205,6 +207,8 @@ fn main() -> Result<(), String> {
         for (data, _, _) in first.flush().map_err(|e| e.to_string())? {
             bits.push(data.len() as u64 * 8);
         }
+        // (The clip's complexity, for a corpus's `corpus=`.)
+        eprintln!("complexity {}", enc.first_pass_complexity(&bits, first_q));
         enc.set_second_pass(&bits, first_q);
         input = std::fs::File::open(&args[1]).map_err(|e| e.to_string())?;
     }

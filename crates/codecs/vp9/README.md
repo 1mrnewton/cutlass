@@ -1596,7 +1596,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-threads` | `g_threads` | `threads` (`threads=`) |
 | `-level` | `target-level` | `level`: named in `vpcC` (added), not enforced |
 | `-ts-parameters` | temporal layers | `temporal_layers` 2 or 3 (`layers=`, added): libvpx's L1T2 and L1T3 patterns; spatial layers are not |
-| `-corpus-complexity` | corpus VBR | missing |
+| `-corpus-complexity` | corpus VBR | `corpus_complexity` with `Vp9Encoder::first_pass_complexity` (`corpus=` with `twopass=1`, added), in this encoder's own unit; see "Options measured" |
 | `-enable-tpl` | TPL model | n/a: two passes have their own allocation |
 | `-pix_fmt yuv420p` … `yuv444p12le` | profiles 0–3 | `chroma`, `bit_depth` (`chroma=`, `bits=`) |
 | `-pix_fmt gbrp`, `gbrp10le`, `gbrp12le` | `VPX_CS_SRGB` | `ColorSpace::Srgb` with 4:4:4: planes G, B, R (added) |
@@ -1815,6 +1815,24 @@ here at a quarter of libvpx's cost to the whole picture for 1.3 times
 its gain in the region. libvpx (1.14 here) applies the map only at the
 realtime deadline: at the good deadline FFmpeg's `addroi` changes no
 byte.
+
+**Corpus VBR** (`corpus_complexity`, `-corpus-complexity`). In two
+passes, a clip spends the bitrate times its complexity over the
+corpus's (a quarter to four times), so that a corpus of clips comes to
+the bitrate as a whole and its easy clips leave bits to its hard ones.
+A clip's complexity is `Vp9Encoder::first_pass_complexity`: ten times the
+mean bits a 16×16 block of luma takes in its first pass, brought to
+quantizer index 100 (bits as the step to the power −1.25); the corpus's
+is the mean over its clips, each weighed by its length. libvpx's number
+is its first pass's mean modified error, which this encoder has no
+equivalent of, so the values do not carry over. The three clips as a
+corpus at 2 Mb/s (complexities 588, 293 and 311; the corpus 408):
+
+| | Three scenes | Still and jumps | Grainy pan | All |
+| --- | --- | --- | --- | --- |
+| Each at the bitrate | 2052 kb/s, 42.78 dB | 2028, 43.96 | 1967, 44.20 | 2022 kB |
+| `corpus=408` | 2975, 45.15 | 1486, 43.77 | 1501, 43.89 | 2048 kB |
+| libvpx `-cpu-used 4`, then `-corpus-complexity 400` | 2365 → 2312 | 2012 → 1686 | 1844 → 1717 | |
 
 Decoders: FFmpeg's `vp9` and `libvpx-vp9` decoders have no options of
 their own; of the generic ones, frame threads and slice (tile) threads

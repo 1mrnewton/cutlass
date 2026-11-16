@@ -2734,3 +2734,68 @@ fn a_finer_region_of_interest_comes_back_nearer_the_source() {
         );
     }
 }
+
+#[test]
+fn a_corpus_gives_its_hard_clip_the_bits_of_its_easy_one() {
+    // An easy clip (still) and a hard one (a noisy pan), two passes each,
+    // at a rate both spend.
+    let (w, h) = (160u32, 96u32);
+    let clips: [&dyn Fn(u32) -> VideoFrame; 2] = [&|_| moving(w, h, 0), &|i| noisy(w, h, i * 3, i)];
+    let base = super::Vp9Options {
+        threads: 2,
+        speed: 8,
+        ..super::Vp9Options::default()
+    };
+    let rate = 60_000u32;
+    let run = |clip: &dyn Fn(u32) -> VideoFrame, corpus: Option<u32>| -> (u32, u64) {
+        let first_opts = super::Vp9Options {
+            qindex: 120,
+            speed: 10,
+            ..base
+        };
+        let first: Vec<u64> = encode_with(first_opts, (w, h), 30, clip)
+            .iter()
+            .map(|p| p.data.len() as u64 * 8)
+            .collect();
+        let opts = super::Vp9Options {
+            bitrate: rate,
+            corpus_complexity: corpus.unwrap_or(0),
+            ..base
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let complexity = encoder.first_pass_complexity(&first, 120);
+        encoder.set_second_pass(&first, 120);
+        let mut bits = 0;
+        for i in 0..30u32 {
+            let p = encoder.push(&input(clip(i))).expect("push");
+            bits += p.iter().map(|p| p.data.len() as u64 * 8).sum::<u64>();
+        }
+        let p = VideoEncoder::drain(&mut encoder).expect("drain");
+        bits += p.iter().map(|p| p.data.len() as u64 * 8).sum::<u64>();
+        (complexity, bits)
+    };
+    let alone: Vec<(u32, u64)> = clips.iter().map(|c| run(*c, None)).collect();
+    let (easy, hard) = (alone[0].0, alone[1].0);
+    assert!(hard > 2 * easy.max(1), "{easy} and {hard}");
+    let corpus = (easy + hard) / 2;
+    let together: Vec<u64> = clips.iter().map(|c| run(*c, Some(corpus)).1).collect();
+    // The easy clip spends less than the bitrate and the hard one more;
+    // the two come to about what they spent alone.
+    assert!(
+        together[0] < alone[0].1,
+        "{} against {}",
+        together[0],
+        alone[0].1
+    );
+    assert!(
+        together[1] > alone[1].1,
+        "{} against {}",
+        together[1],
+        alone[1].1
+    );
+    let (sum, before) = (together[0] + together[1], alone[0].1 + alone[1].1);
+    assert!(
+        sum as f64 > 0.75 * before as f64 && (sum as f64) < 1.25 * before as f64,
+        "{sum} against {before}"
+    );
+}

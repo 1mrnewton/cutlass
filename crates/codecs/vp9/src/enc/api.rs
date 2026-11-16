@@ -240,6 +240,11 @@ pub struct Vp9Options {
     pub tune_content: TuneContent,
     /// The measure the choices aim at (libvpx's `tune`).
     pub tune: Tune,
+    /// A temporal denoiser of the source's luma before it is coded
+    /// (libvpx's `noise-sensitivity`, 0 to 6): each 16×16 block is pulled
+    /// toward the last denoised picture along its motion by libvpx's
+    /// steps ([`super::denoise`]); from 3 harder. 0: off.
+    pub noise_sensitivity: u8,
 }
 
 /// The lookahead below speed 9 unless set: with it, alt-refs take 10 to
@@ -327,6 +332,9 @@ impl Vp9Options {
         if self.aq && !matches!(self.aq_mode, AqMode::Off | AqMode::Variance) {
             return bad("vp9 variance AQ with another AQ mode");
         }
+        if self.noise_sensitivity > 6 {
+            return bad("vp9 noise sensitivity past 6");
+        }
         if self.drop_frame_pct > 100 {
             return bad("vp9 drop-frame threshold past 100");
         }
@@ -383,6 +391,7 @@ impl Default for Vp9Options {
             aq_mode: AqMode::Off,
             tune_content: TuneContent::Default,
             tune: Tune::Psnr,
+            noise_sensitivity: 0,
         }
     }
 }
@@ -432,6 +441,8 @@ struct Core<P: EncPixel> {
     last_prof: Option<super::arf::Profile>,
     /// Cyclic refresh: the superblock the next refresh starts at.
     refresh_at: usize,
+    /// [`Vp9Options::noise_sensitivity`]'s denoiser.
+    denoiser: Option<super::denoise::Denoiser<P>>,
 }
 
 /// A picture a reference slot holds, as its source.
@@ -768,6 +779,8 @@ impl<P: EncPixel> Core<P> {
             pos: (0, 0),
             last_prof: None,
             refresh_at: 0,
+            denoiser: (opts.noise_sensitivity > 0)
+                .then(|| super::denoise::Denoiser::new(opts.noise_sensitivity)),
         }
     }
 
@@ -1128,7 +1141,18 @@ impl<P: EncPixel> Core<P> {
         } else {
             0
         };
-        self.enc.load(planes);
+        match &mut self.denoiser {
+            Some(d) => {
+                // (A key frame starts the denoiser afresh.)
+                if key {
+                    d.reset();
+                }
+                let (w, h) = (self.width as usize, self.height as usize);
+                let y = d.filter(planes[0], (w, h), self.opts.bit_depth);
+                self.enc.load([(&y, w), planes[1], planes[2]]);
+            }
+            None => self.enc.load(planes),
+        }
         let qindex = self.rc.qindex(kind, seconds, cut);
         self.segment(key, qindex);
         // Between an alt-ref and its overlay, ALTREF is ahead.
@@ -1409,6 +1433,9 @@ impl<P: EncPixel> Core<P> {
         self.shown = 0;
         self.pos = (0, 0);
         self.refresh_at = 0;
+        if let Some(d) = &mut self.denoiser {
+            d.reset();
+        }
     }
 
     /// The place of the golden frame after the one (or the key frame) at

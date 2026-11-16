@@ -13,6 +13,7 @@
 pub mod api;
 pub mod aq;
 pub mod arf;
+pub mod denoise;
 pub mod probs;
 pub mod tile;
 pub mod tx;

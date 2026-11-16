@@ -1584,7 +1584,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ), or `aq_mode: AqMode::Variance` |
 | `-aq-mode 3` / `4` | cyclic refresh, equator360 | `aq_mode`: `AqMode::CyclicRefresh` (`aq=3`), `AqMode::Equator360` (`aq=4`), added |
 | `-aq-mode 2` | complexity AQ | missing: libvpx puts each superblock in a segment by the bits its search spent at the frame's quantizer, which this encoder knows only once the block is coded |
-| `-noise-sensitivity` | `noise-sensitivity` | missing (no temporal denoiser) |
+| `-noise-sensitivity` | `noise-sensitivity` | `noise_sensitivity` (`noise=`, added): a temporal denoiser of luma; see "Options measured" |
 | `-static-thresh` | `static-thresh` | `static_thresh` (`static_thresh=`, added) |
 | `-sharpness` | `sharpness` | `sharpness` (`sharpness=`, added) |
 | `-error-resilient default` | `error-resilient` | `error_resilient` (`error_resilient=1`, added); `partitions` is VP8's |
@@ -1720,6 +1720,36 @@ SSIM-Y in dB (FFmpeg's `ssim` filter) / PSNR-Y, against no tuning:
 Neither encoder gains SSIM by it on these clips; the grainy pan's SSIM
 stops rising at 15.3 dB from 1.7 Mb/s for both, so a BD-rate there means
 nothing. It is there for the option's sake, at what it costs.
+
+**Temporal denoiser** (`noise_sensitivity`, `-noise-sensitivity`). Before
+a picture is coded, each 16×16 block of its luma is pulled toward the last
+denoised picture along the block's motion (whole samples: the best of the
+zero vector, the block's last vector and its neighbours', refined by two
+and one samples, kept over zero only when it is an eighth better), by
+libvpx's `vp9_denoiser_filter` steps: a sample within 3 of the reference
+(4 from level 3) takes its value, the others move by 3, 4 or 6 toward it
+(one more at motion of up to 3 samples, two from level 3), and a block
+that would move by more than 2 (3) a sample on average is taken back by
+up to 3 a sample or left as it is; a block whose motion-compensated mean
+squared difference is over 144 is left as it is. The result is coded, and
+is the next picture's reference; chroma goes through as it is, as in
+libvpx. On the pan with noise of 34.7 dB added (60 frames, 720p; the
+clean pan is the truth), speed 9 at a constant bitrate, PSNR-Y against
+the clean picture at the same rate:
+
+| Rate | 1 Mb/s | 2 | 3 | 4 | 6 | 9 | 13 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Off | 36.26 dB | 37.84 | 38.77 | 39.14 | 38.36 | 37.58 | 37.36 |
+| `noise=1` | 36.24 | 37.77 | 38.90 | 39.26 | 39.30 | 38.73 | 38.03 |
+| `noise=3` | | | | 39.17 | 39.26 | 38.59 | 38.09 |
+
+Coded without it, the picture gets further from the clean one past 4
+Mb/s (the bits go to the noise); with it, up to 1.2 dB nearer. Against
+the noisy source it loses, as it should (1.2 to 1.9% BD-rate at 1 to 4
+Mb/s). It takes 3.7 ms a 720p picture on one thread (speed 9: from 0.89
+to 1.11 s for the 60 pictures). FFmpeg 6.1's `libvpx-vp9` here was built
+without libvpx's denoiser (`-noise-sensitivity 1` writes the same bytes),
+so there is no comparison.
 
 Decoders: FFmpeg's `vp9` and `libvpx-vp9` decoders have no options of
 their own; of the generic ones, frame threads and slice (tile) threads

@@ -10,7 +10,8 @@
 //! `keyint_min=N`, `max_intra=PCT`, `tile_columns=0..6`, `level=N`
 //! (10 × the level) and `lossless=1`; `drop=PCT` (FFmpeg's
 //! `-drop-threshold`: dropped frames leave gaps in the IVF timestamps),
-//! `screen=1` (`-tune-content screen`) and `ssim=1` (`-tune ssim`).
+//! `screen=1` (`-tune-content screen`), `ssim=1` (`-tune ssim`) and
+//! `noise=0..6` (`-noise-sensitivity`).
 //! With `bits=10` or `12` the input has little-endian 16-bit samples
 //! (FFmpeg's `yuv420p10le` and the like).
 
@@ -104,6 +105,7 @@ fn main() -> Result<(), String> {
             "tile_columns" => opts.tile_columns = Some(n as u8),
             "level" => opts.level = n as u8,
             "drop" => opts.drop_frame_pct = n,
+            "noise" => opts.noise_sensitivity = n as u8,
             "ssim" => {
                 if n != 0 {
                     opts.tune = Tune::Ssim;

@@ -2474,3 +2474,46 @@ fn ssim_tuning_moves_bits_to_flat_blocks() {
     assert!(ssim_flat < psnr_flat, "{ssim_flat} against {psnr_flat}");
     assert!(ssim_busy >= psnr_busy, "{ssim_busy} against {psnr_busy}");
 }
+
+#[test]
+fn the_denoiser_brings_a_noisy_still_picture_near_the_clean_one() {
+    // A still picture under fresh noise each frame, coded losslessly: what
+    // comes out is the denoised source.
+    let (w, h) = (64u32, 48u32);
+    let clean = moving(w, h, 0);
+    let noisy = |i: u32| {
+        let mut f = clean.clone();
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let n = ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 29;
+            *v = (i32::from(*v) + n as i32 - 4).clamp(0, 255) as u8;
+        }
+        f
+    };
+    let err = |level: u8| {
+        let opts = super::Vp9Options {
+            noise_sensitivity: level,
+            ..lag0(0)
+        };
+        let packets = encode_with(opts, (w, h), 8, noisy);
+        let mut dec = Decoder::new();
+        let mut last = None;
+        for p in &packets {
+            last = dec.decode(&p.data).expect("decode");
+        }
+        let pic = last.expect("shown");
+        // Chroma comes through as it went in.
+        assert_eq!(pic.u, vis(&clean.u));
+        let src = vis(&clean.y);
+        src.iter()
+            .zip(&pic.y)
+            .map(|(&a, &b)| u64::from(a.abs_diff(b)).pow(2))
+            .sum::<u64>()
+    };
+    let (raw, denoised) = (err(0), err(1));
+    assert!(denoised * 2 < raw, "{denoised} against {raw}");
+    let past = super::Vp9Options {
+        noise_sensitivity: 7,
+        ..lag0(0)
+    };
+    assert!(Vp9Encoder::with_options(w, h, past).is_err());
+}

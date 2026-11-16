@@ -1290,6 +1290,133 @@ quantizer gave 17.8%), and per-block filters (speed 5 with SMOOTH and
 SHARP tried, before the filter's changes: +18.1% on the gradient from
 +22.8%, in more time).
 
+**Smooth and synthetic pictures, again** (16 November 2026, after
+`e11866b6`). What "Synthetic pans" left: the gradient at +17.9% against
+FFmpeg's `-crf` (its key frame 1.7 dB under libvpx's at the same
+quantizer) and `testsrc2` at +18.1%. Coded alone at `q=68` and decoded
+by this crate's decoder with each block's mode, transform and end of
+block printed, libvpx's key frame of the gradient is 199 blocks of 32×32
+in DC, H, V and TM whose ends of block sum to 15 000, at 0.45 a sample
+of squared error; ours had 24 blocks of 64×64 and 60 of 8×8, mostly TM
+and the directional modes, ends of block summing to 4 000, at 0.67. Speeds 0 to 3 code that key frame alike, 0.2 dB under libvpx's
+curve; speed 5 was 0.6 dB under speed 3 for 6% more bits. Turning speed
+5's key frame features off one at a time, and the inter frames' (the
+gradient at speed 4: +7.5%, at 2: +5.0%), gave three causes, and the
+loop filter a fourth:
+
+- The intra modes a key frame's block tries: speed 5 tries the three
+  best by SATD, and only those within a fifth of the best's, and on a
+  smooth picture SATD ranks them poorly. With a full search (a fixed
+  quantizer up to speed 5, or a second pass) a key frame's blocks now
+  try the best four, however far behind (`KEY_FULL_SPEED`): its key
+  frame is 0.06 dB under speed 3's for 2% more bits, in 1.18 times the
+  instructions of a key frame (720p, a fine quantizer).
+- The inter candidate of large blocks: from 32×32 speed 5 tries one, the
+  best by SAD and vector rate, and on the gradient's pan the search
+  finds vectors a sample to four off the motion, down, whose SAD is a few
+  units under the exact vector's (0.1 to 1% of a 64×64 block's SAD: the
+  reference's quantization noise), where NEAREST has the exact one and
+  wins its trial (a sixth of the 64×64 blocks, a quarter of the 32×32
+  ones, with both tried). With a full search a NEW vector now also tries
+  the free one (NEAREST, NEAR or ZERO of its reference) ranked after it
+  within 3% of its score (`CLOSE_FREE`).
+- The loop filter level came from the quantizer. libvpx searches it
+  (`vp9_pick_filter_level`): on `testsrc2` its levels go from 1 to 14 at
+  `-crf 35`, where ours were 21, and halving ours gave 14.5%. Up to speed
+  5 the level is now searched (`pick_level`, libvpx's
+  `search_filter_level` on part of the picture): one superblock row in
+  four, spread over the frame, filtered in luma at the quantizer's level
+  and a quarter of it either side, moving to the side of less error
+  (libvpx's bias for the lower level kept), the step halved while the
+  level stands, down to 2; levels 2 to 61, whose masks the encoder
+  rebases from the quantizer's (`Mask::rebase`) rather than build them
+  again. The level found is kept only where the three planes' errors,
+  each against its own at the quantizer's level, fall by 1% on average.
+  A frame whose level is searched is not filtered row by row as its tiles
+  come (the frames are the same whatever the threads).
+- Not a cause: the key frame's quantizer (libvpx's `-crf` codes it at a
+  quarter of the inter step; ours at 0.35 of it): at 0.25 no better, at
+  0.18 1 to 1.6 points worse.
+
+The gradient and `testsrc2` (bytes of the IVF, PSNR-Y; speed 5, four
+threads), FFmpeg's `-crf` against `crf=` here:
+
+| crf | Gradient, FFmpeg | Before | Now | `testsrc2`, FFmpeg | Before | Now |
+| --- | --- | --- | --- | --- | --- | --- |
+| 15 | 17767, 55.10 dB | 13491, 52.43 dB | 13433, 52.83 dB | 357003, 54.36 dB | 339547, 52.39 dB | 339601, 52.41 dB |
+| 25 | 14431, 53.64 dB | 9941, 50.94 dB | 9991, 51.37 dB | 272682, 50.37 dB | 255025, 48.53 dB | 254403, 48.54 dB |
+| 35 | 8704, 51.31 dB | 7760, 48.73 dB | 7491, 49.01 dB | 175644, 45.59 dB | 154368, 43.25 dB | 153152, 43.34 dB |
+| 45 | 6428, 48.40 dB | 6505, 46.04 dB | 6269, 46.38 dB | 87402, 40.61 dB | 68119, 38.26 dB | 65830, 38.47 dB |
+| 55 | 5395, 45.09 dB | 5969, 42.68 dB | 5555, 43.10 dB | 33071, 37.41 dB | 22194, 34.55 dB | 21597, 34.56 dB |
+
+At the same PSNR-Y, the gradient +17.9% → +10.9%, `testsrc2` +18.1% →
++15.2%. By part: the level's search alone, +17.9% and +15.5%; with the
+key frames, +13.2% and +15.1%; the key frames and free vectors without
+the search, +10.9% and +17.7%. On the README's three clips, against the
+build before (BD-rate at the same PSNR-Y / U / V / FFmpeg's average /
+6:1:1, four threads; constant quality at `q=60` to `210`):
+
+| Before → now | Three scenes | Still scene, two jumps | Grainy pan |
+| --- | --- | --- | --- |
+| Speed 5 | +0.0 / −0.1 / −0.6 / −0.1 / −0.1 | −2.6 / −2.2 / −2.4 / −2.4 / −2.5 | 0.0 / 0.0 / 0.0 / 0.0 / 0.0 |
+| Two passes | −0.8 / −1.5 / −1.1 / −1.0 / −1.0 | −2.1 / −0.2 / −0.3 / −1.1 / −1.4 | −1.7 / +0.1 / +0.2 / −0.6 / −0.9 |
+| Constant quality | −0.6 / −1.3 / −1.2 / −0.8 / −0.7 | −3.8 / −2.5 / −2.4 / −3.1 / −3.4 | −1.4 / −2.1 / −2.0 / −1.7 / −1.6 |
+
+Speeds 6, 9 and 10 write the same streams as before (the pan at speed 5
+too: its searched levels never took off the 1%). Against FFmpeg now:
+speed 5 −3.9 / −1.6 / −4.4 / −3.6 / −3.7 on the three scenes, −22.7 /
+−36.2 / −36.5 / −30.7 / −27.6 on the still scene, −31.9 / −50.4 / −50.5
+/ −43.5 / −39.4 on the pan; two passes −7.4 / −3.6 / −7.5 / −6.7 / −6.9,
+−38.4 / −35.2 / −35.2 / −36.6 / −37.2, −17.0 / −30.7 / −30.0 / −24.0 /
+−22.3; constant quality −4.9 / −16.3 / −17.3 / −10.0 / −8.1, −8.2 /
+−42.2 / −41.9 / −31.4 / −23.1, −27.6 / −46.6 / −46.7 / −39.4 / −34.6.
+CPU time on one thread against the build before (1 and 3 Mb/s on the
+three scenes and the pan, 0.5 and 2 on the still scene, `q=80` and
+`160` at constant quality; medians of three rounds, in turn): speed 5
+0.995, 1.025 and 0.997; speed 6 1.008, 1.013 and 1.017 (the same
+streams: the noise of the measure); speed 10 0.991, 1.015 and 0.963;
+two passes 1.008, 1.018 and 1.035; constant quality 1.026, 1.059 and
+1.030 (the key frames' fuller search and the free vectors' trials, 2%
+each on the still scene). Speed 10 on four threads against FFmpeg's
+realtime 8: 0.97, 1.01 and 0.84 (the build before in the same runs:
+0.94, 1.01 and 0.86). 11 of the identity check's 41 configurations
+changed (speeds 2 and 5 at a fixed quantizer, and at a bitrate where a
+searched level took off the 1%; two passes; constant quality), the
+other 30 (every one at speeds 6 to 10) did not; 56 decodes of 14 new streams (the gradient
+and `testsrc2` at `crf=35`, `testsrc2` in two passes and at speed 2, 10
+bits at three quantizers, 4:4:4, a noisy picture at a bitrate, speed 2
+on one thread, the three clips' constant quality, two passes and speed
+5) are the same in FFmpeg's `vp9` (threaded and on one thread), libvpx
+and this decoder.
+
+Tried and left out: the level searched on luma alone (libvpx's measure):
+the grainy pan at speed 5 lost 4 points of PSNR-U, as its luma's error
+wants less filter and its chroma's more; the three planes' errors
+summed, 2.3 points; each plane's against its own, averaged, 1.6; with a
+margin of 1%, 0.4; with level 0 (no filter) left out of the levels, as
+now, none (the 0.4 was the pan's key frame turning its filter off). The
+whole frame searched (`testsrc2` 0.4 points better than a row in four)
+took 10% more time at speed 5, a row in three 5%, libvpx's single band
+in the middle (an eighth of the rows) lost 2 points on `testsrc2`. The
+key frames' fuller search at a bitrate in one pass: the pan lost 2.2
+points of PSNR-U for 2.5 of PSNR-Y (the key frame's size moves the rate
+control there), so only with a full search; with the key frames' trials
+quantized by RD too (not by the dead zone), the gradient a point better,
+for 1.69 times a key frame's instructions. The free vector preferred
+without its trial (ranked first within 3%, at every speed and mode): 1.8
+points lost on the still scene at speed 6, 0.6 on the pan at speed 5. Two inter candidates at every
+32×32 and larger block with a full search: the gradient at +8.9%, for
+5% more time at constant quality on the pan; the second candidate tried
+whenever within 3% of the first (not only a free one after a NEW), 3
+to 7% more time at a bitrate. Rectangular partitions (speed 4's halves, tried before
+the split): `testsrc2` 5 points better, in 2.5 times the time; after a
+split that won and only where its quarters pair up across or down, 0.6
+points; after every split that won, 3.6 points for 1.66 times the time.
+`testsrc2` without alt-refs: 2.2 points better there, 8 worse on the
+gradient. What is left: `testsrc2` at +15.2% (rectangular partitions
+are 5 points of it; with these changes speed 4 is at +13.0%, speed 2 at
++6.1%), the gradient at +10.9% (speed 2: +5.0%).
+
 Still behind: `testsrc2` alone, where libvpx is ahead at every speed
 here on PSNR-Y too (at fixed quantizers against `-crf`: +9% / +33% at
 PSNR-Y / U at speed 5, −2.8% / +18% at speed 1); its key frame takes 9%

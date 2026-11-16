@@ -629,7 +629,9 @@ const ONE_CAND_SPEED: u8 = 5;
 /// exact one's (the reference's quantization noise), and their bits lose
 /// to NEAREST's at the exact vector: on the gradient of "Synthetic pans"
 /// in the README, the 64×64 blocks' second candidate won a sixth of the
-/// time (a quarter of the 32×32 ones'). At 1%, two thirds of the gain.
+/// time (a quarter of the 32×32 ones'), and the stream went from 13.2%
+/// over libvpx's at the same PSNR-Y to 10.9% (at 1%, two thirds of
+/// that), for 2% more time at a fixed quantizer on the README's clips.
 const CLOSE_FREE: f64 = 0.03;
 
 /// From this speed the sub-sample refinement tries, of the four diagonals,
@@ -669,10 +671,11 @@ const DZ_TRIAL_SPEED: u8 = 5;
 /// best's). On a smooth picture SATD ranks the modes poorly: on the
 /// gradient of "Synthetic pans" in the README, a key frame at speed 5 was
 /// 0.6 dB under speed 3's at the same quantizer, for 6% more bits (now
-/// 0.06 dB and 2%), and the stream 15.2% over libvpx's at the same PSNR-Y
-/// (now 10.9%). A key frame takes 1.18 times the instructions (720p,
-/// fine quantizer); with the trials quantized by RD too (not by the dead
-/// zone, [`DZ_TRIAL_SPEED`]), 10.0% for 1.69 times. Not at a bitrate in
+/// 0.06 dB and 2%), and the stream (with the loop filter's search) 17.9%
+/// over libvpx's at the same PSNR-Y (now 13.2%). A key frame takes 1.18
+/// times the instructions (720p, fine quantizer); with the trials
+/// quantized by RD too (not by the dead zone, [`DZ_TRIAL_SPEED`]), a
+/// point fewer bits there for 1.69 times. Not at a bitrate in
 /// one pass, where the key frame's size moves the rate control: the
 /// grainy pan's chroma lost 2 points at the same PSNR for its luma's 2.5.
 pub const KEY_FULL_SPEED: u8 = 5;

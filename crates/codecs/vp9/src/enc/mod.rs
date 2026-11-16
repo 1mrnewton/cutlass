@@ -67,9 +67,9 @@ pub struct FrameParams {
     /// rather than measured on their coefficients ([`tile`]'s
     /// `BREAKOUT_SPEED`, `TX_DOMAIN_SPEED`): a second pass, and a fixed
     /// quantizer at speed 5 (see [`api`]'s `FULL_SEARCH_SPEED`). In two
-    /// passes on the README's three scenes, 2 points fewer bits at the
-    /// same PSNR-Y and 7 at PSNR-U, in 1.1 to 1.25 times the time (a
-    /// third of libvpx's).
+    /// passes on the README's three scenes, 1.7 points fewer bits at the
+    /// same PSNR-Y and 3.6 to 5.2 at PSNR-U and V, in 1.1 to 1.25 times the
+    /// time (a third of libvpx's).
     pub full_search: bool,
     /// An alt-ref of a stream at speed 8 or more, coded at speed 6 (see
     /// [`api`]'s `ARF_SPEED`): chroma is weighed as at speed 8, past

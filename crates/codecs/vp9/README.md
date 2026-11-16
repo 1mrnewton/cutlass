@@ -278,7 +278,11 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   the same PSNR-Y / averaged PSNR, in a third less time, most of it the noise's
   end of the search. One pass was unchanged by that round, bit for bit;
   since, one pass keeps the reference pool too, up to speed 7 (see
-  "Chroma" in "Against FFmpeg's libvpx-vp9").
+  "Chroma" in "Against FFmpeg's libvpx-vp9"), and a cheaper one at speeds
+  9 and 10 (see "The gaps" there). Since then too, the second pass codes
+  a scene that predicts better than the key frame's at a finer step
+  (`api::SCENE_BETA`), searches without the one-pass breakouts
+  (`FrameParams::full_search`) and weighs chroma's bits 0.75 of luma's.
 
   Where the chroma gap came from: the grainy pan is of a fractal, flat
   colour gradients and an edge of fine colour detail, and its luma moves
@@ -922,6 +926,167 @@ the picture's noise (time, but 10 to 25% under the rate), and a stop
 of the partition search at a coded block under the picture's noise (40
 points worse).
 
+**The gaps.** After "Chroma", speed 5 at a bitrate was ahead of
+FFmpeg's default on every plane and average of every clip, but two
+passes, speed 10, constant quality and speed 6 were still behind on the
+three scenes in one column or two. In the round after (16 November
+2026, commits `75836650`, `8e2e64ed` and `c0063234`), each against its
+FFmpeg counterpart, four threads, BD-rate at the same PSNR-Y / PSNR-U /
+PSNR-V / FFmpeg's average / 6:1:1 average, before → now. Speed 5 at a
+bitrate writes the same streams as before (0.53, 0.61 and 0.72 of
+FFmpeg's time, from 0.53, 0.62 and 0.73 in the same runs), and so does
+speed 10 at a fixed quantizer, the first pass of two.
+
+| Two passes, `-pass 1/2` | Y | U | V | FFmpeg avg | 6:1:1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| three scenes, before | −4.7% | +9.6% | +4.5% | −0.1% | −1.7% |
+| three scenes, now | −6.4% | −0.9% | −5.3% | −5.1% | −5.6% |
+| still scene, before | −38.3% | −32.8% | −32.7% | −35.2% | −36.4% |
+| still scene, now | −37.9% | −34.2% | −34.1% | −35.7% | −36.5% |
+| grainy pan, before | −15.9% | −25.5% | −24.9% | −21.0% | −19.8% |
+| grainy pan, now | −14.6% | −28.8% | −28.0% | −22.0% | −20.2% |
+
+in 0.30, 0.32 and 0.38 of libvpx's two passes' time (0.27, 0.29 and
+0.35 before; 6.5, 6.4 and 5.8 s a stream against 22.1, 19.7 and 15.5 s,
+the mean over the rates of medians of three runs interleaved). What
+moved it:
+
+- A scene that starts at a cut and predicts better than the last key
+  frame's scene is coded at a finer step (`api::SCENE_BETA`): the
+  ratio of its first picture's first-pass bits to its inter frames'
+  (over the 12 pictures after it) is taken against the key frame
+  scene's, and the step scaled by that to the power −0.45, down to half
+  (never coarser). The three scenes' grainy pan predicts nearly whole
+  from the reference pool (a ratio of 15 against the fractal's 5.6) and
+  its inter frames code under 1 kB at 2 Mb/s, so its quality is what its
+  golden frames and alt-refs carry on: at one step for the clip it took
+  120 kB of the 770 at 2 Mb/s with PSNR-U at 39.9 dB, where libvpx gives
+  it 193 kB for 41.8 dB (its alt-refs every four pictures at q 55 to 84);
+  at 0.65 of the step (with the rest of this round), 153 kB for 41.5
+  dB, and `testsrc2` 275 kB where it took 309. The rate model weighs the
+  scene's first-pass bits by the step's scale up to where the first
+  pass shows the scene end (`Pass2::scene_end`). A clip without a cut
+  is coded as before.
+- The second pass leaves out the partition search's fast breakouts and
+  measures inter trials by reconstructing them, not on their
+  coefficients (`FrameParams::full_search`): on the three scenes (on
+  two threads, with the step above) 1.7 points fewer bits at the same
+  PSNR-Y and 3.6 to 5.2 at PSNR-U and V, in 1.1 to 1.25 times the time.
+- Golden intervals by motion count a picture as moving only when one
+  block in ten of its sample moved (`arf::MOVED_SHARE`): `testsrc2`'s
+  few moving things (a twentieth of its blocks, 12 samples a picture)
+  gave it golden frames every 6 pictures, alt-refs of 6 to 11 kB at
+  1 Mb/s, where libvpx's are 16 apart and take 23 and 8 kB (on the three
+  scenes, two threads, 1.3 points fewer bits at the same PSNR-Y, 0.7 and
+  0.8 at PSNR-U and V).
+- The second pass weighs chroma's bits 0.75 of luma's (0.8): PSNR-U on
+  the three scenes from +0.04% to −0.9% for 0.4 points of PSNR-Y, and
+  0.4 and 1.3 points of PSNR-Y for 1 to 3 at PSNR-U on the other two.
+
+| Speed 10, realtime 8 | Y | U | V | FFmpeg avg | 6:1:1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| three scenes, before | −6.0% | +4.9% | +1.7% | −2.5% | −4.1% |
+| three scenes, now | −8.3% | −0.7% | −2.5% | −5.8% | −7.0% |
+| still scene, before | −66.7% | −52.8% | −53.4% | −61.3% | −64.8% |
+| still scene, now | −69.3% | −58.0% | −58.4% | −65.0% | −67.8% |
+| grainy pan, before | n/a | −56.6% | −57.5% | −67.8% | −74.3% |
+| grainy pan, now | n/a | −60.7% | −61.3% | −70.3% | n/a |
+
+| Speed 9, realtime 8 | Y | U | V | FFmpeg avg | 6:1:1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| three scenes, before | −14.7% | −2.9% | −5.3% | −10.6% | −12.5% |
+| three scenes, now | −17.0% | −9.4% | −10.7% | −14.4% | −15.6% |
+| still scene, before | −68.9% | −55.0% | −55.7% | −63.5% | −67.0% |
+| still scene, now | −72.0% | −59.6% | −60.0% | −67.2% | −70.4% |
+| grainy pan, before | n/a | −58.8% | −59.4% | −69.6% | −75.7% |
+| grainy pan, now | n/a | −61.2% | −61.7% | −71.2% | −76.9% |
+
+(n/a: the curves do not meet.) Speeds 9 and 10 at a bitrate keep a
+reference pool too (`api::RT_POOL_SPEED`), a cheap one: every shown
+picture refreshes one of slots 3 to 5, and GOLDEN reads the last of
+them (or the golden frame) that stands an even number of luma samples
+from where the content is now, so that chroma predicts from it at whole
+samples; its blocks try the vector of that displacement (the vector
+from neither NEAREST nor NEAR: at these speeds GOLDEN is not searched).
+Where the content stands is the sum of each picture's motion, found on
+luma profiles (`arf::Profile`: the differences from the sample above
+summed along each row, and from the one to the left down each column,
+the offsets of least difference within 32 samples): with the extra
+GOLDEN candidate, 2.3% more instructions at speed 10 on the still
+scene's clip. On the three scenes at 2 Mb/s the pan's PSNR-U went from
+34.9 to 35.4 dB at the same bits.
+Time against FFmpeg's realtime 8: on one thread, paired runs pinned to
+their own cores (medians of five), 0.89, 0.90 and 0.88 (0.89, 0.84 and
+0.90 before); on four threads, interleaved (eleven runs), 1.00, 1.02
+and 0.90 (0.97, 1.00 and 0.86 before in the same runs, where the
+previous round measured 0.91, 0.91 and 0.82: the machine's load moves
+these by several points, and in this sitting FFmpeg ran relatively
+faster). So speed 10 is over 0.95 of FFmpeg's time on four threads on
+two clips here, 3 to 4% over the build before. Speed 9: 0.95, 1.02 and 0.86 on four threads
+(0.94, 1.01 and 0.82 before).
+
+| Constant quality, `-crf` | Y | U | V | FFmpeg avg | 6:1:1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| three scenes, before | +0.2% | −10.2% | −10.1% | −4.1% | −2.5% |
+| three scenes, now | −4.3% | −15.6% | −16.6% | −9.4% | −7.5% |
+| still scene, before | −0.9% | −33.3% | −33.3% | −23.1% | −15.2% |
+| still scene, now | −5.5% | −41.3% | −41.2% | −29.9% | −21.3% |
+| grainy pan, before | −21.1% | −39.7% | −39.7% | −32.5% | −27.9% |
+| grainy pan, now | −25.9% | −45.9% | −45.9% | −38.4% | −33.4% |
+
+A fixed quantizer at speed 5 searches as the second pass does
+(`api::FULL_SEARCH_SPEED`), in 1.22, 1.39 and 1.38 times the time:
+0.55, 0.82 and 0.76 of libvpx's (3.96, 3.21 and 2.21 s a stream against
+7.23, 3.93 and 2.90 s; 0.45, 0.59 and 0.55 before; the mean over each
+curve's points of medians of three runs). With every one-pass prune
+left out too (the second pass's whole search), the same within a point
+in 1.2 times that time.
+
+| Speed 6, FFmpeg's default | Y | U | V | FFmpeg avg | 6:1:1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| three scenes, before | −1.5% | +0.2% | −2.1% | −1.3% | −1.4% |
+| three scenes, now | −1.0% | −1.4% | −3.3% | −1.5% | −1.3% |
+| still scene, before | −21.2% | −34.9% | −35.1% | −29.3% | −26.2% |
+| still scene, now | −20.2% | −36.1% | −36.3% | −29.7% | −26.1% |
+| grainy pan, before | −30.7% | −49.1% | −49.2% | −42.3% | −38.3% |
+| grainy pan, now | −29.8% | −50.3% | −50.4% | −42.7% | −38.2% |
+
+Speed 6 in one pass weighs chroma's bits 0.75 of luma's
+(`tile::CHROMA_RATE_SIX`; 0.7: −0.3 / −1.4% at PSNR-Y / U on the three
+scenes), in 1.00, 0.93 and 0.99 of speed 5's time (0.53, 0.57 and 0.71
+of FFmpeg's): on the three scenes speed 6 is no faster than speed 5 in
+these runs, nor was it before (0.99). Speed 7's alt-refs, coded at
+speed 6, take it too: on the three clips 0.2 to 2.6 points fewer bits at
+every column. Speed 8's alt-refs weigh chroma as speed 8 does and stop
+the partition search at a cheap block at the thresholds of before the
+pool (`FrameParams::fast_arf`): speed 8 writes the streams it wrote
+before "Chroma", which had cost it 1 to 3 points at PSNR-Y.
+
+Tried and left out in this round. Two passes: finer golden frames and
+alt-refs only in groups that predict well (libvpx's boost: to half the
+step, PSNR-U on the three scenes +9.6% to +8.5% but the still scene's
+from −32.8% to −25.7%); golden intervals of 32 samples of motion (4
+pictures on the pan, as libvpx: worse on all three clips); the scene's
+step by a window of 12 pictures around each picture instead of a scene's
+(clips without cuts lost 3 to 7 points of PSNR-Y: the window's ratio
+wanders); chroma's error weighed 3 and its bits 0.6 in the second pass
+(the three scenes' PSNR-U −0.6%, but PSNR-Y −0.5% there and 2 to 3
+points elsewhere); the inter candidates' margin left out too (PSNR-U
+−0.6%, the still scene's PSNR-Y 1.2 points worse); six candidates
+ranked with their chroma (−0.3%); speed 4's search in the second pass
+(the three scenes at −6.4 / +5.7 / −0.1%, every clip better, but 1.45
+to 1.75 times the time: the pan at 0.53 to 0.69 of libvpx's). Speed 10:
+the median of the coded vectors on LAST as the motion (they run short,
+6 samples where the content moves 7 or 8, and the parity is lost),
+nine vectors around the last motion voted on by blocks of detail
+(content moving 7.5 samples a picture splits the vote), and
+`arf::shift` itself on blocks 64 apart (the same streams as the
+profiles, 5 to 9% more time); the two best candidates ranked with their
+chroma (the fractal 1 dB under at PSNR-Y, the pan no better). Speed 6:
+chroma's error weighed 2.5 (PSNR-U −0.3% only). Speed 8: the old stop
+with speed 6's chroma weights (0.3 to 1.4 points better at PSNR-U, 0.8
+worse at PSNR-Y on the three scenes).
+
 Still behind: `testsrc2` alone, where libvpx is ahead at every speed
 here on PSNR-Y too (at fixed quantizers against `-crf`: +9% / +33% at
 PSNR-Y / U at speed 5, −2.8% / +18% at speed 1); its key frame takes 9%
@@ -1270,12 +1435,17 @@ What is left:
 - Time on the pan with the reference pool in one pass (see "Chroma"):
   0.81 of FFmpeg's on four threads and 0.78 to 0.82 on one, at its
   finer quantizers; and its rate, 3 to 16% under (see there).
-- Chroma, and the three scenes' margin. Speed 5 is now ahead of libvpx's
+- Chroma, and the three scenes' margin. Speed 5 is ahead of libvpx's
   cpu-used 1 there on every plane and average, but by 1.1 to 4.6
-  points (on four threads: −3.2% PSNR-Y, −1.1% PSNR-U), and speed 6 is
-  at +0.2% at PSNR-U; `testsrc2` is where it is lost (see "Chroma").
-  Speed 10 is +4.9% at PSNR-U there and two passes +9.6% (their PSNR-Y
-  −6.0% and −4.7%). Before this round: speed 6 was ahead of libvpx's
+  points (on four threads: −3.2% PSNR-Y, −1.1% PSNR-U); `testsrc2` is
+  where it is lost (see "Chroma"). After "The gaps", every mode is
+  ahead of its FFmpeg counterpart on every column there, but narrowly
+  at PSNR-U: speed 6 −1.4%, speed 10 −0.7%, two passes −0.9% (at a
+  chroma rate of 0.8 in the second pass, +0.04%); a run on another
+  number of threads (other tile columns) moves these by a point. Speed 6
+  takes speed 5's time on the three scenes (it did before too), and
+  speed 10 0.90 to 1.02 of FFmpeg's realtime 8 on four threads in the
+  last runs (0.86 to 1.00 before, in the same runs: 3 to 4% more). Before "Chroma": speed 6 was ahead of libvpx's
   cpu-used 1 on the three scenes by 2.0 points at the averaged PSNR (8.2
   at PSNR-Y), speed 5 by 3.0. At speed 6, a coarser gate on the smaller transform (128 bits an
   8×8) lost 5 points, intra left out of 64×64 blocks 1.1, speed 5's
@@ -1415,16 +1585,16 @@ carries the colour space, range and render size.
 - Against FFmpeg's `libvpx-vp9` as FFmpeg runs it ("Against FFmpeg's
   libvpx-vp9" above), the default speed takes fewer bits at the same
   PSNR-Y, PSNR-U, PSNR-V and averaged PSNR on every clip (1.1% to 55%),
-  in 0.55 to 0.82 of libvpx's time on one thread and on four; two passes
-  in about a third of its time (but 9.6% more bits at the same PSNR-U on
-  the three scenes); constant quality with 2.5% to 28% fewer bits at the
-  same 6:1:1 average (PSNR-Y level on the three scenes); speed 6 fewer
-  bits than libvpx's default on every clip at PSNR-Y and the averages
-  (+0.2% at PSNR-U on the three scenes), in 0.95 to 0.98 of speed 5's
-  time. Speed 10
-  takes 0.82 to 0.91 of libvpx realtime 8's time on four threads and
-  0.83 to 0.89 on one, with 4% to 74% fewer bits at the same PSNR; speed
-  9 takes 0.77 to 0.94 of it, with 12% to 76% fewer.
+  in 0.53 to 0.82 of libvpx's time on one thread and on four; two passes
+  fewer bits at every PSNR on every clip (0.9% to 38%) in 0.30 to 0.38 of
+  its time; constant quality with 4.3% to 46% fewer bits at every PSNR;
+  speed 6 fewer bits than libvpx's default at every PSNR on every clip
+  (1.0% to 50%), but in speed 5's time on the three scenes (0.93 to
+  1.00 of it). Speed 10 has 0.7% to 70% fewer bits than libvpx realtime
+  8 at every PSNR, in 0.88 to 0.90 of its time on one thread and 0.90 to
+  1.02 on four (see "The gaps": over 0.95 on two clips in the last
+  runs, where the build before took 0.97 and 1.00); speed 9 9% to 77%
+  fewer, in 0.86 to 1.02 of it on four threads.
 - At equal time the encoder is within about 8% of libvpx's good presets
   on moving content (ahead with more time, and far ahead on still content
   and against the realtime presets), and its fastest speed takes libvpx

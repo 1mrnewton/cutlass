@@ -1546,8 +1546,8 @@ const RT_SHIFT_RANGE: isize = 32;
 /// ([`super::FrameParams::full_search`]). Against FFmpeg's `-crf 24` to
 /// `48` at `q=60` to `210`, speed 5: on the README's three clips, from
 /// +0.2 / −0.9 / −21.1% at the same PSNR-Y to −4.3 / −5.5 / −25.9%, and
-/// 5 to 7 points fewer bits at PSNR-U and V, in 1.25 to 1.4 times the
-/// time (at speed 5 a fixed quantizer took half of libvpx's).
+/// 5 to 8 points fewer bits at PSNR-U and V, in 1.22 to 1.39 times the
+/// time (0.55 to 0.82 of libvpx's, from 0.45 to 0.59).
 const FULL_SEARCH_SPEED: u8 = 5;
 
 /// See [`super::FrameParams::fast_arf`].
@@ -1685,10 +1685,11 @@ const K_PRIOR_FRAMES: f64 = 4.0;
 /// each picture's quality on into the ones after it (their inter frames
 /// code nearly nothing). On the README's three scenes, where the grainy
 /// pan predicts whole from the reference pool (a ratio of 15 against the
-/// fractal's 5.6), the pan at 0.65 of the step: at 2 Mb/s, PSNR-U 41.4
-/// dB where it was 39.9 for 32 kB more of the 770, and 6 points fewer
-/// bits at the same PSNR-U over the clip. A clip of one scene (no cut)
-/// is coded as before.
+/// fractal's 5.6), the pan at 0.65 of the step: at 2 Mb/s (with the
+/// other changes of that round) PSNR-U 41.5 dB where it was 39.9, for
+/// 33 kB more of the 770, and 6 points fewer bits at the same PSNR-U over
+/// the clip (on two threads, against libvpx's two passes). A clip of one
+/// scene (no cut) is coded as before.
 const SCENE_BETA: f64 = 0.45;
 const SCENE_MIN: f64 = 0.5;
 

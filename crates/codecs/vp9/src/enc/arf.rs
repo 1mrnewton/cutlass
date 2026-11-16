@@ -201,8 +201,9 @@ pub fn reachable<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize, bd: u8) 
 /// a still picture with a few things moving across it. FFmpeg's
 /// `testsrc2` (a twentieth of its blocks move, 12 samples a picture) had
 /// golden frames every 6 pictures in two passes; libvpx gives it 16. At 12
-/// (with the other changes of that round, on the README's three scenes),
-/// 2 points fewer bits at the same PSNR-Y, 3 at PSNR-U.
+/// (with the other changes of that round, on the README's three scenes,
+/// two threads), 1.3 points fewer bits at the same PSNR-Y, 0.7 and 0.8 at
+/// PSNR-U and V.
 const MOVED_SHARE: usize = 10;
 
 /// How far `to` moved from `from` (luma, `w`×`h`), in whole samples: over

@@ -1103,14 +1103,18 @@ carries the colour space, range and render size.
   back: to look into).
 - Against FFmpeg's `libvpx-vp9` as FFmpeg runs it ("Against FFmpeg's
   libvpx-vp9" above), the default speed takes fewer bits at the same
-  PSNR on every clip and mode measured but constant quality on the still
-  scene, in 1.04 to 1.9 times libvpx's time.
+  PSNR on every clip, in 0.51 to 0.74 of libvpx's time on one thread and
+  on four; two passes in about a third of its time. Constant quality is
+  1.3% behind on the still scene, and the realtime speeds take 0.93 to
+  1.33 of libvpx realtime's time, with 4% to 74% fewer bits at the same
+  PSNR.
 - At equal time the encoder is within about 8% of libvpx's good presets
   on moving content (ahead with more time, and far ahead on still content
   and against the realtime presets), and its fastest speed takes libvpx
   realtime's time at equal bitrate with much better quality; tile columns
-  limit how well 4 threads share a 720p frame. The decoder is level with FFmpeg on 4 threads on 4:2:0 and
-  1.1–1.25× its time on one core. Its pictures go out without a copy, as
+  limit how well 4 threads share a 720p frame. The decoder takes 0.86–0.94
+  of FFmpeg's time on 4 threads and on one core ("Speed and size against
+  FFmpeg"). Its pictures go out without a copy, as
   shared views of the decoder's own planes at their padded stride
   (`Plane::samples` is a `Samples`, copied only on a first write;
   `Plane::packed` gives the visible rows); 10- and 12-bit samples are

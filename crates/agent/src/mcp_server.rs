@@ -304,7 +304,13 @@ pub(crate) fn input_schema(tool: &str) -> Value {
                     "items": { "type": "object" },
                 },
                 "dry_run": { "type": "boolean" },
-                "request_id": { "type": "string" },
+                "request_id": {
+                    "type": "string",
+                    "description": "Optional. Send the same combo again under the id it \
+                        committed with, after a lost answer, and it is answered again, not \
+                        written twice; another combo under that id is refused. A dry run or \
+                        a refused combo does not use up its id.",
+                },
             },
             "required": ["expected_revision", "requests"],
         });

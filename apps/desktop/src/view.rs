@@ -20559,11 +20559,11 @@ mod tests {
     }
 
     /// The title's Basic page with its placement, blend and style sections
-    /// open: each switch turns its part on and off, and the window paints
-    /// with every part styled. With `CUTLASS_RENDER_DIR` set the steps
-    /// between are painted too and every picture is kept there. A frame
-    /// this tall is slow on a runner with no GPU, which has 10 seconds for
-    /// each, so only the styled one is painted without it.
+    /// open: each switch turns its part on and off. With
+    /// `CUTLASS_RENDER_DIR` set each step is painted by the real renderer
+    /// and kept there to look at. Without it nothing is painted: the window
+    /// is 3200 points tall to hold every section, and on a runner with no
+    /// GPU one frame of it ran past the 10 seconds egui_kittest allows.
     #[test]
     fn the_title_style_sections_switch_and_paint() {
         use cutlass_model::SegmentId;
@@ -20572,17 +20572,21 @@ mod tests {
         let mut shell = text_inspector_shell(&temp);
         shell.select(Some(SegmentId::new("words")));
         shell.set_text_face("sample.ttf").unwrap();
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(Vec2::new(1280.0, 3200.0))
-            .wgpu()
-            .build_ui_state(
-                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
-                (shell, {
-                    let mut view = ViewState::new();
-                    view.library_shelf = Shelf::Stickers;
-                    view
-                }),
-            );
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let builder = egui_kittest::Harness::builder().with_size(Vec2::new(1280.0, 3200.0));
+        let builder = if keep.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
+        let mut harness = builder.build_ui_state(
+            |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+            (shell, {
+                let mut view = ViewState::new();
+                view.library_shelf = Shelf::Stickers;
+                view
+            }),
+        );
         harness.run_steps(4);
         for section in [
             "position",
@@ -20601,17 +20605,12 @@ mod tests {
                 .insert(section.to_owned());
         }
         harness.run_steps(4);
-        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
             harness.run_steps(8);
-            if keep.is_none() && name != "title-parts-styled" {
-                return;
-            }
+            let Some(dir) = &keep else { return };
             let image = window_image(harness);
-            if let Some(dir) = &keep {
-                std::fs::create_dir_all(dir).unwrap();
-                image.save(dir.join(format!("{name}.png"))).unwrap();
-            }
+            std::fs::create_dir_all(dir).unwrap();
+            image.save(dir.join(format!("{name}.png"))).unwrap();
         };
         let inspection = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>| {
             harness.state().0.inspection().unwrap()

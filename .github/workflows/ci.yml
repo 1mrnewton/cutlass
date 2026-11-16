@@ -194,19 +194,43 @@ jobs:
         include:
           - os: macos-latest
             platform: cutlass-platform-apple
-            binary: target/debug/cutlass
+            binary: debug/cutlass
             python: python3
           - os: windows-latest
             platform: cutlass-platform-windows
-            binary: target/debug/cutlass.exe
+            binary: debug/cutlass.exe
             python: python
-    runs-on: ${{ matrix.os }}
+    # Windows runs on the self-hosted runner labelled cutlass-windows when the
+    # repository variable SELF_HOSTED_WINDOWS is 'true'; set it to anything
+    # else while that machine is off and the job goes back to GitHub. A pull
+    # request from a fork never runs on it, since anyone can open one.
+    runs-on: >-
+      ${{ matrix.os == 'windows-latest'
+      && vars.SELF_HOSTED_WINDOWS == 'true'
+      && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+      && fromJSON('["self-hosted", "cutlass-windows"]')
+      || matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Build folder kept between runs
+        # A self-hosted runner keeps its build outside the checkout, which
+        # checkout empties each run, so later runs rebuild only what changed.
+        # Past 40 GB it starts again from empty, so the disk never fills.
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          dir="${RUNNER_WORKSPACE}-target"
+          if [ -d "$dir" ] && [ "$(du -sk "$dir" | cut -f1)" -gt 41943040 ]; then
+            echo "Build folder is over 40 GB; emptying it."
+            rm -rf "$dir"
+          fi
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
@@ -219,7 +243,7 @@ jobs:
       - name: Smoke test
         run: |
           cargo build -p cutlass
-          ${{ matrix.python }} scripts/smoke.py ${{ matrix.binary }}
+          ${{ matrix.python }} scripts/smoke.py ${{ env.CARGO_TARGET_DIR || 'target' }}/${{ matrix.binary }}
 
   android:
     # The phone app: the Rust crates it loads are linted for Android, the

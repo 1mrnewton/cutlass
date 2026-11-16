@@ -1,17 +1,30 @@
 name: release
 
-# A tag `v<version>` builds the three packages, writes `<package>.sha256`
-# beside each, and publishes them as a GitHub release. The desktop's update
-# check reads that release from the API's `releases/latest`, so a tag with a
-# `-` (such as v1.0.0-rc.1) is published as a pre-release, which the check
-# ignores.
+# A tag `v<version>` builds every package, one per processor: the macOS
+# app for Apple Silicon and Intel, the Windows installer for x64 and Arm,
+# the Linux AppImage for x64, and one Android APK for Arm and x86_64. It
+# writes `<package>.sha256` beside each and uploads them as a draft GitHub
+# release. The iOS app (Arm) goes to TestFlight instead. A check job
+# downloads the draft's files and checks each against its checksum; the
+# draft is then published by hand. The desktop's update check reads the
+# published release from the API's `releases/latest`, which leaves drafts
+# out. A tag with a `-` (such as v1.0.0-rc.1) is marked a pre-release,
+# which the check also ignores. Tags come only from main, on a commit the
+# `rust` check passed.
 #
 # The packages are built as in ci.yml, with `--features public-release`,
 # through scripts/pgo.py: the H.264 codec is optimised from a profile of its
 # own training run, which needs the toolchain's llvm-tools.
-# They are signed ad hoc on macOS and unsigned on Windows until the
-# certificates are set up (see scripts/macos_bundle.py and
-# scripts/windows_installer.py for the variables).
+#
+# macOS is signed with the Developer ID certificate and notarized when the
+# repository has these secrets, and signed ad hoc without them:
+#   MACOS_CERTIFICATE_P12       the certificate and its key, base64
+#   MACOS_CERTIFICATE_PASSWORD  the .p12's password
+#   APPSTORE_API_KEY_P8         an App Store Connect API key (.p8), base64
+#   APPSTORE_API_KEY_ID         that key's id
+#   APPSTORE_API_ISSUER_ID      the issuer id on the same page
+# Windows stays unsigned until a signing service is set up (see
+# docs/planned/release-ci.md and scripts/windows_installer.py).
 
 on:
   push:
@@ -20,13 +33,26 @@ on:
 permissions:
   contents: read
 
+env:
+  # The packages every release must carry, each with a `<package>.sha256`
+  # beside it; the update check asks for them by these names (crates/update
+  # checks they are here). Cutlass.apk joins them when the Android upload
+  # key is set, and gets a checksum the same way.
+  PACKAGES: Cutlass-aarch64.dmg Cutlass-x86_64.dmg Cutlass-x86_64-setup.exe Cutlass-aarch64-setup.exe Cutlass-x86_64.AppImage
+
 jobs:
   version:
     # The tag names the version the packages carry, or the update check
-    # would offer the same release again and again.
+    # would offer the same release again and again. A release is built only
+    # from main, and only from a commit main's required `rust` check passed.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: The tag matches the workspace version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -34,10 +60,46 @@ jobs:
             echo "the tag $GITHUB_REF_NAME is not v$version from Cargo.toml" >&2
             exit 1
           fi
+      - name: The tag is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "the tag $GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main" >&2
+            exit 1
+          fi
+      - name: rust passed on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusions=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=rust" \
+            --jq '[.check_runs[].conclusion] | join(" ")')
+          case " $conclusions " in
+            *" success "*) echo "rust passed on $GITHUB_SHA" ;;
+            *)
+              echo "rust has not passed on $GITHUB_SHA (runs: ${conclusions:-none}); tag a commit main's checks passed" >&2
+              exit 1
+              ;;
+          esac
 
   macos:
+    # One app per processor, each built with its own profiles, signed,
+    # notarized and smoke tested on a Mac of its own kind. Not one universal
+    # app: that would be twice the size (each build is about 200 MB) for
+    # every download and update. An Intel app runs on Apple Silicon through
+    # Rosetta; the Apple Silicon one does not open on Intel.
     needs: version
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: aarch64
+            lipo: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+            lipo: x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      DMG: Cutlass-${{ matrix.arch }}.dmg
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -51,21 +113,109 @@ jobs:
         run: python3 scripts/pgo_profile.py "$RUNNER_TEMP/av1.profdata"
       - name: Build
         run: PGO_MERGE="$RUNNER_TEMP/av1.profdata" python3 scripts/pgo.py -p cutlass --features public-release
+      - name: The binary is for this processor
+        run: |
+          archs=$(lipo -archs target/release/cutlass)
+          if [ "$archs" != "${{ matrix.lipo }}" ]; then
+            echo "target/release/cutlass is built for $archs, not ${{ matrix.lipo }}" >&2
+            exit 1
+          fi
+      # Signing comes after the build, so no build script runs while the
+      # certificate is in a keychain. Each secret is given only to the step
+      # that needs it. Without the certificate the bundle is signed ad hoc;
+      # without the API key it is signed but not notarized.
+      - name: Which signing secrets are set
+        id: signing
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          API_KEY: ${{ secrets.APPSTORE_API_KEY_P8 }}
+        run: |
+          echo "sign=$([ -n "$CERTIFICATE" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+          echo "notarize=$([ -n "$CERTIFICATE" ] && [ -n "$API_KEY" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - name: Developer ID certificate in a keychain of this run
+        if: steps.signing.outputs.sign == 'yes'
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password=$(openssl rand -hex 24)
+          echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" \
+            -f pkcs12 -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          # The certificate's SHA-1 names it exactly, whatever else the
+          # runner's keychains hold.
+          identity=$(security find-identity -v -p codesigning "$keychain" \
+            | awk '/"Developer ID Application: / { print $2; exit }')
+          if [ -z "$identity" ]; then
+            echo "the certificate holds no Developer ID Application identity" >&2
+            exit 1
+          fi
+          echo "CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+      - name: App Store Connect API key for notarization
+        if: steps.signing.outputs.notarize == 'yes'
+        env:
+          API_KEY: ${{ secrets.APPSTORE_API_KEY_P8 }}
+        run: |
+          echo "$API_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          echo "NOTARY_KEY=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
       - name: Bundle
-        run: python3 scripts/macos_bundle.py target/release/cutlass dist
+        env:
+          NOTARY_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+        run: |
+          python3 scripts/macos_bundle.py target/release/cutlass dist
+          mv dist/Cutlass.dmg "dist/$DMG"
+      - name: Remove the signing keychain and key
+        if: always()
+        run: |
+          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then security delete-keychain "$SIGNING_KEYCHAIN"; fi
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/certificate.p12"
+      - name: Say how the DMG is signed
+        run: |
+          case "${{ steps.signing.outputs.sign }}/${{ steps.signing.outputs.notarize }}" in
+            yes/yes) echo "macOS: Developer ID signed, notarized and stapled." ;;
+            yes/no) echo "::warning::macOS: Developer ID signed but not notarized (no APPSTORE_API_KEY_P8); Gatekeeper will refuse it." ;;
+            *) echo "::warning::macOS: signed ad hoc (no MACOS_CERTIFICATE_P12); Gatekeeper will refuse it." ;;
+          esac
       - name: Smoke test the bundle
         run: python3 scripts/smoke.py dist/Cutlass.app/Contents/MacOS/cutlass
       - uses: actions/upload-artifact@v4
         with:
-          name: macos
-          path: dist/Cutlass.dmg
+          name: release-macos-${{ matrix.arch }}
+          path: dist/${{ env.DMG }}
           if-no-files-found: error
 
   windows:
+    # One installer per processor, each built, installed and smoke tested on
+    # a machine of its own kind. The installer refuses a PC that cannot run
+    # it; x64 Windows on Arm runs through emulation, slower than its own.
     needs: version
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x86_64
+          - runner: windows-11-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      INSTALLER: Cutlass-${{ matrix.arch }}-setup.exe
     steps:
       - uses: actions/checkout@v4
+      # The Arm image is not promised to carry Python, which the build and
+      # packaging scripts run on.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools
@@ -76,19 +226,21 @@ jobs:
         run: |
           command -v makensis || choco install nsis -y --no-progress
           echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+      # The script reads the processor from cutlass.exe and fails when it
+      # is not the one the installer's name says.
       - name: Package
-        run: python scripts/windows_installer.py target/release/cutlass.exe dist/Cutlass-setup.exe
+        run: python scripts/windows_installer.py target/release/cutlass.exe dist/${{ env.INSTALLER }}
       - name: Install and smoke test
         shell: pwsh
         run: |
           $dir = "$env:RUNNER_TEMP\CutlassInstall"
-          Start-Process -Wait -FilePath dist\Cutlass-setup.exe -ArgumentList "/S", "/D=$dir"
+          Start-Process -Wait -FilePath "dist\$env:INSTALLER" -ArgumentList "/S", "/D=$dir"
           python scripts/smoke.py "$dir\cutlass.exe"
           if ($LASTEXITCODE -ne 0) { throw "the smoke test failed" }
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
-          path: dist/Cutlass-setup.exe
+          name: release-windows-${{ matrix.arch }}
+          path: dist/${{ env.INSTALLER }}
           if-no-files-found: error
 
   appimage:
@@ -116,12 +268,208 @@ jobs:
         run: python3 scripts/smoke.py dist/Cutlass-x86_64.AppImage
       - uses: actions/upload-artifact@v4
         with:
-          name: appimage
+          name: release-appimage
           path: dist/Cutlass-x86_64.AppImage
           if-no-files-found: error
 
+  android:
+    # The phone app, built as ci.yml builds it but as a release: the Rust
+    # library and bindings from apps/android/build-rust.sh, then Gradle's
+    # release APK for the GitHub release and AAB for Google Play, signed
+    # with the upload key when the repository has these secrets:
+    #   ANDROID_KEYSTORE           the upload keystore, base64
+    #   ANDROID_KEYSTORE_PASSWORD  its password
+    #   ANDROID_KEY_ALIAS          the key's alias in it
+    #   ANDROID_KEY_PASSWORD       the key's password
+    # Without them nothing is published for Android: an unsigned APK
+    # cannot be installed.
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 30.0.16248370
+    steps:
+      - uses: actions/checkout@v4
+      - name: ALSA headers for the host build the bindings generator reads
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk@4.1.2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: true
+      - name: NDK r30
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - name: Rust library and bindings
+        run: |
+          apps/android/build-rust.sh
+          git diff --exit-code -- apps/android/app/src/main/java/uniffi
+      - name: Is the upload key set
+        id: signing
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: echo "sign=$([ -n "$KEYSTORE" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - name: Upload keystore
+        if: steps.signing.outputs.sign == 'yes'
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: |
+          echo "$KEYSTORE" | base64 --decode > "$RUNNER_TEMP/upload.jks"
+          echo "CUTLASS_ANDROID_KEYSTORE=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
+      - name: Build the release APK and AAB
+        if: steps.signing.outputs.sign == 'yes'
+        working-directory: apps/android
+        env:
+          CUTLASS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CUTLASS_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          CUTLASS_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon assembleRelease bundleRelease
+      - name: Remove the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/upload.jks"
+      - name: Check the signature and the version
+        if: steps.signing.outputs.sign == 'yes'
+        run: |
+          mkdir dist
+          cp apps/android/app/build/outputs/apk/release/app-release.apk dist/Cutlass.apk
+          cp apps/android/app/build/outputs/bundle/release/app-release.aab "$RUNNER_TEMP/Cutlass.aab"
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$tools/apksigner" verify --print-certs dist/Cutlass.apk
+          version=$("$tools/aapt2" dump badging dist/Cutlass.apk | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "the APK says $version, not ${GITHUB_REF_NAME#v}" >&2
+            exit 1
+          fi
+          # One APK for both: phones and tablets on Arm, and x86_64
+          # Chromebooks and emulators. Play splits the AAB per device.
+          for abi in arm64-v8a x86_64; do
+            if ! unzip -l dist/Cutlass.apk | grep -q " lib/$abi/libcutlass_ffi_bindings.so$"; then
+              echo "the APK has no lib/$abi/libcutlass_ffi_bindings.so" >&2
+              exit 1
+            fi
+          done
+      - name: Say how Android is published
+        run: |
+          if [ "${{ steps.signing.outputs.sign }}" = yes ]; then
+            echo "Android: Cutlass.apk signed with the upload key; the AAB is kept for Google Play."
+          else
+            echo "::warning::Android: no ANDROID_KEYSTORE, so the release carries no APK."
+          fi
+      - uses: actions/upload-artifact@v4
+        if: steps.signing.outputs.sign == 'yes'
+        with:
+          name: release-android
+          path: dist/Cutlass.apk
+          if-no-files-found: error
+      # Not a release file: Play takes the AAB from its own upload.
+      - uses: actions/upload-artifact@v4
+        if: steps.signing.outputs.sign == 'yes'
+        with:
+          name: play-android
+          path: ${{ runner.temp }}/Cutlass.aab
+          if-no-files-found: error
+
+  ios:
+    # The iPhone and iPad app, for Arm devices. It goes to TestFlight, not
+    # to the GitHub release: an iOS app installs only through the App Store
+    # or TestFlight. With the App Store Connect API key above, Xcode signs
+    # it for distribution with certificates Apple keeps for the team (the
+    # key needs the Admin role) and uploads it; the build then waits in
+    # App Store Connect for testers to be given it. That needs the app's
+    # record in App Store Connect, under com.scytheralpha.cutlass. Without
+    # the key, or for a pre-release tag, the app is only built, unsigned.
+    # The draft release does not wait on this job.
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+      - name: Rust library and bindings
+        run: |
+          apps/ios/build-rust.sh
+          git diff --exit-code -- apps/ios/ios/Generated apps/ios/Rust/include
+      # The workspace version, as the App Store takes it: the marketing
+      # version without a pre-release part, and a build number that grows
+      # with it (0.8.0 is 8000), as on Android.
+      - name: Version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          release=${version%%-*}
+          IFS=. read -r major minor patch <<< "$release"
+          echo "MARKETING_VERSION=$release" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$((major * 1000000 + minor * 1000 + patch))" >> "$GITHUB_ENV"
+      - name: Upload to TestFlight or only build
+        id: lane
+        env:
+          API_KEY: ${{ secrets.APPSTORE_API_KEY_P8 }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) echo "upload=no" >> "$GITHUB_OUTPUT" ;;
+            *) echo "upload=$([ -n "$API_KEY" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: Build unsigned
+        if: steps.lane.outputs.upload == 'no'
+        run: |
+          xcodebuild build -project apps/ios/ios.xcodeproj -scheme ios -configuration Release \
+            -destination generic/platform=iOS -derivedDataPath "$RUNNER_TEMP/ios" \
+            CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="$MARKETING_VERSION" CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+          app="$RUNNER_TEMP/ios/Build/Products/Release-iphoneos/ios.app"
+          lipo -archs "$app/ios" | grep -qx arm64
+      - name: App Store Connect API key
+        if: steps.lane.outputs.upload == 'yes'
+        env:
+          API_KEY: ${{ secrets.APPSTORE_API_KEY_P8 }}
+        run: echo "$API_KEY" | base64 --decode > "$RUNNER_TEMP/appstore.p8"
+      - name: Archive, sign and upload to TestFlight
+        if: steps.lane.outputs.upload == 'yes'
+        env:
+          KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+        run: |
+          auth=(-allowProvisioningUpdates -authenticationKeyPath "$RUNNER_TEMP/appstore.p8"
+            -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$ISSUER")
+          archive="$RUNNER_TEMP/Cutlass.xcarchive"
+          xcodebuild archive -project apps/ios/ios.xcodeproj -scheme ios -configuration Release \
+            -destination generic/platform=iOS -archivePath "$archive" \
+            MARKETING_VERSION="$MARKETING_VERSION" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" "${auth[@]}"
+          cat > "$RUNNER_TEMP/export.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>FR82ZG29F6</string>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$RUNNER_TEMP/export.plist" \
+            -exportPath "$RUNNER_TEMP/export" "${auth[@]}"
+      - name: Remove the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/appstore.p8"
+      - name: Say what happened to iOS
+        run: |
+          if [ "${{ steps.lane.outputs.upload }}" = yes ]; then
+            echo "iOS: $MARKETING_VERSION ($BUILD_NUMBER) uploaded to TestFlight."
+          else
+            echo "::warning::iOS: built unsigned only (a pre-release tag, or no APPSTORE_API_KEY_P8)."
+          fi
+
   publish:
-    needs: [macos, windows, appimage]
+    # The packages go up as a draft, which the update check never sees.
+    # Publishing it is done by hand, once the check below has passed.
+    needs: [macos, windows, appimage, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -129,18 +477,21 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: release-*
           merge-multiple: true
       - name: Checksums
         # `sha256sum` writes "<hex>  <name>"; the update check reads the
         # first token.
         working-directory: dist
         run: |
-          for package in Cutlass.dmg Cutlass-setup.exe Cutlass-x86_64.AppImage; do
+          for package in $PACKAGES; do
             test -s "$package"
+          done
+          for package in *; do
             sha256sum "$package" > "$package.sha256"
           done
           cat ./*.sha256
-      - name: Release
+      - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -151,4 +502,41 @@ jobs:
             --title "Cutlass ${GITHUB_REF_NAME#v}" \
             --generate-notes \
             --verify-tag \
+            --draft \
             $flags
+
+  check:
+    # The draft's files, downloaded from the release as a user's update
+    # would download them: each package is there, and matches its checksum.
+    # A draft is visible only to a token that can write the repository.
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
+          mkdir draft
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir draft
+      - name: Every package matches its checksum
+        working-directory: draft
+        run: |
+          for package in $PACKAGES; do
+            test -s "$package"
+            test -s "$package.sha256"
+          done
+          for sum in ./*.sha256; do
+            sha256sum --check --strict "$sum"
+          done
+      - name: How to publish
+        run: |
+          {
+            echo "The draft $GITHUB_REF_NAME passed its checks. Publish it to offer the update:"
+            echo
+            echo '```'
+            echo "gh release edit $GITHUB_REF_NAME --repo $GITHUB_REPOSITORY --draft=false"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

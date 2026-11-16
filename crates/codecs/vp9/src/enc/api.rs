@@ -956,7 +956,7 @@ impl<P: EncPixel> Core<P> {
             // (An alt-ref of the scene before a cut has nothing to show.)
             self.overlay_at = None;
         }
-        // Two passes: the picture's tight planes, for the reference pool.
+        // With the reference pool: the picture's tight planes.
         let tight: Option<[Vec<P>; 3]> = self.pooled().then(|| {
             let (w, h) = (self.width as usize, self.height as usize);
             let c = self.opts.chroma_dims(w, h);
@@ -1096,9 +1096,10 @@ impl<P: EncPixel> Core<P> {
         Ok(())
     }
 
-    /// Whether the reference pool is kept: two passes ([`POOL`]).
+    /// Whether the reference pool is kept ([`POOL`]): two passes, and one
+    /// pass up to [`POOL_SPEED`].
     fn pooled(&self) -> bool {
-        self.rc.pass2.is_some()
+        self.rc.pass2.is_some() || self.opts.speed <= POOL_SPEED
     }
 
     /// The slot GOLDEN reads for the picture `to` (tight planes): the
@@ -1440,11 +1441,24 @@ fn check_planes<P>(
     Ok(())
 }
 
-/// Two passes keep the last [`POOL`] shown pictures in the reference
-/// slots from [`POOL_FIRST`], and GOLDEN reads whichever of them, or the
-/// golden frame, predicts the picture's chroma best at whole samples.
+/// Two passes, and one pass up to [`POOL_SPEED`], keep the last [`POOL`]
+/// shown pictures in the reference slots from [`POOL_FIRST`], and GOLDEN
+/// reads whichever of them, or the golden frame, predicts the picture's
+/// chroma best at whole samples.
 const POOL: u8 = 5;
 const POOL_FIRST: u8 = 3;
+
+/// The fastest speed whose one pass keeps the reference pool. At speed 5
+/// against FFmpeg's `libvpx-vp9` on the README's grainy pan, it took 16
+/// points off the bits at the same PSNR-Y and 32 at the same PSNR-U; 16
+/// and 19 on the clip from a still picture, 1 and 5 on the three scenes
+/// (where the pan is a third of the pictures). At speed 7, 17 and 36 on
+/// the pan and 20 and 29 on the still picture's clip; at speed 8 it gained
+/// nothing (one candidate a block, its search seldom finds the pool's
+/// picture). It costs no time at a fixed quantizer; at a bitrate the
+/// pictures it predicts better leave the bitrate finer quantizers, which
+/// take longer (see `tile::CHEAP_DIST`).
+const POOL_SPEED: u8 = 7;
 
 /// Frames from one golden frame to the next (at most, in two passes).
 const GF_INTERVAL: u32 = 12;

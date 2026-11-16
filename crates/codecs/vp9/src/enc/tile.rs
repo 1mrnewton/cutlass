@@ -445,8 +445,35 @@ const NOISE_FLOOR: f64 = 1.2;
 pub const TX_TRIAL_BITS: f64 = 64.0 * 256.0;
 
 /// How much more a bit of chroma coefficients weighs in RD quantization
-/// than one of luma.
-const CHROMA_RATE: f32 = 1.0 / 0.7;
+/// than one of luma at speeds 7 and 8 (and, before [`CHROMA_SPEED`] took
+/// [`CHROMA_RATE`], at every speed).
+const CHROMA_RATE_FAST: f32 = 1.0 / 0.7;
+
+/// Up to this speed a bit of chroma coefficients weighs [`CHROMA_RATE`]
+/// of one of luma in RD quantization, and chroma's error [`CHROMA_DIST`]
+/// times luma's in the trials' decisions (mode, partition, transform
+/// size, skip).
+pub const CHROMA_SPEED: u8 = 6;
+
+/// See [`CHROMA_SPEED`]. libvpx weighs chroma's bits 0.6 (intra) and
+/// 0.625 (inter) of luma's in its coefficient optimization; this encoder
+/// weighed them 1/0.7, which on 720p clips with cuts to synthetic
+/// content (FFmpeg's `mandelbrot`, `testsrc2`) left chroma 1.2 dB under
+/// libvpx's at the same bits and PSNR-Y over it. With the reference pool
+/// in one pass, at speed 5 against FFmpeg's `libvpx-vp9` on those three
+/// scenes (BD-rate at the same PSNR-U, against PSNR-Y): 1.2 gained 6
+/// points for 2, 1.0 another 4 for 2.5, 0.8 another 4 for 2, 0.7 only 1
+/// for 1.5; FFmpeg's averaged PSNR gained 1.5 points to 1.0 and nothing
+/// past it. Before the pool, 0.8 cost 8 points of PSNR-Y there for 12 of
+/// PSNR-U. Speeds 7 and 8 lost with it (1/0.7 there).
+const CHROMA_RATE: f32 = 0.8;
+
+/// See [`CHROMA_SPEED`]: with [`CHROMA_RATE`], 2 rather than 1 (the
+/// planes' errors summed as they are) takes 3 points off the bits at the
+/// same PSNR-U and V on the three scenes and on the clip from a still
+/// picture, and 0.8 and 2.4 at FFmpeg's averaged PSNR, for 0.6 points of
+/// PSNR-Y on the three scenes (none on the other two clips).
+const CHROMA_DIST: f32 = 2.0;
 
 /// With [`super::FrameParams::second_pass`] up to speed 6 (and in one
 /// pass at [`ONE_CAND_SPEED`] and 6 too), how many of
@@ -472,10 +499,18 @@ pub const UV_RANK: usize = 4;
 /// out within 2% of not splitting either way. Speed 5 at 4 Mb/s on the
 /// pan, one thread, in 0.8 of the time (with the rest of the prunes of
 /// that change, the same BD-rates within a point on the README's clips).
-const CHEAP_RATE: f64 = 8.0;
+/// (8 before the reference pool came to one pass, with [`CHEAP_DIST`];
+/// at 12, the pan on one thread in 0.95 of the time, for a point of
+/// PSNR-U on the three scenes and none elsewhere.)
+const CHEAP_RATE: f64 = 12.0;
 
-/// See [`CHEAP_RATE`].
-const CHEAP_DIST: f64 = 0.16;
+/// See [`CHEAP_RATE`]. (0.16 before the reference pool came to one pass:
+/// with it the bitrate takes finer quantizers on the grainy pan, where the
+/// grain is over the step's noise and the stop never came, and speed 5
+/// took 1.3 to 1.6 times its time at 3 and 4 Mb/s on one thread. At 0.64,
+/// 1.1 to 1.15 times, at the same BD-rates within 0.5 point on the three
+/// clips; nothing more stops past it, where the bits are what decide.)
+const CHEAP_DIST: f64 = 0.64;
 
 /// Speed 6 in one pass searches as speed 5 does (the chroma of the best
 /// intra mode, one intra candidate and the threshold of seven levels of
@@ -2979,7 +3014,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     /// the frame.
     fn block_sse(&mut self, b: &Blk) -> f64 {
         let s = self.s;
-        let mut total = 0u64;
+        let mut total = [0u64; 2];
         for p in 0..3 {
             let (sx, sy) = plane_ss(self.s, p);
             let (_, _, vw, vh) = self.visible(b, p);
@@ -2987,9 +3022,20 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             let (src, sst) = (s.src.planes[p], s.src.strides[p]);
             let v = &mut self.rec.views()[p];
             let stride = v.stride;
-            total += P::sse(&src[y * sst + x..], sst, v.at(y, x), stride, vw * 4, vh * 4);
+            total[usize::from(p > 0)] +=
+                P::sse(&src[y * sst + x..], sst, v.at(y, x), stride, vw * 4, vh * 4);
         }
-        total as f64
+        total[0] as f64 + total[1] as f64 * self.chroma_dist()
+    }
+
+    /// How much chroma's error weighs against luma's in the trials'
+    /// decisions ([`CHROMA_DIST`] up to [`CHROMA_SPEED`]).
+    fn chroma_dist(&self) -> f64 {
+        if self.s.speed <= CHROMA_SPEED {
+            f64::from(CHROMA_DIST)
+        } else {
+            1.0
+        }
     }
 
     /// The intra mode of the 4×4 luma block at `(x, y)` whose prediction
@@ -3052,6 +3098,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.dist_sum = (0.0, 0.0);
         let intra = b.refs[0] == INTRA_FRAME;
         let lossless = s.h.lossless;
+        let cw = self.chroma_dist() as f32;
         for plane in 0..3 {
             let tx = if plane == 0 { b.tx } else { rec.uv_tx };
             let (ssx, ssy) = plane_ss(self.s, plane);
@@ -3098,10 +3145,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                     }
                     let (levels, eob) = self.quantize(plane, tx, kind, x, y, intra);
                     *eobs += eob;
-                    sums.0 += self.rd.coded;
-                    sums.1 += self.rd.dropped;
-                    self.dist_sum.0 += self.rd.dist.0;
-                    self.dist_sum.1 += self.rd.dist.1;
+                    // Chroma's error weighs `w` more in the decisions.
+                    let w = if plane > 0 { cw - 1.0 } else { 0.0 };
+                    sums.0 += self.rd.coded + w * self.rd.dist.0;
+                    sums.1 += self.rd.dropped + w * self.rd.dist.1;
+                    self.dist_sum.0 += self.rd.dist.0 * (1.0 + w);
+                    self.dist_sum.1 += self.rd.dist.1 * (1.0 + w);
                     toks.push((plane, tx, r, c, levels, eob, self.rd.rate));
                     c += step;
                 }
@@ -3391,10 +3440,16 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let dqi = usize::from(plane > 0);
         let (dc_q, ac_q) = (s.dq[self.seg][dqi][0], s.dq[self.seg][dqi][1]);
         let g = super::tx::gain(usize::from(tx));
-        // Chroma's bits weigh 1/0.7 of luma's: at the same average PSNR
-        // over the planes, 3 to 4% fewer bits (and 19 to 22% fewer at the
-        // same PSNR-Y) on grainy and clean 720p.
-        let lam = s.rd_lambda * g / 256.0 * if plane > 0 { CHROMA_RATE } else { 1.0 };
+        // Chroma's bits weigh [`CHROMA_RATE`] of luma's (1/0.7 at the
+        // fast speeds: at the same average PSNR over the planes, 3 to 4%
+        // fewer bits, and 19 to 22% fewer at the same PSNR-Y, on grainy
+        // and clean 720p at speed 6 before the reference pool).
+        let chroma = if s.speed <= CHROMA_SPEED {
+            CHROMA_RATE
+        } else {
+            CHROMA_RATE_FAST
+        };
+        let lam = s.rd_lambda * g / 256.0 * if plane > 0 { chroma } else { 1.0 };
         let (scan, nb) = scan_pair(tx, kind);
         // Each scan position's place in the transposed block.
         let tpos = crate::dec::parse::scan_pair(tx, kind).2;

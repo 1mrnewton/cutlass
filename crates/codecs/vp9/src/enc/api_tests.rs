@@ -1432,12 +1432,22 @@ fn a_cut_starts_a_golden_frame_and_keeps_the_stream_going() {
             h
         })
         .collect();
-    // The cut is not a key frame, but it refreshes LAST and GOLDEN.
+    // The cut is not a key frame, but it refreshes LAST and GOLDEN (and,
+    // as every inter frame at this speed, one slot of the reference pool:
+    // exactly one of slots 3 to 7).
     assert!(!headers[10].key_frame);
-    assert_eq!(headers[10].refresh_flags, 0x03);
-    // The frames around it refresh only LAST.
-    assert_eq!(headers[9].refresh_flags, 0x01);
-    assert_eq!(headers[11].refresh_flags, 0x01);
+    let pool_slot = |h: &header::Header| {
+        let pool = h.refresh_flags & 0xf8;
+        assert_eq!(pool.count_ones(), 1, "one pool slot");
+        pool
+    };
+    assert_eq!(headers[10].refresh_flags & 0x07, 0x03);
+    pool_slot(&headers[10]);
+    // The frames around it refresh only LAST, of the first three.
+    assert_eq!(headers[9].refresh_flags & 0x07, 0x01);
+    assert_eq!(headers[11].refresh_flags & 0x07, 0x01);
+    // Each in a pool slot of its own.
+    assert_ne!(pool_slot(&headers[9]), pool_slot(&headers[11]));
     // And the stream decodes through it.
     let params = CodecParams::with_format(CodecId::Vp9, 128, 128, PixelFormat::Yuv420p);
     let mut decoder = Vp9Decoder::open(&params).expect("decoder");

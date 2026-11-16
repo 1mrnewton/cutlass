@@ -61,13 +61,13 @@ pub struct FrameParams {
     /// 5 do (see [`tile::TX_TRIAL_BITS`]), and the best inter candidates
     /// are ranked with their chroma too (see [`tile::UV_RANK`]).
     pub second_pass: bool,
-    /// The slot GOLDEN reads (1 but in two passes, see
-    /// [`super::api`]'s reference pool).
+    /// The slot GOLDEN reads (1 but with [`super::api`]'s reference pool:
+    /// two passes, and one pass up to speed 7).
     pub golden_slot: u8,
     /// Slots this frame also refreshes, besides its type's.
     pub also_refresh: u8,
-    /// Two passes: the error a luma sample of the picture keeps from its
-    /// best reference picture (its noise), 0 when unknown.
+    /// With the reference pool: the error a luma sample of the picture
+    /// keeps from its best reference picture (its noise), 0 when unknown.
     pub noise: f32,
 }
 

@@ -10498,6 +10498,25 @@ mod tests {
     use cutlass_settings::Settings;
     use egui::Color32;
 
+    /// The window as `harness` paints it now.
+    ///
+    /// egui_kittest waits 10 seconds for a frame. On a runner with no GPU,
+    /// the first frame that draws a styled title builds its pipelines in
+    /// software and takes about 24 seconds; the ones after take a few
+    /// milliseconds. A wait that times out leaves its frame running, so
+    /// paint again until a frame lands, for up to a minute.
+    fn window_image<State>(harness: &mut egui_kittest::Harness<'_, State>) -> image::RgbaImage {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match harness.render() {
+                Ok(image) => return image,
+                Err(error)
+                    if error.contains("timed out") && std::time::Instant::now() < deadline => {}
+                Err(error) => panic!("the renderer draws the window: {error:?}"),
+            }
+        }
+    }
+
     #[test]
     fn film_textures_let_go_of_the_least_recently_drawn() {
         let ctx = egui::Context::default();
@@ -19674,7 +19693,7 @@ mod tests {
         harness.run_steps(8);
         let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(harness);
             // Not one flat colour: something was drawn.
             let first = image.get_pixel(0, 0);
             assert!(
@@ -19809,7 +19828,7 @@ mod tests {
             assert_eq!(harness.query_all_by_label(label).count(), 1, "{label}");
         }
         if let Some(dir) = &keep {
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(&mut harness);
             std::fs::create_dir_all(dir).unwrap();
             image.save(dir.join("assistant-steps.png")).unwrap();
         }
@@ -19862,7 +19881,7 @@ mod tests {
             let Some(dir) = &keep else {
                 return;
             };
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(harness);
             std::fs::create_dir_all(dir).unwrap();
             image.save(dir.join(format!("{name}.png"))).unwrap();
         };
@@ -19996,7 +20015,7 @@ mod tests {
         };
         let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(harness);
             if let Some(dir) = &keep {
                 std::fs::create_dir_all(dir).unwrap();
                 image.save(dir.join(format!("{name}.png"))).unwrap();
@@ -20252,7 +20271,7 @@ mod tests {
         assert_eq!(listed(&harness, "No font has that name"), 0);
         if let Some(dir) = &keep {
             std::fs::create_dir_all(dir).unwrap();
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(&mut harness);
             image.save(dir.join("font-search.png")).unwrap();
         }
         // A click in the field kept the menu open; more letters that no
@@ -20476,7 +20495,7 @@ mod tests {
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
             // Enough frames for a page's tile pictures.
             harness.run_steps(16);
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(harness);
             let first = image.get_pixel(0, 0);
             assert!(
                 image.pixels().any(|pixel| pixel != first),
@@ -20588,7 +20607,7 @@ mod tests {
             if keep.is_none() && name != "title-parts-styled" {
                 return;
             }
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(harness);
             if let Some(dir) = &keep {
                 std::fs::create_dir_all(dir).unwrap();
                 image.save(dir.join(format!("{name}.png"))).unwrap();

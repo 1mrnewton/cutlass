@@ -1471,8 +1471,9 @@ What is left:
   chroma rate of 0.8 in the second pass, +0.04%); a run on another
   number of threads (other tile columns) moves these by a point. Speed 6
   takes speed 5's time on the three scenes (it did before too), and
-  speed 10 0.90 to 1.02 of FFmpeg's realtime 8 on four threads in the
-  last runs (0.86 to 1.00 before, in the same runs: 3 to 4% more). Before "Chroma": speed 6 was ahead of libvpx's
+  speed 10 0.82 to 0.95 of FFmpeg's realtime 8 on four threads, after
+  the loop filter's planes went to one thread (the reference pool had
+  taken it to 0.90 to 1.02; see "The gaps"). Before "Chroma": speed 6 was ahead of libvpx's
   cpu-used 1 on the three scenes by 2.0 points at the averaged PSNR (8.2
   at PSNR-Y), speed 5 by 3.0. At speed 6, a coarser gate on the smaller transform (128 bits an
   8×8) lost 5 points, intra left out of 64×64 blocks 1.1, speed 5's
@@ -1618,10 +1619,9 @@ carries the colour space, range and render size.
   speed 6 fewer bits than libvpx's default at every PSNR on every clip
   (1.0% to 50%), but in speed 5's time on the three scenes (0.93 to
   1.00 of it). Speed 10 has 0.7% to 70% fewer bits than libvpx realtime
-  8 at every PSNR, in 0.88 to 0.90 of its time on one thread and 0.90 to
-  1.02 on four (see "The gaps": over 0.95 on two clips in the last
-  runs, where the build before took 0.97 and 1.00); speed 9 9% to 77%
-  fewer, in 0.86 to 1.02 of it on four threads.
+  8 at every PSNR, in 0.85 to 0.90 of its time on one thread and 0.82 to
+  0.95 on four (see "The gaps"); speed 9 9% to 77% fewer, in 0.76 to
+  0.88 of it on four threads.
 - At equal time the encoder is within about 8% of libvpx's good presets
   on moving content (ahead with more time, and far ahead on still content
   and against the realtime presets), and its fastest speed takes libvpx

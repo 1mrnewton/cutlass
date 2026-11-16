@@ -754,7 +754,10 @@ impl Small {
             for ((((c, a), b), d), e) in cols.iter_mut().zip(r0).zip(r1).zip(r2).zip(r3) {
                 *c = (a.get() + b.get() + d.get() + e.get()) as u16;
             }
-            for (v, q) in s[r * sw..(r + 1) * sw].iter_mut().zip(cols.chunks_exact(4)) {
+            for (v, q) in s[r * sw..(r + 1) * sw]
+                .iter_mut()
+                .zip(cols.as_chunks::<4>().0)
+            {
                 *v = q[0] + q[1] + q[2] + q[3];
             }
         }

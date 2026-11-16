@@ -20,6 +20,7 @@ pub mod tx;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
 
 use cutlass_decode::CodecError;
 
@@ -116,6 +117,20 @@ pub const COMPOUND_SPEED: u8 = 6;
 /// From this speed a reference that predicted almost nothing of the last
 /// inter frame is not searched (see [`FrameEncoder::tiles`]).
 pub const REF_PRUNE_SPEED: u8 = 5;
+
+/// From this speed each tile column's rows are coded on one thread (as
+/// many as the threads allow beyond one a column): a superblock is too
+/// little work for the wavefront's waits. Speed 10 on 720p at four
+/// threads (four tile columns): the tiles in 0.7 of the time with one
+/// lane a column against two. The frames are the same either way.
+pub const ONE_LANE_SPEED: u8 = 9;
+
+/// At this speed each tile column's thread makes its own columns' part of
+/// the fast path's search ([`tile::prepass_sb`]) row by row as it codes
+/// them, instead of the frame's search coming first on its own threads.
+/// (Not at speed 10: it is also the first pass of two passes and the probe
+/// of one, whose bits the rate control of the other speeds reads.)
+pub const FUSED_SPEED: u8 = 9;
 
 /// One coded frame.
 pub struct Coded {
@@ -220,6 +235,11 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     ss: (usize, usize),
     /// The fast search's vectors of the last frame, by 8×8 block.
     pre_seeds: Vec<Mv>,
+    /// The fast path's searches made row by row (see [`Lazy`]): each tile
+    /// column's seeds and searches, kept from frame to frame.
+    pre_bufs: Vec<(Vec<Mv>, Vec<tile::Pre>)>,
+    /// The frame's searches, made ahead on threads.
+    pre_frame: Vec<tile::Pre>,
     /// The segmentation of the frame being coded, with adaptive
     /// quantization.
     aq: Option<aq::Plan>,
@@ -302,6 +322,8 @@ impl<P: EncPixel> FrameEncoder<P> {
             log2_tile_rows: 0,
             ss,
             pre_seeds: Vec::new(),
+            pre_bufs: Vec::new(),
+            pre_frame: Vec::new(),
             aq: None,
             ref_use: [(0, 1024, 0); 3],
             stream: Stream::default(),
@@ -730,48 +752,86 @@ impl<P: EncPixel> FrameEncoder<P> {
             static_thresh: self.stream.static_thresh,
             global: self.global.take(),
         };
+        // Each tile column on its own thread, into its own copy of the
+        // picture (intra prediction reads nothing across tile columns).
+        let ntiles = 1usize << h.log2_tile_cols;
+        let edges: Vec<usize> = (0..=ntiles)
+            .map(|i| tile_edge(i, mi_cols, h.log2_tile_cols))
+            .collect();
+        // Each tile column's superblock rows on `lanes` threads at once,
+        // in a wavefront (see [`tile::Lanes`]): tile columns alone keep
+        // threads waiting for the busiest column.
+        let lanes = if self.row_lanes > 0 {
+            self.row_lanes
+        } else if self.threads > 1 && fp.speed >= ONE_LANE_SPEED {
+            self.threads.div_ceil(ntiles)
+        } else if self.threads > 1 {
+            (2 * self.threads).div_ceil(ntiles).clamp(2, 8)
+        } else {
+            1
+        }
+        .min(sb_rows.max(1));
         // Fast inter frames: the motion search of every superblock first,
         // its rows shared out evenly among the threads (tile columns carry
         // uneven work), each thread with its own copy of the seed vectors.
-        let pre_buf: Vec<tile::Pre>;
-        let shared = if fp.speed >= 7 && !h.is_intra() {
-            let rp = ctx.refs[0]
-                .as_ref()
-                .map(|r| (r.buf.plane(0), (r.dims.w[0] as i32, r.dims.h[0] as i32)));
+        let mut pre_buf: Vec<tile::Pre> = std::mem::take(&mut self.pre_frame);
+        let rp = ctx.refs[0]
+            .as_ref()
+            .map(|r| (r.buf.plane(0), (r.dims.w[0] as i32, r.dims.h[0] as i32)));
+        // On one thread, each superblock row's search just before the row
+        // is coded, while its samples are in the cache: the same search, in
+        // the same order. At FUSED_SPEED, with one lane a tile column,
+        // each tile column's thread searches its own columns so, with its
+        // own copy of the seeds (those across its left edge are the last
+        // frame's), and no thread waits for the frame's search.
+        let single = self.log2_tiles == 0 && ntiles == 1 && lanes == 1 && self.threads <= 1;
+        let lazy = fp.speed >= 7
+            && !h.is_intra()
+            && rp.is_some()
+            && (single || (fp.speed == FUSED_SPEED && lanes == 1));
+        if lazy {
+            self.pre_seeds.resize(mi_cols * mi_rows, Mv::ZERO);
+        }
+        let shared = if fp.speed >= 7 && !h.is_intra() && !lazy {
             match rp {
                 Some(rp) => {
                     let threads = (1usize << self.log2_tiles).max(1);
                     self.pre_seeds.resize(mi_cols * mi_rows, Mv::ZERO);
-                    let base = &self.pre_seeds;
+                    // (Each thread's seeds and searches, kept from frame to
+                    // frame.)
+                    let mut bufs = std::mem::take(&mut self.pre_bufs);
+                    bufs.resize_with(threads, Default::default);
+                    for (seeds, out) in &mut bufs {
+                        seeds.clone_from(&self.pre_seeds);
+                        out.clear();
+                    }
                     let sh = &shared;
-                    let parts: Vec<(usize, Vec<tile::Pre>, Vec<Mv>)> = std::thread::scope(|sc| {
-                        let hs: Vec<_> = (0..threads)
-                            .map(|t| {
+                    let done: Vec<bool> = std::thread::scope(|sc| {
+                        let hs: Vec<_> = bufs
+                            .iter_mut()
+                            .enumerate()
+                            .map(|(t, (seeds, out))| {
                                 sc.spawn(move || {
-                                    let mut seeds = base.clone();
-                                    let mut out = Vec::new();
                                     let mut r = t;
                                     while r < sb_rows {
                                         for c in 0..sb_cols {
-                                            out.push(tile::prepass_sb(
-                                                sh,
-                                                rp,
-                                                &mut seeds,
-                                                r * 8,
-                                                c * 8,
-                                            ));
+                                            out.push(tile::prepass_sb(sh, rp, seeds, r * 8, c * 8));
                                         }
                                         r += threads;
                                     }
-                                    (t, out, seeds)
                                 })
                             })
                             .collect();
-                        hs.into_iter().filter_map(|h| h.join().ok()).collect()
+                        hs.into_iter().map(|h| h.join().is_ok()).collect()
                     });
-                    let mut pre = vec![tile::Pre::default(); sb_rows * sb_cols];
-                    for (t, out, seeds) in parts {
-                        let mut it = out.into_iter();
+                    let mut pre = std::mem::take(&mut pre_buf);
+                    pre.clear();
+                    pre.resize(sb_rows * sb_cols, tile::Pre::default());
+                    for (t, (seeds, out)) in bufs.iter().enumerate() {
+                        if !done[t] {
+                            continue;
+                        }
+                        let mut it = out.iter().copied();
                         let mut r = t;
                         while r < sb_rows {
                             for c in 0..sb_cols {
@@ -784,6 +844,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                             r += threads;
                         }
                     }
+                    self.pre_bufs = bufs;
                     pre_buf = pre;
                     Shared {
                         prepass: Some(&pre_buf),
@@ -795,32 +856,22 @@ impl<P: EncPixel> FrameEncoder<P> {
         } else {
             shared
         };
-        // Each tile column on its own thread, into its own copy of the
-        // picture (intra prediction reads nothing across tile columns).
-        let ntiles = 1usize << h.log2_tile_cols;
-        let edges: Vec<usize> = (0..=ntiles)
-            .map(|i| tile_edge(i, mi_cols, h.log2_tile_cols))
-            .collect();
-        // Each tile column's superblock rows on `lanes` threads at once,
-        // in a wavefront (see [`tile::Lanes`]): tile columns alone keep
-        // threads waiting for the busiest column.
-        let lanes = if self.row_lanes > 0 {
-            self.row_lanes
-        } else if self.threads > 1 {
-            (2 * self.threads).div_ceil(ntiles).clamp(2, 8)
-        } else {
-            1
-        }
-        .min(sb_rows.max(1));
         while self.work.len() < ntiles * lanes {
             self.work.push(TileWork::new(&dims));
         }
         let plane_len: [usize; 3] = std::array::from_fn(|p| dims.stride[p] * dims.rows[p]);
+        // With one lane a tile column on threads, the loop filter follows
+        // the tiles row by row ([`lf_rows`]) instead of filtering the frame
+        // after them: on four threads at speed 10 it was a tenth of the
+        // time. (Not with a grid: 4:2:2 and 4:4:0 filter chroma from it.)
+        let piped = lanes == 1 && ntiles > 1 && !needs_grid;
         let run = |t: &mut TileWork<P>,
                    col0: usize,
                    col1: usize,
                    lane: usize,
-                   sync: Option<&tile::Lanes<P>>|
+                   sync: Option<&tile::Lanes<P>>,
+                   pipe: Option<&[mpsc::Sender<Band<P>>]>,
+                   mut lazy: Option<Lazy<'_, '_, P>>|
          -> Result<(), CodecError> {
             for (p, buf) in t.pix.iter_mut().enumerate() {
                 buf.resize(plane_len[p], P::default());
@@ -850,9 +901,24 @@ impl<P: EncPixel> FrameEncoder<P> {
             ];
             let mut seeds = std::mem::take(&mut t.seeds);
             for r in (lane..sb_rows).step_by(lanes) {
+                let row_shared;
+                let sh = match lazy.as_mut() {
+                    Some(l) => {
+                        for c in col0 / 8..col1.div_ceil(8) {
+                            l.pre[r * sb_cols + c] =
+                                tile::prepass_sb(&shared, l.rp, l.seeds, r * 8, c * 8);
+                        }
+                        row_shared = Shared {
+                            prepass: Some(&l.pre[..]),
+                            ..shared
+                        };
+                        &row_shared
+                    }
+                    None => &shared,
+                };
                 let mut rec = Recon::new(&ctx, &mut views, &mut t.scratch);
                 let mut tile = Tile::new(
-                    &shared,
+                    sh,
                     &mut t.state,
                     &mut t.out,
                     &mut rec,
@@ -864,31 +930,115 @@ impl<P: EncPixel> FrameEncoder<P> {
                 tile.sb_row(r * 8);
                 (seeds, t.bufs) = tile.finish();
                 t.row_ends.push(t.out.len());
+                if let Some(pipe) = pipe {
+                    // The row's samples and filter masks, for the loop
+                    // filter (a receiver gone has failed: the frame does).
+                    for (p, tx) in pipe.iter().enumerate() {
+                        let (sx, sy) = if p == 0 {
+                            (0, 0)
+                        } else {
+                            (dims.ss_x, dims.ss_y)
+                        };
+                        let stride = dims.stride[p];
+                        let (x0, x1) = ((col0 * 8) >> sx, ((col1 * 8) >> sx).min(stride));
+                        let y0 = (r * 64) >> sy;
+                        let y1 = if r + 1 == sb_rows {
+                            dims.rows[p]
+                        } else {
+                            (((r + 1) * 64) >> sy).min(dims.rows[p])
+                        };
+                        let mut pix = Vec::with_capacity((x1 - x0) * (y1 - y0));
+                        for y in y0..y1 {
+                            pix.extend_from_slice(&views[p].data[y * stride + x0..y * stride + x1]);
+                        }
+                        let band = Band {
+                            cols: (col0, col1),
+                            row: r,
+                            pix,
+                            masks: t.state.masks[r * tsb..(r + 1) * tsb].to_vec(),
+                        };
+                        if tx.send(band).is_err() {
+                            return Err(CodecError::Malformed {
+                                at_bit: 0,
+                                what: "vp9 encoder loop filter",
+                            });
+                        }
+                    }
+                }
             }
             t.seeds = seeds;
             Ok(())
         };
         let work = &mut self.work[..ntiles * lanes];
         if ntiles * lanes == 1 {
-            run(&mut work[0], 0, mi_cols, 0, None)?;
+            // (Each entry is written before it is read.)
+            let mut bufs = std::mem::take(&mut self.pre_bufs);
+            bufs.resize_with(1, Default::default);
+            let pre = &mut bufs[0].1;
+            let lazy = match rp {
+                Some(rp) if lazy => {
+                    pre.resize(sb_rows * sb_cols, tile::Pre::default());
+                    Some(Lazy {
+                        rp,
+                        seeds: &mut self.pre_seeds,
+                        pre,
+                    })
+                }
+                _ => None,
+            };
+            let r = run(&mut work[0], 0, mi_cols, 0, None, None, lazy);
+            self.pre_bufs = bufs;
+            r?;
         } else {
             let syncs: Vec<tile::Lanes<P>> = (0..ntiles)
                 .map(|i| tile::Lanes::new(sb_rows, (edges[i + 1] - edges[i]).div_ceil(8)))
                 .collect();
+            let writer = &mut writer;
+            // (Fused: each tile column's seeds and searches.)
+            let mut fused = std::mem::take(&mut self.pre_bufs);
+            if lazy {
+                fused.resize_with(ntiles, Default::default);
+                for (seeds, pre) in &mut fused {
+                    seeds.clone_from(&self.pre_seeds);
+                    pre.resize(sb_rows * sb_cols, tile::Pre::default());
+                }
+            } else {
+                fused.clear();
+            }
             let results: Vec<Result<(), CodecError>> = std::thread::scope(|sc| {
+                // Piped: each plane's rows go into the picture and through
+                // the loop filter as every tile column finishes them.
+                let mut lf_threads = Vec::new();
+                let mut txs = Vec::new();
+                if piped {
+                    for (p, v) in writer.tails().map(View::of).into_iter().enumerate() {
+                        let (tx, rx) = mpsc::channel();
+                        txs.push(tx);
+                        let (l, g) = (&levels, &geo);
+                        lf_threads.push(
+                            sc.spawn(move || lf_rows(v, p, rx, (ntiles, sb_rows), filter_on, l, g)),
+                        );
+                    }
+                }
+                let mut fused_it = fused.iter_mut();
                 let handles: Vec<_> = work
                     .iter_mut()
                     .enumerate()
                     .map(|(k, t)| {
+                        let lazy = match (rp, fused_it.next()) {
+                            (Some(rp), Some((seeds, pre))) => Some(Lazy { rp, seeds, pre }),
+                            _ => None,
+                        };
                         let (i, lane) = (k / lanes, k % lanes);
                         let (c0, c1) = (edges[i], edges[i + 1]);
                         let sync = (lanes > 1).then(|| &syncs[i]);
                         let run = &run;
+                        let pipe = piped.then(|| txs.clone());
                         sc.spawn(move || {
                             // (A lane that stops lets the others stop
                             // waiting for it.)
                             let _guard = Release(sync);
-                            let r = run(t, c0, c1, lane, sync);
+                            let r = run(t, c0, c1, lane, sync, pipe.as_deref(), lazy);
                             if r.is_err()
                                 && let Some(l) = sync
                             {
@@ -898,16 +1048,33 @@ impl<P: EncPixel> FrameEncoder<P> {
                         })
                     })
                     .collect();
-                handles
-                    .into_iter()
-                    .map(|h| {
-                        h.join().unwrap_or(Err(CodecError::Malformed {
-                            at_bit: 0,
-                            what: "vp9 encoder thread",
-                        }))
+                drop(txs);
+                let thread_err = || {
+                    Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "vp9 encoder thread",
                     })
-                    .collect()
+                };
+                let mut out: Vec<Result<(), CodecError>> = handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| thread_err()))
+                    .collect();
+                for h in lf_threads {
+                    if h.join().unwrap_or(false) {
+                        continue;
+                    }
+                    out.push(thread_err());
+                }
+                out
             });
+            for (i, (seeds, _)) in fused.iter().enumerate() {
+                let (c0, c1) = (edges[i], edges[i + 1]);
+                for r in 0..mi_rows {
+                    let at = r * mi_cols;
+                    self.pre_seeds[at + c0..at + c1].copy_from_slice(&seeds[at + c0..at + c1]);
+                }
+            }
+            self.pre_bufs = fused;
             for r in results {
                 r?;
             }
@@ -956,6 +1123,7 @@ impl<P: EncPixel> FrameEncoder<P> {
         let new_nc = probs::updates(&old_nc, &counts, &Self::coded(key, fp));
         // A tile column's symbols, one coder for each tile row.
         let log2_rows = h.log2_tile_rows;
+        let probs = tile::prob_table(&new, &new_nc);
         let write = |t: &TileWork<P>| -> Result<Vec<Vec<u8>>, CodecError> {
             (0..1usize << log2_rows)
                 .map(|tr| {
@@ -972,9 +1140,11 @@ impl<P: EncPixel> FrameEncoder<P> {
                         ((tr + 1) * sb_rows) >> log2_rows,
                     );
                     let mut w = BoolWriter::new();
-                    for &(bit, id) in &t.out[symbols(r0)..symbols(r1)] {
-                        w.write(u32::from(bit), tile::prob_of(id, &new, &new_nc));
-                    }
+                    w.write_all(
+                        t.out[symbols(r0)..symbols(r1)]
+                            .iter()
+                            .map(|&(bit, id)| (u32::from(bit), u32::from(probs[usize::from(id)]))),
+                    );
                     w.finish()
                 })
                 .collect()
@@ -983,6 +1153,10 @@ impl<P: EncPixel> FrameEncoder<P> {
         let (m, l, g, ed, gr) = (&masks, &levels, &geo, &edges, &grid);
         let tiles = std::thread::scope(|sc| {
             for (p, mut v) in writer.tails().map(View::of).into_iter().enumerate() {
+                if piped {
+                    // (Filtered already.)
+                    break;
+                }
                 sc.spawn(move || {
                     let ss = if p == 0 { 0 } else { dims.ss_x };
                     // (Rows are whole: tile columns split only across.)
@@ -1058,6 +1232,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                 // Left out: its share stands, and its count goes on.
             }
         }
+        self.pre_frame = pre_buf;
         Ok((
             counts,
             mvs,
@@ -1072,6 +1247,66 @@ impl<P: EncPixel> FrameEncoder<P> {
             },
         ))
     }
+}
+
+/// The one-thread search of each superblock row before it is coded (see
+/// [`FrameEncoder::tiles`]): LAST's luma, the frame's seeds, and where
+/// the rows' searches go.
+#[allow(clippy::type_complexity)]
+struct Lazy<'a, 'b, P> {
+    rp: ((&'a [P], usize), (i32, i32)),
+    seeds: &'b mut [Mv],
+    pre: &'b mut [tile::Pre],
+}
+
+/// A superblock row of one tile column, coded: each plane's samples (its
+/// columns, row by row) and the row's filter masks.
+struct Band<P> {
+    /// Its tile column's first and last mode info columns.
+    cols: (usize, usize),
+    row: usize,
+    pix: Vec<P>,
+    masks: Vec<lpf::Mask>,
+}
+
+/// Puts the rows of plane `p` that the tile columns send into the picture
+/// `v`, and filters each superblock row once every tile column has sent
+/// it: a row's filter reads and writes no sample under it, and the row
+/// above is filtered first, so the picture is the one filtering the whole
+/// frame after coding it makes. Whether every row came.
+fn lf_rows<P: EncPixel>(
+    mut v: View<'_, P>,
+    p: usize,
+    rx: mpsc::Receiver<Band<P>>,
+    (ntiles, sb_rows): (usize, usize),
+    filter_on: bool,
+    levels: &lpf::Levels,
+    g: &lf::Geo,
+) -> bool {
+    let (sx, sy) = if p == 0 { (0, 0) } else { (g.ss_x, g.ss_y) };
+    let stride = v.stride;
+    let mut masks = vec![lpf::Mask::default(); sb_rows * g.sb_cols];
+    let mut have = vec![0usize; sb_rows];
+    let mut next = 0;
+    for b in rx {
+        let (x0, x1) = ((b.cols.0 * 8) >> sx, ((b.cols.1 * 8) >> sx).min(stride));
+        let w = x1 - x0;
+        let y0 = (b.row * 64) >> sy;
+        for (k, line) in b.pix.chunks_exact(w.max(1)).enumerate() {
+            let at = (y0 + k) * stride - v.base + x0;
+            v.data[at..at + w].copy_from_slice(line);
+        }
+        let at = b.row * g.sb_cols + b.cols.0 / 8;
+        masks[at..at + b.masks.len()].copy_from_slice(&b.masks);
+        have[b.row] += 1;
+        while next < sb_rows && have[next] == ntiles {
+            if filter_on {
+                lf::sb_row_plane(&mut v, p, &masks, &[], levels, g, next);
+            }
+            next += 1;
+        }
+    }
+    next == sb_rows
 }
 
 /// Releases a tile column's other lanes when its thread unwinds.

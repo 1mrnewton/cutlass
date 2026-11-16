@@ -317,8 +317,32 @@ pub fn shift<P: EncPixel>(
 /// its own mean predicts no better than anything does, is not seen; the
 /// blocks of the frame after it choose intra all the same.)
 pub fn cut<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> bool {
+    let rows: Vec<usize> = (0..h.saturating_sub(15)).step_by(64).collect();
+    let (inter, intra) = cut_rows(from, to, w, h, &rows);
+    inter > intra * 2
+}
+
+/// Each of `rows` split among `threads` threads, `f` of each share.
+fn on_rows<R: Send>(rows: &[usize], threads: usize, f: impl Fn(&[usize]) -> R + Sync) -> Vec<R> {
+    let share = rows.len().div_ceil(threads.max(1)).max(1);
+    if threads <= 1 || rows.len() <= share {
+        return vec![f(rows)];
+    }
+    let f = &f;
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = rows.chunks(share).map(|c| sc.spawn(move || f(c))).collect();
+        hs.into_iter()
+            .map(|h| h.join())
+            .collect::<Result<Vec<R>, _>>()
+    })
+    .unwrap_or_else(|_| vec![f(rows)])
+}
+
+/// [`cut`]'s sums over the block rows at `rows`: the best matches' errors
+/// and the blocks' own.
+fn cut_rows<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize, rows: &[usize]) -> (u64, u64) {
     let (mut inter, mut intra) = (0u64, 0u64);
-    for by in (0..h.saturating_sub(15)).step_by(64) {
+    for &by in rows {
         for bx in (0..w.saturating_sub(15)).step_by(64) {
             let (_, sse) = search(to, from, w, h, bx, by, 16, 16, &[], 16);
             inter += sse;
@@ -333,7 +357,7 @@ pub fn cut<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> bool {
             intra += s2 - s * s / 256;
         }
     }
-    inter > intra * 2
+    (inter, intra)
 }
 
 /// How far (in sums of 4×4 samples) [`jump`] looks.
@@ -346,11 +370,50 @@ const JUMP_RANGE: isize = 80;
 /// for a cut. Blocks the same vector predicts leave under a quarter of
 /// their own variance; a cut to another picture leaves no vector more
 /// than a few blocks agree on.
-pub fn jump<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> Option<(isize, isize)> {
+/// The blocks are measured on `threads` threads, a share of the rows each.
+pub fn jump<P: EncPixel>(
+    from: &[P],
+    to: &[P],
+    w: usize,
+    h: usize,
+    threads: usize,
+) -> Option<(isize, isize)> {
     let (sf, st) = (Small::new(from, w, h), Small::new(to, w, h));
+    let rows: Vec<usize> = (16..h.saturating_sub(47)).step_by(96).collect();
     let mut votes: Vec<(isize, isize)> = Vec::new();
     let mut detail = 0usize;
-    for by in (16..h.saturating_sub(47)).step_by(96) {
+    for (v, d) in on_rows(&rows, threads, |rows| {
+        jump_rows(from, to, (w, h), (&sf, &st), rows)
+    }) {
+        votes.extend(v);
+        detail += d;
+    }
+    votes.sort_unstable();
+    let mut best = (0usize, (0isize, 0isize));
+    let mut i = 0;
+    while i < votes.len() {
+        let j = votes[i..].iter().take_while(|&&v| v == votes[i]).count();
+        if j > best.0 {
+            best = (j, votes[i]);
+        }
+        i += j;
+    }
+    (best.0 >= 4 && best.0 * 3 >= detail && best.1 != (0, 0)).then_some(best.1)
+}
+
+/// [`jump`]'s blocks of detail in the block rows at `rows`: the vectors
+/// that predict them, and how many there are.
+#[allow(clippy::type_complexity)]
+fn jump_rows<P: EncPixel>(
+    from: &[P],
+    to: &[P],
+    (w, h): (usize, usize),
+    (sf, st): (&Small, &Small),
+    rows: &[usize],
+) -> (Vec<(isize, isize)>, usize) {
+    let mut votes = Vec::new();
+    let mut detail = 0usize;
+    for &by in rows {
         for bx in (16..w.saturating_sub(47)).step_by(96) {
             let (mut s, mut s2) = (0u64, 0u64);
             for r in 0..32 {
@@ -366,7 +429,7 @@ pub fn jump<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> Option<(is
                 continue;
             }
             detail += 1;
-            let c = st.find_near(&sf, bx / 4, by / 4, 8, 8, (0, 0), JUMP_RANGE);
+            let c = st.find_near(sf, bx / 4, by / 4, 8, 8, (0, 0), JUMP_RANGE);
             // The sums' match, to the sample.
             let mut best = (u64::MAX, c);
             for dy in -3..=3 {
@@ -387,17 +450,7 @@ pub fn jump<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> Option<(is
             }
         }
     }
-    votes.sort_unstable();
-    let mut best = (0usize, (0isize, 0isize));
-    let mut i = 0;
-    while i < votes.len() {
-        let j = votes[i..].iter().take_while(|&&v| v == votes[i]).count();
-        if j > best.0 {
-            best = (j, votes[i]);
-        }
-        i += j;
-    }
-    (best.0 >= 4 && best.0 * 3 >= detail && best.1 != (0, 0)).then_some(best.1)
+    (votes, detail)
 }
 
 /// Adds one picture's block to the accumulators: `strength` `None` is the
@@ -573,9 +626,10 @@ const COARSE_RANGE: isize = 12;
 /// [`shift`]'s coarse range around its guess, in sums (12 samples).
 const SHIFT_RANGE: isize = 3;
 
-/// A picture's luma in sums of 4×4 samples, for the coarse search.
+/// A picture's luma in sums of 4×4 samples, for the coarse search (at
+/// most 16 × 4095, so in 16 bits at every depth).
 struct Small {
-    s: Vec<u32>,
+    s: Vec<u16>,
     w: usize,
     h: usize,
 }
@@ -583,14 +637,14 @@ struct Small {
 impl Small {
     fn new<P: Pixel>(y: &[P], w: usize, h: usize) -> Self {
         let (sw, sh) = (w / 4, h / 4);
-        let mut s = vec![0u32; sw * sh];
+        let mut s = vec![0u16; sw * sh];
         for r in 0..sh {
             for (c, v) in s[r * sw..(r + 1) * sw].iter_mut().enumerate() {
                 let mut t = 0u32;
                 for row in y[r * 4 * w + c * 4..].chunks(w).take(4) {
                     t += row[..4].iter().map(|p| p.get() as u32).sum::<u32>();
                 }
-                *v = t;
+                *v = t as u16;
             }
         }
         Self { s, w: sw, h: sh }
@@ -603,7 +657,9 @@ impl Small {
         self.find_near(pic, x, y, bw, bh, (0, 0), COARSE_RANGE)
     }
 
-    /// [`Small::find`] within `range` of `near` (in sums).
+    /// [`Small::find`] within `range` of `near` (in sums). Each row of
+    /// vectors is measured at once, sum by sum of the block across the
+    /// row's offsets (in vector lanes), then taken in order.
     #[allow(clippy::too_many_arguments)]
     fn find_near(
         &self,
@@ -618,29 +674,35 @@ impl Small {
         if bw == 0 || bh == 0 || x + bw > self.w || y + bh > self.h {
             return (0, 0);
         }
+        // The offsets across that keep the block in `pic`.
+        let lo = (near.0 - range).max(-(x as isize));
+        let hi = (near.0 + range).min(pic.w as isize - bw as isize - x as isize);
         let mut best = (u64::MAX, (0isize, 0isize));
+        if hi < lo {
+            return best.1;
+        }
+        let n = (hi - lo + 1) as usize;
+        let mut acc = vec![0u32; n];
         for dy in near.1 - range..=near.1 + range {
             let py = y as isize + dy;
             if py < 0 || py as usize + bh > pic.h {
                 continue;
             }
-            for dx in near.0 - range..=near.0 + range {
-                let px = x as isize + dx;
-                if px < 0 || px as usize + bw > pic.w {
-                    continue;
+            let py = py as usize;
+            acc.fill(0);
+            let px0 = (x as isize + lo) as usize;
+            for r in 0..bh {
+                let a = &self.s[(y + r) * self.w + x..][..bw];
+                let row = &pic.s[(py + r) * pic.w + px0..];
+                for (c, &a) in a.iter().enumerate() {
+                    for (t, &b) in acc.iter_mut().zip(&row[c..c + n]) {
+                        *t += u32::from(a.abs_diff(b));
+                    }
                 }
-                let (py, px) = (py as usize, px as usize);
-                let mut sad = 0u64;
-                for r in 0..bh {
-                    let a = &self.s[(y + r) * self.w + x..][..bw];
-                    let b = &pic.s[(py + r) * pic.w + px..][..bw];
-                    sad += a
-                        .iter()
-                        .zip(b)
-                        .map(|(&a, &b)| u64::from(a.abs_diff(b)))
-                        .sum::<u64>();
-                }
-                let sad = sad * 64 + (dx.unsigned_abs() + dy.unsigned_abs()) as u64;
+            }
+            for (i, &t) in acc.iter().enumerate() {
+                let dx = lo + i as isize;
+                let sad = u64::from(t) * 64 + (dx.unsigned_abs() + dy.unsigned_abs()) as u64;
                 if sad < best.0 {
                     best = (sad, (dx * 4, dy * 4));
                 }

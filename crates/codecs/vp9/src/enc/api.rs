@@ -1175,7 +1175,7 @@ impl<P: EncPixel> Core<P> {
         let tight: Vec<P> = (0..h)
             .flat_map(|r| y[r * stride..r * stride + w].iter().copied())
             .collect();
-        super::arf::jump(&self.last_luma, &tight, w, h)
+        super::arf::jump(&self.last_luma, &tight, w, h, self.opts.threads())
     }
 
     fn reset(&mut self) {

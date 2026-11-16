@@ -328,6 +328,22 @@ pub fn gain(log2n: usize) -> f32 {
     })[log2n.min(3)]
 }
 
+/// The DCT's DC coefficient of each size for a residual summing to 1
+/// (measured once on a flat residual): the DC of a residual is its sum
+/// times this, near enough.
+pub fn dc_gain(log2n: usize) -> f32 {
+    static G: OnceLock<[f32; 4]> = OnceLock::new();
+    G.get_or_init(|| {
+        core::array::from_fn(|l| {
+            let n = 4usize << l;
+            let res = vec![64i32; n * n];
+            let mut out = vec![0.0f32; n * n];
+            forward(&res, n, l, false, false, &mut out);
+            out[0] / (64 * n * n) as f32
+        })
+    })[log2n.min(3)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::forward;

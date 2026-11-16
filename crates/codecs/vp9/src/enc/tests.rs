@@ -218,13 +218,19 @@ fn a_far_jump_is_found_and_searched_from() {
     let (w, h) = (640usize, 320usize);
     let a = texture(w, h, (200, 100));
     let b = texture(w, h, (100, 60));
-    // `b`'s blocks are `a`'s 100 to the left and 40 up.
-    assert_eq!(super::arf::jump(&a[0], &b[0], w, h), Some((-100, -40)));
+    // `b`'s blocks are `a`'s 100 to the left and 40 up (on one thread
+    // or several).
+    for threads in [1, 3] {
+        assert_eq!(
+            super::arf::jump(&a[0], &b[0], w, h, threads),
+            Some((-100, -40))
+        );
+    }
     // Another picture altogether: no jump.
     let other: Vec<u8> = (0..w * h)
         .map(|i| (30 + (i % w + i / w) / 8) as u8)
         .collect();
-    assert_eq!(super::arf::jump(&a[0], &other, w, h), None);
+    assert_eq!(super::arf::jump(&a[0], &other, w, h, 1), None);
     // Coded after `a`, `b` takes far fewer bits with the jump given.
     let cw = w.div_ceil(2);
     let code = |global: bool| {

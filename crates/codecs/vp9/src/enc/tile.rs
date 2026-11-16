@@ -184,6 +184,7 @@ pub fn bit_cost(bit: bool, p: u8) -> u32 {
 }
 
 /// A source picture: three planes padded to whole superblocks.
+#[derive(Clone, Copy)]
 pub struct Source<'a, P> {
     pub planes: [&'a [P]; 3],
     pub strides: [usize; 3],
@@ -512,6 +513,22 @@ const TX_DOMAIN_SPEED: u8 = 5;
 /// chosen); the blocks the search chooses are coded with RD quantization.
 const DZ_TRIAL_SPEED: u8 = 5;
 
+/// The dead zone's offsets at speeds 9 and 10 (0.5 rounds to nearest).
+const DZ_INTRA_ROUND: f32 = 0.42;
+const DZ_INTER_ROUND: f32 = 0.33;
+
+/// From this speed (where every block is quantized by the dead zone) a DCT
+/// block whose residual bounds every coefficient inside the dead zone is
+/// not transformed: by its sum, the DC; by its variance, any AC
+/// coefficient (the transforms keep energy, up to their gain).
+const DZ_BOUND_SPEED: u8 = 9;
+
+/// How far inside the dead zone the bound must be, for the transforms'
+/// roundings: a share of the step, and coefficients' units (at the scale
+/// the dead zone reads, doubled for 32×32).
+const DZ_BOUND_MARGIN: f32 = 0.95;
+const DZ_BOUND_SLACK: f32 = 4.0;
+
 /// The largest transform of the one-pass speeds. A chroma transform is
 /// as large as luma's (one size smaller in 4:2:0) and at these speeds
 /// nothing tries a smaller one: capped, chroma keeps the detail a large
@@ -558,10 +575,86 @@ fn copy_rows<P: Copy>(dst: &mut [P], ds: usize, src: &[P], ss: usize, w: usize, 
     }
 }
 
+/// Whether the dead zone ([`Tile::dz_levels`]) quantizes every coefficient
+/// of the DCT of a residual of `tx` (`n`×`n`, its squares and its sum
+/// `(ss, sum)`) to zero, at steps `(dc_q, ac_q)`: its DC is the sum through
+/// the DC's gain, and no AC coefficient is larger than the AC energy, the
+/// residual's variance through the transform's gain; each with a margin
+/// for the transform's roundings ([`DZ_BOUND_MARGIN`], [`DZ_BOUND_SLACK`]).
+fn dz_bounded(tx: u8, (ss, sum): (i64, i64), (dc_q, ac_q): (i32, i32), intra: bool) -> bool {
+    let l = usize::from(tx);
+    let n = 4usize << l;
+    let unit = if tx == TX_32X32 { 2.0 } else { 1.0 };
+    let slack = DZ_BOUND_SLACK * unit;
+    let sum = sum as f32;
+    let var = (ss as f32 - sum * sum / (n * n) as f32).max(0.0);
+    let dc = (sum * super::tx::dc_gain(l)).abs() * unit + slack;
+    let round = if intra {
+        DZ_INTRA_ROUND
+    } else {
+        DZ_INTER_ROUND
+    };
+    let ac = (1.0 - round) * DZ_BOUND_MARGIN * ac_q as f32 - slack;
+    dc < 0.5 * DZ_BOUND_MARGIN * dc_q as f32
+        && ac > 0.0
+        && var * super::tx::gain(l) * unit * unit < ac * ac
+}
+
+/// The residual of an `n`×`n` tx block, `src` less `pred`, into `res` (in
+/// rows of `n`), the sum of its squares ([`sum_sq`]) and its sum; in AVX2
+/// where the CPU has it.
+fn residual_of<P: EncPixel>(
+    src: &[P],
+    ss: usize,
+    pred: &[P],
+    ps: usize,
+    n: usize,
+    res: &mut [i32],
+) -> (i64, i64) {
+    #[inline(always)]
+    fn rows<P: EncPixel, const N: usize>(
+        src: &[P],
+        ss: usize,
+        pred: &[P],
+        ps: usize,
+        res: &mut [i32],
+    ) -> (i64, i64) {
+        let mut sum = 0i64;
+        for r in 0..N {
+            let (Some(sr), Some(pr), Some(d)) = (
+                src[r * ss..].first_chunk::<N>(),
+                pred[r * ps..].first_chunk::<N>(),
+                res[r * N..].first_chunk_mut::<N>(),
+            ) else {
+                continue;
+            };
+            let mut a = [0i32; N];
+            let mut b = [0i32; N];
+            for c in 0..N {
+                a[c] = sr[c].get();
+                b[c] = pr[c].get();
+            }
+            let mut t = 0i32;
+            for c in 0..N {
+                d[c] = a[c] - b[c];
+                t += d[c];
+            }
+            sum += i64::from(t);
+        }
+        (sum_sq(&res[..N * N]), sum)
+    }
+    cutlass_simd::vp9::wide(|| match n {
+        4 => rows::<P, 4>(src, ss, pred, ps, res),
+        8 => rows::<P, 8>(src, ss, pred, ps, res),
+        16 => rows::<P, 16>(src, ss, pred, ps, res),
+        _ => rows::<P, 32>(src, ss, pred, ps, res),
+    })
+}
+
 /// The sum of the squares of a residual (of samples up to 12 bits, a
 /// length that is a multiple of 16): sixteen squares at a time in 32 bits
 /// (at most 268 million), so that it runs in vector lanes.
-#[inline]
+#[inline(always)]
 fn sum_sq(res: &[i32]) -> i64 {
     let mut total = 0i64;
     for c in res.as_chunks::<16>().0 {
@@ -2257,6 +2350,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let (src, ss) = (s.src.planes[0], s.src.strides[0]);
         let a = &src[y * ss + x..];
         let b = &data[by as usize * stride + bx as usize..];
+        if r & 7 == 0 && c & 7 == 0 {
+            // Whole samples: the bilinear filter at zero is the samples.
+            return Some(u64::from(P::sad(a, ss, b, stride, w, h)));
+        }
         Some(u64::from(P::sad_bilinear(
             a,
             ss,
@@ -2953,19 +3050,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let n = 4usize << tx;
         let log2n = 2 + usize::from(tx);
         let (src, ss) = (s.src.planes[plane], s.src.strides[plane]);
-        {
+        let (res_ss, res_sum) = {
             let v = &mut self.rec.views()[plane];
             let stride = v.stride;
             let pred = v.at(y, x);
-            // Row slices, so that each row's differences vectorize.
-            for r in 0..n {
-                let sr = &src[(y + r) * ss + x..][..n];
-                let pr = &pred[r * stride..][..n];
-                for ((d, &a), &b) in self.res[r * n..][..n].iter_mut().zip(sr).zip(pr) {
-                    *d = a.get() - b.get();
-                }
-            }
-        }
+            residual_of(&src[y * ss + x..], ss, pred, stride, n, &mut self.res)
+        };
         let mut levels = self.pool.pop().unwrap_or_default();
         levels.clear();
         levels.resize(n * n, 0);
@@ -2974,7 +3064,6 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let dqi = usize::from(plane > 0);
         let (dc_q, ac_q) = (s.dq[self.seg][dqi][0], s.dq[self.seg][dqi][1]);
         let shift = u32::from(tx == 3);
-        let res_ss = sum_sq(&self.res[..n * n]);
         let quiet = {
             // No coefficient can reach 0.3 of a step when the residual's
             // energy (by Parseval, through the transform's gain) is below
@@ -2985,6 +3074,15 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             let floor = 0.3 * step;
             (ss as f32) * g < floor * floor
         };
+        // From DZ_BOUND_SPEED, a DCT block whose dead zone can only find
+        // zeros: its DC (the residual's sum, through the DC's gain) under
+        // the DC's dead zone, and its AC energy (the residual's variance,
+        // through the gain), all in one coefficient, under the AC's.
+        let bounded = !quiet
+            && !s.h.lossless
+            && s.speed >= DZ_BOUND_SPEED
+            && kind == 0
+            && dz_bounded(tx, (res_ss, res_sum), (dc_q, ac_q), intra);
         if s.h.lossless {
             let mut c = [0i32; 16];
             fwht(&self.res, n, &mut c);
@@ -3001,6 +3099,18 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 dropped: ss as f32,
                 rate: NO_RATE,
                 dist: (ss as f32, ss as f32),
+            };
+            rd_eob = Some(0);
+        } else if bounded {
+            // What the dead zone's costs come to for zeros: the error all
+            // dropped, and an end of block either way.
+            let ss = res_ss as f32;
+            let lam = s.rd_lambda;
+            self.rd = TxRd {
+                coded: ss + lam,
+                dropped: ss + lam,
+                rate: NO_RATE,
+                dist: (ss, ss),
             };
             rd_eob = Some(0);
         } else {
@@ -3097,7 +3207,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             dc_q as f32 / (1 << shift) as f32,
             ac_q as f32 / (1 << shift) as f32,
         ];
-        let round = if intra { 0.42 } else { 0.33 };
+        let round = if intra {
+            DZ_INTRA_ROUND
+        } else {
+            DZ_INTER_ROUND
+        };
         // The DC at its own step, rounded to nearest; then the rest.
         use cutlass_simd::vp9::quant;
         let dc = quant::dz(&self.fcoef[..1], &mut levels[..1], inv[0], steps[0], 0.5);
@@ -4292,6 +4406,23 @@ pub fn prob_of(id: u16, coef: &[u8; 1728], nc: &probs::Flat) -> u32 {
     }
 }
 
+/// [`prob_of`] of every symbol id, by id (0 between the ranges ids take):
+/// the writers look each one up without its branches.
+pub fn prob_table(coef: &[u8; 1728], nc: &probs::Flat) -> Vec<u8> {
+    let len = usize::from(PARETO_ID) + coef.len() * 8;
+    let mut t = vec![0u8; len];
+    let ranges = [
+        0..256,
+        usize::from(COEF_ID)..usize::from(COEF_ID) + coef.len(),
+        usize::from(NC_ID)..usize::from(NC_ID) + nc.len(),
+        usize::from(PARETO_ID)..len,
+    ];
+    for id in ranges.into_iter().flatten() {
+        t[id] = prob_of(id as u16, coef, nc) as u8;
+    }
+    t
+}
+
 impl Sink for Out {
     #[inline]
     fn write(&mut self, bit: u32, prob: u32) {
@@ -4689,9 +4820,16 @@ fn search_in<P: EncPixel>(
     }
     let mut best = (0i32, 0i32);
     let mut best_sad = u64::MAX;
-    for m in &cands[..nc] {
+    // (Neighbours often share a vector: each one's SAD is taken once.)
+    let mut seen = [((0i32, 0i32), None::<u64>); 7];
+    for (k, m) in cands[..nc].iter().enumerate() {
         let (r, c) = ((i32::from(m.row) + 4) >> 3, (i32::from(m.col) + 4) >> 3);
-        if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, c) {
+        let sad = match seen[..k].iter().find(|e| e.0 == (r, c)) {
+            Some(e) => e.1,
+            None => sad_ref(src, rp, (x, y, w, h), r, c),
+        };
+        seen[k] = ((r, c), sad);
+        if let Some(v) = sad {
             let v = v + mvcost_px(r, c, best);
             if v < best_sad {
                 best_sad = v;
@@ -4710,8 +4848,9 @@ fn search_in<P: EncPixel>(
         (BLOCK_64X64, 9..) => 4,
         (geom::BLOCK_32X32, 9..) => 1,
         // Speed 10 checks only the candidates below 32×32 (its square's
-        // vector among them).
-        (_, 10..) => 0,
+        // vector among them), speed 9 at 8×8 (its 8×8 diamonds were a
+        // tenth of its time for 0.6% of the bits at the same PSNR).
+        (_, 10..) | (BLOCK_8X8, 9) => 0,
         (_, 9) => 1,
         (BLOCK_64X64, _) | (_, 0..=2) => 8,
         (_, 3..=6) => 4,
@@ -4858,5 +4997,70 @@ fn pre_choose<P: EncPixel>(
         quarters
     } else {
         own
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DZ_INTER_ROUND, DZ_INTRA_ROUND, dz_bounded, forward};
+    use crate::tables::{AC_QLOOKUP, DC_QLOOKUP};
+    use cutlass_simd::vp9::quant;
+
+    /// Every residual [`dz_bounded`] passes over quantizes to zeros in the
+    /// dead zone, as [`super::Tile::dz_levels`] quantizes it, at every tx
+    /// size, at steps over the whole range, near the bound and far from
+    /// it; and the bound passes over many of them.
+    #[test]
+    fn dz_bound_finds_only_zeros() {
+        let mut x = 0x2545_f491u32;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x
+        };
+        let mut passed = 0;
+        for tx in 0..4u8 {
+            let n = 4usize << tx;
+            let unit = if tx == 3 { 2.0 } else { 1.0 };
+            for q in (0..256).step_by(5) {
+                let (dc_q, ac_q) = (i32::from(DC_QLOOKUP[q]), i32::from(AC_QLOOKUP[q]));
+                for k in 0..400 {
+                    let intra = k % 2 == 1;
+                    // Noise up to a few hundredths of the step, around an
+                    // offset.
+                    let amp = (next() % (ac_q as u32 / (4 << tx) + 3)) as i32;
+                    let off = (next() % (dc_q as u32 / (2 << tx) + 1)) as i32 - dc_q / (4 << tx);
+                    let res: Vec<i32> = (0..n * n)
+                        .map(|_| {
+                            (off + (next() % (2 * amp as u32 + 1)) as i32 - amp).clamp(-255, 255)
+                        })
+                        .collect();
+                    let ss: i64 = res.iter().map(|&v| i64::from(v * v)).sum();
+                    let sum: i64 = res.iter().map(|&v| i64::from(v)).sum();
+                    if !dz_bounded(tx, (ss, sum), (dc_q, ac_q), intra) {
+                        continue;
+                    }
+                    passed += 1;
+                    let mut c = vec![0.0f32; n * n];
+                    forward(&res, n, usize::from(tx), false, false, &mut c);
+                    let mut levels = vec![0i32; n * n];
+                    let round = if intra {
+                        DZ_INTRA_ROUND
+                    } else {
+                        DZ_INTER_ROUND
+                    };
+                    let (dq, aq) = (dc_q as f32 / unit, ac_q as f32 / unit);
+                    let dc = quant::dz(&c[..1], &mut levels[..1], unit / dc_q as f32, dq, 0.5);
+                    let ac = quant::dz(&c[1..], &mut levels[1..], unit / ac_q as f32, aq, round);
+                    assert!(
+                        !dc.nonzero && !ac.nonzero,
+                        "tx {tx} q {q} intra {intra}: {} levels",
+                        levels.iter().filter(|&&l| l != 0).count()
+                    );
+                }
+            }
+        }
+        assert!(passed > 1000, "{passed}");
     }
 }

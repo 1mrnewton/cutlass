@@ -346,6 +346,14 @@ jobs:
             echo "the APK says $version, not ${GITHUB_REF_NAME#v}" >&2
             exit 1
           fi
+          # One APK for both: phones and tablets on Arm, and x86_64
+          # Chromebooks and emulators. Play splits the AAB per device.
+          for abi in arm64-v8a x86_64; do
+            if ! unzip -l dist/Cutlass.apk | grep -q " lib/$abi/libcutlass_ffi_bindings.so$"; then
+              echo "the APK has no lib/$abi/libcutlass_ffi_bindings.so" >&2
+              exit 1
+            fi
+          done
       - name: Say how Android is published
         run: |
           if [ "${{ steps.signing.outputs.sign }}" = yes ]; then

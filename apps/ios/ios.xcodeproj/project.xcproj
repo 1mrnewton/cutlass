@@ -77,7 +77,7 @@
           "-framework",
           "VideoToolbox",
         ],
-        "PRODUCT_BUNDLE_IDENTIFIER": "devplaceholder.$(PROJECT_UNIQUE_VALUE:identifier).$(PRODUCT_NAME:rfc1034identifier)",
+        "PRODUCT_BUNDLE_IDENTIFIER": "com.scytheralpha.cutlass",
         "PRODUCT_NAME": "$(TARGET_NAME)",
         "REGISTER_APP_GROUPS": "YES",
         "SDKROOT": "auto",

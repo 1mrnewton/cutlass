@@ -6,10 +6,13 @@
 ; and for movies, sound and pictures. /S installs silently; /D= sets the
 ; folder.
 ;
-; Defines from the script: VERSION, SOURCE (the folder holding cutlass.exe
-; and cutlass.ico), OUTFILE.
+; Defines from the script: VERSION, ARCH (x86_64 or aarch64, the processor
+; cutlass.exe is built for), SOURCE (the folder holding cutlass.exe and
+; cutlass.ico), OUTFILE.
 
 Unicode true
+!include LogicLib.nsh
+!include x64.nsh
 SetCompressor /SOLID lzma
 RequestExecutionLevel user
 
@@ -37,6 +40,25 @@ VIAddVersionKey "LegalCopyright" "Licensed MIT OR Apache-2.0"
 !macro Unsupported EXT
   DeleteRegKey HKCU "Software\Classes\${EXT}\OpenWithList\cutlass.exe"
 !macroend
+
+; An Arm build runs only on Arm Windows. An x86_64 build runs on x64
+; Windows, and on Arm Windows through its emulation, but not on 32-bit
+; Windows.
+Function .onInit
+  !if "${ARCH}" == "aarch64"
+    ${IfNot} ${IsNativeARM64}
+      MessageBox MB_ICONSTOP "This installer is for Windows on Arm. Download Cutlass-x86_64-setup.exe for this PC." /SD IDOK
+      Abort
+    ${EndIf}
+  !else if "${ARCH}" == "x86_64"
+    ${IfNot} ${RunningX64}
+      MessageBox MB_ICONSTOP "Cutlass needs 64-bit Windows." /SD IDOK
+      Abort
+    ${EndIf}
+  !else
+    !error "ARCH is ${ARCH}, not x86_64 or aarch64"
+  !endif
+FunctionEnd
 
 Page directory
 Page instfiles

@@ -477,6 +477,20 @@ const CHEAP_RATE: f64 = 8.0;
 /// See [`CHEAP_RATE`].
 const CHEAP_DIST: f64 = 0.16;
 
+/// Speed 6 in one pass searches as speed 5 does (the chroma of the best
+/// intra mode, one intra candidate and the threshold of seven levels of
+/// error a sample to try them, the next smaller transform) but with one
+/// inter candidate at every block size (speed 5 has one at 32×32 and up),
+/// and tries the next smaller transform only after a best mode that codes
+/// more than these bits (1/256) an 8×8. Before, speed 6 kept two inter and
+/// intra candidates and tried no smaller transform, and took speed 5's
+/// time on the three scenes (at 4 threads) for +2.6% / +8.6% against
+/// FFmpeg's default where speed 5 is −9.2% / −3.0% (most of it the
+/// smaller transform: −8.3% / −2.0% with it, at 1.1 times speed 5's
+/// time). At 32 bits, −8.2% / −2.0% in 0.95 of speed 5's time (at 64
+/// bits, −8.1% / −2.1% in the same time; at 128, −3.2% / +2.7%).
+const SIX_TX_BITS: f64 = 32.0 * 256.0;
+
 /// The first speed of [`CHEAP_RATE`]'s stop. (It is left out of the
 /// second pass, which is far ahead of libvpx's time already.)
 const CHEAP_SPEED: u8 = 5;
@@ -1197,6 +1211,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
 
     // Partition decision --------------------------------------------------
 
+    /// Speed 6 in one pass: speed 5's search (see [`SIX_TX_BITS`]).
+    fn six(&self) -> bool {
+        self.s.speed == 6 && !self.s.second_pass
+    }
+
     /// Whether this frame takes the one-pass path: inter frames at speed
     /// 7 and up, every frame at 9.
     fn fast(&self) -> bool {
@@ -1609,7 +1628,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // Chroma and transform size for the best intra mode.
         if best.1 >= intra_first
             && cands.len() > intra_first
-            && (s.speed < 6 || (s.intra_frame && s.speed < 9))
+            && (s.speed < 6 || self.six() || (s.intra_frame && s.speed < 9))
         {
             let b0 = cands[best.1];
             let mut more = Vec::new();
@@ -1637,7 +1656,13 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // Nor for an inter frame's 64×64 block.
         let smaller = smaller
             && (s.speed < SKIP_TX_SPEED || s.second_pass || s.intra_frame || bsize != BLOCK_64X64);
-        if (s.speed < 6 && smaller) || (s.intra_frame && s.speed < 9) || trial {
+        // At speed 6 in one pass, only a block that codes more than
+        // SIX_TX_BITS a 8×8.
+        let smaller = smaller
+            && (s.speed < 6
+                || (self.six()
+                    && (best.0 - self.choice_skip.1) / lam > SIX_TX_BITS * (bw_mi * bh_mi) as f64));
+        if smaller || (s.intra_frame && s.speed < 9) || trial {
             let b0 = cands[best.1];
             let tries = if s.speed < 4 { 2 } else { 1 };
             let mut tx = b0.tx;
@@ -1883,7 +1908,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             // (At speed 5, one: the second's trials took 4% of the time
             // on the README's grainy pan at 4 Mb/s, for the same BD-rates
             // within the noise.)
-            5 if !s.intra_frame && !s.second_pass => 1,
+            5 | 6 if !s.intra_frame && !s.second_pass => 1,
             5 if !s.intra_frame => 2,
             5 => 3,
             6 => 2,
@@ -1918,6 +1943,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let per = match self.s.speed {
             0..=4 => 5,
             5 => 7,
+            6 if !self.s.second_pass => 7,
             6..=7 => 8,
             _ => 12,
         } << (self.s.h.bit_depth - 8);
@@ -2056,6 +2082,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             0..=3 => 3,
             // (See ONE_CAND_SPEED.)
             5 if bsize >= geom::BLOCK_32X32 && !s.second_pass => 1,
+            6 if !s.second_pass => 1,
             4..=7 => 2,
             _ => 1,
         };

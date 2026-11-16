@@ -233,7 +233,15 @@ pub enum EditError {
     FrameRate,
     /// The color space is not one the player keeps.
     ColorSpace,
+    /// A clip would end past [`MAX_TIMELINE`], or its length or start
+    /// does not fit a time at all.
+    TooLong,
 }
+
+/// The latest time a clip may end: 24 hours, in microseconds. Past it a
+/// timeline is a mistake, not a film, and an end near the `i64` limit
+/// cannot be added to without saturating.
+pub const MAX_TIMELINE: i64 = 24 * 60 * 60 * 1_000_000;
 
 impl std::fmt::Display for EditError {
     /// Why the request was refused, in words a person or a model can act on.
@@ -345,6 +353,7 @@ impl std::fmt::Display for EditError {
             Self::LetterboxBlur => "the letterbox blur is outside 0 to 1",
             Self::FrameRate => "the frame rate is not one the project can use",
             Self::ColorSpace => "the color space is not one the project keeps",
+            Self::TooLong => "a clip would end past 24 hours (86400000000 microseconds)",
         };
         formatter.write_str(text)
     }
@@ -1083,7 +1092,33 @@ pub fn apply_all(
     // parted them.
     transition::drop_parted(draft, &blended);
     drop_emptied_lanes(draft, &held);
+    check_lengths(draft)?;
     sync_duration(draft);
+    Ok(())
+}
+
+/// Refuse a draft with a clip, at any depth, that ends past
+/// [`MAX_TIMELINE`] or whose end would overflow.
+fn check_lengths(draft: &Draft) -> Result<(), EditError> {
+    let fits = |range: &TimeRange| {
+        range
+            .start
+            .0
+            .checked_add(range.duration.0)
+            .is_some_and(|end| end <= MAX_TIMELINE)
+    };
+    for track in &draft.tracks {
+        for segment in &track.segments {
+            if !fits(&segment.target) {
+                return Err(EditError::TooLong);
+            }
+        }
+    }
+    for nest in &draft.materials.drafts {
+        if let Some(inside) = nest.draft.as_deref() {
+            check_lengths(inside)?;
+        }
+    }
     Ok(())
 }
 

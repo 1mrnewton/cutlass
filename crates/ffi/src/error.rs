@@ -194,6 +194,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::LetterboxBlur => "the blur is not a fraction from 0 through 1".to_owned(),
         EditError::FrameRate => "the frame rate is not a project rate".to_owned(),
         EditError::ColorSpace => "the color space is not a project color space".to_owned(),
+        EditError::TooLong => "a clip would end past 24 hours".to_owned(),
     }
 }
 

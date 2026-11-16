@@ -15,8 +15,8 @@ pub use cutlass_model::{
 };
 pub use edit::{
     BOLD_WIDTH, CANVAS_SHAPES, CAPTION_KIND, CanvasShape, ClipAttributes, EditError, ITALIC_DEGREE,
-    MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE, TextPattern, canvas_for, follow_first_picture,
-    lane_fits, new_lane_index, ratio_request, text_range_pattern,
+    MAX_CAPTION_STAGGER_MS, MAX_TIMELINE, NEW_TEXT_SIZE, TextPattern, canvas_for,
+    follow_first_picture, lane_fits, new_lane_index, ratio_request, text_range_pattern,
 };
 pub use history::{UNDO_BYTES, UNDO_LIMIT};
 pub use request::{Arrange, ImportedMedium, Request, SubtitleCue, TrimEdge};

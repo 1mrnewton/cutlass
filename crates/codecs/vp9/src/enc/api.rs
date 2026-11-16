@@ -896,6 +896,8 @@ impl<P: EncPixel> Core<P> {
                 altref_future: false,
                 aq: self.opts.aq,
                 second_pass: self.rc.pass2.is_some(),
+                full_search: self.full_search(),
+                fast_arf: self.opts.speed >= FAST_ARF_SPEED,
                 golden_slot: golden_slot.0,
                 also_refresh: 0,
                 noise: golden_slot.1,
@@ -1026,6 +1028,8 @@ impl<P: EncPixel> Core<P> {
             altref_future,
             aq: self.opts.aq,
             second_pass: self.rc.pass2.is_some(),
+            full_search: self.full_search(),
+            fast_arf: false,
             golden_slot: golden_slot.0,
             also_refresh,
             noise: golden_slot.1,
@@ -1102,6 +1106,8 @@ impl<P: EncPixel> Core<P> {
                 altref_future: false,
                 aq: false,
                 second_pass: false,
+                full_search: false,
+                fast_arf: false,
                 golden_slot: 1,
                 also_refresh: 0,
                 noise: 0.0,
@@ -1131,6 +1137,12 @@ impl<P: EncPixel> Core<P> {
         let step = pf.shift(&pt, RT_SHIFT_RANGE);
         self.last_prof = Some(pt);
         step
+    }
+
+    /// See [`super::FrameParams::full_search`]: two passes' second, and a
+    /// fixed quantizer up to [`FULL_SEARCH_SPEED`].
+    fn full_search(&self) -> bool {
+        self.rc.pass2.is_some() || (self.opts.bitrate == 0 && self.opts.speed <= FULL_SEARCH_SPEED)
     }
 
     /// Whether the reference pool is the realtime one ([`RT_POOL_SPEED`]).
@@ -1529,6 +1541,17 @@ const RT_POOL: u8 = 3;
 /// See [`Core::rt_step`]: how far, in samples, the content may move from
 /// one picture to the next.
 const RT_SHIFT_RANGE: isize = 32;
+
+/// Up to this speed a fixed quantizer searches as a second pass does
+/// ([`super::FrameParams::full_search`]). Against FFmpeg's `-crf 24` to
+/// `48` at `q=60` to `210`, speed 5: on the README's three clips, from
+/// +0.2 / −0.9 / −21.1% at the same PSNR-Y to −4.3 / −5.5 / −25.9%, and
+/// 5 to 7 points fewer bits at PSNR-U and V, in 1.25 to 1.4 times the
+/// time (at speed 5 a fixed quantizer took half of libvpx's).
+const FULL_SEARCH_SPEED: u8 = 5;
+
+/// See [`super::FrameParams::fast_arf`].
+const FAST_ARF_SPEED: u8 = 8;
 
 /// Frames from one golden frame to the next (at most, in two passes).
 const GF_INTERVAL: u32 = 12;

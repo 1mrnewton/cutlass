@@ -226,6 +226,10 @@ pub struct Shared<'a, P> {
     pub tok: &'a TokCosts,
     /// See [`super::FrameParams::second_pass`].
     pub second_pass: bool,
+    /// See [`super::FrameParams::full_search`].
+    pub full_search: bool,
+    /// See [`super::FrameParams::fast_arf`].
+    pub fast_arf: bool,
     /// See [`super::FrameParams::noise`].
     pub noise: f32,
     /// See [`super::Stream::static_thresh`].
@@ -469,6 +473,13 @@ pub const CHROMA_SPEED: u8 = 6;
 /// PSNR-U. Speeds 7 and 8 lost with it (1/0.7 there).
 const CHROMA_RATE: f32 = 0.8;
 
+/// [`CHROMA_RATE`] at speed 6 in one pass. Against FFmpeg's default on
+/// the README's three scenes (four threads), at 0.8: −1.5 / +0.2 / −2.1%
+/// at the same PSNR-Y / U / V; at 0.75, −1.0 / −1.4 / −3.3% (and 1 point
+/// of PSNR-Y for 1 of PSNR-U on the other two clips, FFmpeg's average
+/// the same or better); at 0.7, −0.3 / −1.4 / −3.2%.
+const CHROMA_RATE_SIX: f32 = 0.75;
+
 /// See [`CHROMA_SPEED`]: with [`CHROMA_RATE`], 2 rather than 1 (the
 /// planes' errors summed as they are) takes 3 points off the bits at the
 /// same PSNR-U and V on the three scenes and on the clip from a still
@@ -526,6 +537,15 @@ const CHEAP_DIST: f64 = 0.64;
 /// time). At 32 bits, −8.2% / −2.0% in 0.95 of speed 5's time (at 64
 /// bits, −8.1% / −2.1% in the same time; at 128, −3.2% / +2.7%).
 const SIX_TX_BITS: f64 = 32.0 * 256.0;
+
+/// [`CHEAP_RATE`] and [`CHEAP_DIST`] for the alt-refs of speeds 8 and up
+/// ([`super::FrameParams::fast_arf`]): their values before the reference
+/// pool came to one pass. With these, and chroma weighed as at speed 8,
+/// speed 8 is the same as before that round (it had lost 1 to 3 points
+/// at the same PSNR-Y on the README's clips, and gained 0 to 3 at PSNR-U,
+/// from the alt-refs alone; with the chroma weights of speed 6 kept, 0.8
+/// points of PSNR-Y were still lost on the three scenes).
+const CHEAP_FAST_ARF: (f64, f64) = (8.0, 0.16);
 
 /// The first speed of [`CHEAP_RATE`]'s stop. (It is left out of the
 /// second pass, which is far ahead of libvpx's time already.)
@@ -1558,11 +1578,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // `SKIP_SPLIT_LEVEL`, `STILL_BREAKOUT`).
         if whole
             && best.1 == PARTITION_NONE
-            && (none_skip.0 || (s.speed >= BREAKOUT_SPEED && !s.second_pass))
+            && (none_skip.0 || (s.speed >= BREAKOUT_SPEED && !s.full_search))
         {
             let pixels = (n * 8 * n * 8) as f64;
             let step = f64::from(s.dq[0][0][1]) / 8.0;
-            let fast = s.speed >= BREAKOUT_SPEED && !s.second_pass;
+            let fast = s.speed >= BREAKOUT_SPEED && !s.full_search;
             // A block that codes a residual stops the search at half that
             // error (from BREAKOUT_SPEED: 6% of the time, 0.2% of the bits),
             // and from BREAKOUT_SPEED one that codes none at two thirds
@@ -1585,11 +1605,16 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                     && none_skip.1 < pixels * step * step / STILL_BREAKOUT
             };
             let small_skip = fast && none_skip.0 && level <= SKIP_SPLIT_LEVEL;
+            let cheap = if s.fast_arf {
+                CHEAP_FAST_ARF
+            } else {
+                (CHEAP_RATE, CHEAP_DIST)
+            };
             let cheap = (CHEAP_SPEED..=6).contains(&s.speed)
                 && !s.second_pass
                 && !none_skip.0
-                && (best.0 - none_skip.1) / lam < CHEAP_RATE * pixels
-                && none_skip.1 < CHEAP_DIST * pixels * step * step;
+                && (best.0 - none_skip.1) / lam < cheap.0 * pixels
+                && none_skip.1 < cheap.1 * pixels * step * step;
             if still || small_skip || cheap || none_skip.1 < (pixels * step * step / div).max(noise)
             {
                 self.restore(before + 1);
@@ -2847,7 +2872,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 && inter
                 && !s.h.lossless
                 && (TX_DOMAIN_SPEED..9).contains(&s.speed)
-                && !s.second_pass;
+                && !s.full_search;
             let (coded, dropped) = if breakout {
                 (0.0, 0.0)
             } else {
@@ -3045,7 +3070,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     /// How much chroma's error weighs against luma's in the trials'
     /// decisions ([`CHROMA_DIST`] up to [`CHROMA_SPEED`]).
     fn chroma_dist(&self) -> f64 {
-        if self.s.speed <= CHROMA_SPEED {
+        if self.s.speed <= CHROMA_SPEED && !self.s.fast_arf {
             f64::from(CHROMA_DIST)
         } else {
             1.0
@@ -3458,7 +3483,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // fast speeds: at the same average PSNR over the planes, 3 to 4%
         // fewer bits, and 19 to 22% fewer at the same PSNR-Y, on grainy
         // and clean 720p at speed 6 before the reference pool).
-        let chroma = if s.speed <= CHROMA_SPEED {
+        let chroma = if s.fast_arf {
+            CHROMA_RATE_FAST
+        } else if self.six() {
+            CHROMA_RATE_SIX
+        } else if s.speed <= CHROMA_SPEED {
             CHROMA_RATE
         } else {
             CHROMA_RATE_FAST

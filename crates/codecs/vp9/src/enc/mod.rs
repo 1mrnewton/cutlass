@@ -61,6 +61,22 @@ pub struct FrameParams {
     /// 5 do (see [`tile::TX_TRIAL_BITS`]), and the best inter candidates
     /// are ranked with their chroma too (see [`tile::UV_RANK`]).
     pub second_pass: bool,
+    /// The partition search's breakouts at a whole block that codes a
+    /// residual under half the quantizer's error, or none at 16×16 and
+    /// 32×32 or still, are left out, and inter trials are reconstructed
+    /// rather than measured on their coefficients ([`tile`]'s
+    /// `BREAKOUT_SPEED`, `TX_DOMAIN_SPEED`): a second pass, and a fixed
+    /// quantizer at speed 5 (see [`api`]'s `FULL_SEARCH_SPEED`). In two
+    /// passes on the README's three scenes, 2 points fewer bits at the
+    /// same PSNR-Y and 7 at PSNR-U, in 1.1 to 1.25 times the time (a
+    /// third of libvpx's).
+    pub full_search: bool,
+    /// An alt-ref of a stream at speed 8 or more, coded at speed 6 (see
+    /// [`api`]'s `ARF_SPEED`): chroma is weighed as at speed 8, past
+    /// [`tile::CHROMA_SPEED`], and the partition search's stop at a block
+    /// that codes a little takes the thresholds it had before the
+    /// reference pool came to one pass (`tile::CHEAP_FAST_ARF`).
+    pub fast_arf: bool,
     /// The slot GOLDEN reads (1 but with [`super::api`]'s reference pool:
     /// two passes, and one pass up to speed 7).
     pub golden_slot: u8,
@@ -770,6 +786,8 @@ impl<P: EncPixel> FrameEncoder<P> {
             prepass: None,
             tok: &tok,
             second_pass: fp.second_pass,
+            full_search: fp.full_search,
+            fast_arf: fp.fast_arf,
             noise: fp.noise,
             static_thresh: self.stream.static_thresh,
             global: self.global.take(),

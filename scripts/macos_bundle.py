@@ -174,7 +174,7 @@ def main() -> None:
     out = Path(sys.argv[2]).resolve()
     if not binary.is_file():
         raise SystemExit(f"{binary} is not a file; build it first")
-    bundle_id = os.environ.get("BUNDLE_ID", "com.scytheralpha.cutlass")
+    bundle_id = os.environ.get("BUNDLE_ID", "com.scytheralpha.cutlassapp")
     out.mkdir(parents=True, exist_ok=True)
     app = out / "Cutlass.app"
     if app.exists():

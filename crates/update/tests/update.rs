@@ -480,8 +480,8 @@ mod macos {
     #[test]
     fn a_dmg_swaps_in_for_the_bundle_and_verifies() {
         let work = scratch("macos");
-        let old = fake_app(&work.join("old"), "0.1.0", "com.scytheralpha.cutlass");
-        let new = fake_app(&work.join("new"), "0.2.0", "com.scytheralpha.cutlass");
+        let old = fake_app(&work.join("old"), "0.1.0", "com.scytheralpha.cutlassapp");
+        let new = fake_app(&work.join("new"), "0.2.0", "com.scytheralpha.cutlassapp");
         let dmg = work.join("Cutlass.dmg");
         dmg_of(&new, &dmg);
         let bundle = update_bundle(&work, &old, &dmg, "0.2.0").unwrap();
@@ -501,7 +501,7 @@ mod macos {
     #[test]
     fn a_dmg_with_another_app_or_version_leaves_the_bundle() {
         let work = scratch("macos-refused");
-        let old = fake_app(&work.join("old"), "0.1.0", "com.scytheralpha.cutlass");
+        let old = fake_app(&work.join("old"), "0.1.0", "com.scytheralpha.cutlassapp");
         let other = fake_app(&work.join("other"), "0.2.0", "com.example.other");
         let dmg = work.join("Other.dmg");
         dmg_of(&other, &dmg);
@@ -514,7 +514,7 @@ mod macos {
 
         // The feed says 0.3.0 but the DMG holds 0.2.0.
         fs::remove_dir_all(work.join("Applications")).unwrap();
-        let new = fake_app(&work.join("new"), "0.2.0", "com.scytheralpha.cutlass");
+        let new = fake_app(&work.join("new"), "0.2.0", "com.scytheralpha.cutlassapp");
         let dmg = work.join("Cutlass.dmg");
         dmg_of(&new, &dmg);
         let error = update_bundle(&work, &old, &dmg, "0.3.0").unwrap_err();

@@ -1110,7 +1110,11 @@ nine vectors around the last motion voted on by blocks of detail
 `arf::shift` itself on blocks 64 apart (the same streams as the
 profiles, 5 to 9% more time); the two best candidates ranked with their
 chroma (the fractal 1 dB under at PSNR-Y, the pan no better). Speed 6:
-chroma's error weighed 2.5 (PSNR-U −0.3% only). Speed 8: the old stop
+chroma's error weighed 2.5 (PSNR-U −0.3% only); no compound prediction
+(`COMPOUND_SPEED` 5, to take speed 6 under speed 5's time on the three
+scenes): 3.5 to 9.8 points more bits at the same PSNR-Y than speed 6
+with it, and behind FFmpeg's default on the three scenes (+3.1 / +3.8 /
++1.2 / +2.9 / +3.0), so speed 6 keeps it. Speed 8: the old stop
 with speed 6's chroma weights (0.3 to 1.4 points better at PSNR-U, 0.8
 worse at PSNR-Y on the three scenes).
 

@@ -18,7 +18,7 @@
 use std::io::{Read, Write};
 use std::time::Instant;
 
-use cutlass_vp9::{AqMode, Chroma, ColorSpace, Vp9Encoder, Vp9Options};
+use cutlass_vp9::{AqMode, Chroma, ColorSpace, TuneContent, Vp9Encoder, Vp9Options};
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
@@ -103,6 +103,11 @@ fn main() -> Result<(), String> {
             "tile_columns" => opts.tile_columns = Some(n as u8),
             "level" => opts.level = n as u8,
             "drop" => opts.drop_frame_pct = n,
+            "screen" => {
+                if n != 0 {
+                    opts.tune_content = TuneContent::Screen;
+                }
+            }
             "lossless" => {
                 if n != 0 {
                     opts.qindex = 0;

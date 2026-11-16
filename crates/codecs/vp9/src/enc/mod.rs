@@ -114,6 +114,9 @@ pub struct Stream {
     /// libvpx's `static-thresh`: an inter block whose prediction error is
     /// under this threshold (scaled to its size) codes no residual.
     pub static_thresh: u32,
+    /// Screen content (libvpx's `tune-content=screen`): see
+    /// [`tile::Shared::screen`].
+    pub screen: bool,
 }
 
 impl Default for Stream {
@@ -126,6 +129,7 @@ impl Default for Stream {
             error_resilient: false,
             frame_parallel: false,
             static_thresh: 0,
+            screen: false,
         }
     }
 }
@@ -816,6 +820,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             fast_arf: fp.fast_arf,
             noise: fp.noise,
             static_thresh: self.stream.static_thresh,
+            screen: self.stream.screen,
             global: self.global.take(),
             gold_mv: self.gold_mv.take(),
         };

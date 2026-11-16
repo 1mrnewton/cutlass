@@ -234,6 +234,11 @@ pub struct Shared<'a, P> {
     pub noise: f32,
     /// See [`super::Stream::static_thresh`].
     pub static_thresh: u32,
+    /// Screen content: inter frames below speed 10 try intra blocks at a
+    /// smaller error ([`SCREEN_INTRA_ERROR`]; text and windows that appear predict
+    /// from nothing before them), and a whole-sample vector that matches
+    /// exactly is not refined (text moves by whole samples).
+    pub screen: bool,
     /// A vector the whole picture moved by from LAST, far past where the
     /// searches reach (see [`super::FrameEncoder::set_global`]): a start
     /// of every block's search on LAST.
@@ -309,6 +314,13 @@ impl Default for TxRd {
 
 /// [`TxRd::rate`] not counted.
 const NO_RATE: u32 = u32::MAX;
+
+/// See [`Shared::screen`]: the mean error a sample of the best inter
+/// candidate over which an inter frame's block tries intra modes. On the
+/// README's screen clip at speed 6 (no alt-refs), BD-rate at the same
+/// PSNR-Y against the camera's 7: 2, −1.7 points in 1.2 times the time;
+/// 1, −3.5 in 1.3 times; 0 (always), −3.1 in 1.7 times.
+const SCREEN_INTRA_ERROR: u64 = 1;
 
 /// The shift of the context in [`TxRd::rate`].
 const RATE_CTX: u32 = 28;
@@ -2017,6 +2029,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // A mean error of more than a few levels a sample (from speed 6,
         // eight: 5% of the time for 0 to 1% of the bits; at speed 5, seven).
         let per = match self.s.speed {
+            // (Not at speed 10, whose choice of intra is no trial.)
+            ..=9 if self.s.screen => SCREEN_INTRA_ERROR,
             0..=4 => 5,
             5 => 7,
             6 if !self.s.second_pass => 7,
@@ -2603,6 +2617,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let (x, y) = (col * 8, row * 8);
         let w = (bw * 8).min((s.mi_cols - col) * 8);
         let h = (bh * 8).min((s.mi_rows - row) * 8);
+        if s.screen && best_sad == 0 {
+            return (mv, 0);
+        }
         if s.speed < 9 {
             let hp = s.h.allow_hp && mv.row.unsigned_abs() < 64 && mv.col.unsigned_abs() < 64;
             let steps: &[i16] = if hp && s.speed < 4 {

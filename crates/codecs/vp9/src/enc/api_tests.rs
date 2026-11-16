@@ -2387,3 +2387,48 @@ fn equator_aq_codes_the_polar_rows_coarser() {
         assert_eq!(map[16 * 16], 0);
     }
 }
+
+/// A screen: dark text-like strokes on a light page that scrolls up by
+/// whole rows, a line of new strokes appearing at the bottom each frame.
+fn page(w: u32, h: u32, i: u32) -> VideoFrame {
+    let mut f = solid(w, h, 230, 128, 128);
+    for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+        let (r, c) = ((k as u32 / w) + 3 * i, k as u32 % w);
+        let glyph = (r / 12).wrapping_mul(0x9e37_79b9) ^ (c / 7).wrapping_mul(0x85eb_ca6b);
+        if r % 12 < 9 && c % 7 < 5 && (glyph >> 7) % 3 != 0 && ((r * 5 + c * 3) % 4 != 0) {
+            *v = 30;
+        }
+    }
+    f
+}
+
+#[test]
+fn screen_content_codes_no_alt_ref() {
+    let (w, h) = (128u32, 96u32);
+    let opts = super::Vp9Options {
+        qindex: 120,
+        lag: Some(16),
+        speed: 6,
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let superframes = |p: &[Packet]| {
+        p.iter()
+            .filter(|p| p.data.last().is_some_and(|&m| m & 0xe0 == 0xc0))
+            .count()
+    };
+    let camera = encode_with(opts, (w, h), 30, |i| page(w, h, i / 4));
+    assert!(superframes(&camera) > 0);
+    let screen = encode_with(
+        super::Vp9Options {
+            tune_content: super::TuneContent::Screen,
+            ..opts
+        },
+        (w, h),
+        30,
+        |i| page(w, h, i / 4),
+    );
+    assert_eq!(superframes(&screen), 0);
+    assert_eq!(screen.len(), 30);
+    assert_decodes(&screen, (w, h), 30);
+}

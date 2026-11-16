@@ -84,6 +84,20 @@ pub enum AqMode {
     Equator360,
 }
 
+/// What the pictures are (libvpx's `tune-content`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TuneContent {
+    /// Camera pictures.
+    #[default]
+    Default,
+    /// Screen content: text, windows, flat areas, motion in whole
+    /// samples. No alt-refs (on content that LAST predicts exactly where
+    /// it is still, they cost their bits for nothing), intra modes tried
+    /// in inter frames at a smaller error of the best inter candidate,
+    /// and no sub-sample refinement of a vector that matches exactly.
+    Screen,
+}
+
 /// How the encoder codes.
 #[derive(Clone, Copy, Debug)]
 pub struct Vp9Options {
@@ -209,6 +223,8 @@ pub struct Vp9Options {
     /// Adaptive quantization by segment (libvpx's `aq-mode`; `aq` is
     /// [`AqMode::Variance`] too). Not with lossless coding.
     pub aq_mode: AqMode,
+    /// What the pictures are (libvpx's `tune-content`).
+    pub tune_content: TuneContent,
 }
 
 /// The lookahead below speed 9 unless set: with it, alt-refs take 10 to
@@ -253,6 +269,7 @@ impl Vp9Options {
             error_resilient: self.error_resilient,
             frame_parallel: self.frame_parallel,
             static_thresh: self.static_thresh,
+            screen: self.tune_content == TuneContent::Screen,
         }
     }
 
@@ -348,6 +365,7 @@ impl Default for Vp9Options {
             level: 0,
             drop_frame_pct: 0,
             aq_mode: AqMode::Off,
+            tune_content: TuneContent::Default,
         }
     }
 }
@@ -863,6 +881,7 @@ impl<P: EncPixel> Core<P> {
         let mut arf_source = None;
         if !key_next
             && self.opts.alt_ref
+            && self.opts.tune_content != TuneContent::Screen
             && idx == self.gold.0 + 1
             // (One pass: only after a golden place, not after a cut.)
             && (self.rc.pass2.is_some() || idx % GF_INTERVAL == 1)

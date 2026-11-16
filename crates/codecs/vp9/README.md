@@ -1579,7 +1579,8 @@ brackets). "Added" is new in this round; each has a test in
 | `-min-gf-interval` | `min-gf-interval` | internal (golden every 12; 6 to 12 by motion in two passes), not an option |
 | `-tune psnr` | `tune` | the default |
 | `-tune ssim` | `tune=ssim` | missing |
-| `-tune-content screen` / `film` | `tune-content` | missing |
+| `-tune-content screen` | `tune-content` | `tune_content: TuneContent::Screen` (`screen=1`, added); see "Options measured" |
+| `-tune-content film` | `tune-content` | missing (libvpx's VP9 encoder changes little for it) |
 | `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ), or `aq_mode: AqMode::Variance` |
 | `-aq-mode 3` / `4` | cyclic refresh, equator360 | `aq_mode`: `AqMode::CyclicRefresh` (`aq=3`), `AqMode::Equator360` (`aq=4`), added |
 | `-aq-mode 2` | complexity AQ | missing: libvpx puts each superblock in a segment by the bits its search spent at the frame's quantizer, which this encoder knows only once the block is coded |
@@ -1672,6 +1673,32 @@ rate, the eighths next to them in segment 1 at 0.75, on every frame. On
 the three scenes (not a 360° picture) at `q=120`, 0.9% fewer bits for
 0.25 dB less PSNR-Y over the whole picture; libvpx's `-crf 30 -aq-mode 4`
 against `-aq-mode 0` 2.7% fewer for 0.29 dB.
+
+**Screen content** (`TuneContent::Screen`, `-tune-content screen`).
+Three changes: no alt-refs (LAST predicts still text exactly, and an
+alt-ref costs its bits for nothing: on the clip below, alt-refs off alone
+take 20% off the bits at speed 6); inter frames below speed 10 try intra
+modes when the best inter candidate's error is over 1 a sample (text and
+windows that appear predict from nothing before them; speed 10 picks
+intra by a rule, not a trial, and keeps its own); and a whole-sample
+vector that matches exactly is not refined. Measured on a synthetic
+desktop (1280×720, 90 frames: an editor whose text scrolls 3 and 6
+samples a frame, a terminal that types, a moving cursor, a window
+dragged across, drawn with DejaVu Sans Mono), one pass at
+150 kb/s to 1.2 Mb/s, four threads, BD-rate at the same PSNR-Y / FFmpeg's
+average:
+
+| | Against the same speed | Against libvpx with `-tune-content screen` |
+| --- | --- | --- |
+| Speed 6, `screen=1` | −23.6 / −24.2%, same time | −3.0 / −4.0% against good, `-cpu-used 2`, in 0.40 of its time |
+| Speed 9, `screen=1` | −0.8 / −0.8% | −62.0 / −62.0% against realtime 8 |
+| Speed 10, `screen=1` | 0.0 / 0.0% | −57.2 / −57.2% against realtime 8 |
+
+Speed 6 without it was 27% behind libvpx's good deadline on this clip
+(libvpx's alt-refs cost it little here; ours took 14 to 28 kB a golden
+interval). libvpx's own `-tune-content screen` changes nothing at the
+good deadline (the same bytes) and costs 40% at realtime 8 here, where it
+also overshoots the rate by 1.5 to 2.6 times.
 
 Decoders: FFmpeg's `vp9` and `libvpx-vp9` decoders have no options of
 their own; of the generic ones, frame threads and slice (tile) threads

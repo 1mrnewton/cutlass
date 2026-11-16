@@ -29,7 +29,8 @@ mod prove;
 
 pub use decode::{Decoder, Vp9Decoder};
 pub use enc::api::{
-    AqMode, Chroma, ColorSpace, EngineEncoder, Vp9Encoder, Vp9Options, register_engine_encoders,
+    AqMode, Chroma, ColorSpace, EngineEncoder, TuneContent, Vp9Encoder, Vp9Options,
+    register_engine_encoders,
 };
 
 use cutlass_decode::video::VideoDecoder;

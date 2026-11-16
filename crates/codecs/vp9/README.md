@@ -1178,6 +1178,115 @@ the same; every other configuration of the identity check is
 byte-identical (36 of 41; the five that changed are speed 10 at a
 bitrate and two passes).
 
+**Synthetic pans.** The alpha plane of "Alpha" (in "Options measured"),
+a 640×360 plane of `128 + 127 sin((X + 6N)/50) cos((Y − 3N)/40)`
+(chroma 128, 60 pictures), moves by whole samples, (−6, +3) a picture,
+so that nearly every block predicts exactly from one vector; yet at
+`crf=15` to `55` (speed 5, four threads) this encoder took +57% bits
+at the same PSNR-Y against FFmpeg's `-crf` (speeds 0 and 2: +25%),
+with inter frames of twice libvpx's size, 2.5 dB under. Decoded by this
+crate's decoder with the modes, vectors and residuals of each block
+printed, libvpx's frames and ours, two causes:
+
+- The motion search never read past the reference's edges. Its SADs
+  (`sad_ref`, the four at once, `sad_sub`, `sad_sub_exact`) were `None`
+  for a window over an edge (and the 8-tap one wanted three samples
+  inside), so content that moves in from an edge (here the top three
+  rows and the right six columns, each picture) could not take the
+  motion, nor its neighbours' NEAREST and NEAR where those cross: the
+  top superblock row coded NEWMV of (0, 4.5) to (0, 7.5) samples with
+  a residual each picture, which made the row below code NEAR (12 to 24
+  blocks a picture), and the right column took intra or vertical
+  vectors. libvpx reads its 160-sample borders. Now a window reaches
+  `tile::EDGE_REACH` (16) samples past each edge, the edge samples
+  repeated as the decoder predicts there (a window over the top or the
+  bottom only reads the edge row again, at a stride of 0; one over the
+  sides is copied).
+- The alt-ref's temporal filter blurred the pan. Its search in one pass
+  started from zero alone, and its diamond stops in the valleys of a
+  smooth picture: one block in five matched two samples off its exact
+  match, at an error its weights still take (the filtered alt-ref was
+  0.39 a sample in squared error from its picture; now 0.03). It now
+  starts from the match of the block to its left too (as two passes'
+  did), reaches past the edges as the search does, and filters chroma
+  at half a sample where the luma vector is odd (the mean of the two
+  chroma samples it falls between; it took the one before, half a
+  sample off: on the grainy pan, 7 to 8 samples a picture, every other
+  picture's chroma).
+
+The gradient (bytes of the IVF, PSNR-Y), FFmpeg's `-crf` against
+`crf=` here:
+
+| crf | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| 15 | 17767, 55.10 dB | 17570, 51.86 dB | 13491, 52.43 dB |
+| 25 | 14431, 53.64 dB | 12580, 50.63 dB | 9941, 50.94 dB |
+| 35 | 8704, 51.31 dB | 10130, 48.66 dB | 7760, 48.73 dB |
+| 45 | 6428, 48.40 dB | 8660, 45.93 dB | 6505, 46.04 dB |
+| 55 | 5395, 45.09 dB | 7654, 42.80 dB | 5969, 42.68 dB |
+
++57.0% → +17.9% at the same PSNR-Y (the edges alone: +22.8%; speed 2
++5.5%). `testsrc2` (640×360, 60 pictures, the colour stream of
+"Alpha"): +18.2% → +18.1%. On the README's three clips, against the
+build before (BD-rate at the same PSNR-Y / U / V / FFmpeg's average /
+6:1:1, four threads; the realtime speeds with `cbr=1000`, constant
+quality at `q=60` to `210`):
+
+| Before → now | Three scenes | Still scene, two jumps | Grainy pan |
+| --- | --- | --- | --- |
+| Speed 5 | −0.6 / −0.4 / −0.3 / −0.5 / −0.6 | −0.8 / −0.9 / −0.9 / −0.9 / −0.9 | −1.7 / −3.1 / −3.1 / −2.3 / −2.2 |
+| Speed 6 | −0.6 / +0.4 / +0.2 / −0.3 / −0.4 | −2.3 / −0.4 / −0.3 / −1.2 / −1.6 | −2.3 / −0.9 / −0.8 / −1.0 / −1.7 |
+| Two passes | −0.6 / −0.5 / −0.6 / −0.6 / −0.6 | +0.6 / −1.1 / −1.1 / −0.4 / −0.1 | −3.7 / −2.8 / −2.7 / −3.2 / −3.2 |
+| Constant quality | −0.4 / +0.1 / −0.1 / −0.2 / −0.3 | −1.6 / +0.1 / +0.2 / −0.7 / −1.1 | −3.3 / −0.7 / −0.9 / −2.1 / −2.6 |
+| Speed 9 | +0.1 / −0.2 / −0.6 / −0.1 / −0.0 | −2.7 / −0.7 / −0.1 / −1.5 / −2.1 | −3.0 / −1.6 / −1.7 / −2.2 / −2.6 |
+| Speed 10 | −0.2 / −0.8 / −0.6 / −0.4 / −0.3 | −3.0 / −2.8 / −2.8 / −2.9 / −3.0 | −1.6 / −2.9 / −2.7 / −2.1 / −1.8 |
+
+and against FFmpeg (speeds 5 and 6 against its default, two passes
+against `-pass 1/2`, constant quality against `-crf`, speeds 9 and 10
+against realtime 8): speed 5 −4.0 / −1.4 / −3.6 / −3.4 / −3.7 on the
+three scenes, −20.8 / −34.6 / −34.8 / −28.9 / −25.8 on the still scene,
+−31.9 / −50.4 / −50.5 / −43.5 / −39.4 on the pan; speed 6 −1.7 / −0.9 /
+−3.0 / −1.8 / −1.8, −21.5 / −35.6 / −35.7 / −29.8 / −26.6, −30.9 /
+−47.2 / −47.5 / −41.2 / −37.7; two passes −6.5 / −2.1 / −6.4 / −5.7 /
+−5.9, −37.4 / −35.1 / −35.0 / −36.0 / −36.4, −16.2 / −30.8 / −30.1 /
+−23.7 / −21.8; constant quality −4.6 / −15.4 / −16.5 / −9.5 / −7.7,
+−5.6 / −40.9 / −40.7 / −29.7 / −21.1, −26.2 / −45.1 / −45.2 / −38.0 /
+−33.1; speed 9 −11.4 / −7.5 / −9.7 / −10.4 / −10.8, −61.1 / −54.3 /
+−55.0 / −58.2 / −59.7, −64.0 / −57.0 / −57.8 / −60.8 / −62.4; speed 10
+−0.1 / −1.2 / −3.8 / −1.1 / −0.7, −41.2 / −40.6 / −40.9 / −40.8 /
+−41.1, −48.8 / −50.6 / −51.5 / −49.7 / −49.4. Every column on every
+clip is ahead of FFmpeg, as before. CPU time on one thread (1 and 3
+Mb/s on the three scenes and the pan, 0.5 and 2 on the still scene,
+the least of two or three runs each, against the build before): speed
+5 1.01, 1.01 and 1.03; speed 6 1.05, 1.04 and 1.07; speed 10 1.02,
+1.03 and 1.02 (the copies of windows over the edges, the filter's
+seeded search). Every configuration of the identity check changed (41
+of 41: the search reads past the edges at every speed); 56 decodes of
+14 new streams (the gradient at speeds 2, 5, 6 and 10, `testsrc2` in
+two passes and at `crf=30`, the pan at 10 bits, the three clips at
+speeds 5, 6, 9 and 10, two passes and constant quality) are the same in
+FFmpeg's `vp9` (threaded and on one thread), libvpx and this decoder.
+
+Tried and left out: the edges alone without the filter's changes, on
+speed 6 the still scene lost 1.8 points at every column; the filter's
+seed and half samples without the edges, constant quality lost 1.4 to
+2.2 points on the still scene (with both, every mode gains). A reach of
+8 or 32 samples (before the half samples, at speed 6: the pan's PSNR-U
++0.2 and +2.7 points against the build before, where 16 gave +1.3). What
+is left on the gradient: its key frame, at the same quantizer, is 1.7
+dB under libvpx's (at `q=100` 1552 bytes and 48.5 dB, libvpx's at 99
+1715 bytes and 50.2 dB, coded in 32×32 blocks and transforms with many
+more coefficients than ours; a finer key frame or a lower lambda on it
+moved along the same curve); speed 6 is at +80%
+(its partition search stops at whole 64×64 blocks on this smooth
+picture, so the new content at the edges costs a 64×64 block a
+picture); the loop filter level from the quantizer (libvpx searches
+it: on `testsrc2` its levels go from 1 to 14 at `-crf 35`, where ours
+are 21; half our level there gave 14.8% where the level from the
+quantizer gave 17.8%), and per-block filters (speed 5 with SMOOTH and
+SHARP tried, before the filter's changes: +18.1% on the gradient from
++22.8%, in more time).
+
 Still behind: `testsrc2` alone, where libvpx is ahead at every speed
 here on PSNR-Y too (at fixed quantizers against `-crf`: +9% / +33% at
 PSNR-Y / U at speed 5, −2.8% / +18% at speed 1); its key frame takes 9%
@@ -1972,21 +2081,23 @@ source (a moving sinusoidal gradient) and on the same picture with a
 moving soft-edged disc as its alpha, BD-rate of the alpha stream's bytes
 (the BlockAdditionals) at the same alpha PSNR:
 
-| crf | FFmpeg alpha bytes, PSNR | Ours |
-| --- | --- | --- |
-| 15 | 17015, 55.10 dB | 16818, 51.86 dB |
-| 25 | 13679, 53.64 dB | 11828, 50.63 dB |
-| 35 | 7952, 51.31 dB | 9378, 48.66 dB |
-| 45 | 5676, 48.40 dB | 7908, 45.93 dB |
-| 55 | 4643, 45.09 dB | 6902, 42.80 dB |
+| crf | FFmpeg alpha bytes, PSNR | Ours | Ours, before "Synthetic pans" |
+| --- | --- | --- | --- |
+| 15 | 17015, 55.10 dB | 12739, 52.43 dB | 16818, 51.86 dB |
+| 25 | 13679, 53.64 dB | 9189, 50.94 dB | 11828, 50.63 dB |
+| 35 | 7952, 51.31 dB | 7008, 48.73 dB | 9378, 48.66 dB |
+| 45 | 5676, 48.40 dB | 5753, 46.04 dB | 7908, 45.93 dB |
+| 55 | 4643, 45.09 dB | 5217, 42.68 dB | 6902, 42.80 dB |
 
-The alpha stream takes +65% (gradient) and +59% (disc) bits at the same
-alpha PSNR against libvpx's; the colour stream of the same files +18% at
-the same PSNR-Y (this synthetic picture is unlike the README's clips,
+The alpha stream takes +20% bits at the same alpha PSNR against
+libvpx's on the gradient (+65% before "Synthetic pans" in "Against
+FFmpeg's libvpx-vp9", which found why; the disc, +59% then, was not
+measured again); the colour stream of the same files +18% at the same
+PSNR-Y, as before (this synthetic picture is unlike the README's clips,
 where the encoder is ahead). Coding each alpha plane as a plain gray
-stream gives the same bytes on both sides (ours 11828 at `crf=25`,
-libvpx's 13679 in an IVF less its headers), so the gap is the encoder's
-on these smooth planes, not the alpha path's. The alpha stream's own
+stream gives the same bytes on both sides (ours 9189 at `crf=25`,
+11828 before, libvpx's 13679 in an IVF less its headers), so the gap is
+the encoder's on these smooth planes, not the alpha path's. The alpha stream's own
 lookahead took it from +78% to +65% (coding each alpha picture as it
 came, with no lookahead, was the first version). Time at `crf=30`: 1.65 s
 against 1.15 s without alpha (FFmpeg's 3.2 s against 2.7 s).

@@ -363,6 +363,11 @@ const DZ_TRIAL_RATE: u32 = 180;
 /// SAD a sample skip the diamond search.
 const STILL_SAD: u64 = 4;
 
+/// How far past the edges of the reference (in luma samples) the motion
+/// search reads, the edge samples repeated as prediction repeats them:
+/// content that moves in from an edge predicts from there.
+const EDGE_REACH: i32 = 16;
+
 /// A tx block's coefficients: plane, size, position (4×4 units in the
 /// block), levels, end of block.
 type Tok = (usize, u8, usize, usize, Vec<i32>, usize, u32);
@@ -2728,12 +2733,18 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let ((data, stride), (rw, rh)) = self.rec_ref()?;
         let (r, c) = (i32::from(mv.row), i32::from(mv.col));
         let (bx, by) = (x as i32 + (c >> 3), y as i32 + (r >> 3));
-        if bx < 0 || by < 0 || bx + w as i32 + 1 > rw || by + h as i32 + 1 > rh {
-            return None;
-        }
         let (src, ss) = (s.src.planes[0], s.src.strides[0]);
         let a = &src[y * ss + x..];
-        let b = &data[by as usize * stride + bx as usize..];
+        let copy;
+        let (b, stride) = if bx < 0 || by < 0 || bx + w as i32 + 1 > rw || by + h as i32 + 1 > rh {
+            if !reaches(bx, by, w + 1, h + 1, (rw, rh)) {
+                return None;
+            }
+            copy = edge_window(data, stride, (rw, rh), (bx, by), (w + 1, h + 1));
+            (&copy[..], w + 1)
+        } else {
+            (&data[by as usize * stride + bx as usize..], stride)
+        };
         if r & 7 == 0 && c & 7 == 0 {
             // Whole samples: the bilinear filter at zero is the samples.
             return Some(u64::from(P::sad(a, ss, b, stride, w, h)));
@@ -2760,16 +2771,22 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let mut tmp = std::mem::take(&mut self.mctmp);
         let out = (|| {
             let ((data, stride), (rw, rh)) = self.rec_ref()?;
-            if bx < 3
-                || by < 3
-                || bx + w as i32 + 4 > rw
-                || by + h as i32 + 4 > rh
-                || !matches!(w, 8 | 16 | 32 | 64)
-            {
+            if !matches!(w, 8 | 16 | 32 | 64) {
                 return None;
             }
+            let copy;
+            let (data, stride, at) =
+                if bx < 3 || by < 3 || bx + w as i32 + 4 > rw || by + h as i32 + 4 > rh {
+                    if !reaches(bx, by, w, h, (rw, rh)) {
+                        return None;
+                    }
+                    let es = w + 7;
+                    copy = edge_window(data, stride, (rw, rh), (bx - 3, by - 3), (es, h + 7));
+                    (&copy[..], es, 3 * es + 3)
+                } else {
+                    (data, stride, by as usize * stride + bx as usize)
+                };
             let filter = &crate::dsp::mc::FILTERS[usize::from(geom::EIGHTTAP)];
-            let at = by as usize * stride + bx as usize;
             crate::dsp::mc::predict(
                 &mut pred,
                 w,
@@ -5165,6 +5182,7 @@ fn satd<P: Pixel>(src: &[P], ss: usize, pred: &[P], w: usize, h: usize) -> u64 {
 #[inline]
 #[allow(clippy::type_complexity)]
 fn sad_ref<P: EncPixel>(
+    edge: &mut Vec<P>,
     (src, ss): (&[P], usize),
     ((data, stride), (rw, rh)): ((&[P], usize), (i32, i32)),
     (x, y, w, h): (usize, usize, usize, usize),
@@ -5172,16 +5190,93 @@ fn sad_ref<P: EncPixel>(
     dc: i32,
 ) -> Option<u64> {
     let (bx, by) = (x as i32 + dc, y as i32 + dr);
-    if bx < 0 || by < 0 || bx + w as i32 > rw || by + h as i32 > rh {
-        return None;
-    }
     let a = &src[y * ss + x..];
+    if bx < 0 || by < 0 || bx + w as i32 > rw || by + h as i32 > rh {
+        if !reaches(bx, by, w, h, (rw, rh)) {
+            return None;
+        }
+        if bx >= 0 && bx + w as i32 <= rw {
+            // Over the top or the bottom only: the rows past it are its
+            // first or last row, read again (a stride of 0), no copy.
+            let top = (-by).clamp(0, h as i32) as usize;
+            let bottom = (by + h as i32 - rh).clamp(0, (h - top) as i32) as usize;
+            let mid = h - top - bottom;
+            let row = |r: usize| &data[r * stride + bx as usize..];
+            let mut v = 0u64;
+            if top > 0 {
+                v += u64::from(P::sad(a, ss, row(0), 0, w, top));
+            }
+            if mid > 0 {
+                let r0 = (by + top as i32) as usize;
+                v += u64::from(P::sad(&a[top * ss..], ss, row(r0), stride, w, mid));
+            }
+            if bottom > 0 {
+                let last = row(rh as usize - 1);
+                v += u64::from(P::sad(&a[(h - bottom) * ss..], ss, last, 0, w, bottom));
+            }
+            return Some(v);
+        }
+        edge_window_into(edge, data, stride, (rw, rh), (bx, by), (w, h));
+        return Some(u64::from(P::sad(a, ss, edge, w, w, h)));
+    }
     let b = &data[by as usize * stride + bx as usize..];
     Some(u64::from(P::sad(a, ss, b, stride, w, h)))
 }
 
+/// Whether a `w`×`h` window at `(bx, by)` lies within [`EDGE_REACH`] of
+/// the reference.
+fn reaches(bx: i32, by: i32, w: usize, h: usize, (rw, rh): (i32, i32)) -> bool {
+    bx >= -EDGE_REACH
+        && by >= -EDGE_REACH
+        && bx + w as i32 <= rw + EDGE_REACH
+        && by + h as i32 <= rh + EDGE_REACH
+}
+
+/// The reference's `ew`×`eh` window at `(x0, y0)`, which crosses its edge,
+/// the edge samples repeated (as `dec::recon` predicts such a window),
+/// rows `ew` apart, and 32 samples after the last for the kernels' wide
+/// loads (as `dec::recon`'s copy has).
+fn edge_window<P: Copy + Default>(
+    data: &[P],
+    stride: usize,
+    (rw, rh): (i32, i32),
+    (x0, y0): (i32, i32),
+    (ew, eh): (usize, usize),
+) -> Vec<P> {
+    let mut e = Vec::new();
+    edge_window_into(&mut e, data, stride, (rw, rh), (x0, y0), (ew, eh));
+    e
+}
+
+/// [`edge_window`] into `e` (its samples replaced).
+fn edge_window_into<P: Copy + Default>(
+    e: &mut Vec<P>,
+    data: &[P],
+    stride: usize,
+    (rw, rh): (i32, i32),
+    (x0, y0): (i32, i32),
+    (ew, eh): (usize, usize),
+) {
+    e.clear();
+    e.reserve(ew * eh + 32);
+    let lo = (-x0).clamp(0, ew as i32) as usize;
+    let hi = (rw - x0).clamp(lo as i32, ew as i32) as usize;
+    for j in 0..eh {
+        let yy = (y0 + j as i32).clamp(0, rh - 1) as usize;
+        let row = &data[yy * stride..yy * stride + rw as usize];
+        e.extend(std::iter::repeat_n(row[0], lo));
+        if hi > lo {
+            let from = (x0 + lo as i32) as usize;
+            e.extend_from_slice(&row[from..from + hi - lo]);
+        }
+        e.extend(std::iter::repeat_n(row[rw as usize - 1], ew - hi));
+    }
+    e.extend(std::iter::repeat_n(P::default(), 32));
+}
+
 /// [`sad_ref`] at four vectors at once, each within `range`.
 fn sad4_ref<P: EncPixel>(
+    edge: &mut Vec<P>,
     (src, ss): (&[P], usize),
     ((data, stride), (rw, rh)): ((&[P], usize), (i32, i32)),
     (x, y, w, h): (usize, usize, usize, usize),
@@ -5199,14 +5294,34 @@ fn sad4_ref<P: EncPixel>(
             .then(|| by as usize * stride + bx as usize)
     };
     let offs = pts.map(at);
+    // Within the range but over the reference's edge: one at a time, on
+    // a copy with the edge repeated.
+    let mut edge_at = |k: usize| {
+        let (dr, dc) = pts[k];
+        if dr.abs() <= range && dc.abs() <= range {
+            sad_ref(
+                edge,
+                (src, ss),
+                ((data, stride), (rw, rh)),
+                (x, y, w, h),
+                dr,
+                dc,
+            )
+        } else {
+            None
+        }
+    };
     let Some(any) = offs.iter().flatten().next().copied() else {
-        return [None; 4];
+        return [edge_at(0), edge_at(1), edge_at(2), edge_at(3)];
     };
     let b = offs.map(|o| &data[o.unwrap_or(any)..]);
     let v = P::sad4(&src[y * ss + x..], ss, b, stride, w, h);
     let mut out = [None; 4];
     for k in 0..4 {
-        out[k] = offs[k].map(|_| u64::from(v[k]));
+        out[k] = match offs[k] {
+            Some(_) => Some(u64::from(v[k])),
+            None => edge_at(k),
+        };
     }
     out
 }
@@ -5261,13 +5376,15 @@ fn search_in<P: EncPixel>(
     }
     let mut best = (0i32, 0i32);
     let mut best_sad = u64::MAX;
+    // Windows over the reference's edge are copied here.
+    let mut edge = Vec::new();
     // (Neighbours often share a vector: each one's SAD is taken once.)
     let mut seen = [((0i32, 0i32), None::<u64>); 7];
     for (k, m) in cands[..nc].iter().enumerate() {
         let (r, c) = ((i32::from(m.row) + 4) >> 3, (i32::from(m.col) + 4) >> 3);
         let sad = match seen[..k].iter().find(|e| e.0 == (r, c)) {
             Some(e) => e.1,
-            None => sad_ref(src, rp, (x, y, w, h), r, c),
+            None => sad_ref(&mut edge, src, rp, (x, y, w, h), r, c),
         };
         seen[k] = ((r, c), sad);
         if let Some(v) = sad {
@@ -5312,7 +5429,10 @@ fn search_in<P: EncPixel>(
             let center = best;
             let pts = [(-step, 0), (step, 0), (0, -step), (0, step)]
                 .map(|(dr, dc)| (center.0 + dr, center.1 + dc));
-            for (&(r, c), v) in pts.iter().zip(sad4_ref(src, rp, (x, y, w, h), pts, range)) {
+            for (&(r, c), v) in
+                pts.iter()
+                    .zip(sad4_ref(&mut edge, src, rp, (x, y, w, h), pts, range))
+            {
                 if let Some(v) = v
                     && v < best_sad
                 {
@@ -5343,7 +5463,7 @@ fn search_in<P: EncPixel>(
         for q in pts[..np].chunks(4) {
             let mut four = [q[0]; 4];
             four[..q.len()].copy_from_slice(q);
-            let v4 = sad4_ref(src, rp, (x, y, w, h), four, i32::MAX);
+            let v4 = sad4_ref(&mut edge, src, rp, (x, y, w, h), four, i32::MAX);
             for (&(r, cc), v) in q.iter().zip(v4) {
                 if let Some(v) = v
                     && v < best_sad

@@ -1300,7 +1300,9 @@ mod tests {
             .unwrap();
         let read = said(&heard.answer(2, || {}));
         assert!(read.contains("revision=1 name=from the second"), "{read}");
-        first.send(call_line(3, "draft_undo", json!({}))).unwrap();
+        first
+            .send(call_line(3, "draft_undo", json!({"input": "1"})))
+            .unwrap();
         assert_eq!(heard.answer(3, || {})["result"]["isError"], false);
         drop(first);
         host.join().unwrap().unwrap();

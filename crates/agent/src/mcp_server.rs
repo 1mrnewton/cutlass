@@ -333,6 +333,7 @@ pub(crate) fn input_hint(tool: &str) -> &'static str {
         "draft.query" => {
             "project | full | track <id> | segment <id> | range <start_us> <end_us> | materials | material <id> | ops | ops <kind> ..."
         }
+        "draft.undo" | "draft.redo" => "<revision>: the revision draft_query returned",
         "player.seek" => "<time_us>",
         "player.look" => "<time_us>, or nothing for the playhead",
         "media.probe" => "A file path.",

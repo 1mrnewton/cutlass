@@ -224,10 +224,10 @@ pub enum Invocation {
     },
     /// Apply one combo, or preview it.
     DraftApply(ApplyInput),
-    /// Undo the last committed combo.
-    DraftUndo,
-    /// Redo the combo that undo removed.
-    DraftRedo,
+    /// Undo the last committed combo, on the revision the caller read.
+    DraftUndo { expected: u64 },
+    /// Redo the combo that undo removed, on the revision the caller read.
+    DraftRedo { expected: u64 },
     /// Read the settings generation and the switches that leave the machine.
     SettingsGet,
     /// Write settings when `expected` is the current generation.
@@ -546,16 +546,20 @@ where
                 )
             })
             .map_err(ToolError::Draft),
-            Invocation::DraftUndo => self
-                .draft
-                .undo()
-                .map(|revision| format!("revision={revision}"))
-                .map_err(ToolError::Draft),
-            Invocation::DraftRedo => self
-                .draft
-                .redo()
-                .map(|revision| format!("revision={revision}"))
-                .map_err(ToolError::Draft),
+            Invocation::DraftUndo { expected } => {
+                same_revision(&self.draft, expected)?;
+                self.draft
+                    .undo()
+                    .map(|revision| format!("revision={revision}"))
+                    .map_err(ToolError::Draft)
+            }
+            Invocation::DraftRedo { expected } => {
+                same_revision(&self.draft, expected)?;
+                self.draft
+                    .redo()
+                    .map(|revision| format!("revision={revision}"))
+                    .map_err(ToolError::Draft)
+            }
             Invocation::SettingsGet => Ok(show_settings(&self.settings)),
             Invocation::SettingsSet { expected, settings } => {
                 set_settings(&mut self.settings, &mut self.approver, expected, *settings)
@@ -732,8 +736,10 @@ where
         match name {
             "draft.query" => parse_query(arguments),
             "draft.apply" => parse_apply(arguments),
-            "draft.undo" => bare(arguments, "draft.undo", Invocation::DraftUndo),
-            "draft.redo" => bare(arguments, "draft.redo", Invocation::DraftRedo),
+            "draft.undo" => revision_arg(arguments, "draft.undo")
+                .map(|expected| Invocation::DraftUndo { expected }),
+            "draft.redo" => revision_arg(arguments, "draft.redo")
+                .map(|expected| Invocation::DraftRedo { expected }),
             "settings.get" => bare(arguments, "settings.get", Invocation::SettingsGet),
             "settings.set" => parse_settings_set(self.settings.settings(), arguments),
             "player.seek" => {
@@ -916,8 +922,14 @@ fn description(name: &str) -> &'static str {
             "Session requests as one combo, or a dry run. JSON: {\"expected_revision\":N, \
              \"requests\":[{\"op\":\"move\",...}], \"dry_run\":false, \"request_id\":\"...\"}."
         }
-        "draft.undo" => "Restore the draft from before the last committed combo.",
-        "draft.redo" => "Reapply the combo that undo removed.",
+        "draft.undo" => {
+            "Restore the draft from before the last committed combo. Input: the revision \
+             draft.query returned, so an edit made since, by anyone, is not undone unseen."
+        }
+        "draft.redo" => {
+            "Reapply the combo that undo removed. Input: the revision draft.query or undo \
+             returned."
+        }
         "settings.get" => "The user's settings as JSON, with the generation to send back.",
         "settings.set" => {
             "Change the user's app settings (not the project: its canvas and clips are \
@@ -1907,6 +1919,24 @@ fn text_arg(arguments: &str, name: &str) -> Result<String, ToolError> {
     }
 }
 
+/// The revision a caller read, as undo and redo take it.
+fn revision_arg(arguments: &str, name: &str) -> Result<u64, ToolError> {
+    let revision = one_i64(arguments, name)?;
+    u64::try_from(revision).map_err(|_| bad(name))
+}
+
+/// Refuse a write on a revision other than the open one, as an apply is.
+fn same_revision(draft: &DraftTools, expected: u64) -> Result<(), ToolError> {
+    let actual = draft.session().revision();
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(ToolError::Draft(
+            crate::draft::DraftError::RevisionMismatch { expected, actual },
+        ))
+    }
+}
+
 fn one_i64(arguments: &str, name: &str) -> Result<i64, ToolError> {
     let mut parts = arguments.split_whitespace();
     let Some(token) = parts.next() else {
@@ -2538,14 +2568,20 @@ mod tests {
             registry.parse("draft.apply", "place"),
             Err(ToolError::BadArguments(_))
         ));
-        assert!(matches!(
-            registry.parse("draft.undo", "").unwrap(),
-            Invocation::DraftUndo
-        ));
-        assert!(matches!(
-            registry.parse("draft.redo", " \n").unwrap(),
-            Invocation::DraftRedo
-        ));
+        assert_eq!(
+            registry.parse("draft.undo", "3").unwrap(),
+            Invocation::DraftUndo { expected: 3 }
+        );
+        assert_eq!(
+            registry.parse("draft.redo", " 4\n").unwrap(),
+            Invocation::DraftRedo { expected: 4 }
+        );
+        for blank in ["", " \n", "-1", "x"] {
+            assert!(matches!(
+                registry.parse("draft.undo", blank),
+                Err(ToolError::BadArguments(_))
+            ));
+        }
         assert!(matches!(
             registry.parse("draft.query", "range 1"),
             Err(ToolError::BadArguments(_))
@@ -2597,8 +2633,19 @@ mod tests {
         assert!(full.contains("revision=1"));
         assert!(full.split_whitespace().any(|word| word == "full"));
 
+        // An undo on a revision other than the open one undoes nothing.
+        assert!(
+            registry
+                .invoke(Invocation::DraftUndo { expected: 0 })
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
+        );
+        assert_eq!(registry.draft.session().draft().tracks[0].segments.len(), 1);
         assert_eq!(
-            registry.invoke(Invocation::DraftUndo).unwrap(),
+            registry
+                .invoke(Invocation::DraftUndo { expected: 1 })
+                .unwrap(),
             "revision=2"
         );
         assert!(
@@ -2606,8 +2653,15 @@ mod tests {
                 .segments
                 .is_empty()
         );
+        assert!(
+            registry
+                .invoke(Invocation::DraftRedo { expected: 1 })
+                .is_err()
+        );
         assert_eq!(
-            registry.invoke(Invocation::DraftRedo).unwrap(),
+            registry
+                .invoke(Invocation::DraftRedo { expected: 2 })
+                .unwrap(),
             "revision=3"
         );
         assert_eq!(registry.draft.session().draft().tracks[0].segments.len(), 1);
@@ -2798,7 +2852,8 @@ mod tests {
         assert!(text("player.seek", "1.5").contains("<time_us>"));
         assert!(text("speech.start", "0").contains("<start_us> <duration_us>"));
         assert!(text("export.start", "/tmp/a.mp4").contains("new <path> | replace <path>"));
-        assert!(text("draft.undo", "now").contains("takes no input"));
+        assert!(text("draft.undo", "now").contains("<revision>"));
+        assert!(text("player.play", "now").contains("takes no input"));
         assert_eq!(
             registry.parse("media.probe", "\"/a b/c.mp4\"").unwrap(),
             Invocation::MediaProbe {
@@ -2963,7 +3018,7 @@ mod tests {
         assert_eq!(registry.player.time_us, 5);
         assert_eq!(registry.draft.session().revision(), 0);
         assert!(matches!(
-            registry.invoke(Invocation::DraftUndo),
+            registry.invoke(Invocation::DraftUndo { expected: 0 }),
             Err(ToolError::Draft(DraftError::EmptyUndo))
         ));
     }

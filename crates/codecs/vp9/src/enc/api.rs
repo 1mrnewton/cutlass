@@ -344,6 +344,9 @@ struct Core<P: EncPixel> {
     pos: (isize, isize),
     /// Pictures shown so far.
     shown: u64,
+    /// With the realtime pool ([`RT_POOL_SPEED`]): the profile of the
+    /// luma coded last ([`Core::rt_step`]).
+    last_prof: Option<super::arf::Profile>,
 }
 
 /// A picture a reference slot holds, as its source.
@@ -678,6 +681,7 @@ impl<P: EncPixel> Core<P> {
             gold_src: None,
             shown: 0,
             pos: (0, 0),
+            last_prof: None,
         }
     }
 
@@ -956,13 +960,21 @@ impl<P: EncPixel> Core<P> {
             // (An alt-ref of the scene before a cut has nothing to show.)
             self.overlay_at = None;
         }
-        // With the reference pool: the picture's tight planes.
+        // With the reference pool: the picture's tight planes (the
+        // realtime pool's, none).
+        let rt = self.rt_pool();
         let tight: Option<[Vec<P>; 3]> = self.pooled().then(|| {
             let (w, h) = (self.width as usize, self.height as usize);
             let c = self.opts.chroma_dims(w, h);
             std::array::from_fn(|p| {
                 let (data, stride) = planes[p];
-                let (pw, ph) = if p == 0 { (w, h) } else { c };
+                let (pw, ph) = if rt {
+                    (0, 0)
+                } else if p == 0 {
+                    (w, h)
+                } else {
+                    c
+                };
                 let mut t = Vec::with_capacity(pw * ph);
                 for r in 0..ph {
                     t.extend_from_slice(&data[r * stride..r * stride + pw]);
@@ -974,14 +986,17 @@ impl<P: EncPixel> Core<P> {
             self.pool.clear();
             self.gold_src = None;
             self.pos = (0, 0);
+            self.last_prof = None;
         } else if let Some(t) = &tight {
+            let (w, h) = (self.width as usize, self.height as usize);
             let step = match ahead {
                 Some(a) => a.1,
-                None if self.last_luma.len() == t[0].len() => {
+                None if rt && self.last_luma.len() == w * h => self.rt_step(planes[0]),
+                None if !rt && self.last_luma.len() == t[0].len() => {
                     let (w, h) = (self.width as usize, self.height as usize);
                     super::arf::shift(&self.last_luma, &t[0], w, h, (0, 0))
                 }
-                None => (0, 0),
+                _ => (0, 0),
             };
             self.pos = (self.pos.0 + step.0, self.pos.1 + step.1);
         }
@@ -989,7 +1004,8 @@ impl<P: EncPixel> Core<P> {
             Some(t) if !key => self.pick_golden([&t[0], &t[1], &t[2]], self.pos),
             _ => (1, 0.0),
         };
-        let pool_slot = POOL_FIRST + (self.shown % u64::from(POOL)) as u8;
+        let n = if rt { RT_POOL } else { POOL };
+        let pool_slot = POOL_FIRST + (self.shown % u64::from(n)) as u8;
         let also_refresh = if tight.is_some() && !key {
             1 << pool_slot
         } else {
@@ -1099,7 +1115,27 @@ impl<P: EncPixel> Core<P> {
     /// Whether the reference pool is kept ([`POOL`]): two passes, and one
     /// pass up to [`POOL_SPEED`].
     fn pooled(&self) -> bool {
-        self.rc.pass2.is_some() || self.opts.speed <= POOL_SPEED
+        self.rc.pass2.is_some() || self.opts.speed <= POOL_SPEED || self.rt_pool()
+    }
+
+    /// The realtime pool's motion from the picture coded last to `to`
+    /// (luma, rows `stride` apart): [`super::arf::Profile::shift`] within
+    /// [`RT_SHIFT_RANGE`], the picture's profile kept for the next one.
+    fn rt_step(&mut self, (to, stride): (&[P], usize)) -> (isize, isize) {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let pt = super::arf::Profile::new(to, stride, w, h);
+        let pf = match self.last_prof.take() {
+            Some(p) => p,
+            None => super::arf::Profile::new(&self.last_luma, w, w, h),
+        };
+        let step = pf.shift(&pt, RT_SHIFT_RANGE);
+        self.last_prof = Some(pt);
+        step
+    }
+
+    /// Whether the reference pool is the realtime one ([`RT_POOL_SPEED`]).
+    fn rt_pool(&self) -> bool {
+        self.rc.pass2.is_none() && self.opts.speed >= RT_POOL_SPEED && self.opts.bitrate > 0
     }
 
     /// The slot GOLDEN reads for the picture `to` (tight planes): the
@@ -1107,7 +1143,7 @@ impl<P: EncPixel> Core<P> {
     /// predicts `to` far better in chroma ([`super::arf::phase_error`]):
     /// content moved by an even number of luma samples, which chroma
     /// predicts at its whole samples.
-    fn pick_golden(&self, to: [&[P]; 3], at: (isize, isize)) -> (u8, f32) {
+    fn pick_golden(&mut self, to: [&[P]; 3], at: (isize, isize)) -> (u8, f32) {
         if !self.pooled() {
             return (1, 0.0);
         }
@@ -1122,6 +1158,22 @@ impl<P: EncPixel> Core<P> {
         let cands: Vec<&Held<P>> = std::iter::once(g)
             .chain(self.pool.iter().filter(|e| Some(e.shown) != last))
             .collect();
+        if self.rt_pool() {
+            // Realtime: the most recent picture an even vector away.
+            let even = |c: &&Held<P>| {
+                let d = (at.0 - c.pos.0, at.1 - c.pos.1);
+                d.0 % 2 == 0 && d.1 % 2 == 0
+            };
+            let pick = cands
+                .iter()
+                .filter(|c| even(c))
+                .max_by_key(|c| c.shown)
+                .copied()
+                .unwrap_or(cands[0]);
+            let (slot, seed) = (pick.slot, (at.0 - pick.pos.0, at.1 - pick.pos.1));
+            self.enc.set_gold_mv(seed);
+            return (slot, 0.0);
+        }
         let measure = |c: &&Held<P>| {
             // The vector from the picture: how far the content moved since.
             let seed = (at.0 - c.pos.0, at.1 - c.pos.1);
@@ -1460,6 +1512,24 @@ const POOL_FIRST: u8 = 3;
 /// take longer (see `tile::CHEAP_DIST`).
 const POOL_SPEED: u8 = 7;
 
+/// From this speed one pass at a bitrate keeps the reference pool too,
+/// but a cheaper one: GOLDEN reads the last picture (of the golden frame
+/// and the pool) whose content stands an even number of luma samples
+/// from where it is now, so that chroma predicts from it at whole
+/// samples, and GOLDEN's blocks try the vector of that displacement.
+/// Where the content stands is the sum of each picture's motion
+/// ([`Core::rt_step`]). The pool holds no planes (none is measured).
+const RT_POOL_SPEED: u8 = 9;
+
+/// The realtime pool's pictures (slots from [`POOL_FIRST`]): with fewer
+/// pictures held, fewer buffers. On a pan of 7 or 8 samples a picture one
+/// of the last two is mostly an even displacement away.
+const RT_POOL: u8 = 3;
+
+/// See [`Core::rt_step`]: how far, in samples, the content may move from
+/// one picture to the next.
+const RT_SHIFT_RANGE: isize = 32;
+
 /// Frames from one golden frame to the next (at most, in two passes).
 const GF_INTERVAL: u32 = 12;
 
@@ -1557,6 +1627,15 @@ struct Pass2 {
     base: f64,
     /// First-pass bits a picture, on average.
     mean: f64,
+    /// Each picture's first-pass bits.
+    bits: Vec<f64>,
+    /// Each picture's weight in the first-pass bits left: its scene's
+    /// [`Pass2::scale`] to the bits' power.
+    w: Vec<f64>,
+    /// The [`Pass2::predictability`] of the last key frame's scene, and
+    /// the step scale of the scene coded now (see [`SCENE_BETA`]).
+    key_ratio: f64,
+    scale: f64,
 }
 
 /// The share of a golden picture's first-pass bits its overlay keeps
@@ -1573,6 +1652,29 @@ const CUT_BITS: f64 = 1.8;
 /// worth of the overall k each class's own starts with.
 const K_START: f64 = 0.5;
 const K_PRIOR_FRAMES: f64 = 4.0;
+
+/// The second pass codes a scene that predicts better than the last key
+/// frame's (by [`Pass2::predictability`], its first picture's first-pass
+/// bits over its inter frames') at a finer step: the key frame scene's
+/// ratio over its own to this power, down to [`SCENE_MIN`] of the step
+/// (never coarser). One step for every picture spends the bits evenly at
+/// the same distortion a picture, but a scene that predicts well carries
+/// each picture's quality on into the ones after it (their inter frames
+/// code nearly nothing). On the README's three scenes, where the grainy
+/// pan predicts whole from the reference pool (a ratio of 15 against the
+/// fractal's 5.6), the pan at 0.65 of the step: at 2 Mb/s, PSNR-U 41.4
+/// dB where it was 39.9 for 32 kB more of the 770, and 6 points fewer
+/// bits at the same PSNR-U over the clip. A clip of one scene (no cut)
+/// is coded as before.
+const SCENE_BETA: f64 = 0.45;
+const SCENE_MIN: f64 = 0.5;
+
+/// The first-pass pictures after a scene's first that
+/// [`Pass2::predictability`] takes the inter frames' bits of.
+const SCENE_WINDOW: usize = 12;
+
+/// See [`Pass2::scene_end`].
+const SCENE_END_BITS: f64 = 2.5;
 
 /// Over the last pictures the second pass spends as if the stream went
 /// on at its average for this many: a miss near the end is not made up
@@ -1651,6 +1753,69 @@ impl Pass2 {
             arf: (0.0, 2),
             base: 0.0,
             mean: b.iter().sum::<f64>() / b.len().max(1) as f64,
+            w: vec![1.0; b.len()],
+            bits: b,
+            key_ratio: 0.0,
+            scale: 1.0,
+        }
+    }
+
+    /// How well the scene from picture `at` (a key frame or a cut)
+    /// predicts: its first picture's first-pass bits over its inter
+    /// frames' (their mean over the [`SCENE_WINDOW`] pictures after it).
+    fn predictability(&self, at: usize) -> f64 {
+        let e = (at + 1 + SCENE_WINDOW).min(self.inter.len());
+        if at + 1 >= e {
+            return 0.0;
+        }
+        let m = self.inter[at + 1..e].iter().sum::<f64>() / (e - at - 1) as f64;
+        self.bits[at] / m.max(1.0)
+    }
+
+    /// Where the first pass's bits show the scene from picture `at` end:
+    /// at the next key frame's class, or at a picture over
+    /// [`SCENE_END_BITS`] times the median of the six around (as inter
+    /// frames), and at a first-pass golden place also twice the one
+    /// before (golden frames take more anyway).
+    fn scene_end(&self, at: usize) -> usize {
+        let gold = |j: usize| j.is_multiple_of(GF_INTERVAL as usize);
+        (at + 2..self.first.len())
+            .find(|&j| {
+                if self.first[j].1 == 1 {
+                    return true;
+                }
+                let mut near: Vec<f64> = (j.saturating_sub(3)..(j + 4).min(self.bits.len()))
+                    .filter(|&x| x != j)
+                    .map(|x| self.inter[x])
+                    .collect();
+                near.sort_by(f64::total_cmp);
+                let median = near.get(near.len() / 2).copied().unwrap_or(0.0);
+                let prev = (j.saturating_sub(GF_INTERVAL as usize)..j)
+                    .rev()
+                    .find(|&x| gold(x))
+                    .map_or(0.0, |x| self.bits[x]);
+                self.bits[j] > SCENE_END_BITS * median && (!gold(j) || self.bits[j] > 2.0 * prev)
+            })
+            .unwrap_or(self.first.len())
+    }
+
+    /// A scene starts at picture `at` (`key`: at a key frame): its step
+    /// scale ([`SCENE_BETA`]), and its pictures' weight in the bits left.
+    fn scene_at(&mut self, at: usize, key: bool) {
+        let r = self.predictability(at);
+        self.scale = if key || self.key_ratio == 0.0 {
+            self.key_ratio = r;
+            1.0
+        } else if r > 0.0 {
+            (r / self.key_ratio).powf(-SCENE_BETA).clamp(SCENE_MIN, 1.0)
+        } else {
+            1.0
+        };
+        let w = self.scale.powf(-EXP);
+        for i in at..self.scene_end(at) {
+            let (b, c) = self.first[i];
+            self.left[c] += b * (w - self.w[i]);
+            self.w[i] = w;
         }
     }
 
@@ -1660,6 +1825,7 @@ impl Pass2 {
     /// picture still to code does.
     fn golden_at(&mut self, at: usize, n: usize) {
         for i in at.saturating_sub(n) + 1..self.first.len() {
+            let w = self.w[i];
             let t = &mut self.first[i];
             if t.1 == 1 {
                 continue;
@@ -1670,8 +1836,8 @@ impl Pass2 {
                 0
             };
             let b = self.inter[i] * if c == 2 { self.gratio[i] } else { 1.0 };
-            self.left[t.1] -= t.0;
-            self.left[c] += b;
+            self.left[t.1] -= t.0 * w;
+            self.left[c] += b * w;
             *t = (b, c);
         }
     }
@@ -1681,10 +1847,11 @@ impl Pass2 {
     fn alt_ref(&mut self, target: usize) {
         if let Some(t) = self.first.get_mut(target) {
             // Its bits stay left in their class until it is coded.
+            let w = self.w[target];
             let keep = t.0 * OVERLAY_SHARE;
-            self.left[t.1] -= keep;
-            self.left[0] += keep;
-            self.arf = (t.0 - keep, t.1);
+            self.left[t.1] -= keep * w;
+            self.left[0] += keep * w;
+            self.arf = ((t.0 - keep) * w, t.1);
             *t = (keep, 0);
         }
     }
@@ -1880,11 +2047,16 @@ impl Rate {
             // left of the first pass; frame types take their steps from it
             // as a fixed quantizer does, and a cut a key frame's.
             let frames = p.first.len().max(1);
+            if (kind == 0 || cut) && (self.frames as usize) < p.first.len() {
+                p.scene_at(self.frames as usize, kind == 0);
+            }
             let s1 = step_of(p.q, self.opts.bit_depth);
             let total = f64::from(self.opts.bitrate) * seconds.max(1e-3) * frames as f64;
             let done = (self.frames as usize).min(frames);
             let (spent, pred) = (p.spent.iter().sum::<f64>(), p.pred.iter().sum::<f64>());
-            let prior = K_PRIOR_FRAMES * p.mean;
+            // (The prior and the pictures past the end at the scene's weight.)
+            let w = p.w.get(done).copied().unwrap_or(1.0);
+            let prior = K_PRIOR_FRAMES * p.mean * w;
             let all = if done >= 2 && pred > 0.0 {
                 ((spent + K_START * prior) / (pred + prior)).clamp(0.1, 10.0)
             } else {
@@ -1898,7 +2070,8 @@ impl Rate {
                 }
             });
             let more = (END_FRAMES - (frames - done) as f64).max(0.0);
-            let need = k[0] * p.left[0] + k[1] * p.left[1] + k[2] * p.left[2] + all * p.mean * more;
+            let need =
+                k[0] * p.left[0] + k[1] * p.left[1] + k[2] * p.left[2] + all * p.mean * w * more;
             let spent_now = if banded {
                 let budget = total * done as f64 / frames as f64;
                 budget + band(self.spent - budget, budget)
@@ -1911,7 +2084,7 @@ impl Rate {
             let base = s1 * (need.max(1.0) / left.max(1.0)).powf(1.0 / EXP);
             p.base = base;
             let class = if cut { 0 } else { kind };
-            let q = q_of_step(base * STEP_SCALE[class], self.opts.bit_depth)
+            let q = q_of_step(base * STEP_SCALE[class] * p.scale, self.opts.bit_depth)
                 .clamp(floor[class], self.opts.max_q);
             if kind == 2 {
                 self.last_q = q;
@@ -2118,10 +2291,8 @@ impl Rate {
                 // An alt-ref: the bits it took from its target.
                 std::mem::replace(&mut p.arf, (0.0, 2))
             } else {
-                p.first
-                    .get(self.frames as usize)
-                    .copied()
-                    .unwrap_or((0.0, 0))
+                let i = self.frames as usize;
+                p.first.get(i).map_or((0.0, 0), |&(b, c)| (b * p.w[i], c))
             };
             p.spent[c] += bits;
             p.pred[c] += b * at;

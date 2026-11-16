@@ -266,6 +266,7 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     row_lanes: usize,
     /// The next frame's whole-picture motion from LAST, if far.
     global: Option<Mv>,
+    gold_mv: Option<Mv>,
 }
 
 /// What one tile column's encoder keeps from frame to frame.
@@ -340,6 +341,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             threads: threads.max(1),
             row_lanes: 0,
             global: None,
+            gold_mv: None,
         }
     }
 
@@ -366,6 +368,16 @@ impl<P: EncPixel> FrameEncoder<P> {
     /// LAST's, as a whole (a jump of the camera that the searches, which
     /// reach a few dozen samples, would take for a cut): every block's
     /// search on LAST starts there too.
+    /// GOLDEN's blocks at speeds 9 and 10 also try this whole-sample
+    /// vector (the next frame only): where the picture GOLDEN reads
+    /// stands from this one's content.
+    pub fn set_gold_mv(&mut self, (x, y): (isize, isize)) {
+        self.gold_mv = Some(Mv {
+            row: (y * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+            col: (x * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+        });
+    }
+
     pub fn set_global(&mut self, (x, y): (isize, isize)) {
         self.global = Some(Mv {
             row: (y * 8).clamp(-8 * 1023, 8 * 1023) as i16,
@@ -761,6 +773,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             noise: fp.noise,
             static_thresh: self.stream.static_thresh,
             global: self.global.take(),
+            gold_mv: self.gold_mv.take(),
         };
         // Each tile column on its own thread, into its own copy of the
         // picture (intra prediction reads nothing across tile columns).

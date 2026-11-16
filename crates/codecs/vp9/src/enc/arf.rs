@@ -197,12 +197,20 @@ pub fn reachable<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize, bd: u8) 
     all > 0 && good * 10 >= all * 7
 }
 
+/// [`motion`] is 0 when under one block in this many of its sample moved:
+/// a still picture with a few things moving across it. FFmpeg's
+/// `testsrc2` (a twentieth of its blocks move, 12 samples a picture) had
+/// golden frames every 6 pictures in two passes; libvpx gives it 16. At 12
+/// (with the other changes of that round, on the README's three scenes),
+/// 2 points fewer bits at the same PSNR-Y, 3 at PSNR-U.
+const MOVED_SHARE: usize = 10;
+
 /// How far `to` moved from `from` (luma, `w`×`h`), in whole samples: over
 /// a sample of 16×16 blocks whose best match (on sums of 4×4 samples,
 /// refined) leaves under a quarter of the error of none (detail that
 /// moved: on flat areas, grain and all, any vector matches), the median
-/// of the larger component of their vectors. 0 when under eight blocks
-/// moved so.
+/// of the larger component of their vectors. 0 when under eight blocks,
+/// or under one in [`MOVED_SHARE`], moved so.
 pub fn motion<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> u32 {
     let (sf, st) = (Small::new(from, w, h), Small::new(to, w, h));
     let mut m = Vec::new();
@@ -216,7 +224,8 @@ pub fn motion<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> u32 {
             }
         }
     }
-    if m.len() < 8 {
+    let all = h.saturating_sub(15).div_ceil(32) * w.saturating_sub(15).div_ceil(32);
+    if m.len() < 8 || m.len() * MOVED_SHARE < all {
         return 0;
     }
     m.sort_unstable();
@@ -306,6 +315,96 @@ pub fn shift<P: EncPixel>(
     xs.sort_unstable();
     ys.sort_unstable();
     (xs[xs.len() / 2], ys[ys.len() / 2])
+}
+
+/// A picture's luma detail by row and by column, for [`Profile::shift`]:
+/// the differences of each sample from the one above summed across each
+/// row, and from the one to its left summed down each column (every
+/// other row).
+pub struct Profile {
+    cols: Vec<u32>,
+    rows: Vec<u32>,
+}
+
+impl Profile {
+    /// The profile of `y` (`w`×`h`, rows `stride` apart).
+    pub fn new<P: Pixel>(y: &[P], stride: usize, w: usize, h: usize) -> Self {
+        cutlass_simd::vp9::wide(
+            #[inline(always)]
+            || Self::build(y, stride, w, h),
+        )
+    }
+
+    #[inline(always)]
+    fn build<P: Pixel>(y: &[P], stride: usize, w: usize, h: usize) -> Self {
+        // (Differences in 16 bits, a lane each.)
+        let d = |a: &P, b: &P| {
+            let (a, b) = (a.get() as i16, b.get() as i16);
+            (a.max(b) - a.min(b)) as u16
+        };
+        let mut cols = vec![0u32; w];
+        let mut acc = vec![0u16; w];
+        let mut rows = Vec::with_capacity(h);
+        rows.push(0);
+        for r in 1..h {
+            let line = &y[r * stride..r * stride + w];
+            let up = &y[(r - 1) * stride..(r - 1) * stride + w];
+            rows.push(line.iter().zip(up).map(|(a, b)| u32::from(d(a, b))).sum());
+            if r % 2 == 0 {
+                for ((c, a), b) in acc[1..].iter_mut().zip(&line[1..]).zip(&line[..w - 1]) {
+                    *c += d(a, b);
+                }
+                // (Under 16 rows of 4095 a sum: carried into 32 bits.)
+                if r % 32 == 0 || r + 2 >= h {
+                    for (c, a) in cols.iter_mut().zip(acc.iter_mut()) {
+                        *c += u32::from(std::mem::take(a));
+                    }
+                }
+            }
+        }
+        Self { cols, rows }
+    }
+
+    /// The whole-sample vector the picture of `to` moved by from this
+    /// one's, as [`shift`]'s (`to[p]` near `from[p + v]`), for content
+    /// that moves as a whole (a pan): across and down, the offset within
+    /// `range` at which the profiles differ least, a sum on average over
+    /// the sums both cover (the shorter offset on a tie).
+    pub fn shift(&self, to: &Profile, range: isize) -> (isize, isize) {
+        #[inline(always)]
+        fn best(a: &[u32], b: &[u32], range: isize) -> isize {
+            let n = a.len().min(b.len()) as isize;
+            let mut best = (u64::MAX, 0isize);
+            for d in -range..=range {
+                // b[i] against a[i + d], over the i both cover.
+                let (lo, hi) = ((-d).max(0), (n - d).min(n));
+                if hi - lo < n / 2 {
+                    continue;
+                }
+                let (lo, hi) = (lo as usize, hi as usize);
+                let off = (lo as isize + d) as usize;
+                let s: u64 = a[off..off + (hi - lo)]
+                    .iter()
+                    .zip(&b[lo..hi])
+                    .map(|(&x, &y)| u64::from(x.abs_diff(y)))
+                    .sum();
+                let cost = s * 1024 / (hi - lo) as u64 * 64 + d.unsigned_abs() as u64;
+                if cost < best.0 {
+                    best = (cost, d);
+                }
+            }
+            best.1
+        }
+        cutlass_simd::vp9::wide(
+            #[inline(always)]
+            || {
+                (
+                    best(&self.cols, &to.cols, range),
+                    best(&self.rows, &to.rows, range),
+                )
+            },
+        )
+    }
 }
 
 /// Whether `to` cuts from `from` (luma, `w`×`h`): over a sample of 16×16
@@ -635,16 +734,27 @@ struct Small {
 }
 
 impl Small {
+    /// The sums of `y` (`w`×`h`, tight): each band of four rows summed
+    /// down its columns, then across in fours (a loop the compiler
+    /// vectorizes).
     fn new<P: Pixel>(y: &[P], w: usize, h: usize) -> Self {
         let (sw, sh) = (w / 4, h / 4);
         let mut s = vec![0u16; sw * sh];
+        let n = sw * 4;
+        let mut cols = vec![0u16; n];
         for r in 0..sh {
-            for (c, v) in s[r * sw..(r + 1) * sw].iter_mut().enumerate() {
-                let mut t = 0u32;
-                for row in y[r * 4 * w + c * 4..].chunks(w).take(4) {
-                    t += row[..4].iter().map(|p| p.get() as u32).sum::<u32>();
-                }
-                *v = t as u16;
+            let b = r * 4 * w;
+            let (r0, r1, r2, r3) = (
+                &y[b..b + n],
+                &y[b + w..b + w + n],
+                &y[b + 2 * w..b + 2 * w + n],
+                &y[b + 3 * w..b + 3 * w + n],
+            );
+            for ((((c, a), b), d), e) in cols.iter_mut().zip(r0).zip(r1).zip(r2).zip(r3) {
+                *c = (a.get() + b.get() + d.get() + e.get()) as u16;
+            }
+            for (v, q) in s[r * sw..(r + 1) * sw].iter_mut().zip(cols.chunks_exact(4)) {
+                *v = q[0] + q[1] + q[2] + q[3];
             }
         }
         Self { s, w: sw, h: sh }
@@ -679,6 +789,36 @@ impl Small {
         let hi = (near.0 + range).min(pic.w as isize - bw as isize - x as isize);
         let mut best = (u64::MAX, (0isize, 0isize));
         if hi < lo {
+            return best.1;
+        }
+        if bw == 4 && bh == 4 {
+            // (A block of 4×4 sums, as `shift` measures, held in registers:
+            // each vector's sum of differences at once.)
+            let a: [[u16; 4]; 4] = std::array::from_fn(|r| {
+                let at = (y + r) * self.w + x;
+                [self.s[at], self.s[at + 1], self.s[at + 2], self.s[at + 3]]
+            });
+            for dy in near.1 - range..=near.1 + range {
+                let py = y as isize + dy;
+                if py < 0 || py as usize + 4 > pic.h {
+                    continue;
+                }
+                let py = py as usize;
+                for dx in lo..=hi {
+                    let px = (x as isize + dx) as usize;
+                    let mut t = 0u32;
+                    for (r, a) in a.iter().enumerate() {
+                        let row = &pic.s[(py + r) * pic.w + px..][..4];
+                        for (&a, &b) in a.iter().zip(row) {
+                            t += u32::from(a.abs_diff(b));
+                        }
+                    }
+                    let sad = u64::from(t) * 64 + (dx.unsigned_abs() + dy.unsigned_abs()) as u64;
+                    if sad < best.0 {
+                        best = (sad, (dx * 4, dy * 4));
+                    }
+                }
+            }
             return best.1;
         }
         let n = (hi - lo + 1) as usize;

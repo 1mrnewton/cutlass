@@ -234,6 +234,7 @@ pub struct Shared<'a, P> {
     /// searches reach (see [`super::FrameEncoder::set_global`]): a start
     /// of every block's search on LAST.
     pub global: Option<Mv>,
+    pub gold_mv: Option<Mv>,
 }
 
 /// The context energy of a level (libvpx `vp9_pt_energy_class`): 0, 1, 2,
@@ -1555,10 +1556,13 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // 16×16 or 32×32 block that needs no residual ends the search, and
         // so does a 64×64 one that keeps LAST's picture where it is (see
         // `SKIP_SPLIT_LEVEL`, `STILL_BREAKOUT`).
-        if whole && best.1 == PARTITION_NONE && (none_skip.0 || s.speed >= BREAKOUT_SPEED) {
+        if whole
+            && best.1 == PARTITION_NONE
+            && (none_skip.0 || (s.speed >= BREAKOUT_SPEED && !s.second_pass))
+        {
             let pixels = (n * 8 * n * 8) as f64;
             let step = f64::from(s.dq[0][0][1]) / 8.0;
-            let fast = s.speed >= BREAKOUT_SPEED;
+            let fast = s.speed >= BREAKOUT_SPEED && !s.second_pass;
             // A block that codes a residual stops the search at half that
             // error (from BREAKOUT_SPEED: 6% of the time, 0.2% of the bits),
             // and from BREAKOUT_SPEED one that codes none at two thirds
@@ -2006,8 +2010,15 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             if self.rec_ref().is_none() {
                 continue;
             }
+            let gold = if r == 1 && s.speed >= 9 {
+                s.gold_mv
+            } else {
+                None
+            };
             let (mv, sad) = if r == 0 && self.fast() {
                 self.found[Self::slot(row, col, bsize)]
+            } else if let Some(g) = gold {
+                (g, self.sad_sub(x, y, w, h, g).unwrap_or(u64::MAX / 4))
             } else if r > 0 && s.speed >= 9 {
                 // Other references: only their candidate vectors, below.
                 (Mv::ZERO, u64::MAX / 4)
@@ -2018,7 +2029,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let (bw, _) = MI_WH[usize::from(bsize)];
                 self.put_seeds(row, col, bw, mv);
             }
-            let (mv, sad) = if sad < u64::MAX / 4 {
+            let (mv, sad) = if sad < u64::MAX / 4 && gold.is_none() {
                 self.refine(row, col, bsize, mv, sad)
             } else {
                 (mv, sad)
@@ -2832,8 +2843,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             // From TX_DOMAIN_SPEED, a trial of an inter block measures its
             // error on the coefficients (libvpx's transform-domain
             // distortion) and leaves the prediction unreconstructed.
-            self.tx_dom =
-                self.trial && inter && !s.h.lossless && (TX_DOMAIN_SPEED..9).contains(&s.speed);
+            self.tx_dom = self.trial
+                && inter
+                && !s.h.lossless
+                && (TX_DOMAIN_SPEED..9).contains(&s.speed)
+                && !s.second_pass;
             let (coded, dropped) = if breakout {
                 (0.0, 0.0)
             } else {

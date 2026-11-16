@@ -21,12 +21,23 @@
 //! corpus's complexity; the clip's own is printed).
 //! With `bits=10` or `12` the input has little-endian 16-bit samples
 //! (FFmpeg's `yuv420p10le` and the like).
+//! `alpha=FILE` codes alpha (FFmpeg's `-pix_fmt yuva420p`): FILE holds one
+//! 8-bit plane of the picture's size a picture (`-pix_fmt gray`), coded as
+//! a second stream. An output that ends in `.webm` or `.mkv` is written as
+//! WebM or Matroska, the alpha packets as each block's BlockAdditional
+//! (BlockAddID 1, AlphaMode 1); an IVF output gets the alpha stream as a
+//! second IVF beside it, `<out>.alpha.ivf`.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::io::{Read, Write};
 use std::time::Instant;
 
+use cutlass_codec::{
+    BlockAddition, CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
+};
+use cutlass_container::{Mux, NewStream, TrackDuration};
+use cutlass_matroska::MatroskaMux;
 use cutlass_vp9::{AqMode, Chroma, ColorSpace, RoiMap, Tune, TuneContent, Vp9Encoder, Vp9Options};
 
 fn main() -> Result<(), String> {
@@ -47,8 +58,14 @@ fn main() -> Result<(), String> {
     // `roi_q` (segment 1, on reference `roi_ref` when given), the top
     // eighth of its rows skipped (segment 2) with `roi_skip=1`.
     let mut roi: (Option<i16>, Option<u8>, bool) = (None, None, false);
+    let mut alpha_path = None;
     for a in &args[5..] {
         let (k, v) = a.split_once('=').ok_or("option")?;
+        if k == "alpha" {
+            alpha_path = Some(v.to_string());
+            opts.alpha = true;
+            continue;
+        }
         if k == "render" {
             let (rw, rh) = v.split_once('x').ok_or("render=WxH")?;
             opts.render_size = Some((
@@ -221,6 +238,14 @@ fn main() -> Result<(), String> {
         enc.set_second_pass(&bits, first_q);
         input = std::fs::File::open(&args[1]).map_err(|e| e.to_string())?;
     }
+    let mut alpha_in = match &alpha_path {
+        Some(path) => Some(std::fs::File::open(path).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let mut alpha_buf = vec![0u8; w * h];
+    // (Each packet's alpha packet, with `alpha=`.)
+    let mut alphas: Vec<Vec<u8>> = Vec::new();
+    let mut keys: Vec<bool> = Vec::new();
     let mut packets = Vec::new();
     let start = Instant::now();
     let mut n = 0;
@@ -240,11 +265,30 @@ fn main() -> Result<(), String> {
         });
         for buf in rx {
             let clock = (n as i64, 1, fps);
-            for (data, _, (pts, _, _)) in
+            if let Some(file) = alpha_in.as_mut() {
+                file.read_exact(&mut alpha_buf)
+                    .map_err(|e| format!("alpha: {e}"))?;
+                let (y, rest) = buf.split_at(w * h);
+                let (u, v) = rest.split_at(cw * ch);
+                let planes = [(y, w), (u, cw), (v, cw), (&alpha_buf[..], w)];
+                for c in enc
+                    .push_planes_alpha(planes, 1.0 / f64::from(fps), clock)
+                    .map_err(|e| e.to_string())?
+                {
+                    packets.push((c.data, c.clock.0));
+                    alphas.push(c.alpha);
+                    keys.push(c.keyframe);
+                }
+                n += 1;
+                let _ = back_tx.send(buf);
+                continue;
+            }
+            for (data, key, (pts, _, _)) in
                 push(&mut enc, &buf, &mut wide, (w, h, cw, ch), fps, clock)?
             {
                 if enc.temporal_layer() < keep_layers {
                     packets.push((data, pts));
+                    keys.push(key);
                 }
             }
             n += 1;
@@ -252,10 +296,45 @@ fn main() -> Result<(), String> {
         }
         Ok(())
     })?;
-    for (data, _, (pts, _, _)) in enc.flush().map_err(|e| e.to_string())? {
-        packets.push((data, pts));
+    if opts.alpha {
+        for c in enc.flush_alpha().map_err(|e| e.to_string())? {
+            packets.push((c.data, c.clock.0));
+            alphas.push(c.alpha);
+            keys.push(c.keyframe);
+        }
+    } else {
+        for (data, key, (pts, _, _)) in enc.flush().map_err(|e| e.to_string())? {
+            packets.push((data, pts));
+            keys.push(key);
+        }
     }
     let secs = start.elapsed().as_secs_f64();
+    let out_path = args[4].to_ascii_lowercase();
+    if out_path.ends_with(".webm") || out_path.ends_with(".mkv") {
+        drop(out);
+        let file = std::fs::File::create(&args[4]).map_err(|e| e.to_string())?;
+        let total = write_matroska(
+            file,
+            out_path.ends_with(".webm"),
+            (w, h, fps),
+            &packets,
+            &keys,
+            &alphas,
+        )?;
+        report(n, secs, total, &alphas, fps);
+        return Ok(());
+    }
+    if !alphas.is_empty() {
+        let pairs: Vec<(Vec<u8>, i64)> = alphas
+            .iter()
+            .zip(&packets)
+            .map(|(a, (_, pts))| (a.clone(), *pts))
+            .collect();
+        let mut file = std::io::BufWriter::new(
+            std::fs::File::create(format!("{}.alpha.ivf", args[4])).map_err(|e| e.to_string())?,
+        );
+        write_ivf(&mut file, (w, h, fps), &pairs)?;
+    }
     let mut hdr = Vec::new();
     hdr.extend_from_slice(b"DKIF");
     hdr.extend_from_slice(&0u16.to_le_bytes());
@@ -277,12 +356,105 @@ fn main() -> Result<(), String> {
         out.write_all(p).map_err(|e| e.to_string())?;
         total += p.len();
     }
+    report(n, secs, total, &alphas, fps);
+    Ok(())
+}
+
+/// Prints the frames, time, bytes and rate (and the alpha stream's).
+fn report(n: usize, secs: f64, total: usize, alphas: &[Vec<u8>], fps: u32) {
     let kbps = total as f64 * 8.0 / (n as f64 / f64::from(fps)) / 1000.0;
     println!(
         "{n} frames in {secs:.3}s ({:.1} fps), {total} bytes, {kbps:.0} kb/s",
         n as f64 / secs
     );
+    if !alphas.is_empty() {
+        let bytes: usize = alphas.iter().map(Vec::len).sum();
+        let kbps = bytes as f64 * 8.0 / (n as f64 / f64::from(fps)) / 1000.0;
+        println!("alpha: {bytes} bytes, {kbps:.0} kb/s");
+    }
+}
+
+/// An IVF file of `packets` (data, pts).
+fn write_ivf(
+    out: &mut impl Write,
+    (w, h, fps): (usize, usize, u32),
+    packets: &[(Vec<u8>, i64)],
+) -> Result<(), String> {
+    let mut hdr = Vec::new();
+    hdr.extend_from_slice(b"DKIF");
+    hdr.extend_from_slice(&0u16.to_le_bytes());
+    hdr.extend_from_slice(&32u16.to_le_bytes());
+    hdr.extend_from_slice(b"VP90");
+    hdr.extend_from_slice(&(w as u16).to_le_bytes());
+    hdr.extend_from_slice(&(h as u16).to_le_bytes());
+    hdr.extend_from_slice(&fps.to_le_bytes());
+    hdr.extend_from_slice(&1u32.to_le_bytes());
+    hdr.extend_from_slice(&(packets.len() as u32).to_le_bytes());
+    hdr.extend_from_slice(&0u32.to_le_bytes());
+    out.write_all(&hdr).map_err(|e| e.to_string())?;
+    for (p, pts) in packets {
+        out.write_all(&(p.len() as u32).to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        out.write_all(&(*pts as u64).to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        out.write_all(p).map_err(|e| e.to_string())?;
+    }
     Ok(())
+}
+
+/// A WebM or Matroska file of the packets (data, pts at `fps`), each with
+/// its alpha packet as BlockAdditional 1 when there are alpha packets;
+/// returns the packets' bytes.
+fn write_matroska(
+    file: std::fs::File,
+    webm: bool,
+    (w, h, fps): (usize, usize, u32),
+    packets: &[(Vec<u8>, i64)],
+    keys: &[bool],
+    alphas: &[Vec<u8>],
+) -> Result<usize, String> {
+    let writer = std::io::BufWriter::with_capacity(1 << 20, file);
+    let mut mux = if webm {
+        MatroskaMux::webm(writer)
+    } else {
+        MatroskaMux::new(writer)
+    };
+    let size = FrameSize::try_new(w as u32, h as u32).map_err(|e| e.to_string())?;
+    let track = mux
+        .add_stream(NewStream {
+            params: StreamParams::video(StreamCodec::Known(CodecId::Vp9), size, Vec::new()),
+            timescale: Timescale::new(fps),
+            language: None,
+        })
+        .map_err(|e| e.to_string())?;
+    let mut total = 0;
+    for (i, (data, pts)) in packets.iter().enumerate() {
+        let time =
+            Timestamp::try_new(Some(*pts), Some(*pts), Some(1)).map_err(|e| e.to_string())?;
+        let mut packet = Packet::try_new(
+            track.get(),
+            data.clone(),
+            time,
+            Timescale::new(fps),
+            keys[i],
+        )
+        .map_err(|e| e.to_string())?;
+        if let Some(alpha) = alphas.get(i) {
+            packet = packet.with_additions(vec![BlockAddition {
+                id: 1,
+                data: alpha.clone(),
+            }]);
+        }
+        mux.write_packet(&packet).map_err(|e| e.to_string())?;
+        total += data.len();
+    }
+    mux.finish(&[TrackDuration {
+        track,
+        timescale: Timescale::new(fps),
+        ticks: packets.len() as i64,
+    }])
+    .map_err(|e| format!("{e:?}"))?;
+    Ok(total)
 }
 
 /// The pictures coded on pushing one raw picture: 8-bit samples as they

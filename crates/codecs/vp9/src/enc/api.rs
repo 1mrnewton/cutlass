@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use cutlass_encode::video::{VideoEncoder, VideoInput};
 use cutlass_encode::{
     CodecError, CodecId, CodecParams, ColorRange, EncodeFactory, MatrixCoefficients, Packet,
-    PixelFormat, Plane, VideoFrame,
+    PixelFormat, Plane, SideData, VideoFrame,
 };
 
 use super::{EncPixel, FrameEncoder, FrameParams};
@@ -318,6 +318,34 @@ pub struct Vp9Options {
     /// bitrate and its easy clips leave bits to its hard ones. 0: each
     /// clip at the bitrate.
     pub corpus_complexity: u32,
+    /// Alpha (FFmpeg's `libvpx-vp9` with `-pix_fmt yuva420p`): a second
+    /// encoder codes each picture's alpha plane as the luma of an 8-bit
+    /// 4:2:0 picture whose chroma is 128, one alpha packet for each packet
+    /// of the stream, which WebM stores as the block's BlockAdditional of
+    /// BlockAddID 1 (with the track's AlphaMode 1). Pictures go in with
+    /// [`Vp9Encoder::push_planes_alpha`] and come out of it and
+    /// [`Vp9Encoder::flush_alpha`] as [`AlphaCoded`]; on the video codec
+    /// contract, a frame's alpha plane goes in and its packet carries the
+    /// alpha packet as `SideData::BlockAdditional` with id 1. The alpha
+    /// encoder takes these options (the quantizer, bitrate, speed and
+    /// lookahead too, as FFmpeg's does) and codes a picture's alpha once
+    /// the stream has coded the picture: a key frame where the stream has
+    /// one, and no frame dropped (the alpha of a picture the stream drops
+    /// is passed over). The stream itself is coded as without alpha.
+    /// 8-bit pictures in one temporal layer only.
+    pub alpha: bool,
+}
+
+/// One picture coded with its alpha ([`Vp9Options::alpha`]): the stream's
+/// packet, the alpha stream's packet of the same picture, the key frame
+/// flag (both are key frames, or neither), and the picture's `pts`,
+/// `duration` and `timescale`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlphaCoded {
+    pub data: Vec<u8>,
+    pub alpha: Vec<u8>,
+    pub keyframe: bool,
+    pub clock: (i64, i64, u32),
 }
 
 /// The lookahead below speed 9 unless set: with it, alt-refs take 10 to
@@ -442,7 +470,33 @@ impl Vp9Options {
         if self.drop_frame_pct > 100 {
             return bad("vp9 drop-frame threshold past 100");
         }
+        if self.alpha && self.bit_depth != 8 {
+            return bad("vp9 alpha above 8 bits");
+        }
+        if self.alpha && self.layered() {
+            return bad("vp9 alpha in temporal layers");
+        }
         Ok(())
+    }
+
+    /// The options of [`Vp9Options::alpha`]'s encoder: the stream's, for
+    /// 8-bit 4:2:0 pictures, with the stream's lookahead (and so its own
+    /// alt-refs), key frames where the stream has them (forced on it too),
+    /// no frame dropped, and nothing that reads the colour planes' content.
+    fn alpha_options(&self) -> Self {
+        Self {
+            alpha: false,
+            chroma: Chroma::Yuv420,
+            bit_depth: 8,
+            color_space: ColorSpace::Bt601,
+            lag: Some(self.lag()),
+            keyint_min: 0,
+            drop_frame_pct: 0,
+            noise_sensitivity: 0,
+            temporal_layers: 1,
+            corpus_complexity: 0,
+            ..*self
+        }
     }
 
     /// Whether variance AQ is on.
@@ -499,6 +553,7 @@ impl Default for Vp9Options {
             noise_sensitivity: 0,
             temporal_layers: 1,
             corpus_complexity: 0,
+            alpha: false,
         }
     }
 }
@@ -507,6 +562,60 @@ impl Default for Vp9Options {
 /// 4:2:2, 4:4:0, 4:4:4), 2 and 3 (the same at 10 and 12 bits).
 pub struct Vp9Encoder {
     lane: Lane,
+    /// [`Vp9Options::alpha`]'s second encoder.
+    alpha: Option<Box<AlphaLane>>,
+}
+
+/// The encoder of the alpha planes, and the planes of the pictures pushed
+/// that the stream has not coded yet.
+struct AlphaLane {
+    /// The alpha encoder: its lookahead holds the alpha pictures pushed
+    /// that the stream has not coded yet, and it codes one when the
+    /// stream has coded its picture.
+    core: Core<u8>,
+    /// The chroma planes: 128.
+    gray: Vec<u8>,
+}
+
+impl AlphaLane {
+    fn new(width: u32, height: u32, opts: &Vp9Options) -> Self {
+        let (w, h) = (width as usize, height as usize);
+        Self {
+            core: Core::new(width, height, opts.alpha_options()),
+            gray: vec![128; w.div_ceil(2) * h.div_ceil(2)],
+        }
+    }
+
+    /// Takes the alpha plane of a picture pushed into the lookahead.
+    fn wait(&mut self, alpha: (&[u8], usize), seconds: f64, clock: (i64, i64, u32)) {
+        let cw = (self.core.width as usize).div_ceil(2);
+        let planes = [alpha, (&self.gray[..], cw), (&self.gray[..], cw)];
+        self.core.enqueue(planes, seconds, clock);
+    }
+
+    /// Codes the alpha of the picture the stream coded at `clock`, a key
+    /// frame when it was one. The pictures before it in the lookahead are
+    /// those the stream dropped, and are passed over.
+    fn code(&mut self, keyframe: bool, clock: (i64, i64, u32)) -> Result<Vec<u8>, CodecError> {
+        let queue = &mut self.core.queue;
+        let at = queue
+            .iter()
+            .position(|q| q.pts == clock.0)
+            .ok_or(CodecError::InvalidApi {
+                what: "vp9 alpha picture",
+            })?;
+        queue.drain(..at);
+        if keyframe {
+            self.core.force_key = true;
+        }
+        // (The alpha encoder drops no frame.)
+        let coded = self.core.code_front()?;
+        Ok(coded.map(|(data, _, _)| data).unwrap_or_default())
+    }
+
+    fn reset(&mut self) {
+        self.core.reset();
+    }
 }
 
 /// The encoder of the stream's sample size.
@@ -642,7 +751,12 @@ impl Vp9Encoder {
                 });
             }
         };
-        Ok(Self { lane })
+        let alpha = if opts.alpha {
+            Some(Box::new(AlphaLane::new(width, height, &opts)))
+        } else {
+            None
+        };
+        Ok(Self { lane, alpha })
     }
 
     /// Bitrate 0 keeps the default quantizer; a positive bitrate aims at
@@ -803,6 +917,7 @@ impl Vp9Encoder {
         planes: [(&[u8], usize); 3],
         seconds: f64,
     ) -> Result<(Vec<u8>, bool), CodecError> {
+        self.no_alpha()?;
         match &mut self.lane {
             Lane::Eight(c) => c.encode_planes(planes, seconds),
             Lane::Deep(_) => Err(deep_only()),
@@ -816,6 +931,7 @@ impl Vp9Encoder {
         planes: [(&[u16], usize); 3],
         seconds: f64,
     ) -> Result<(Vec<u8>, bool), CodecError> {
+        self.no_alpha()?;
         match &mut self.lane {
             Lane::Deep(c) => {
                 c.check_range(&planes)?;
@@ -834,10 +950,75 @@ impl Vp9Encoder {
         seconds: f64,
         clock: (i64, i64, u32),
     ) -> Result<Coded, CodecError> {
+        self.no_alpha()?;
         match &mut self.lane {
             Lane::Eight(c) => c.push_planes(planes, seconds, clock),
             Lane::Deep(_) => Err(deep_only()),
         }
+    }
+
+    /// [`Vp9Options::alpha`]: takes one 8-bit picture and its alpha plane
+    /// (`planes` are Y, U, V and alpha with their strides, alpha at the
+    /// picture's size) into the lookahead; returns the pictures coded,
+    /// each with its alpha packet. The pictures' `pts` must differ.
+    pub fn push_planes_alpha(
+        &mut self,
+        planes: [(&[u8], usize); 4],
+        seconds: f64,
+        clock: (i64, i64, u32),
+    ) -> Result<Vec<AlphaCoded>, CodecError> {
+        let [y, u, v, a] = planes;
+        let (Some(lane), Lane::Eight(c)) = (self.alpha.as_mut(), &mut self.lane) else {
+            return Err(CodecError::InvalidApi {
+                what: "vp9 alpha is off",
+            });
+        };
+        let (w, h) = (c.width as usize, c.height as usize);
+        if a.1 < w || a.0.len() < (h - 1) * a.1 + w {
+            return Err(CodecError::InvalidApi {
+                what: "alpha plane",
+            });
+        }
+        lane.wait(a, seconds, clock);
+        let coded = c.push_planes([y, u, v], seconds, clock)?;
+        Self::code_alpha(lane, coded)
+    }
+
+    /// [`Vp9Options::alpha`]: codes what the lookahead still holds, each
+    /// picture with its alpha packet.
+    pub fn flush_alpha(&mut self) -> Result<Vec<AlphaCoded>, CodecError> {
+        let (Some(lane), Lane::Eight(c)) = (self.alpha.as_mut(), &mut self.lane) else {
+            return Err(CodecError::InvalidApi {
+                what: "vp9 alpha is off",
+            });
+        };
+        let coded = c.flush()?;
+        Self::code_alpha(lane, coded)
+    }
+
+    /// The alpha of each picture the stream coded.
+    fn code_alpha(lane: &mut AlphaLane, coded: Coded) -> Result<Vec<AlphaCoded>, CodecError> {
+        coded
+            .into_iter()
+            .map(|(data, keyframe, clock)| {
+                Ok(AlphaCoded {
+                    alpha: lane.code(keyframe, clock)?,
+                    data,
+                    keyframe,
+                    clock,
+                })
+            })
+            .collect()
+    }
+
+    /// With [`Vp9Options::alpha`] the pictures go in with their alpha.
+    fn no_alpha(&self) -> Result<(), CodecError> {
+        if self.alpha.is_some() {
+            return Err(CodecError::InvalidApi {
+                what: "vp9 alpha: push_planes_alpha",
+            });
+        }
+        Ok(())
     }
 
     /// [`Vp9Encoder::push_planes`] of a 10- or 12-bit picture: samples in
@@ -848,6 +1029,7 @@ impl Vp9Encoder {
         seconds: f64,
         clock: (i64, i64, u32),
     ) -> Result<Coded, CodecError> {
+        self.no_alpha()?;
         match &mut self.lane {
             Lane::Deep(c) => {
                 c.check_range(&planes)?;
@@ -859,6 +1041,7 @@ impl Vp9Encoder {
 
     /// Codes what the lookahead still holds.
     pub fn flush(&mut self) -> Result<Coded, CodecError> {
+        self.no_alpha()?;
         on_lane!(self, c => c.flush())
     }
 
@@ -1046,6 +1229,16 @@ impl<P: EncPixel> Core<P> {
             let coded = self.code(planes, seconds, None, true)?;
             return Ok(coded.map(|(d, k)| (d, k, clock)).into_iter().collect());
         }
+        self.enqueue(planes, seconds, clock);
+        let mut out = Vec::new();
+        while self.queue.len() > self.opts.lag() as usize {
+            out.extend(self.code_front()?);
+        }
+        Ok(out)
+    }
+
+    /// Puts one picture (checked) at the back of the lookahead.
+    fn enqueue(&mut self, planes: [(&[P], usize); 3], seconds: f64, clock: (i64, i64, u32)) {
         let (w, h) = (self.width as usize, self.height as usize);
         let c = self.opts.chroma_dims(w, h);
         let dims = [(w, h), c, c];
@@ -1084,11 +1277,6 @@ impl<P: EncPixel> Core<P> {
             duration: clock.1,
             timescale: clock.2,
         });
-        let mut out = Vec::new();
-        while self.queue.len() > self.opts.lag() as usize {
-            out.extend(self.code_front()?);
-        }
-        Ok(out)
     }
 
     /// Codes what the lookahead still holds.
@@ -2022,6 +2210,9 @@ impl VideoEncoder for Vp9Encoder {
             input.duration as f64 / f64::from(input.timescale)
         };
         let clock = (input.pts, input.duration, input.timescale);
+        if self.alpha.is_some() {
+            return self.push_frame_alpha(f, seconds, clock);
+        }
         let coded = if o.bit_depth > 8 {
             // Little-endian samples, two bytes each, rows `stride` bytes
             // apart.
@@ -2058,6 +2249,9 @@ impl VideoEncoder for Vp9Encoder {
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
+        if self.alpha.is_some() {
+            return Ok(self.flush_alpha()?.into_iter().map(alpha_packet).collect());
+        }
         let coded = self.flush()?;
         Ok(coded
             .into_iter()
@@ -2067,6 +2261,9 @@ impl VideoEncoder for Vp9Encoder {
 
     fn reset(&mut self) {
         on_lane!(self, c => c.reset());
+        if let Some(lane) = self.alpha.as_mut() {
+            lane.reset();
+        }
     }
 
     fn cancel_flag(&self) -> Arc<AtomicBool> {
@@ -2075,6 +2272,54 @@ impl VideoEncoder for Vp9Encoder {
             Lane::Deep(c) => Arc::clone(&c.cancel),
         }
     }
+}
+
+impl Vp9Encoder {
+    /// [`VideoEncoder::push`] with [`Vp9Options::alpha`]: the frame's alpha
+    /// plane (8-bit), or an opaque one when it has none.
+    fn push_frame_alpha(
+        &mut self,
+        f: &VideoFrame,
+        seconds: f64,
+        clock: (i64, i64, u32),
+    ) -> Result<Vec<Packet>, CodecError> {
+        let opaque;
+        let alpha = match &f.alpha {
+            Some(a) if a.bit_depth == 8 => (&a.plane.samples[..], a.plane.stride),
+            Some(_) => {
+                return Err(CodecError::Unsupported {
+                    what: "vp9 alpha above 8 bits",
+                });
+            }
+            None => {
+                opaque = vec![255; f.width as usize * f.height as usize];
+                (&opaque[..], f.width as usize)
+            }
+        };
+        let planes = [
+            (&f.y.samples[..], f.y.stride),
+            (&f.u.samples[..], f.u.stride),
+            (&f.v.samples[..], f.v.stride),
+            alpha,
+        ];
+        Ok(self
+            .push_planes_alpha(planes, seconds, clock)?
+            .into_iter()
+            .map(alpha_packet)
+            .collect())
+    }
+}
+
+/// A picture coded with its alpha as a packet: the alpha packet rides as
+/// `SideData::BlockAdditional` with id 1, as WebM stores it.
+fn alpha_packet(coded: AlphaCoded) -> Packet {
+    let (pts, duration, timescale) = coded.clock;
+    let mut packet = Packet::video(coded.data, pts, duration, timescale, coded.keyframe);
+    packet.side.push(SideData::BlockAdditional {
+        id: 1,
+        data: coded.alpha,
+    });
+    packet
 }
 
 /// Registers the encoder export opens.

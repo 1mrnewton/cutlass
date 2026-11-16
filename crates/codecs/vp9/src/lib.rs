@@ -27,10 +27,10 @@ mod txfm;
 #[cfg(test)]
 mod prove;
 
-pub use decode::{Decoder, Vp9Decoder};
+pub use decode::{AlphaPlane, Decoder, Vp9AlphaDecoder, Vp9Decoder};
 pub use enc::api::{
-    AqMode, Chroma, ColorSpace, EngineEncoder, RoiMap, Tune, TuneContent, Vp9Encoder, Vp9Options,
-    register_engine_encoders,
+    AlphaCoded, AqMode, Chroma, ColorSpace, EngineEncoder, RoiMap, Tune, TuneContent, Vp9Encoder,
+    Vp9Options, register_engine_encoders,
 };
 
 use cutlass_decode::video::VideoDecoder;

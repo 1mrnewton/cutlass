@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use cutlass_decode::video::{VideoDecoder, VideoOutput};
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorPrimaries, ColorRange, MatrixCoefficients, Packet,
-    Plane, Transfer, VideoFrame,
+    Plane, SideData, Transfer, VideoFrame,
 };
 use cutlass_encode::PixelFormat;
 
@@ -487,21 +487,96 @@ impl Default for Decoder {
     }
 }
 
+/// The decoder of a VP9 alpha stream (WebM's BlockAdditional of BlockAddID
+/// 1 with AlphaMode 1, FFmpeg's `libvpx-vp9` with `yuva420p`): each alpha
+/// packet is a frame (or a superframe) of a second VP9 stream whose luma is
+/// the alpha plane. FFmpeg's `libvpx-vp9` decoder decodes it so; its
+/// native `vp9` decoder leaves it out. [`Vp9Decoder`] decodes it itself
+/// when a packet carries it as `SideData::BlockAdditional` with id 1.
+#[derive(Default)]
+pub struct Vp9AlphaDecoder {
+    inner: Decoder,
+}
+
+/// A decoded alpha plane: one sample a pixel, tightly packed (two bytes,
+/// little-endian, above 8 bits).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlphaPlane {
+    pub samples: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub bit_depth: u8,
+}
+
+impl Vp9AlphaDecoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Decodes one alpha packet and returns the alpha plane of the picture
+    /// it shows, if any. A failed packet resets the decoder: the planes
+    /// come again from the next key frame.
+    pub fn decode(&mut self, packet: &[u8]) -> Result<Option<AlphaPlane>, CodecError> {
+        let mut shown = None;
+        for part in split_superframe(packet)? {
+            match self.inner.decode(part) {
+                Ok(Some(picture)) => shown = Some(picture),
+                Ok(None) => {}
+                Err(err) => {
+                    self.inner.reset();
+                    return Err(err);
+                }
+            }
+        }
+        Ok(shown.map(|p| AlphaPlane {
+            samples: p.y,
+            width: p.width,
+            height: p.height,
+            bit_depth: p.bit_depth,
+        }))
+    }
+
+    /// Drops the reference pictures.
+    pub fn reset(&mut self) {
+        self.inner.reset();
+    }
+}
+
+/// The alpha packet a packet carries: its `SideData::BlockAdditional` of
+/// id 1.
+fn alpha_of(packet: &Packet) -> Option<&[u8]> {
+    packet.side.iter().find_map(|side| match side {
+        SideData::BlockAdditional { id: 1, data } => Some(data.as_slice()),
+        _ => None,
+    })
+}
+
 /// VP9 decoder on the video codec contract.
 ///
 /// `push` consumes one access unit. A hidden frame returns no picture.
 /// `drain` is empty. `reset` drops reference pictures. A failed `push`
-/// leaves those pictures as they were.
+/// leaves those pictures as they were. A packet that carries an alpha
+/// packet (`SideData::BlockAdditional` with id 1, as a WebM file with
+/// alpha stores it) has it decoded by a [`Vp9AlphaDecoder`], and the
+/// picture it shows carries the alpha plane (`VideoFrame::alpha`); an
+/// alpha packet that fails, or whose plane is not the picture's size,
+/// leaves that picture without one.
 pub struct Vp9Decoder {
     inner: Decoder,
     rt: Option<Runtime>,
-    /// Pictures to show, in order, with their packet's times; their
-    /// reconstruction may still be running.
-    pending: VecDeque<(Held, i64, i64, u32)>,
+    /// Pictures to show, in order, with their packet's times and alpha;
+    /// their reconstruction may still be running.
+    pending: VecDeque<Pending>,
+    /// The alpha stream's decoder, from the first packet with alpha.
+    alpha: Option<Vp9AlphaDecoder>,
     cancel: Arc<AtomicBool>,
     /// The largest picture given out so far, in bytes.
     warmed: usize,
 }
+
+/// A picture to show: the picture, its packet's `pts`, `duration` and
+/// `timescale`, and its alpha plane.
+type Pending = (Held, i64, i64, u32, Option<AlphaPlane>);
 
 /// Workers that reconstruct frames while the caller parses, and the
 /// channel their syntax buffers come back on.
@@ -576,6 +651,7 @@ impl Vp9Decoder {
             inner: Decoder::new(),
             rt,
             pending: VecDeque::new(),
+            alpha: None,
             cancel: Arc::new(AtomicBool::new(false)),
             warmed: 0,
         })
@@ -596,11 +672,11 @@ impl Vp9Decoder {
         });
         let mut out = Vec::new();
         let failed = |rt: &Option<Runtime>| rt.as_ref().is_some_and(|rt| rt.workers.take_failure());
-        while let Some((held, _, _, _)) = self.pending.front() {
+        while let Some((held, ..)) = self.pending.front() {
             if !(all || held.done() || self.pending.len() > limit) {
                 break;
             }
-            let Some((held, pts, duration, timescale)) = self.pending.pop_front() else {
+            let Some((held, pts, duration, timescale, alpha)) = self.pending.pop_front() else {
                 break;
             };
             let bytes = held_bytes(&held);
@@ -625,6 +701,15 @@ impl Vp9Decoder {
                     what: "vp9 reconstruction",
                 });
             }
+            // (An alpha plane of another size is left out.)
+            let frame = match alpha {
+                Some(a) if (a.width, a.height) == (frame.width, frame.height) => {
+                    let sample = if a.bit_depth > 8 { 2 } else { 1 };
+                    let plane = Plane::bytes(a.width, a.height, sample, a.samples)?;
+                    frame.with_alpha(a.bit_depth, plane)?
+                }
+                _ => frame,
+            };
             out.push(VideoOutput {
                 frame,
                 pts,
@@ -651,8 +736,13 @@ impl VideoDecoder for Vp9Decoder {
         for part in parts {
             match self.inner.decode_with(part, self.rt.as_ref()) {
                 Ok(Some(held)) => {
-                    self.pending
-                        .push_back((held, packet.pts, packet.duration, packet.timescale));
+                    self.pending.push_back((
+                        held,
+                        packet.pts,
+                        packet.duration,
+                        packet.timescale,
+                        None,
+                    ));
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -662,6 +752,16 @@ impl VideoDecoder for Vp9Decoder {
                     }
                     return Err(err);
                 }
+            }
+        }
+        if let Some(alpha) = alpha_of(packet) {
+            let decoder = self.alpha.get_or_insert_with(Vp9AlphaDecoder::new);
+            // (A failed alpha packet leaves the picture without alpha.)
+            let plane = decoder.decode(alpha).ok().flatten();
+            if self.pending.len() > queued
+                && let Some(last) = self.pending.back_mut()
+            {
+                last.4 = plane;
             }
         }
         self.ready(false)
@@ -674,6 +774,9 @@ impl VideoDecoder for Vp9Decoder {
     fn reset(&mut self) {
         self.pending.clear();
         self.inner.reset();
+        if let Some(alpha) = self.alpha.as_mut() {
+            alpha.reset();
+        }
     }
 
     fn cancel_flag(&self) -> Arc<AtomicBool> {

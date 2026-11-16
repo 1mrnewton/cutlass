@@ -33,6 +33,9 @@ Decoder (`Vp9Decoder`, over `Decoder`):
   parse) and tile-column threads for the parse. `Vp9Decoder::open` uses one
   thread per core; the frames still being made when `push` returns come out
   of later pushes or `drain`, as with FFmpeg's frame threads.
+- Alpha (WebM's BlockAdditional 1, FFmpeg's `libvpx-vp9` `yuva420p`): a
+  packet's alpha packet (`SideData::BlockAdditional` id 1) is decoded by a
+  second decoder into the frame's alpha plane (`Vp9AlphaDecoder` alone).
 
 Encoder (`Vp9Encoder`, `EngineEncoder`):
 
@@ -47,6 +50,9 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   (to eighths where the vector may be), per-block transform size
   (`TX_MODE_SELECT`, 4×4 to 32×32 with the intra ADST types), skip, the loop
   filter (libvpx's level from the quantizer), probability adaptation.
+- Alpha (`Vp9Options::alpha`, FFmpeg's `-pix_fmt yuva420p`): the alpha
+  plane coded by a second encoder as its own VP9 stream, one alpha packet
+  beside each packet ("Options measured").
 - Segmentation: with `Vp9Options::aq` (libvpx's `aq-mode=1`) each 32×32
   region goes in one of five segments by its luma variance, each with
   its own quantizer (flat regions finer); the map is coded per block.
@@ -437,10 +443,25 @@ let mut encoder = Vp9Encoder::with_options(1280, 720, Vp9Options { qindex: 120, 
 let (bytes, key) = encoder.encode_planes([(y, 1280), (u, 640), (v, 640)], 1.0 / 30.0)?;
 ```
 
-Examples: `examples/roundtrip.rs` (decode a committed key frame) and
-`examples/vp9enc.rs` (raw 4:2:0 to IVF:
+Examples: `examples/roundtrip.rs` (decode a committed key frame),
+`examples/vp9enc.rs` (raw 4:2:0 to IVF, or to WebM or Matroska by the
+output's extension:
 `vp9enc in.yuv 1280 720 out.ivf q=120 speed=5 threads=4`; its doc
-comment lists the options, libvpx-vp9's among them).
+comment lists the options, libvpx-vp9's among them; `alpha=FILE` codes
+alpha) and `examples/vp9dec.rs` (the VP9 track of a WebM or Matroska file
+to raw `yuv420p`, or `yuva420p` with alpha: `vp9dec in.webm out.yuv`).
+
+With alpha (`Vp9Options::alpha`), each picture goes in with its alpha
+plane and comes out with its alpha packet, which WebM keeps as the
+block's BlockAdditional 1:
+
+```rust
+let mut encoder = Vp9Encoder::with_options(1280, 720, Vp9Options { alpha: true, ..Default::default() })?;
+for coded in encoder.push_planes_alpha([(y, 1280), (u, 640), (v, 640), (a, 1280)], 1.0 / 30.0, (pts, 1, 30))? {
+    // coded.data, coded.alpha, coded.keyframe, coded.clock
+}
+let plane = Vp9AlphaDecoder::new().decode(&alpha_packet)?; // or Vp9Decoder with SideData::BlockAdditional
+```
 
 ## How it is tested
 
@@ -461,6 +482,10 @@ cargo test -p cutlass-vp9
   inter and golden frames, odd sizes, lossless, four tile columns on four
   threads, two columns past 4096 samples); FFmpeg decodes the same streams
   to the same pictures.
+- Alpha: `tests/alpha_interop.rs` writes a WebM with alpha through
+  `cutlass-matroska` that FFmpeg's `libvpx-vp9` decodes to the pictures
+  and alpha this decoder gives, and decodes FFmpeg's `yuva420p` WebM to
+  FFmpeg's YUVA (skipped without `ffmpeg`).
 
 ## Speed and size against FFmpeg
 
@@ -1601,7 +1626,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-enable-tpl` | TPL model | n/a: two passes have their own allocation |
 | `-pix_fmt yuv420p` … `yuv444p12le` | profiles 0–3 | `chroma`, `bit_depth` (`chroma=`, `bits=`) |
 | `-pix_fmt gbrp`, `gbrp10le`, `gbrp12le` | `VPX_CS_SRGB` | `ColorSpace::Srgb` with 4:4:4: planes G, B, R (added) |
-| `-pix_fmt yuva420p` | alpha as a second stream in WebM `BlockAdditional` | missing, a container's: the alpha plane is a second stream any `Vp9Encoder` codes (alpha as luma, chroma at 128), and its packets go in each block's `BlockAdditional` (id 1), which `cutlass-matroska` neither writes nor reads (it skips BlockAdditions) |
+| `-pix_fmt yuva420p` | alpha as a second stream in WebM `BlockAdditional` | `alpha` (`alpha=FILE`, added): a second encoder codes the alpha plane as the luma of a 4:2:0 picture with chroma at 128, one alpha packet a packet (`Vp9Encoder::push_planes_alpha`, `flush_alpha`; on the codec contract a frame's alpha plane in, `SideData::BlockAdditional` id 1 out); `cutlass-matroska` writes it as each block's BlockAdditional (BlockAddID 1) with AlphaMode 1 and reads it back; `Vp9Decoder` decodes it into the frame's alpha (`Vp9AlphaDecoder` on its own), as FFmpeg's `libvpx-vp9` decoder does; see "Options measured" |
 | `-colorspace`, `-color_range` | `color-space`, `color-range` | `color_space`, `full_range` (`colorspace=`, `range=`), and from `CodecParams` (added) |
 | `-aspect` / sample aspect ratio | `VP9E_SET_RENDER_SIZE` | `render_size` (`render=WxH`, added) |
 | regions of interest (side data) | ROI map | `Vp9Encoder::set_roi_map` with a `RoiMap` (`roi_q=`, `roi_ref=`, `roi_skip=` in `vp9enc`, added): a segment a block, each with a quantizer and loop filter delta, a reference and skip |
@@ -1899,6 +1924,72 @@ corpus at 2 Mb/s (complexities 588, 293 and 311; the corpus 408):
 | Each at the bitrate | 2052 kb/s, 42.78 dB | 2028, 43.96 | 1967, 44.20 | 2022 kB |
 | `corpus=408` | 2975, 45.15 | 1486, 43.77 | 1501, 43.89 | 2048 kB |
 | libvpx `-cpu-used 4`, then `-corpus-complexity 400` | 2365 → 2312 | 2012 → 1686 | 1844 → 1717 | |
+
+**Alpha** (`alpha`, `-pix_fmt yuva420p`). As in FFmpeg's `libvpxenc.c`,
+a second encoder takes the stream's options (quantizer, bitrate, speed,
+lookahead) and codes each alpha plane as the luma of an 8-bit 4:2:0
+picture whose chroma is 128. It codes a picture's alpha when the stream
+has coded the picture, from its own lookahead of the same pictures (so it
+has alt-refs of its own), a key frame wherever the stream has one (forced,
+so that a seek to any key frame finds alpha), and it drops none: the
+alpha of a picture the stream drops is passed over. The stream's packets
+are the ones the same options code without alpha. WebM stores each alpha
+packet as its block's BlockAdditional, BlockAddID 1, and the track's
+AlphaMode as 1 (`cutlass-matroska`; `vp9enc out.webm alpha=FILE`). The
+decoder decodes a packet's alpha with a second decoder and hands the
+plane out as the frame's alpha, as FFmpeg's `libvpx-vp9` decoder does
+(its native `vp9` decoder leaves alpha out); an alpha packet that fails
+leaves its picture without alpha. Checked both ways against FFmpeg 6.1
+(`tests/alpha_interop.rs` at 160×96, and by hand at 640×360 with the
+commands below): a WebM written by `vp9enc` and `cutlass-matroska`
+decodes in `ffmpeg -c:v libvpx-vp9` to the same Y, U, V and alpha as in
+`vp9dec`, every sample of all 60 pictures, and FFmpeg's own `libvpx-vp9`
+`yuva420p` WebM decodes in `vp9dec` (one thread and four) to the YUVA
+FFmpeg's `libvpx-vp9` decoder gives, every sample.
+
+```
+ffmpeg -f lavfi -i testsrc2=s=640x360:d=2:r=30 \
+  -f lavfi -i "nullsrc=s=640x360:d=2:r=30,format=gray,geq=lum='128+127*sin((X+6*N)/50)*cos((Y-3*N)/40)'" \
+  -filter_complex "[0][1]alphamerge,format=yuva420p" -f rawvideo src.yuva
+ffmpeg -f rawvideo -pix_fmt yuva420p -s 640x360 -i src.yuva -vf format=yuv420p -f rawvideo src.yuv
+ffmpeg -f rawvideo -pix_fmt yuva420p -s 640x360 -i src.yuva -vf extractplanes=a -f rawvideo src_alpha.y
+# Ours to FFmpeg: the two decodes are the same bytes.
+vp9enc src.yuv 640 360 ours.webm alpha=src_alpha.y crf=30 threads=4
+ffmpeg -c:v libvpx-vp9 -i ours.webm -pix_fmt yuva420p -f rawvideo ours_by_ffmpeg.yuva
+vp9dec ours.webm ours_by_us.yuva
+cmp ours_by_ffmpeg.yuva ours_by_us.yuva
+# FFmpeg's to ours: the same.
+ffmpeg -f rawvideo -pix_fmt yuva420p -s 640x360 -r 30 -i src.yuva \
+  -c:v libvpx-vp9 -pix_fmt yuva420p -crf 30 -b:v 0 -threads 4 ffmpeg.webm
+ffmpeg -c:v libvpx-vp9 -i ffmpeg.webm -pix_fmt yuva420p -f rawvideo ffmpeg_by_ffmpeg.yuva
+vp9dec ffmpeg.webm ffmpeg_by_us.yuva threads=4
+cmp ffmpeg_by_ffmpeg.yuva ffmpeg_by_us.yuva
+```
+
+Size and quality against FFmpeg at the same `-crf` (15 to 55; `crf=` here,
+speed 5 against FFmpeg's default `-cpu-used 1`, four threads), on that
+source (a moving sinusoidal gradient) and on the same picture with a
+moving soft-edged disc as its alpha, BD-rate of the alpha stream's bytes
+(the BlockAdditionals) at the same alpha PSNR:
+
+| crf | FFmpeg alpha bytes, PSNR | Ours |
+| --- | --- | --- |
+| 15 | 17015, 55.10 dB | 16818, 51.86 dB |
+| 25 | 13679, 53.64 dB | 11828, 50.63 dB |
+| 35 | 7952, 51.31 dB | 9378, 48.66 dB |
+| 45 | 5676, 48.40 dB | 7908, 45.93 dB |
+| 55 | 4643, 45.09 dB | 6902, 42.80 dB |
+
+The alpha stream takes +65% (gradient) and +59% (disc) bits at the same
+alpha PSNR against libvpx's; the colour stream of the same files +18% at
+the same PSNR-Y (this synthetic picture is unlike the README's clips,
+where the encoder is ahead). Coding each alpha plane as a plain gray
+stream gives the same bytes on both sides (ours 11828 at `crf=25`,
+libvpx's 13679 in an IVF less its headers), so the gap is the encoder's
+on these smooth planes, not the alpha path's. The alpha stream's own
+lookahead took it from +78% to +65% (coding each alpha picture as it
+came, with no lookahead, was the first version). Time at `crf=30`: 1.65 s
+against 1.15 s without alpha (FFmpeg's 3.2 s against 2.7 s).
 
 **Layered alt-refs** (`alt_ref_layers`, `-auto-alt-ref` 2 to 6). With
 the lookahead, once the golden group's alt-ref is coded, the span from

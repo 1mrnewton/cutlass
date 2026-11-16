@@ -2954,3 +2954,255 @@ fn layered_alt_refs_are_shown_as_they_are() {
     };
     assert!(Vp9Encoder::with_options(w, h, past).is_err());
 }
+
+/// A moving alpha gradient: a diagonal ramp that slides `shift` samples a
+/// picture, with an opaque band.
+fn alpha_plane(width: u32, height: u32, shift: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    for row in 0..height {
+        for col in 0..width {
+            let ramp = (col + row + 3 * shift) * 4 % 256;
+            out.push(if (row / 8) % 3 == 1 {
+                255
+            } else {
+                u8::try_from(ramp).unwrap_or(0)
+            });
+        }
+    }
+    out
+}
+
+/// Whether a profile 0 VP9 frame (no superframe) is a key frame: its
+/// first octet is the frame marker, the profile's two bits,
+/// `show_existing_frame` and `frame_type` (0 for a key frame).
+fn is_key(frame: &[u8]) -> bool {
+    frame[0] & 0xF0 == 0x80 && frame[0] & 0x0C == 0
+}
+
+#[test]
+fn alpha_rides_beside_each_packet_and_decodes_to_the_plane() {
+    use super::{AlphaCoded, Vp9Options};
+    use crate::decode::Vp9AlphaDecoder;
+
+    let (w, h) = (64_u32, 48_u32);
+    // Lossless, to check the planes exactly; lookahead and alt-refs in the
+    // stream (speed 5) and a key frame every 5.
+    let opts = Vp9Options {
+        qindex: 0,
+        keyint: 5,
+        alpha: true,
+        threads: 1,
+        ..Vp9Options::default()
+    };
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let mut coded: Vec<AlphaCoded> = Vec::new();
+    let mut sources = Vec::new();
+    for n in 0..12 {
+        let frame = moving(w, h, n * 2);
+        let alpha = alpha_plane(w, h, n);
+        let planes = [
+            (&frame.y.samples[..], frame.y.stride),
+            (&frame.u.samples[..], frame.u.stride),
+            (&frame.v.samples[..], frame.v.stride),
+            (&alpha[..], w as usize),
+        ];
+        coded.extend(
+            encoder
+                .push_planes_alpha(planes, 1.0 / 30.0, (i64::from(n), 1, 30))
+                .expect("push"),
+        );
+        sources.push(alpha);
+    }
+    coded.extend(encoder.flush_alpha().expect("flush"));
+    assert_eq!(coded.len(), 12);
+    // The stream is the one the same options code without alpha.
+    let mut plain = Vp9Encoder::with_options(
+        w,
+        h,
+        Vp9Options {
+            alpha: false,
+            ..opts
+        },
+    )
+    .expect("plain");
+    let mut streams = Vec::new();
+    for n in 0..12 {
+        let frame = moving(w, h, n * 2);
+        let planes = [
+            (&frame.y.samples[..], frame.y.stride),
+            (&frame.u.samples[..], frame.u.stride),
+            (&frame.v.samples[..], frame.v.stride),
+        ];
+        streams.extend(
+            plain
+                .push_planes(planes, 1.0 / 30.0, (i64::from(n), 1, 30))
+                .expect("push"),
+        );
+    }
+    streams.extend(plain.flush().expect("flush"));
+    let main: Vec<_> = coded
+        .iter()
+        .map(|c| (c.data.clone(), c.keyframe, c.clock))
+        .collect();
+    assert_eq!(main, streams);
+    let mut alpha_decoder = Vp9AlphaDecoder::new();
+    for (n, c) in coded.iter().enumerate() {
+        assert_eq!(c.clock, (n as i64, 1, 30));
+        // The alpha stream's key frames are the stream's.
+        assert_eq!(is_key(&c.alpha), c.keyframe, "picture {n}");
+        let plane = alpha_decoder
+            .decode(&c.alpha)
+            .expect("alpha")
+            .expect("shown");
+        assert_eq!((plane.width, plane.height, plane.bit_depth), (w, h, 8));
+        assert_eq!(plane.samples, sources[n], "picture {n}");
+    }
+    assert_eq!(coded.iter().filter(|c| c.keyframe).count(), 3);
+    // Without alpha in, the plain calls are refused.
+    let frame = moving(w, h, 0);
+    let planes = [
+        (&frame.y.samples[..], frame.y.stride),
+        (&frame.u.samples[..], frame.u.stride),
+        (&frame.v.samples[..], frame.v.stride),
+    ];
+    assert!(encoder.push_planes(planes, 0.0, (99, 1, 30)).is_err());
+    assert!(encoder.flush().is_err());
+    // Nor is alpha above 8 bits or in temporal layers.
+    for opts in [
+        Vp9Options {
+            alpha: true,
+            bit_depth: 10,
+            ..Vp9Options::default()
+        },
+        Vp9Options {
+            alpha: true,
+            temporal_layers: 2,
+            ..Vp9Options::default()
+        },
+    ] {
+        assert!(Vp9Encoder::with_options(w, h, opts).is_err());
+    }
+    // And alpha on an encoder without it is.
+    let mut plain = Vp9Encoder::with_quantizer(w, h, 60).expect("plain");
+    let alpha = alpha_plane(w, h, 0);
+    let planes = [planes[0], planes[1], planes[2], (&alpha[..], w as usize)];
+    assert!(plain.push_planes_alpha(planes, 0.0, (0, 1, 30)).is_err());
+}
+
+#[test]
+fn alpha_of_dropped_pictures_is_passed_over() {
+    use super::Vp9Options;
+    use crate::decode::Vp9AlphaDecoder;
+
+    // Constant bitrate far under what the pictures take, dropping frames.
+    let (w, h) = (96_u32, 64_u32);
+    let opts = Vp9Options {
+        bitrate: 20_000,
+        cbr_buffer_ms: 1000,
+        drop_frame_pct: 60,
+        speed: 9,
+        alpha: true,
+        threads: 1,
+        ..Vp9Options::default()
+    };
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let mut coded = Vec::new();
+    for n in 0..30 {
+        let frame = moving(w, h, n * 5);
+        let alpha = alpha_plane(w, h, n * 3);
+        let planes = [
+            (&frame.y.samples[..], frame.y.stride),
+            (&frame.u.samples[..], frame.u.stride),
+            (&frame.v.samples[..], frame.v.stride),
+            (&alpha[..], w as usize),
+        ];
+        coded.extend(
+            encoder
+                .push_planes_alpha(planes, 1.0 / 30.0, (i64::from(n), 1, 30))
+                .expect("push"),
+        );
+    }
+    coded.extend(encoder.flush_alpha().expect("flush"));
+    assert!(coded.len() < 30, "{} pictures coded", coded.len());
+    let mut alpha_decoder = Vp9AlphaDecoder::new();
+    for c in &coded {
+        let plane = alpha_decoder
+            .decode(&c.alpha)
+            .expect("alpha")
+            .expect("shown");
+        // Each alpha packet is the alpha of its own picture.
+        let source = alpha_plane(w, h, u32::try_from(c.clock.0).expect("pts") * 3);
+        assert!(psnr(&source, &plane.samples) > 20.0, "pts {}", c.clock.0);
+    }
+}
+
+#[test]
+fn frames_with_alpha_round_trip_on_the_codec_contracts() {
+    use super::Vp9Options;
+    use cutlass_encode::SideData;
+
+    let (w, h) = (64_u32, 32_u32);
+    let opts = Vp9Options {
+        qindex: 0,
+        alpha: true,
+        threads: 1,
+        ..Vp9Options::default()
+    };
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let mut packets = Vec::new();
+    let mut sources = Vec::new();
+    for n in 0..6 {
+        let frame = moving(w, h, n);
+        // The fourth picture goes in without alpha: opaque.
+        let alpha = if n == 3 {
+            vec![255; (w * h) as usize]
+        } else {
+            alpha_plane(w, h, n)
+        };
+        let frame = if n == 3 {
+            frame
+        } else {
+            frame
+                .with_alpha(8, Plane::tight(w, h, alpha.clone()).expect("plane"))
+                .expect("alpha")
+        };
+        sources.push(alpha);
+        packets.extend(
+            encoder
+                .push(&VideoInput {
+                    frame,
+                    pts: i64::from(n),
+                    duration: 1,
+                    timescale: 30,
+                })
+                .expect("push"),
+        );
+    }
+    packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+    assert_eq!(packets.len(), 6);
+    let params = CodecParams::with_format(CodecId::Vp9, w, h, PixelFormat::Yuv420p);
+    let mut decoder = Vp9Decoder::open_with_threads(&params, 2).expect("decoder");
+    let mut frames = Vec::new();
+    for packet in &packets {
+        assert!(
+            packet
+                .side
+                .iter()
+                .any(|side| matches!(side, SideData::BlockAdditional { id: 1, .. }))
+        );
+        frames.extend(VideoDecoder::push(&mut decoder, packet).expect("decode"));
+    }
+    frames.extend(VideoDecoder::drain(&mut decoder).expect("drain"));
+    assert_eq!(frames.len(), 6);
+    for (n, out) in frames.iter().enumerate() {
+        let alpha = out.frame.alpha.as_ref().expect("alpha");
+        assert_eq!(alpha.bit_depth, 8);
+        assert_eq!(vis(&alpha.plane), sources[n], "picture {n}");
+    }
+    // A packet without its alpha decodes to a picture without one.
+    let mut decoder = Vp9Decoder::open_with_threads(&params, 1).expect("decoder");
+    let mut bare = packets[0].clone();
+    bare.side.clear();
+    let out = VideoDecoder::push(&mut decoder, &bare).expect("decode");
+    assert!(out.iter().all(|o| o.frame.alpha.is_none()));
+}

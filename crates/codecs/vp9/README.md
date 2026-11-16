@@ -1600,7 +1600,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-enable-tpl` | TPL model | n/a: two passes have their own allocation |
 | `-pix_fmt yuv420p` … `yuv444p12le` | profiles 0–3 | `chroma`, `bit_depth` (`chroma=`, `bits=`) |
 | `-pix_fmt gbrp`, `gbrp10le`, `gbrp12le` | `VPX_CS_SRGB` | `ColorSpace::Srgb` with 4:4:4: planes G, B, R (added) |
-| `-pix_fmt yuva420p` | alpha as a second stream in WebM `BlockAdditional` | missing: a container feature |
+| `-pix_fmt yuva420p` | alpha as a second stream in WebM `BlockAdditional` | missing, a container's: the alpha plane is a second stream any `Vp9Encoder` codes (alpha as luma, chroma at 128), and its packets go in each block's `BlockAdditional` (id 1), which `cutlass-matroska` neither writes nor reads (it skips BlockAdditions) |
 | `-colorspace`, `-color_range` | `color-space`, `color-range` | `color_space`, `full_range` (`colorspace=`, `range=`), and from `CodecParams` (added) |
 | `-aspect` / sample aspect ratio | `VP9E_SET_RENDER_SIZE` | `render_size` (`render=WxH`, added) |
 | regions of interest (side data) | ROI map | `Vp9Encoder::set_roi_map` with a `RoiMap` (`roi_q=`, `roi_ref=`, `roi_skip=` in `vp9enc`, added): a segment a block, each with a quantizer and loop filter delta, a reference and skip |
@@ -1665,7 +1665,10 @@ long) rather than for PSNR; libvpx gains PSNR by it on two clips because
 its constant bitrate without it is far behind (this encoder's speed 10
 without it is 12 to 14% ahead of libvpx's realtime 8 with `-aq-mode 3`
 at PSNR-Y). Time: 1.01 to 1.06 of the
-time without.
+time without. Weighing the refreshed superblocks' rate against their
+error at their own quantizer's lambda, as region of interest maps do
+(see below), gained 6.8 points summed at speed 10 but lost 9.8 at speed
+9, and was left out.
 
 **360° pictures** (`AqMode::Equator360`, `-aq-mode 4`): libvpx's bands,
 the outer eighths of the rows in segment 2 at the bits of 0.6 of the

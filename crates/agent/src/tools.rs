@@ -1614,10 +1614,10 @@ fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
         }));
     }
     if let Some(id) = headed(arguments, "track") {
-        // An older project's main track has no id; it is written `""`.
-        let id = if id == "\"\"" { "" } else { id };
+        // Quotes come off, as for a segment; an older project's main track
+        // has no id, and `""` names it.
         return Ok(Invocation::DraftQuery(DraftQuery::Track {
-            track_id: TrackId::new(id),
+            track_id: TrackId::new(unquoted(id)),
         }));
     }
     if let Some(id) = headed(arguments, "segment") {
@@ -2890,6 +2890,20 @@ mod tests {
             }
         );
         assert!(registry.parse("export.start", "new \"\"").is_err());
+        // A track id loses its quotes too, and `""` is the id-less main track.
+        for (asked, id) in [
+            ("track \"main\"", "main"),
+            ("track 'a b'", "a b"),
+            ("track \"\"", ""),
+        ] {
+            assert_eq!(
+                registry.parse("draft.query", asked).unwrap(),
+                Invocation::DraftQuery(crate::draft::DraftQuery::Track {
+                    track_id: TrackId::new(id)
+                }),
+                "{asked}"
+            );
+        }
     }
 
     /// A host whose files are the ones named here, each this long.

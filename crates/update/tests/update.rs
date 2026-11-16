@@ -197,10 +197,13 @@ fn a_newer_release_downloads_checked_and_an_old_one_offers_nothing() {
 
 #[test]
 fn a_package_that_does_not_match_its_checksum_is_refused() {
-    let platform = Platform::Windows;
+    let platform = Platform::Windows { arch: "x86_64" };
     let package = vec![7u8; 300_000];
     let mut files = files_for(platform, &package);
-    files.insert("/pkg/Cutlass-setup.exe".to_owned(), vec![8u8; 300_000]);
+    files.insert(
+        "/pkg/Cutlass-x86_64-setup.exe".to_owned(),
+        vec![8u8; 300_000],
+    );
     let files = serve(files);
     let mut feed_files = HashMap::new();
     feed_files.insert(
@@ -223,7 +226,7 @@ fn a_package_that_does_not_match_its_checksum_is_refused() {
         matches!(&error, UpdateError::Network(message) if message.contains("checksum")),
         "{error}"
     );
-    assert!(!folder.join("0.2.0/Cutlass-setup.exe").exists());
+    assert!(!folder.join("0.2.0/Cutlass-x86_64-setup.exe").exists());
     fs::remove_dir_all(&folder).unwrap();
 }
 
@@ -235,14 +238,14 @@ fn an_unreachable_or_missing_feed_is_a_network_error() {
         &Http::new(),
         &format!("{}/feed", empty.base),
         &running,
-        Platform::MacOs,
+        Platform::MacOs { arch: "aarch64" },
     );
     assert!(matches!(missing, Err(UpdateError::Network(message)) if message.contains("404")));
     let closed = check(
         &Http::new(),
         "http://127.0.0.1:9/feed",
         &running,
-        Platform::MacOs,
+        Platform::MacOs { arch: "aarch64" },
     );
     assert!(matches!(closed, Err(UpdateError::Network(_))));
 }
@@ -429,12 +432,16 @@ mod macos {
         );
         let running = Version::parse(&plist(&bundle, "CFBundleShortVersionString")).unwrap();
         let package = fs::read(dmg).unwrap();
-        let (feed_server, _files) = release(Platform::MacOs, &package, &format!("v{version}"));
+        let (feed_server, _files) = release(
+            Platform::MacOs { arch: "aarch64" },
+            &package,
+            &format!("v{version}"),
+        );
         let offer = check(
             &Http::new(),
             &format!("{}/feed", feed_server.base),
             &running,
-            Platform::MacOs,
+            Platform::MacOs { arch: "aarch64" },
         )?
         .ok_or_else(|| UpdateError::Feed("nothing offered".to_owned()))?;
         let downloaded = download(
@@ -445,7 +452,7 @@ mod macos {
             &|| false,
         )?;
         let exe = bundle.join("Contents/MacOS/cutlass");
-        let installed = Installed::detect(Platform::MacOs, &exe, None)?;
+        let installed = Installed::detect(Platform::MacOs { arch: "aarch64" }, &exe, None)?;
         assert_eq!(installed, Installed::Bundle(bundle.clone()));
         let relaunch = install(&installed, &downloaded, &offer.version, 99_999)?;
         assert_eq!(relaunch.args.last().unwrap(), bundle.as_os_str());
@@ -473,8 +480,8 @@ mod macos {
     #[test]
     fn a_dmg_swaps_in_for_the_bundle_and_verifies() {
         let work = scratch("macos");
-        let old = fake_app(&work.join("old"), "0.1.0", "app.cutlass.desktop");
-        let new = fake_app(&work.join("new"), "0.2.0", "app.cutlass.desktop");
+        let old = fake_app(&work.join("old"), "0.1.0", "com.scytheralpha.cutlass");
+        let new = fake_app(&work.join("new"), "0.2.0", "com.scytheralpha.cutlass");
         let dmg = work.join("Cutlass.dmg");
         dmg_of(&new, &dmg);
         let bundle = update_bundle(&work, &old, &dmg, "0.2.0").unwrap();
@@ -494,7 +501,7 @@ mod macos {
     #[test]
     fn a_dmg_with_another_app_or_version_leaves_the_bundle() {
         let work = scratch("macos-refused");
-        let old = fake_app(&work.join("old"), "0.1.0", "app.cutlass.desktop");
+        let old = fake_app(&work.join("old"), "0.1.0", "com.scytheralpha.cutlass");
         let other = fake_app(&work.join("other"), "0.2.0", "com.example.other");
         let dmg = work.join("Other.dmg");
         dmg_of(&other, &dmg);
@@ -507,7 +514,7 @@ mod macos {
 
         // The feed says 0.3.0 but the DMG holds 0.2.0.
         fs::remove_dir_all(work.join("Applications")).unwrap();
-        let new = fake_app(&work.join("new"), "0.2.0", "app.cutlass.desktop");
+        let new = fake_app(&work.join("new"), "0.2.0", "com.scytheralpha.cutlass");
         let dmg = work.join("Cutlass.dmg");
         dmg_of(&new, &dmg);
         let error = update_bundle(&work, &old, &dmg, "0.3.0").unwrap_err();

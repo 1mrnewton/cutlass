@@ -42,7 +42,7 @@ impl Installed {
         appimage: Option<&OsStr>,
     ) -> Result<Self, UpdateError> {
         match platform {
-            Platform::MacOs => {
+            Platform::MacOs { .. } => {
                 let bundle = exe
                     .parent()
                     .filter(|dir| dir.file_name() == Some(OsStr::new("MacOS")))
@@ -60,7 +60,7 @@ impl Installed {
                         )
                     })
             }
-            Platform::Windows => exe
+            Platform::Windows { .. } => exe
                 .parent()
                 .filter(|dir| dir.join("uninstall.exe").is_file())
                 .map(|dir| Self::Folder(dir.to_path_buf()))
@@ -406,19 +406,20 @@ mod tests {
         touch(&exe);
         assert!(
             matches!(
-                Installed::detect(Platform::MacOs, &exe, None),
+                Installed::detect(Platform::MacOs { arch: "aarch64" }, &exe, None),
                 Err(UpdateError::NotInstalled(_))
             ),
             "no Info.plist yet"
         );
         touch(&app.join("Contents/Info.plist"));
         assert_eq!(
-            Installed::detect(Platform::MacOs, &exe, None).unwrap(),
+            Installed::detect(Platform::MacOs { arch: "aarch64" }, &exe, None).unwrap(),
             Installed::Bundle(app.clone())
         );
         let bare = dir.join("target/debug/cutlass");
         touch(&bare);
-        let refused = Installed::detect(Platform::MacOs, &bare, None).unwrap_err();
+        let refused =
+            Installed::detect(Platform::MacOs { arch: "aarch64" }, &bare, None).unwrap_err();
         assert!(refused.to_string().contains("Cutlass.app"), "{refused}");
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -428,10 +429,10 @@ mod tests {
         let dir = scratch("folder");
         let exe = dir.join("Cutlass/cutlass.exe");
         touch(&exe);
-        assert!(Installed::detect(Platform::Windows, &exe, None).is_err());
+        assert!(Installed::detect(Platform::Windows { arch: "x86_64" }, &exe, None).is_err());
         touch(&dir.join("Cutlass/uninstall.exe"));
         assert_eq!(
-            Installed::detect(Platform::Windows, &exe, None).unwrap(),
+            Installed::detect(Platform::Windows { arch: "x86_64" }, &exe, None).unwrap(),
             Installed::Folder(dir.join("Cutlass"))
         );
         fs::remove_dir_all(&dir).unwrap();
@@ -498,7 +499,7 @@ mod tests {
     fn windows_installs_silently_into_its_folder_after_the_app_quits() {
         let folder = Path::new(r"C:\Users\O'Neil Ama\AppData\Local\Programs\Cutlass");
         let installer = Path::new(
-            r"C:\Users\O'Neil Ama\AppData\Roaming\Cutlass\Cache\Updates\0.2.0\Cutlass-setup.exe",
+            r"C:\Users\O'Neil Ama\AppData\Roaming\Cutlass\Cache\Updates\0.2.0\Cutlass-x86_64-setup.exe",
         );
         let relaunch = Relaunch::windows_installer(4321, installer, folder);
         assert_eq!(relaunch.program, "powershell.exe");

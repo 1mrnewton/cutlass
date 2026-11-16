@@ -473,7 +473,11 @@ pub const CHROMA_SPEED: u8 = 6;
 /// PSNR-U. Speeds 7 and 8 lost with it (1/0.7 there).
 const CHROMA_RATE: f32 = 0.8;
 
-/// [`CHROMA_RATE`] at speed 6 in one pass. Against FFmpeg's default on
+/// [`CHROMA_RATE`] at speed 6 in one pass, and in a second pass. Two
+/// passes against FFmpeg's on the three scenes: at 0.8, −6.8 / +0.04 /
+/// −4.9% at the same PSNR-Y / U / V; at 0.75, −6.4 / −0.9 / −5.3% (and
+/// 0.4 and 1.3 points of PSNR-Y for 1 to 3 of PSNR-U on the other two
+/// clips). One pass against FFmpeg's default on
 /// the README's three scenes (four threads), at 0.8: −1.5 / +0.2 / −2.1%
 /// at the same PSNR-Y / U / V; at 0.75, −1.0 / −1.4 / −3.3% (and 1 point
 /// of PSNR-Y for 1 of PSNR-U on the other two clips, FFmpeg's average
@@ -3485,7 +3489,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // and clean 720p at speed 6 before the reference pool).
         let chroma = if s.fast_arf {
             CHROMA_RATE_FAST
-        } else if self.six() {
+        } else if self.six() || s.second_pass {
             CHROMA_RATE_SIX
         } else if s.speed <= CHROMA_SPEED {
             CHROMA_RATE

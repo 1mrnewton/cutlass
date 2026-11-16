@@ -434,8 +434,25 @@ fn on_cpu(outputs: Vec<Output>) -> Result<Vec<Vec<u8>>, String> {
 /// The three planes of a frame, row by row without any padding.
 fn tight(frame: &cutlass_codec::access::VideoFrame) -> Vec<&[u8]> {
     let mut rows = Vec::new();
+    let bytes = if matches!(
+        frame.format,
+        PixelFormat::Yuv420p10
+            | PixelFormat::Yuv420p12
+            | PixelFormat::Yuv422p10
+            | PixelFormat::Yuv422p12
+            | PixelFormat::Yuv440p10
+            | PixelFormat::Yuv440p12
+            | PixelFormat::Yuv444p10
+            | PixelFormat::Yuv444p12
+            | PixelFormat::Gbrp10
+            | PixelFormat::Gbrp12
+    ) {
+        2
+    } else {
+        1
+    };
     for plane in [&frame.y, &frame.u, &frame.v] {
-        let width = plane.width as usize;
+        let width = plane.width as usize * bytes;
         if plane.stride == width {
             rows.push(plane.samples.as_slice());
             continue;
@@ -541,6 +558,7 @@ fn codec_id(name: &str) -> Result<CodecId, String> {
         "h264" => CodecId::H264,
         "av1" => CodecId::Av1,
         "vp8" => CodecId::Vp8,
+        "vp9" => CodecId::Vp9,
         "mpeg4" => CodecId::Mpeg4,
         "mpeg2" => CodecId::Mpeg2,
         "mjpeg" => CodecId::Mjpeg,
@@ -836,6 +854,7 @@ fn rust_encoders() -> EncodeFactory {
     cutlass_h264::register_encoders(&mut encoders);
     cutlass_prores::register_encoders(&mut encoders);
     cutlass_vp8::register_engine_encoders(&mut encoders);
+    cutlass_vp9::register_engine_encoders(&mut encoders);
     cutlass_mpeg2::register_encoders(&mut encoders);
     cutlass_mpeg4::register_engine_encoders(&mut encoders);
     encoders

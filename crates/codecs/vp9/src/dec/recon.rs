@@ -1,0 +1,839 @@
+//! Reconstruction of one superblock row from the parsed syntax: intra and
+//! inter prediction and the residual of each transform block, into the
+//! rows of the picture its writer has not published yet.
+
+use std::sync::Arc;
+
+use cutlass_simd::vp9::frame::{SharedFrame, Tail};
+
+use crate::dsp::ipred::{self, Edges};
+use crate::dsp::itx::{self, Kind};
+use crate::dsp::mc;
+use crate::dsp::pixel::Pixel;
+use crate::geom::{self, BLOCK_8X8, INTRA_FRAME};
+
+use super::frame::Dims;
+use super::syntax::{BlockRec, TileSyntax};
+
+/// Width and height of each block size in 8×8 units (at least 1).
+const MI_WH: [(usize, usize); 13] = [
+    (1, 1),
+    (1, 1),
+    (1, 1),
+    (1, 1),
+    (1, 2),
+    (2, 1),
+    (2, 2),
+    (2, 4),
+    (4, 2),
+    (4, 4),
+    (4, 8),
+    (8, 4),
+    (8, 8),
+];
+
+/// Fixed-point scale of a reference of another size (libvpx
+/// `scale_factors`).
+#[derive(Clone, Copy, Debug)]
+pub struct Scale {
+    pub x_fp: i32,
+    pub y_fp: i32,
+    pub x_step: i32,
+    pub y_step: i32,
+}
+
+impl Scale {
+    /// `None` for the same size; `Err` for a ratio VP9 does not allow.
+    pub fn between(rw: usize, rh: usize, w: usize, h: usize) -> Result<Option<Scale>, ()> {
+        if rw == 0 || rh == 0 || w == 0 || h == 0 {
+            return Err(());
+        }
+        if !(2 * w >= rw && 2 * h >= rh && w <= 16 * rw && h <= 16 * rh) {
+            return Err(());
+        }
+        let x_fp = ((rw << 14) / w) as i32;
+        let y_fp = ((rh << 14) / h) as i32;
+        if x_fp == 1 << 14 && y_fp == 1 << 14 {
+            return Ok(None);
+        }
+        Ok(Some(Scale {
+            x_fp,
+            y_fp,
+            x_step: sc(16, x_fp),
+            y_step: sc(16, y_fp),
+        }))
+    }
+}
+
+#[inline]
+fn sc(v: i32, fp: i32) -> i32 {
+    ((i64::from(v) * i64::from(fp)) >> 14) as i32
+}
+
+/// A reference picture with its scale relative to the frame.
+pub struct RefPic<P> {
+    pub buf: Arc<SharedFrame<P>>,
+    pub dims: Dims,
+    pub scale: Option<Scale>,
+}
+
+/// What reconstruction reads: the frame's shape and its references.
+pub struct Ctx<P> {
+    pub dims: Dims,
+    pub refs: [Option<RefPic<P>>; 3],
+    pub mi_cols: usize,
+    pub mi_rows: usize,
+    pub lossless: bool,
+}
+
+/// One plane of the picture being made: the rows from `first_row` on.
+pub struct View<'a, P> {
+    pub data: &'a mut [P],
+    /// Index of the first element of `data` in the whole plane.
+    pub base: usize,
+    pub stride: usize,
+}
+
+impl<'a, P> View<'a, P> {
+    pub fn of(t: Tail<'a, P>) -> Self {
+        Self {
+            base: t.first_row * t.stride,
+            stride: t.stride,
+            data: t.data,
+        }
+    }
+
+    /// The samples from row `y`, column `x` on.
+    #[inline(always)]
+    pub fn at(&mut self, y: usize, x: usize) -> &mut [P] {
+        &mut self.data[y * self.stride + x - self.base..]
+    }
+}
+
+/// A buffer on a cache line of its own: no vector load of it is split
+/// across two lines.
+#[repr(align(64))]
+pub struct Lines<T>(pub T);
+
+/// Buffers reconstruction keeps from row to row.
+pub struct Scratch<P> {
+    /// Coefficients of the transform block being added; the transforms
+    /// clear what they read.
+    pub coef: Box<Lines<[i32; 1024]>>,
+    pub emu: Vec<P>,
+    pub mc: Vec<u8>,
+    pub itx: itx::Tmp,
+    /// Each plane's last row of the superblock row above, as reconstructed
+    /// and before the loop filter changed it: intra prediction at the top
+    /// of a superblock reads it from here, so that the row above can be
+    /// filtered as soon as it is made (empty: read the picture).
+    pub above: [Vec<P>; 3],
+}
+
+impl<P: Pixel> Scratch<P> {
+    pub fn new() -> Self {
+        Self {
+            coef: Box::new(Lines([0; 1024])),
+            emu: vec![P::default(); 80 * 80],
+            mc: vec![0; cutlass_simd::vp9::mc::TMP],
+            itx: itx::Tmp::new(),
+            above: [Vec::new(), Vec::new(), Vec::new()],
+        }
+    }
+}
+
+/// The reconstruction of a frame, row by row.
+pub struct Recon<'c, 'v, P> {
+    c: &'c Ctx<P>,
+    views: &'c mut [View<'v, P>; 3],
+    s: &'c mut Scratch<P>,
+    bd: u32,
+    max: i32,
+}
+
+impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
+    pub fn new(c: &'c Ctx<P>, views: &'c mut [View<'v, P>; 3], s: &'c mut Scratch<P>) -> Self {
+        let bd = u32::from(c.dims.bit_depth);
+        Self {
+            c,
+            views,
+            s,
+            bd,
+            max: (1i32 << bd) - 1,
+        }
+    }
+
+    /// Reconstructs superblock row `sb_row` of every tile column.
+    pub fn sb_row(&mut self, tiles: &[TileSyntax], sb_row: usize) {
+        for t in tiles {
+            let start = t.row_start(sb_row);
+            let end = t.rows.get(sb_row).copied().unwrap_or(start);
+            let mut tx = start.txs;
+            let mut coef = start.coefs;
+            let blocks = &t.blocks[start.blocks..end.blocks];
+            if !P::HIGH {
+                // 8-bit blocks take no hints: the loop as it was.
+                for b in blocks {
+                    self.block(t, b, &mut tx, &mut coef);
+                }
+                continue;
+            }
+            if let Some(b) = blocks.first() {
+                self.prefetch(b);
+            }
+            for (i, b) in blocks.iter().enumerate() {
+                // The next block's rows, while this one is made: rows a
+                // stride apart, more at once than the hardware prefetchers
+                // follow.
+                if let Some(next) = blocks.get(i + 1) {
+                    self.prefetch(next);
+                }
+                self.block(t, b, &mut tx, &mut coef);
+            }
+        }
+    }
+
+    /// Hints the reference rows a large inter block reads (its first
+    /// vector's) into the cache, at 10 and 12 bits. Smaller blocks, and
+    /// 8-bit ones, lost more to the hints than they gained: the hardware
+    /// prefetchers keep up with them.
+    #[inline]
+    fn prefetch(&self, b: &BlockRec) {
+        use cutlass_simd::vp9::prefetch::rect;
+        let (bw, bh) = MI_WH[usize::from(b.bsize)];
+        if b.refs[0] == INTRA_FRAME || bw < 4 {
+            return;
+        }
+        let (col, row) = (usize::from(b.col) * 8, usize::from(b.row) * 8);
+        let nref = 1 + usize::from(b.refs[1] > INTRA_FRAME);
+        for r in 0..nref {
+            let slot = usize::from(b.refs[r]).saturating_sub(1).min(2);
+            let Some(rp) = self.c.refs[slot].as_ref() else {
+                continue;
+            };
+            if rp.scale.is_some() {
+                continue;
+            }
+            let mv = b.bmv[0][r];
+            for plane in 0..3 {
+                let (ssx, ssy) = self.plane_ss(plane);
+                // The block's place moved by the vector's whole samples,
+                // with the 8-tap filter's 3 before and 4 after.
+                let x = (col >> ssx) as i32 + ((i32::from(mv.col) * (2 >> ssx)) >> 4) - 3;
+                let y = (row >> ssy) as i32 + ((i32::from(mv.row) * (2 >> ssy)) >> 4) - 3;
+                let (w, h) = ((bw * 8) >> ssx, (bh * 8) >> ssy);
+                let (data, stride) = rp.buf.plane(plane);
+                let (x, y) = (x.max(0) as usize, y.max(0) as usize);
+                rect(data, y * stride + x, stride, w + 7, h + 7);
+            }
+        }
+    }
+
+    fn plane_ss(&self, plane: usize) -> (usize, usize) {
+        if plane == 0 {
+            (0, 0)
+        } else {
+            (self.c.dims.ss_x, self.c.dims.ss_y)
+        }
+    }
+
+    /// The tx blocks of a plane inside the frame: (blocks wide, high).
+    fn visible(&self, b: &BlockRec, plane: usize) -> (usize, usize, usize, usize) {
+        let (ssx, ssy) = self.plane_ss(plane);
+        let (bw, bh) = MI_WH[usize::from(b.bsize)];
+        let n4w = (bw * 2) >> ssx;
+        let n4h = (bh * 2) >> ssy;
+        let right = (self.c.mi_cols as i32 - bw as i32 - i32::from(b.col)) * 64;
+        let bottom = (self.c.mi_rows as i32 - bh as i32 - i32::from(b.row)) * 64;
+        let vw = if right >= 0 {
+            n4w
+        } else {
+            (n4w as i32 + (right >> (5 + ssx))).max(0) as usize
+        };
+        let vh = if bottom >= 0 {
+            n4h
+        } else {
+            (n4h as i32 + (bottom >> (5 + ssy))).max(0) as usize
+        };
+        (n4w, n4h, vw, vh)
+    }
+
+    pub(crate) fn block(
+        &mut self,
+        t: &TileSyntax,
+        b: &BlockRec,
+        tx_at: &mut usize,
+        coef_at: &mut usize,
+    ) {
+        let intra = b.refs[0] == INTRA_FRAME;
+        if !intra {
+            self.predict_inter(b);
+            if !b.coded {
+                return;
+            }
+        }
+        let lossless = self.c.lossless;
+        for plane in 0..3 {
+            let tx = if plane == 0 { b.tx } else { b.uv_tx };
+            let (ssx, ssy) = self.plane_ss(plane);
+            let (n4w, _, vw, vh) = self.visible(b, plane);
+            let step = 1usize << tx;
+            let x0 = (usize::from(b.col) * 8) >> ssx;
+            let y0 = (usize::from(b.row) * 8) >> ssy;
+            let mut r = 0;
+            while r < vh {
+                let mut c = 0;
+                while c < vw {
+                    let (x, y) = (x0 + c * 4, y0 + r * 4);
+                    let mut kind = 0;
+                    if intra {
+                        let mode = if plane == 0 {
+                            if b.bsize < BLOCK_8X8 {
+                                b.bmode[(r << 1) + c]
+                            } else {
+                                b.mode
+                            }
+                        } else {
+                            b.uv
+                        };
+                        let have_above = r > 0 || b.row > 0;
+                        let have_left = c > 0 || usize::from(b.col) > t.col0;
+                        let have_right = c + step < n4w;
+                        self.predict_intra(
+                            plane, mode, tx, x, y, have_left, have_above, have_right,
+                        );
+                        if plane == 0 && !lossless && tx != geom::TX_32X32 {
+                            kind = geom::intra_tx_type(mode);
+                        }
+                    }
+                    if b.coded {
+                        let rec = t.txs[*tx_at];
+                        *tx_at += 1;
+                        let n = usize::from(rec.n);
+                        if rec.eob > 0 {
+                            for k in *coef_at..*coef_at + n {
+                                self.s.coef.0[usize::from(t.pos[k])] = t.val[k];
+                            }
+                            self.add_residual(
+                                plane,
+                                x,
+                                y,
+                                tx,
+                                kind,
+                                usize::from(rec.eob),
+                                (usize::from(rec.nzr), usize::from(rec.nzc)),
+                            );
+                        }
+                        *coef_at += n;
+                    }
+                    c += step;
+                }
+                r += step;
+            }
+        }
+    }
+
+    /// Adds the residual of one tx block at sample `(x, y)` of a plane.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_residual(
+        &mut self,
+        plane: usize,
+        x: usize,
+        y: usize,
+        tx: u8,
+        kind: u8,
+        eob: usize,
+        nz: (usize, usize),
+    ) {
+        let max = self.max;
+        let v = &mut self.views[plane];
+        let stride = v.stride;
+        let dst = v.at(y, x);
+        if self.c.lossless {
+            itx::wht_add(dst, stride, &mut self.s.coef.0, max);
+            return;
+        }
+        let (col, row) = match kind {
+            1 => (Kind::Adst, Kind::Dct),
+            2 => (Kind::Dct, Kind::Adst),
+            3 => (Kind::Adst, Kind::Adst),
+            _ => (Kind::Dct, Kind::Dct),
+        };
+        itx::add(
+            dst,
+            stride,
+            &mut self.s.coef.0,
+            usize::from(tx),
+            col,
+            row,
+            eob,
+            nz,
+            max,
+            &mut self.s.itx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn predict_intra(
+        &mut self,
+        plane: usize,
+        mode: u8,
+        tx: u8,
+        x: usize,
+        y: usize,
+        have_left: bool,
+        have_above: bool,
+        have_right: bool,
+    ) {
+        let e = self.intra_edges(plane, tx, x, y, have_left, have_above, have_right);
+        let n = 4usize << tx;
+        let bd = self.bd;
+        let v = &mut self.views[plane];
+        let stride = v.stride;
+        ipred::predict(mode, n, v.at(y, x), stride, &e, bd);
+    }
+
+    /// The edges intra prediction of a tx block at `(x, y)` reads.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn intra_edges(
+        &self,
+        plane: usize,
+        tx: u8,
+        x: usize,
+        y: usize,
+        have_left: bool,
+        have_above: bool,
+        have_right: bool,
+    ) -> Edges<P> {
+        let bd = self.bd;
+        let base = 1i32 << (bd - 1);
+        let n = 4usize << tx;
+        let (fw, fh) = (self.c.dims.aw[plane], self.c.dims.ah[plane]);
+        let v = &self.views[plane];
+        let stride = v.stride;
+        let mut e = Edges {
+            above: [P::new(base - 1); 64],
+            left: [P::new(base + 1); 32],
+            tl: P::new(base - 1),
+            have_above,
+            have_left,
+        };
+        let off = v.base;
+        let data = &v.data;
+        let px = |i: usize| data[i - off];
+        if have_left {
+            let count = n.min(fh.saturating_sub(y)).max(1);
+            for (i, l) in e.left.iter_mut().enumerate().take(n) {
+                *l = px((y + i.min(count - 1)) * stride + x - 1);
+            }
+        }
+        if have_above {
+            let avail = if tx == 0 && have_right { 2 * n } else { n };
+            let count = avail.min(fw.saturating_sub(x)).max(1);
+            let sb = 64 >> if plane == 0 { 0 } else { self.c.dims.ss_y };
+            let saved = &self.s.above[plane];
+            if y.is_multiple_of(sb) && !saved.is_empty() {
+                // The top of a superblock: the row above as it was before
+                // its filter.
+                for (i, a) in e.above.iter_mut().enumerate().take(2 * n) {
+                    *a = saved[x + i.min(count - 1)];
+                }
+                e.tl = if have_left {
+                    saved[x - 1]
+                } else {
+                    P::new(base + 1)
+                };
+            } else {
+                let row = (y - 1) * stride + x;
+                for (i, a) in e.above.iter_mut().enumerate().take(2 * n) {
+                    *a = px(row + i.min(count - 1));
+                }
+                e.tl = if have_left {
+                    px(row - 1)
+                } else {
+                    P::new(base + 1)
+                };
+            }
+        }
+        e
+    }
+
+    pub(crate) fn predict_inter(&mut self, b: &BlockRec) {
+        let nref = 1 + usize::from(b.refs[1] > INTRA_FRAME);
+        let filter = &mc::FILTERS[usize::from(b.interp).min(3)];
+        let (bw, bh) = MI_WH[usize::from(b.bsize)];
+        let (row, col) = (usize::from(b.row), usize::from(b.col));
+        // Luma alone, then the two chroma planes together: they share
+        // the reference, the vector and the block's place. Without
+        // subsampling all three do, so a whole block takes them at once.
+        let all: [&[usize]; 2] = if self.plane_ss(1) == (0, 0) && b.bsize >= BLOCK_8X8 {
+            [&[0, 1, 2], &[]]
+        } else {
+            [&[0], &[1, 2]]
+        };
+        for planes in all {
+            if planes.is_empty() {
+                continue;
+            }
+            let (ssx, ssy) = self.plane_ss(planes[0]);
+            let x0 = (col * 8) >> ssx;
+            let y0 = (row * 8) >> ssy;
+            for r in 0..nref {
+                let slot = usize::from(b.refs[r]).saturating_sub(1).min(2);
+                if b.bsize < BLOCK_8X8 {
+                    let n4w = (bw * 2) >> ssx;
+                    let n4h = (bh * 2) >> ssy;
+                    for &plane in planes {
+                        let mut i = 0;
+                        for y in 0..n4h {
+                            for x in 0..n4w {
+                                let mv = split_mv(b, plane, i, r, ssx, ssy);
+                                i += 1;
+                                self.mc(
+                                    slot,
+                                    &[plane],
+                                    (x0 + 4 * x, y0 + 4 * y),
+                                    (4, 4),
+                                    mv,
+                                    (col * 8 + 4 * x, row * 8 + 4 * y),
+                                    filter,
+                                    r == 1,
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    let mv = b.bmv[0][r];
+                    let q = (
+                        i32::from(mv.row) * (2 >> ssy),
+                        i32::from(mv.col) * (2 >> ssx),
+                    );
+                    let w = (bw * 8) >> ssx;
+                    let h = (bh * 8) >> ssy;
+                    self.mc(
+                        slot,
+                        planes,
+                        (x0, y0),
+                        (w, h),
+                        q,
+                        (col * 8, row * 8),
+                        filter,
+                        r == 1,
+                    );
+                }
+            }
+        }
+    }
+
+    /// One prediction of a `w`×`h` block at `(x, y)` of each of `planes`
+    /// (luma alone, chroma planes of the same size, or all three of one size), with the vector
+    /// `(row, col)` in sixteenths of a sample of those planes. `luma` is
+    /// the luma position libvpx scales the vector's offset at.
+    #[allow(clippy::too_many_arguments)]
+    fn mc(
+        &mut self,
+        slot: usize,
+        planes: &[usize],
+        (x, y): (usize, usize),
+        (w, h): (usize, usize),
+        mv: (i32, i32),
+        luma: (usize, usize),
+        filter: &mc::Filter,
+        avg: bool,
+    ) {
+        let [v0, v1, v2] = &mut *self.views;
+        fn at<'a, P>(v: &'a mut View<'_, P>, y: usize, x: usize) -> (&'a mut [P], usize) {
+            let ds = v.stride;
+            (v.at(y, x), ds)
+        }
+        let dsts: [Option<(usize, &mut [P], usize)>; 3] = match planes {
+            [0] => {
+                let (d, ds) = at(v0, y, x);
+                [Some((0, d, ds)), None, None]
+            }
+            [_, _, _] => {
+                let (d0, s0) = at(v0, y, x);
+                let (d1, s1) = at(v1, y, x);
+                let (d2, s2) = at(v2, y, x);
+                [Some((0, d0, s0)), Some((1, d1, s1)), Some((2, d2, s2))]
+            }
+            [_, _] => {
+                let (d1, s1) = at(v1, y, x);
+                let (d2, s2) = at(v2, y, x);
+                [Some((1, d1, s1)), Some((2, d2, s2)), None]
+            }
+            [1] => {
+                let (d, ds) = at(v1, y, x);
+                [Some((1, d, ds)), None, None]
+            }
+            _ => {
+                let (d, ds) = at(v2, y, x);
+                [Some((2, d, ds)), None, None]
+            }
+        };
+        mc_into(
+            self.c,
+            &mut *self.s,
+            self.max,
+            slot,
+            dsts,
+            (x, y),
+            (w, h),
+            mv,
+            luma,
+            filter,
+            avg,
+        );
+    }
+
+    /// The frame's views, for the encoder.
+    pub(crate) fn views(&mut self) -> &mut [View<'v, P>; 3] {
+        self.views
+    }
+
+    /// What reconstruction reads.
+    pub(crate) fn ctx(&self) -> &Ctx<P> {
+        self.c
+    }
+
+    /// The coefficient scratch the residual is added from.
+    pub(crate) fn coef(&mut self) -> &mut [i32] {
+        &mut self.s.coef.0
+    }
+}
+
+/// One prediction of a `w`×`h` block at `(x, y)` into each plane `dsts`
+/// names (its index, the destination and its row stride; planes of one
+/// size), with the vector `(row, col)` in sixteenths of a sample of those
+/// planes. `(lx, ly)` is the luma position libvpx scales the vector's
+/// offset at. Where the reference rows lie and whether the block needs
+/// the edge copy are worked out once for all of them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mc_into<P: Pixel>(
+    c: &Ctx<P>,
+    s: &mut Scratch<P>,
+    max: i32,
+    slot: usize,
+    dsts: [Option<(usize, &mut [P], usize)>; 3],
+    (x, y): (usize, usize),
+    (w, h): (usize, usize),
+    (mv_row, mv_col): (i32, i32),
+    (lx, ly): (usize, usize),
+    filter: &mc::Filter,
+    avg: bool,
+) {
+    let Some(rp) = c.refs[slot].as_ref() else {
+        return;
+    };
+    let Some(first) = dsts[0].as_ref().map(|d| d.0) else {
+        return;
+    };
+    let shift = if first == 0 { 0 } else { rp.dims.ss_y };
+    let (rw, rh) = (rp.dims.w[first] as i32, rp.dims.h[first] as i32);
+    if let Some(sc_) = rp.scale {
+        scaled(
+            rp,
+            sc_,
+            max,
+            dsts,
+            (x, y),
+            (w, h),
+            (mv_row, mv_col),
+            (lx, ly),
+            filter,
+            avg,
+        );
+        return;
+    }
+    let mx = (mv_col & 15) as usize;
+    let my = (mv_row & 15) as usize;
+    let bx = x as i32 + (mv_col >> 4);
+    let by = y as i32 + (mv_row >> 4);
+    let (l, r) = if mx != 0 { (3, 4) } else { (0, 0) };
+    let (t, bo) = if my != 0 { (3, 4) } else { (0, 0) };
+    // The reference rows this block reads (the edge copy below reads 4
+    // past the block whatever the fraction), and one more for the
+    // kernels' loads past the end of a row, must be final.
+    let last = (by + h as i32 + 4).clamp(1, rh) as usize;
+    rp.buf.wait((last + 1) << shift);
+    // Below the picture, a finished reference may hold its last row
+    // repeated in the buffer (all but one row of it: the kernels read
+    // past the end of a row).
+    let below = match rp.buf.held_rows(first, rh as usize) as i32 {
+        held if held > rh => held - 1,
+        _ => rh,
+    };
+    let inside =
+        bx - l >= 0 && by - t >= 0 && bx + w as i32 + r <= rw && by + h as i32 + bo <= below;
+    // By reference, an index at a time: moving the array into an
+    // iterator copied it on every call.
+    let mut dsts = dsts;
+    for d in &mut dsts {
+        let Some((plane, dst, ds)) = d else { break };
+        let (plane, ds) = (*plane, *ds);
+        let dst = &mut **dst;
+        let (data, stride) = rp.buf.plane(plane);
+        if inside {
+            let at = by as usize * stride + bx as usize;
+            mc::predict(
+                dst,
+                ds,
+                data,
+                at,
+                stride,
+                (w, h),
+                (mx, my),
+                filter,
+                max,
+                avg,
+                &mut s.mc,
+            );
+        } else {
+            emulated(
+                dst,
+                ds,
+                (data, stride),
+                (rw, rh),
+                (bx, by),
+                (w, h),
+                (mx, my),
+                filter,
+                max,
+                avg,
+                s,
+            );
+        }
+    }
+}
+
+/// [`mc_into`] from a reference of another size; apart, so that the
+/// common call does not carry its frame.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn scaled<P: Pixel>(
+    rp: &RefPic<P>,
+    sc_: Scale,
+    max: i32,
+    dsts: [Option<(usize, &mut [P], usize)>; 3],
+    (x, y): (usize, usize),
+    (w, h): (usize, usize),
+    (mv_row, mv_col): (i32, i32),
+    (lx, ly): (usize, usize),
+    filter: &mc::Filter,
+    avg: bool,
+) {
+    let first = dsts[0].as_ref().map_or(0, |d| d.0);
+    let (rw, rh) = (rp.dims.w[first] as i32, rp.dims.h[first] as i32);
+    // libvpx `dec_build_inter_predictors` for a scaled reference.
+    rp.buf.wait(usize::MAX);
+    let col = sc(mv_col, sc_.x_fp)
+        + ((((i64::from(lx as i32) << 4) * i64::from(sc_.x_fp)) >> 14) as i32 & 15);
+    let row = sc(mv_row, sc_.y_fp)
+        + ((((i64::from(ly as i32) << 4) * i64::from(sc_.y_fp)) >> 14) as i32 & 15);
+    let x0 = sc(x as i32, sc_.x_fp) + (col >> 4);
+    let y0 = sc(y as i32, sc_.y_fp) + (row >> 4);
+    for (plane, dst, ds) in dsts.into_iter().flatten() {
+        let (data, stride) = rp.buf.plane(plane);
+        let get = |xx: i32, yy: i32| -> P {
+            let xx = xx.clamp(0, rw - 1) as usize;
+            let yy = yy.clamp(0, rh - 1) as usize;
+            data[yy * stride + xx]
+        };
+        mc::predict_scaled(
+            dst,
+            ds,
+            get,
+            (w, h),
+            (x0, y0),
+            (col & 15, row & 15),
+            (sc_.x_step, sc_.y_step),
+            filter,
+            max,
+            avg,
+        );
+    }
+}
+
+/// One plane of [`mc_into`] for a block whose window crosses the edge of
+/// the reference: the window copied with its edge samples repeated, and
+/// predicted from the copy. Apart, as [`scaled`] is.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn emulated<P: Pixel>(
+    dst: &mut [P],
+    ds: usize,
+    (data, stride): (&[P], usize),
+    (rw, rh): (i32, i32),
+    (bx, by): (i32, i32),
+    (w, h): (usize, usize),
+    (mx, my): (usize, usize),
+    filter: &mc::Filter,
+    max: i32,
+    avg: bool,
+    s: &mut Scratch<P>,
+) {
+    // Edge emulation: the window held to the reference.
+    let ew = w + 7;
+    let eh = h + 7;
+    let emu = &mut s.emu;
+    if emu.len() < ew * eh + 32 {
+        emu.resize(ew * eh + 32, P::default());
+    }
+    // Columns of the window inside the picture, copied whole; the
+    // rest repeat the edge samples.
+    let x0 = bx - 3;
+    let lo = (-x0).clamp(0, ew as i32) as usize;
+    let hi = (rw - x0).clamp(lo as i32, ew as i32) as usize;
+    for j in 0..eh {
+        let yy = (by - 3 + j as i32).clamp(0, rh - 1) as usize;
+        let row = &data[yy * stride..yy * stride + rw as usize];
+        let out = &mut emu[j * ew..j * ew + ew];
+        if hi > lo {
+            let from = (x0 + lo as i32) as usize;
+            out[lo..hi].copy_from_slice(&row[from..from + hi - lo]);
+        }
+        out[..lo].fill(row[0]);
+        out[hi..].fill(row[rw as usize - 1]);
+    }
+    mc::predict(
+        dst,
+        ds,
+        emu,
+        3 * ew + 3,
+        ew,
+        (w, h),
+        (mx, my),
+        filter,
+        max,
+        avg,
+        &mut s.mc,
+    );
+}
+
+/// The vector of sub-block `i` of a plane in sixteenths, libvpx
+/// `average_split_mvs` (with its sequential sub-block index for 4:2:2).
+fn split_mv(b: &BlockRec, plane: usize, i: usize, r: usize, ssx: usize, ssy: usize) -> (i32, i32) {
+    let q2 = |v: i32| (if v < 0 { v - 1 } else { v + 1 }) / 2;
+    let q4 = |v: i32| (if v < 0 { v - 2 } else { v + 2 }) / 4;
+    let get = |k: usize| b.bmv[k.min(3)][r];
+    let (row, col) = if plane == 0 || (ssx == 0 && ssy == 0) {
+        let m = get(i);
+        (i32::from(m.row), i32::from(m.col))
+    } else if ssx == 1 && ssy == 1 {
+        let (mut row, mut col) = (0, 0);
+        for m in &b.bmv {
+            row += i32::from(m[r].row);
+            col += i32::from(m[r].col);
+        }
+        (q4(row), q4(col))
+    } else {
+        let other = if ssy == 1 { i + 2 } else { i + 1 };
+        let (a, c) = (get(i), get(other));
+        (
+            q2(i32::from(a.row) + i32::from(c.row)),
+            q2(i32::from(a.col) + i32::from(c.col)),
+        )
+    };
+    let (ssx, ssy) = if plane == 0 { (0, 0) } else { (ssx, ssy) };
+    (row * (2 >> ssy), col * (2 >> ssx))
+}

@@ -4,8 +4,10 @@
 //! slots update only after reconstruction succeeds. `show_existing_frame`
 //! displays a stored picture and does not refresh those slots.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 use cutlass_decode::video::{VideoDecoder, VideoOutput};
 use cutlass_decode::{
@@ -14,21 +16,123 @@ use cutlass_decode::{
 };
 use cutlass_encode::PixelFormat;
 
+use cutlass_simd::vp9::frame::SharedFrame;
+
+use crate::dec::frame::{Dims, MvRef, Pic};
+use crate::dec::threads::Workers;
+use crate::dec::{ParseBufs, Reuse, decode_frame};
+use crate::dsp::pixel::Pixel;
 use crate::geom::{self, SWITCHABLE, TX_MODE_SELECT};
 use crate::header::{Header, Parsed, Persist, parse};
-use crate::pel::{Pix, Wide};
 use crate::prob::{self, Counts, FrameContext};
-use crate::recon::{Motion, Picture, RefSlots, Reference, reconstruct};
 
+/// A reference picture of either sample width.
 #[derive(Clone)]
+pub enum Held {
+    Eight(Arc<Pic<u8>>),
+    Deep(Arc<Pic<u16>>),
+}
+
+/// Picture buffers whose readers are gone, for later pictures.
+type Spare<P> = Vec<(Dims, Arc<SharedFrame<P>>)>;
+
+/// A decoded picture as tightly packed planes (little-endian above 8
+/// bits).
+pub struct Picture {
+    pub y: Vec<u8>,
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub ss_x: u32,
+    pub ss_y: u32,
+    pub color_space: u8,
+    pub color_range: u8,
+    pub bit_depth: u8,
+    pub render_width: u32,
+    pub render_height: u32,
+}
+
+pub(crate) trait Store: Pixel {
+    fn view(held: &Held) -> Option<&Pic<Self>>;
+    fn arc(held: &Held) -> Option<&Arc<Pic<Self>>>;
+    fn keep(frame: Arc<Pic<Self>>) -> Held;
+    fn spare(d: &mut Decoder) -> &mut Spare<Self>;
+}
+
+impl Store for u8 {
+    fn view(held: &Held) -> Option<&Pic<Self>> {
+        match held {
+            Held::Eight(f) => Some(f),
+            Held::Deep(_) => None,
+        }
+    }
+    fn arc(held: &Held) -> Option<&Arc<Pic<Self>>> {
+        match held {
+            Held::Eight(f) => Some(f),
+            Held::Deep(_) => None,
+        }
+    }
+    fn keep(frame: Arc<Pic<Self>>) -> Held {
+        Held::Eight(frame)
+    }
+    fn spare(d: &mut Decoder) -> &mut Spare<Self> {
+        &mut d.spare8
+    }
+}
+
+impl Store for u16 {
+    fn view(held: &Held) -> Option<&Pic<Self>> {
+        match held {
+            Held::Deep(f) => Some(f),
+            Held::Eight(_) => None,
+        }
+    }
+    fn arc(held: &Held) -> Option<&Arc<Pic<Self>>> {
+        match held {
+            Held::Deep(f) => Some(f),
+            Held::Eight(_) => None,
+        }
+    }
+    fn keep(frame: Arc<Pic<Self>>) -> Held {
+        Held::Deep(frame)
+    }
+    fn spare(d: &mut Decoder) -> &mut Spare<Self> {
+        &mut d.spare16
+    }
+}
+
 pub struct Decoder {
     persist: Persist,
     refs: [Option<Held>; 8],
-    prev: Option<Arc<Motion>>,
+    prev: Option<Arc<Vec<MvRef>>>,
     last_seg: Vec<u8>,
+    spare8: Spare<u8>,
+    spare16: Spare<u16>,
+    bufs: ParseBufs,
+    /// Syntax buffers the workers gave back, for the frames to come: each
+    /// parse takes one, rather than growing new ones from nothing.
+    reuse: Vec<Reuse>,
     /// Frames whose segmentation map was coded relative to the previous map.
     #[cfg(test)]
     temporal_frames: u32,
+}
+
+impl Clone for Decoder {
+    fn clone(&self) -> Self {
+        Self {
+            persist: self.persist.clone(),
+            refs: self.refs.clone(),
+            prev: self.prev.clone(),
+            last_seg: self.last_seg.clone(),
+            spare8: Spare::default(),
+            spare16: Spare::default(),
+            bufs: ParseBufs::default(),
+            reuse: Vec::new(),
+            #[cfg(test)]
+            temporal_frames: self.temporal_frames,
+        }
+    }
 }
 
 impl Decoder {
@@ -38,6 +142,10 @@ impl Decoder {
             refs: [const { None }; 8],
             prev: None,
             last_seg: Vec::new(),
+            spare8: Spare::default(),
+            spare16: Spare::default(),
+            bufs: ParseBufs::default(),
+            reuse: Vec::new(),
             #[cfg(test)]
             temporal_frames: 0,
         }
@@ -49,7 +157,24 @@ impl Decoder {
         self.temporal_frames
     }
 
+    /// Decodes one frame and returns the picture to show, if any, as
+    /// tightly packed planes.
     pub fn decode(&mut self, packet: &[u8]) -> Result<Option<Picture>, CodecError> {
+        Ok(self.decode_held(packet)?.map(|h| picture_of(&h)))
+    }
+
+    /// Decodes one frame and returns the picture to show, if any.
+    pub fn decode_held(&mut self, packet: &[u8]) -> Result<Option<Held>, CodecError> {
+        self.decode_with(packet, None)
+    }
+
+    /// Decodes one frame, reconstructing it on `rt`'s workers when given:
+    /// the picture returned may then still be in the making.
+    fn decode_with(
+        &mut self,
+        packet: &[u8],
+        rt: Option<&Runtime>,
+    ) -> Result<Option<Held>, CodecError> {
         if packet.is_empty() {
             return Err(CodecError::InvalidApi {
                 what: "empty packet",
@@ -61,15 +186,23 @@ impl Decoder {
             self.temporal_frames = self.temporal_frames.saturating_add(1);
         }
         if parsed.header.show_existing {
-            let picture = self.shown(&parsed.header)?;
+            let slot = usize::from(parsed.header.frame_to_show);
+            let held =
+                self.refs
+                    .get(slot)
+                    .and_then(|s| s.clone())
+                    .ok_or(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "shown reference",
+                    })?;
             self.persist.last_width = parsed.header.width;
             self.persist.last_height = parsed.header.height;
-            return Ok(Some(picture));
+            return Ok(Some(held));
         }
-        match parsed.header.bit_depth {
-            10 => self.reconstruct_depth::<Wide<10>>(&parsed),
-            12 => self.reconstruct_depth::<Wide<12>>(&parsed),
-            _ => self.reconstruct_depth::<u8>(&parsed),
+        if parsed.header.bit_depth > 8 {
+            self.frame::<u16>(&parsed, rt)
+        } else {
+            self.frame::<u8>(&parsed, rt)
         }
     }
 
@@ -84,200 +217,183 @@ impl Decoder {
         }
     }
 
-    fn reconstruct_depth<P: Store>(
+    fn frame<P: Store>(
         &mut self,
         parsed: &Parsed<'_>,
-    ) -> Result<Option<Picture>, CodecError> {
+        rt: Option<&Runtime>,
+    ) -> Result<Option<Held>, CodecError> {
+        if let Some(rt) = rt {
+            while let Ok(back) = rt.back.try_recv() {
+                if self.reuse.len() < 8 {
+                    self.reuse.push(back);
+                }
+            }
+            if self.bufs.tiles.is_empty()
+                && let Some(back) = self.reuse.pop()
+            {
+                self.bufs.tiles = back.tiles;
+                self.bufs.masks = back.masks;
+                self.bufs.grid = back.grid;
+            }
+        }
+        let header = &parsed.header;
+        if !header.is_intra() && header.use_prev_mvs && self.prev.is_none() {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "previous motion",
+            });
+        }
+        let last_seg = seg_source(&self.last_seg, header);
         let prev = self.prev.clone();
-        let last_seg = seg_source(&self.last_seg, &parsed.header);
-        let built = {
-            let slots = self.slots::<P>();
-            reconstruct(parsed, &slots, prev.as_deref(), &last_seg)?
+        // Pictures that nothing holds any more come back as buffers.
+        let refs_now = self.refs.clone();
+        let bufs = std::mem::take(&mut self.bufs);
+        let (pic, built) = {
+            let view = |i: usize| -> Option<&Pic<P>> {
+                let slot = usize::from(header.ref_index[i]);
+                refs_now.get(slot)?.as_ref().and_then(P::view)
+            };
+            let refs = [view(0), view(1), view(2)];
+            let spare = P::spare(self);
+            let workers = rt.map(|rt| (&rt.workers, &rt.send));
+            let make: crate::dec::frame::Present<P> = video_frame::<P>;
+            let present = (rt.is_some() && parsed.header.show_frame).then_some(make);
+            decode_frame(
+                parsed,
+                refs,
+                prev.as_deref().map(|v| v.as_slice()),
+                &last_seg,
+                bufs,
+                spare,
+                workers,
+                present,
+            )?
         };
-        self.commit(
-            parsed,
-            &built.picture,
-            &built.counts,
-            built.motion,
-            built.segmap,
-        );
-        if parsed.header.show_frame {
-            Ok(Some(built.picture))
-        } else {
-            Ok(None)
+        drop(refs_now);
+        // The last reader of the previous motion besides `self.prev`: with
+        // it gone, `commit` takes that map back for the next frame instead
+        // of a new one being made and cleared.
+        drop(prev);
+        self.bufs = built.spare;
+        if rt.is_none() {
+            self.bufs.tiles = built.tiles;
+            self.bufs.masks = built.masks;
+            self.bufs.grid = built.grid;
         }
+        Ok(self.commit(parsed, &built.counts, built.mvs, built.segmap, pic))
     }
 
-    fn slots<P: Store>(&self) -> RefSlots<'_, P> {
-        RefSlots {
-            frames: std::array::from_fn(|index| self.refs[index].as_ref().and_then(P::view)),
-        }
-    }
-
-    fn shown(&self, header: &Header) -> Result<Picture, CodecError> {
-        let slot = usize::from(header.frame_to_show);
-        let held =
-            self.refs
-                .get(slot)
-                .and_then(|slot| slot.as_ref())
-                .ok_or(CodecError::Malformed {
-                    at_bit: 0,
-                    what: "shown reference",
-                })?;
-        match held {
-            Held::Eight(reference) => Ok(picture_from(reference)),
-            Held::Ten(reference) => Ok(picture_from(reference)),
-            Held::Twelve(reference) => Ok(picture_from(reference)),
-        }
-    }
-
-    fn commit(
+    /// The state a finished frame leaves for the next: the adapted
+    /// probabilities, the motion and segmentation maps, the reference
+    /// slots it refreshes. Returns the picture when it is shown. The
+    /// encoder commits its own frames through this too, so that it
+    /// predicts from the state a decoder has.
+    pub(crate) fn commit<P: Store>(
         &mut self,
         parsed: &Parsed<'_>,
-        picture: &Picture,
         counts: &Counts,
-        motion: Motion,
+        mvs: Vec<MvRef>,
         segmap: Vec<u8>,
-    ) {
+        pic: Arc<Pic<P>>,
+    ) -> Option<Held> {
         let header = &parsed.header;
         let after_key = self.persist.key_frame;
         let fc = adapted(parsed, counts, after_key);
-        self.persist.width = header.width;
-        self.persist.height = header.height;
-        self.persist.last_width = header.width;
-        self.persist.last_height = header.height;
-        self.persist.need_resync = header.need_resync;
-        self.persist.key_frame = header.key_frame;
-        self.persist.intra_only = header.intra_only;
-        self.persist.last_show_frame = header.show_frame;
-        self.persist.sign_bias = header.sign_bias;
-        self.persist.ss_x = header.ss_x;
-        self.persist.ss_y = header.ss_y;
-        self.persist.bit_depth = header.bit_depth;
-        self.persist.color_space = header.color_space;
-        self.persist.color_range = header.color_range;
-        self.persist.seg = header.seg.clone();
-        self.persist.ref_deltas = header.ref_deltas;
-        self.persist.mode_deltas = header.mode_deltas;
-        self.persist.contexts = parsed.contexts.clone();
+        let persist = &mut self.persist;
+        persist.width = header.width;
+        persist.height = header.height;
+        persist.last_width = header.width;
+        persist.last_height = header.height;
+        persist.need_resync = header.need_resync;
+        persist.key_frame = header.key_frame;
+        persist.intra_only = header.intra_only;
+        persist.last_show_frame = header.show_frame;
+        persist.sign_bias = header.sign_bias;
+        persist.ss_x = header.ss_x;
+        persist.ss_y = header.ss_y;
+        persist.bit_depth = header.bit_depth;
+        persist.color_space = header.color_space;
+        persist.color_range = header.color_range;
+        persist.seg = header.seg.clone();
+        persist.ref_deltas = header.ref_deltas;
+        persist.mode_deltas = header.mode_deltas;
+        persist.contexts = parsed.contexts.clone();
         if header.refresh_context {
-            let index = usize::from(header.context_idx);
-            self.persist.contexts[index] = fc;
+            persist.contexts[usize::from(header.context_idx)] = fc;
         }
-        self.prev = Some(Arc::new(motion));
-        match header.bit_depth {
-            10 => self.store_refs::<Wide<10>>(header, picture),
-            12 => self.store_refs::<Wide<12>>(header, picture),
-            _ => self.store_refs::<u8>(header, picture),
+        // The previous motion goes back to the spare buffers if no one
+        // else holds it.
+        if let Some(old) = self.prev.take()
+            && let Ok(v) = Arc::try_unwrap(old)
+        {
+            self.bufs.mvs = v;
         }
-        self.store_seg(header, segmap);
-    }
-
-    fn store_seg(&mut self, header: &Header, segmap: Vec<u8>) {
+        self.prev = Some(Arc::new(mvs));
         let cells = geom::mi_count(header.width).saturating_mul(geom::mi_count(header.height));
         if header.seg.enabled {
             self.last_seg = segmap;
         } else if header.is_intra() || header.error_resilient {
             self.last_seg = vec![0u8; cells];
         }
-    }
-
-    fn store_refs<P: Store>(&mut self, header: &Header, picture: &Picture) {
-        if header.refresh_flags == 0 {
-            return;
-        }
-        let Ok(reference) = Reference::<P>::from_picture(picture) else {
-            return;
-        };
-        let shared = Arc::new(reference);
+        let shared = pic;
         for slot in 0..8 {
-            let bit = 1u8 << u32::try_from(slot).unwrap_or(0);
-            if header.refresh_flags & bit == 0 {
+            if header.refresh_flags & (1u8 << slot) == 0 {
                 continue;
             }
-            self.refs[slot] = Some(P::keep(Arc::clone(&shared)));
+            let old = self.refs[slot].replace(P::keep(Arc::clone(&shared)));
             self.persist.ref_ok[slot] = true;
             self.persist.ref_w[slot] = header.width;
             self.persist.ref_h[slot] = header.height;
+            if let Some(old) = old {
+                self.recycle(old);
+            }
         }
+        header.show_frame.then(|| P::keep(shared))
     }
-}
 
-#[derive(Clone)]
-enum Held {
-    Eight(Arc<Reference<u8>>),
-    Ten(Arc<Reference<Wide<10>>>),
-    Twelve(Arc<Reference<Wide<12>>>),
-}
+    /// The state the next frame is coded against.
+    pub(crate) fn persist(&self) -> &Persist {
+        &self.persist
+    }
 
-trait Store: Pix {
-    fn view(held: &Held) -> Option<&Reference<Self>>;
-    fn keep(reference: Arc<Reference<Self>>) -> Held;
-}
+    /// The pictures in the reference slots, of frames of `P` samples.
+    pub(crate) fn ref_pic<P: Store>(&self, slot: usize) -> Option<&Arc<Pic<P>>> {
+        self.refs.get(slot)?.as_ref().and_then(P::arc)
+    }
 
-impl Store for u8 {
-    fn view(held: &Held) -> Option<&Reference<Self>> {
+    /// The previous frame's motion, and a spare picture buffer list.
+    pub(crate) fn prev_mvs(&self) -> Option<&[MvRef]> {
+        self.prev.as_deref().map(|v| v.as_slice())
+    }
+
+    pub(crate) fn spare<P: Store>(&mut self) -> &mut Spare<P> {
+        P::spare(self)
+    }
+
+    /// Takes back a picture's buffers for a later picture: one still read
+    /// (by a worker, or the caller's copy of a shown frame) waits in the
+    /// list until its readers are gone, rather than being freed then and
+    /// a new one allocated and cleared.
+    pub fn recycle(&mut self, held: Held) {
+        fn keep<P>(spare: &mut Spare<P>, f: &Pic<P>) {
+            if spare.len() < crate::dec::frame::SPARE
+                && !spare.iter().any(|(_, b)| Arc::ptr_eq(b, &f.buf))
+            {
+                spare.push((f.dims, Arc::clone(&f.buf)));
+            }
+        }
         match held {
-            Held::Eight(reference) => Some(reference),
-            _ => None,
+            Held::Eight(f) => keep(&mut self.spare8, &f),
+            Held::Deep(f) => keep(&mut self.spare16, &f),
         }
     }
-
-    fn keep(reference: Arc<Reference<Self>>) -> Held {
-        Held::Eight(reference)
-    }
-}
-
-impl Store for Wide<10> {
-    fn view(held: &Held) -> Option<&Reference<Self>> {
-        match held {
-            Held::Ten(reference) => Some(reference),
-            _ => None,
-        }
-    }
-
-    fn keep(reference: Arc<Reference<Self>>) -> Held {
-        Held::Ten(reference)
-    }
-}
-
-impl Store for Wide<12> {
-    fn view(held: &Held) -> Option<&Reference<Self>> {
-        match held {
-            Held::Twelve(reference) => Some(reference),
-            _ => None,
-        }
-    }
-
-    fn keep(reference: Arc<Reference<Self>>) -> Held {
-        Held::Twelve(reference)
-    }
-}
-
-fn picture_from<P: Pix>(reference: &Reference<P>) -> Picture {
-    Picture {
-        y: packed(&reference.y.samples),
-        u: packed(&reference.u.samples),
-        v: packed(&reference.v.samples),
-        width: reference.width,
-        height: reference.height,
-        ss_x: reference.ss_x,
-        ss_y: reference.ss_y,
-        color_space: reference.color_space,
-        color_range: reference.color_range,
-        bit_depth: reference.bit_depth,
-        render_width: reference.render_width,
-        render_height: reference.render_height,
-    }
-}
-
-fn packed<P: Pix>(samples: &[P]) -> Vec<u8> {
-    let mut out = Vec::new();
-    crate::pel::pack_row(samples, &mut out);
-    out
 }
 
 fn seg_source(last: &[u8], header: &Header) -> Vec<u8> {
+    // Only segmentation reads the map: no copy of it without.
+    if !header.seg.enabled {
+        return Vec::new();
+    }
     let cells = geom::mi_count(header.width).saturating_mul(geom::mi_count(header.height));
     if header.is_intra() || header.error_resilient || last.len() != cells {
         vec![0u8; cells]
@@ -310,6 +426,55 @@ fn adapted(parsed: &Parsed<'_>, counts: &Counts, after_key: bool) -> FrameContex
     fc
 }
 
+/// The visible samples of plane `p`, rows packed, little-endian above 8
+/// bits.
+fn packed<P: Pixel>(f: &Pic<P>, p: usize) -> Vec<u8> {
+    let (w, h) = (f.dims.w[p], f.dims.h[p]);
+    f.buf.wait(usize::MAX);
+    let (data, stride) = f.buf.plane(p);
+    let mut out = Vec::with_capacity(w * h * if P::HIGH { 2 } else { 1 });
+    for r in 0..h {
+        let row = &data[r * stride..r * stride + w];
+        if let Some(b) = P::bytes(row) {
+            out.extend_from_slice(b);
+        } else if P::HIGH {
+            // Written in place, two bytes a sample: a loop the compiler
+            // vectorizes, where extending by each pair did not.
+            let at = out.len();
+            out.resize(at + 2 * w, 0);
+            for (d, s) in out[at..].as_chunks_mut::<2>().0.iter_mut().zip(row) {
+                *d = (s.get() as u16).to_le_bytes();
+            }
+        } else {
+            out.extend(row.iter().map(|s| s.get() as u8));
+        }
+    }
+    out
+}
+
+fn picture_of(held: &Held) -> Picture {
+    fn of<P: Pixel>(f: &Pic<P>) -> Picture {
+        Picture {
+            y: packed(f, 0),
+            u: packed(f, 1),
+            v: packed(f, 2),
+            width: f.dims.width as u32,
+            height: f.dims.height as u32,
+            ss_x: f.dims.ss_x as u32,
+            ss_y: f.dims.ss_y as u32,
+            color_space: f.color_space,
+            color_range: f.color_range,
+            bit_depth: f.dims.bit_depth,
+            render_width: f.render_width,
+            render_height: f.render_height,
+        }
+    }
+    match held {
+        Held::Eight(f) => of(f),
+        Held::Deep(f) => of(f),
+    }
+}
+
 impl Default for Decoder {
     fn default() -> Self {
         Self::new()
@@ -323,11 +488,44 @@ impl Default for Decoder {
 /// leaves those pictures as they were.
 pub struct Vp9Decoder {
     inner: Decoder,
+    rt: Option<Runtime>,
+    /// Pictures to show, in order, with their packet's times; their
+    /// reconstruction may still be running.
+    pending: VecDeque<(Held, i64, i64, u32)>,
     cancel: Arc<AtomicBool>,
+    /// The largest picture given out so far, in bytes.
+    warmed: usize,
+}
+
+/// Workers that reconstruct frames while the caller parses, and the
+/// channel their syntax buffers come back on.
+struct Runtime {
+    workers: Workers,
+    send: Sender<Reuse>,
+    back: Receiver<Reuse>,
+}
+
+impl Held {
+    fn done(&self) -> bool {
+        match self {
+            Held::Eight(p) => !p.made.load(Ordering::Acquire) && p.buf.published() == usize::MAX,
+            Held::Deep(p) => !p.made.load(Ordering::Acquire) && p.buf.published() == usize::MAX,
+        }
+    }
 }
 
 impl Vp9Decoder {
+    /// A decoder with as many threads as the machine runs at once, at
+    /// most 16.
     pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
+        Self::open_with_threads(params, threads)
+    }
+
+    /// A decoder that reconstructs frames on `threads` worker threads
+    /// while the caller parses (0 or 1: everything on the caller). Frames
+    /// come out up to `threads` packets late; `drain` gives the rest.
+    pub fn open_with_threads(params: &CodecParams, threads: usize) -> Result<Self, CodecError> {
         if params.codec != CodecId::Vp9 {
             return Err(CodecError::Unsupported {
                 what: "vp9 decoder",
@@ -356,10 +554,79 @@ impl Vp9Decoder {
             });
         }
         check_open_size(params.width, params.height)?;
+        let rt = if threads > 1 {
+            Workers::new(threads.min(16)).map(|workers| {
+                let (send, back) = channel();
+                Runtime {
+                    workers,
+                    send,
+                    back,
+                }
+            })
+        } else {
+            None
+        };
         Ok(Self {
             inner: Decoder::new(),
+            rt,
+            pending: VecDeque::new(),
             cancel: Arc::new(AtomicBool::new(false)),
+            warmed: 0,
         })
+    }
+
+    /// Pictures from the front of the queue: those that are done, and
+    /// any past the number that may be in flight (waiting for them).
+    fn ready(&mut self, all: bool) -> Result<Vec<VideoOutput>, CodecError> {
+        // Twice the workers' pictures may be in flight while they are
+        // small, so that a stall of one frame's parse leaves work to do;
+        // large ones, past about 4 MB a worker, crowd each other out of
+        // the caches, and fewer go in flight, down to one per worker
+        // and one more.
+        let limit = self.rt.as_ref().map_or(0, |rt| {
+            let n = rt.workers.count();
+            let size = self.pending.front().map_or(1, |p| held_bytes(&p.0)).max(1);
+            (2 * n * (4 << 20) / size).clamp(n + 1, 2 * n)
+        });
+        let mut out = Vec::new();
+        let failed = |rt: &Option<Runtime>| rt.as_ref().is_some_and(|rt| rt.workers.take_failure());
+        while let Some((held, _, _, _)) = self.pending.front() {
+            if !(all || held.done() || self.pending.len() > limit) {
+                break;
+            }
+            let Some((held, pts, duration, timescale)) = self.pending.pop_front() else {
+                break;
+            };
+            let bytes = held_bytes(&held);
+            if bytes > self.warmed {
+                // Every picture goes out in new buffers that the caller
+                // frees. glibc returns such memory to the system after
+                // each picture (and faults it in again for the next)
+                // unless a block that large was once mapped and freed,
+                // which raises its thresholds: free one, once per size.
+                let block: Vec<u8> = Vec::with_capacity(2 * bytes);
+                std::hint::black_box(&block);
+                drop(block);
+                self.warmed = bytes;
+            }
+            let frame = held_frame(&held)?;
+            if failed(&self.rt) {
+                // A reconstruction failed: what follows predicts from it.
+                self.pending.clear();
+                self.inner.reset();
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "vp9 reconstruction",
+                });
+            }
+            out.push(VideoOutput {
+                frame,
+                pts,
+                duration,
+                timescale,
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -374,32 +641,32 @@ impl VideoDecoder for Vp9Decoder {
         }
         let parts = split_superframe(&packet.data)?;
         let mut checkpoint = (parts.len() > 1).then(|| self.inner.clone());
-        let mut outputs = Vec::new();
+        let queued = self.pending.len();
         for part in parts {
-            match self.inner.decode(part) {
-                Ok(Some(picture)) => outputs.push(VideoOutput {
-                    frame: picture_frame(&picture)?,
-                    pts: packet.pts,
-                    duration: packet.duration,
-                    timescale: packet.timescale,
-                }),
+            match self.inner.decode_with(part, self.rt.as_ref()) {
+                Ok(Some(held)) => {
+                    self.pending
+                        .push_back((held, packet.pts, packet.duration, packet.timescale));
+                }
                 Ok(None) => {}
                 Err(err) => {
                     if let Some(saved) = checkpoint.take() {
                         self.inner = saved;
+                        self.pending.truncate(queued);
                     }
                     return Err(err);
                 }
             }
         }
-        Ok(outputs)
+        self.ready(false)
     }
 
     fn drain(&mut self) -> Result<Vec<VideoOutput>, CodecError> {
-        Ok(Vec::new())
+        self.ready(true)
     }
 
     fn reset(&mut self) {
+        self.pending.clear();
         self.inner.reset();
     }
 
@@ -415,13 +682,48 @@ impl Vp9Decoder {
     }
 }
 
-fn picture_frame(picture: &Picture) -> Result<VideoFrame, CodecError> {
-    let format = match (
-        picture.bit_depth,
-        picture.ss_x,
-        picture.ss_y,
-        picture.color_space,
-    ) {
+/// The bytes of a picture's visible samples.
+fn held_bytes(held: &Held) -> usize {
+    fn of<P: Pixel>(f: &Pic<P>) -> usize {
+        let b = if P::HIGH { 2 } else { 1 };
+        (0..3).map(|p| f.dims.w[p] * f.dims.h[p] * b).sum()
+    }
+    match held {
+        Held::Eight(f) => of(f),
+        Held::Deep(f) => of(f),
+    }
+}
+
+fn held_frame(held: &Held) -> Result<VideoFrame, CodecError> {
+    fn of<P: Pixel>(f: &Pic<P>) -> Result<VideoFrame, CodecError> {
+        // The worker that finished a shown frame has made its picture,
+        // unless it is being shown again.
+        f.buf.wait(usize::MAX);
+        let Ok(mut slot) = f.out.lock() else {
+            return video_frame(f);
+        };
+        loop {
+            if let Some(v) = slot.take() {
+                return v;
+            }
+            if !f.made.load(Ordering::Acquire) {
+                drop(slot);
+                return video_frame(f);
+            }
+            slot = match f.made_cv.wait(slot) {
+                Ok(g) => g,
+                Err(_) => return video_frame(f),
+            };
+        }
+    }
+    match held {
+        Held::Eight(f) => of(f),
+        Held::Deep(f) => of(f),
+    }
+}
+
+fn video_frame<P: Pixel>(f: &Pic<P>) -> Result<VideoFrame, CodecError> {
+    let format = match (f.dims.bit_depth, f.dims.ss_x, f.dims.ss_y, f.color_space) {
         (10, 1, 1, _) => PixelFormat::Yuv420p10,
         (12, 1, 1, _) => PixelFormat::Yuv420p12,
         (10, 1, 0, _) => PixelFormat::Yuv422p10,
@@ -441,31 +743,47 @@ fn picture_frame(picture: &Picture) -> Result<VideoFrame, CodecError> {
             return Err(CodecError::Unsupported { what: "vp9 chroma" });
         }
     };
-    let chroma_w = picture.width.div_ceil(1u32 << picture.ss_x.min(1));
-    let chroma_h = picture.height.div_ceil(1u32 << picture.ss_y.min(1));
-    let sample_bytes = if picture.bit_depth > 8 { 2 } else { 1 };
-    let plane = |width, height, samples: Vec<u8>| {
-        if sample_bytes == 1 {
-            Plane::tight(width, height, samples)
+    let bytes = if P::HIGH { 2 } else { 1 };
+    let plane = |p: usize| {
+        // A finished picture goes out as views of its own planes, at their
+        // padded stride, with no copy (16-bit samples as their
+        // little-endian bytes).
+        if let Some(shared) = P::share(&f.buf, p) {
+            f.buf.wait(usize::MAX);
+            let stride = f.buf.plane(p).1 * bytes;
+            let (w, h) = (f.dims.w[p], f.dims.h[p]);
+            if let Some(samples) = cutlass_decode::Samples::shared(shared, 0, stride * h) {
+                return Ok(Plane {
+                    width: w as u32,
+                    height: h as u32,
+                    stride,
+                    samples,
+                });
+            }
+        }
+        let samples = packed(f, p);
+        let (w, h) = (f.dims.w[p] as u32, f.dims.h[p] as u32);
+        if bytes == 1 {
+            Plane::tight(w, h, samples)
         } else {
-            Plane::bytes(width, height, sample_bytes, samples)
+            Plane::bytes(w, h, bytes, samples)
         }
     };
     let mut frame = VideoFrame::planar(
         format,
-        picture.width,
-        picture.height,
-        plane(picture.width, picture.height, picture.y.clone())?,
-        plane(chroma_w, chroma_h, picture.u.clone())?,
-        plane(chroma_w, chroma_h, picture.v.clone())?,
+        f.dims.width as u32,
+        f.dims.height as u32,
+        plane(0)?,
+        plane(1)?,
+        plane(2)?,
     )?;
-    let (range, primaries, transfer, matrix) = color_of(picture.color_space, picture.color_range);
+    let (range, primaries, transfer, matrix) = color_of(f.color_space, f.color_range);
     frame.range = range;
     frame.primaries = primaries;
     frame.transfer = transfer;
     frame.matrix = matrix;
-    frame.render_width = picture.render_width;
-    frame.render_height = picture.render_height;
+    frame.render_width = f.render_width;
+    frame.render_height = f.render_height;
     Ok(frame)
 }
 
@@ -505,7 +823,7 @@ fn color_of(space: u8, range: u8) -> (ColorRange, ColorPrimaries, Transfer, Matr
     (range, primaries, transfer, matrix)
 }
 
-fn split_superframe(data: &[u8]) -> Result<Vec<&[u8]>, CodecError> {
+pub(crate) fn split_superframe(data: &[u8]) -> Result<Vec<&[u8]>, CodecError> {
     let Some(marker) = data.last().copied() else {
         return Ok(vec![data]);
     };
@@ -710,7 +1028,7 @@ mod tests {
     }
 
     fn fuzz_corpus() -> Vec<Vec<u8>> {
-        let mut encoder = crate::encode::Vp9Encoder::with_quantizer(32, 16, 32).expect("encoder");
+        let mut encoder = crate::Vp9Encoder::with_quantizer(32, 16, 32).expect("encoder");
         let mut frames = Vec::new();
         for index in 0..4 {
             let frame = fuzz_picture(index);
@@ -791,7 +1109,7 @@ mod tests {
         bytes
     }
 
-    fn sane(picture: &crate::recon::Picture) -> bool {
+    fn sane(picture: &super::Picture) -> bool {
         let width = usize::try_from(picture.width).unwrap_or(usize::MAX);
         let height = usize::try_from(picture.height).unwrap_or(usize::MAX);
         let chroma_w = width.div_ceil(2);

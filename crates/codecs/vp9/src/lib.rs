@@ -1,30 +1,36 @@
-//! VP9 decoder and profile 0 encoder.
+//! VP9 decoder and encoder.
 //!
-//! The decoder accepts profiles 0, 1, 2, and 3. The encoder emits profile 0.
+//! The decoder accepts profiles 0, 1, 2, and 3. So does the encoder
+//! (8-, 10- and 12-bit, every chroma format).
 //! Playback and a WebM container are outside this crate.
 
 #![forbid(unsafe_code)]
 
 mod bits;
-mod coef;
+mod dec;
 mod decode;
-mod encode;
-mod fwd;
+mod dsp;
+mod enc;
 mod geom;
 mod header;
+#[cfg(test)]
 mod intra;
 mod lpf;
+#[cfg(test)]
+#[allow(dead_code)]
 mod pel;
 mod prob;
-mod recon;
 mod tables;
+#[cfg(test)]
 mod txfm;
 
 #[cfg(test)]
 mod prove;
 
 pub use decode::{Decoder, Vp9Decoder};
-pub use encode::Vp9Encoder;
+pub use enc::api::{
+    Chroma, ColorSpace, EngineEncoder, Vp9Encoder, Vp9Options, register_engine_encoders,
+};
 
 use cutlass_decode::video::VideoDecoder;
 use cutlass_decode::{CodecError, CodecId, CodecParams, VideoDecodeFactory};
@@ -36,7 +42,7 @@ pub fn register_decoders(factory: &mut VideoDecodeFactory) {
     factory.register(CodecId::Vp9, open_decoder);
 }
 
-/// Registers the profile-0 encoder on a video encode factory.
+/// Registers the encoder on a video encode factory.
 pub fn register_encoders(factory: &mut VideoEncodeFactory) {
     factory.register(CodecId::Vp9, open_encoder);
 }

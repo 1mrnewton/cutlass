@@ -135,11 +135,15 @@ impl<S: ToolSink> McpServer<S> {
         let arguments = if takes_object(tool) {
             arguments.to_string()
         } else {
-            arguments
-                .get("input")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
+            match input_text(name, &arguments) {
+                Ok(text) => text,
+                Err(refusal) => {
+                    return Ok(json!({
+                        "content": [{ "type": "text", "text": refusal }],
+                        "isError": true,
+                    }));
+                }
+            }
         };
         let outcome = self.sink.run_tool(&ToolCall {
             id: String::new(),
@@ -155,6 +159,33 @@ impl<S: ToolSink> McpServer<S> {
             }));
         }
         Ok(json!({ "content": content, "isError": outcome.is_error }))
+    }
+}
+
+/// The text a tool that takes one `input` was sent. Nothing at all is no
+/// text, and a number is its digits, as a time is often sent; any other
+/// key, or an input that is not text or a number, is refused rather than
+/// run as if nothing were asked.
+fn input_text(name: &str, arguments: &Value) -> Result<String, String> {
+    let fields = match arguments {
+        Value::Null => return Ok(String::new()),
+        Value::Object(fields) => fields,
+        other => {
+            return Err(format!(
+                "{name} takes its arguments as an object, {{\"input\": \"...\"}}, not {other}"
+            ));
+        }
+    };
+    if let Some(key) = fields.keys().find(|key| *key != "input") {
+        return Err(format!(
+            "{name} has no argument {key}; it takes one text, {{\"input\": \"...\"}}"
+        ));
+    }
+    match fields.get("input") {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(Value::Number(number)) => Ok(number.to_string()),
+        Some(other) => Err(format!("{name} takes its input as text, not {other}")),
     }
 }
 
@@ -490,6 +521,43 @@ mod tests {
             serde_json::from_str::<Value>(&calls[1].arguments).unwrap(),
             apply
         );
+    }
+
+    #[test]
+    fn an_input_that_is_not_text_is_refused_or_read_as_its_digits() {
+        let mut server = McpServer::new(Echo::default(), "cutlass", "0.1.0");
+        let call = |server: &mut McpServer<Echo>, name: &str, arguments: Value| {
+            ask(
+                server,
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                    "params":{"name":name,"arguments":arguments}}),
+            )["result"]
+                .clone()
+        };
+        // A number is its digits, so a time may be sent as one.
+        call(&mut server, "player_look", json!({"input": 2_000_000}));
+        assert_eq!(server.sink().calls[0].arguments, "2000000");
+        // Nothing, or a null input, is no text.
+        call(&mut server, "player_look", json!({"input": null}));
+        call(&mut server, "draft_undo", Value::Null);
+        assert_eq!(server.sink().calls[1].arguments, "");
+        assert_eq!(server.sink().calls[2].arguments, "");
+        for (name, arguments, says) in [
+            (
+                "catalog_search",
+                json!({"query": "blur"}),
+                "no argument query",
+            ),
+            ("player_look", json!({"input": true}), "as text"),
+            ("draft_query", json!({"input": ["project"]}), "as text"),
+            ("draft_query", json!("project"), "as an object"),
+        ] {
+            let refused = call(&mut server, name, arguments);
+            assert_eq!(refused["isError"], true, "{name}");
+            let text = refused["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains(says), "{text}");
+        }
+        assert_eq!(server.sink().calls.len(), 3, "a refused call does not run");
     }
 
     #[test]

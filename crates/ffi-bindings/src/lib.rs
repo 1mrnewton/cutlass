@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
+use std::thread::JoinHandle;
 use std::time::UNIX_EPOCH;
 
 use cutlass_ffi::{Drag, FfiError, Home, PhoneHost};
@@ -1426,9 +1427,30 @@ fn project_in(home: &Home, project: &Path) -> Result<(), EditorError> {
 }
 
 /// One open project.
+///
+/// Its host lives on a thread of its own. Dropping the editor ends that
+/// thread and waits for it, so the host, its GPU device and its sound are
+/// gone when the drop returns: a process that exits just after cannot tear
+/// down the GPU driver while the host is still closing its device on it.
 #[derive(uniffi::Object)]
 pub struct Editor {
-    jobs: Sender<Job>,
+    /// `None` only while the editor is dropped.
+    jobs: Option<Sender<Job>>,
+    host: Option<JoinHandle<()>>,
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        // Closing the queue ends the host's loop, and the host drops.
+        self.jobs = None;
+        if let Some(host) = self.host.take()
+            && host.thread().id() != std::thread::current().id()
+        {
+            // A host that panicked has dropped already; there is nothing
+            // left to wait for.
+            let _ = host.join();
+        }
+    }
 }
 
 type Job = Box<dyn FnOnce(&mut PhoneHost) + Send>;
@@ -1446,7 +1468,7 @@ impl Editor {
         let cache = home.cache();
         let (jobs, inbox) = mpsc::channel::<Job>();
         let (opened, answer) = mpsc::sync_channel(1);
-        std::thread::Builder::new()
+        let host = std::thread::Builder::new()
             .name("cutlass-editor".to_owned())
             .spawn(move || {
                 cutlass_ffi::serve_the_interface();
@@ -1476,7 +1498,10 @@ impl Editor {
                 message: error.to_string(),
             })?;
         answer.recv().map_err(|_| closed())??;
-        Ok(Arc::new(Self { jobs }))
+        Ok(Arc::new(Self {
+            jobs: Some(jobs),
+            host: Some(host),
+        }))
     }
 
     /// Read a picked file, copy it into the project, and add it to the
@@ -2437,6 +2462,8 @@ impl Editor {
     ) -> Result<T, EditorError> {
         let (reply, answer) = mpsc::sync_channel(1);
         self.jobs
+            .as_ref()
+            .ok_or_else(closed)?
             .send(Box::new(move |host| {
                 let _ = reply.send(job(host));
             }))
@@ -2469,7 +2496,7 @@ fn lane_kind(kind: cutlass_ffi::TrackType) -> LaneKind {
 mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use super::{
         Editor, LaneKind, create_project, delete_project, duplicate_project, list_projects,
@@ -2658,6 +2685,30 @@ mod tests {
             self.heard.fetch_add(1, Ordering::Relaxed);
             done < self.stop_at
         }
+    }
+
+    #[test]
+    fn dropping_the_editor_waits_for_its_host_to_close() {
+        // The host thread owns the GPU device. A drop that returned before
+        // that thread ended let a test process exit while the device was
+        // still closing, and the driver's teardown corrupted the heap.
+        let temp = Temp::new();
+        let editor = temp.open();
+        let finished = Arc::new(AtomicBool::new(false));
+        let seen = finished.clone();
+        editor
+            .jobs
+            .as_ref()
+            .unwrap()
+            .send(Box::new(move |_| {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                seen.store(true, Ordering::SeqCst);
+            }))
+            .unwrap();
+        let host = editor.host.as_ref().unwrap().thread().id();
+        assert_ne!(host, std::thread::current().id());
+        drop(editor);
+        assert!(finished.load(Ordering::SeqCst));
     }
 
     #[test]

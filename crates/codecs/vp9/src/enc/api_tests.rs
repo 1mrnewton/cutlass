@@ -2323,3 +2323,67 @@ fn a_low_buffer_drops_frames() {
     };
     assert!(Vp9Encoder::with_options(w, h, past).is_err());
 }
+
+/// Each packet's header and the segment map its frame leaves.
+fn segmaps_of(packets: &[Packet]) -> Vec<(header::Header, Vec<u8>)> {
+    let mut dec = Decoder::new();
+    packets
+        .iter()
+        .map(|p| {
+            let h = header::parse(dec.persist(), &p.data)
+                .expect("header")
+                .header;
+            dec.decode(&p.data).expect("decode");
+            (h, dec.last_segmap().to_vec())
+        })
+        .collect()
+}
+
+#[test]
+fn cyclic_refresh_moves_a_band_of_finer_superblocks() {
+    // 10×2 superblocks: a tenth is two a frame, the next two each time.
+    let (w, h) = (640u32, 128u32);
+    let opts = super::Vp9Options {
+        aq_mode: super::AqMode::CyclicRefresh,
+        speed: 9,
+        ..lag0(120)
+    };
+    let packets = encode_with(opts, (w, h), 5, |i| moving(w, h, i));
+    assert_decodes(&packets, (w, h), 5);
+    let maps = segmaps_of(&packets);
+    assert!(!maps[0].0.seg.enabled, "the key frame refreshes all");
+    let mi_cols = 80;
+    for (i, (hd, map)) in maps.iter().enumerate().skip(1) {
+        assert!(hd.seg.enabled && hd.seg.update_map, "frame {i}");
+        assert!(hd.seg.feature_on[1][0] && hd.seg.feature_data[1][0] < 0);
+        assert!(!hd.seg.feature_on[0][0]);
+        // Superblocks 2i − 2 and 2i − 1 of the first row are segment 1.
+        for (k, &s) in map.iter().enumerate() {
+            let sb = (k / mi_cols / 8) * 10 + (k % mi_cols) / 8;
+            assert_eq!(s, u8::from(sb / 2 == i - 1), "frame {i} block {k}");
+        }
+    }
+    let both = super::Vp9Options { aq: true, ..opts };
+    assert!(Vp9Encoder::with_options(w, h, both).is_err());
+}
+
+#[test]
+fn equator_aq_codes_the_polar_rows_coarser() {
+    let (w, h) = (128u32, 256u32);
+    let opts = super::Vp9Options {
+        aq_mode: super::AqMode::Equator360,
+        speed: 6,
+        ..lag0(100)
+    };
+    let packets = encode_with(opts, (w, h), 3, |i| noisy(w, h, i, i));
+    assert_decodes(&packets, (w, h), 3);
+    for (hd, map) in segmaps_of(&packets) {
+        let s = &hd.seg;
+        assert!(s.enabled);
+        assert_eq!(s.feature_data[0][0], 0);
+        assert!(0 < s.feature_data[1][0] && s.feature_data[1][0] < s.feature_data[2][0]);
+        // (A block takes its top-left row's segment.)
+        assert_eq!(map[0], 2);
+        assert_eq!(map[16 * 16], 0);
+    }
+}

@@ -273,6 +273,9 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// The segmentation of the frame being coded, with adaptive
     /// quantization.
     aq: Option<aq::Plan>,
+    /// The segmentation the next frame codes when it is not adaptively
+    /// quantized ([`FrameEncoder::set_segmentation`]).
+    next_plan: Option<aq::Plan>,
     /// Each reference's picture in the last inter frame, the share of its
     /// area that frame predicted from it (in 1/1024), and how many frames
     /// in a row it has been left out of the search.
@@ -356,6 +359,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             pre_bufs: Vec::new(),
             pre_frame: Vec::new(),
             aq: None,
+            next_plan: None,
             ref_use: [(0, 1024, 0); 3],
             stream: Stream::default(),
             threads: threads.max(1),
@@ -377,6 +381,12 @@ impl<P: EncPixel> FrameEncoder<P> {
     /// thread.
     pub fn set_tile_columns(&mut self, log2: u8) {
         self.log2_tiles = log2.min(6);
+    }
+
+    /// The segmentation the next frame codes (cyclic refresh, 360°
+    /// pictures), unless it is adaptively quantized or lossless.
+    pub fn set_segmentation(&mut self, plan: aq::Plan) {
+        self.next_plan = Some(plan);
     }
 
     /// What every frame signals from now on.
@@ -448,6 +458,7 @@ impl<P: EncPixel> FrameEncoder<P> {
     pub fn encode(&mut self, fp: FrameParams) -> Result<Coded, CodecError> {
         let key = fp.key || self.dec.ref_pic::<P>(0).is_none();
         let lossless = fp.qindex == 0;
+        let next = self.next_plan.take();
         self.aq = (fp.aq && !lossless).then(|| {
             let (w, h) = (self.width as usize, self.height as usize);
             aq::plan(
@@ -458,6 +469,9 @@ impl<P: EncPixel> FrameEncoder<P> {
                 fp.qindex,
             )
         });
+        if self.aq.is_none() && !lossless {
+            self.aq = next;
+        }
         // The tiles are coded against the probabilities as they stand; their
         // symbols are kept, the coefficient probabilities that pay for
         // their update are updated, and the symbols written with them.

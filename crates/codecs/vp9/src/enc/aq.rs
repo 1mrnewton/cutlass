@@ -78,6 +78,76 @@ pub fn plan<P: Pixel>(
     }
 }
 
+impl Plan {
+    /// A plan of the segment `map` (one id an 8×8 block) with these
+    /// quantizer deltas.
+    pub fn of_map(map: Vec<u8>, deltas: [i16; 8]) -> Self {
+        let mut used = [0u32; 8];
+        for &s in &map {
+            used[usize::from(s & 7)] += 1;
+        }
+        Self {
+            map,
+            deltas,
+            tree_probs: tree_probs(&used),
+        }
+    }
+}
+
+/// Cyclic refresh (libvpx's `aq-mode=3`, `vp9_aq_cyclicrefresh.c`): each
+/// inter frame codes `percent` of the picture's superblocks, the next
+/// ones in raster order from `*next` (which moves on past them), in
+/// segment 1 at a finer quantizer (`delta`), so that every part of the
+/// picture is coded fine once every 100 / `percent` frames and what a
+/// coarse frame left behind is cleaned up. The superblocks wrap around.
+pub fn cyclic(
+    next: &mut usize,
+    (mi_cols, mi_rows): (usize, usize),
+    percent: u32,
+    delta: i16,
+) -> Plan {
+    let (sb_cols, sb_rows) = (mi_cols.div_ceil(8), mi_rows.div_ceil(8));
+    let total = sb_cols * sb_rows;
+    let count = (total * percent as usize).div_ceil(100).min(total);
+    let mut map = vec![0u8; mi_cols * mi_rows];
+    for k in 0..count {
+        let sb = (*next + k) % total;
+        let (r0, c0) = ((sb / sb_cols) * 8, (sb % sb_cols) * 8);
+        for r in r0..(r0 + 8).min(mi_rows) {
+            map[r * mi_cols + c0..r * mi_cols + (c0 + 8).min(mi_cols)].fill(1);
+        }
+    }
+    *next = (*next + count) % total.max(1);
+    let mut deltas = [0i16; 8];
+    deltas[1] = delta;
+    Plan::of_map(map, deltas)
+}
+
+/// The rate ratios of [`equator`]'s three bands (libvpx's `vp9_aq_360.c`
+/// ratios of its segments 0 to 2).
+pub const EQUATOR_RATIOS: [f64; 3] = [1.0, 0.75, 0.6];
+
+/// Equirectangular (360°) pictures (libvpx's `aq-mode=4`): the rows of
+/// 8×8 blocks away from the equator, which the projection stretches
+/// across the width, in coarser segments, as libvpx's
+/// `vp9_360aq_segment_id`: the eighth of the rows at the top and at the
+/// bottom in segment 2, the next eighth on each side in 1, the half in
+/// the middle in 0; `deltas` are the segments' quantizer deltas.
+pub fn equator((mi_cols, mi_rows): (usize, usize), deltas: [i16; 8]) -> Plan {
+    let mut map = vec![0u8; mi_cols * mi_rows];
+    for r in 0..mi_rows {
+        let seg = if r < mi_rows / 8 || r > mi_rows - mi_rows / 8 {
+            2
+        } else if r < mi_rows / 4 || r > mi_rows - mi_rows / 4 {
+            1
+        } else {
+            0
+        };
+        map[r * mi_cols..(r + 1) * mi_cols].fill(seg);
+    }
+    Plan::of_map(map, deltas)
+}
+
 /// The segment tree's probabilities for ids used `used` times.
 fn tree_probs(used: &[u32; 8]) -> [u8; 7] {
     let mut branch = [[0u64; 2]; 7];

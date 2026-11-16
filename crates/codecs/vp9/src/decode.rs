@@ -157,6 +157,12 @@ impl Decoder {
         self.temporal_frames
     }
 
+    /// The segment of every 8×8 block of the last frame decoded.
+    #[cfg(test)]
+    pub fn last_segmap(&self) -> &[u8] {
+        &self.last_seg
+    }
+
     /// Decodes one frame and returns the picture to show, if any, as
     /// tightly packed planes.
     pub fn decode(&mut self, packet: &[u8]) -> Result<Option<Picture>, CodecError> {

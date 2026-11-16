@@ -1580,8 +1580,9 @@ brackets). "Added" is new in this round; each has a test in
 | `-tune psnr` | `tune` | the default |
 | `-tune ssim` | `tune=ssim` | missing |
 | `-tune-content screen` / `film` | `tune-content` | missing |
-| `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ) |
-| `-aq-mode 2` / `3` / `4` | complexity, cyclic refresh, equator360 | missing |
+| `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ), or `aq_mode: AqMode::Variance` |
+| `-aq-mode 3` / `4` | cyclic refresh, equator360 | `aq_mode`: `AqMode::CyclicRefresh` (`aq=3`), `AqMode::Equator360` (`aq=4`), added |
+| `-aq-mode 2` | complexity AQ | missing: libvpx puts each superblock in a segment by the bits its search spent at the frame's quantizer, which this encoder knows only once the block is coded |
 | `-noise-sensitivity` | `noise-sensitivity` | missing (no temporal denoiser) |
 | `-static-thresh` | `static-thresh` | `static_thresh` (`static_thresh=`, added) |
 | `-sharpness` | `sharpness` | `sharpness` (`sharpness=`, added) |
@@ -1637,6 +1638,41 @@ to 74% over). Speed 9 holds the rate on its own quantizers and drops at
 most two frames. At 500 kb/s speed 10 drops 1, 13 and 8 frames (to 508,
 572 and 603 kb/s from 508, 657 and 692), libvpx 0, 8 and 0.
 
+**Cyclic refresh** (`AqMode::CyclicRefresh`, `-aq-mode 3`). Every inter
+frame puts a tenth of the superblocks, the next ones in raster order, in
+segment 1, at the quantizer that takes three times the bits (bits as the
+step to the power −1.25; at most half the index finer); key frames
+refresh everything and code none. libvpx's version also leaves out
+blocks coded finely of late and puts a refreshed block that coded
+nothing back in segment 0; this one refreshes whole superblocks in turn.
+libvpx's ratio is 2: here that lost 4.0 points of PSNR-Y BD-rate summed
+over the three clips at speed 10, 3 won 2.2, 4 won 6.8 but lost 6.9 on
+the three scenes. BD-rate at a constant bitrate (1 s buffer, 0.5/1 to 3/4
+Mb/s, four threads) against the same speed without it, PSNR-Y / FFmpeg's
+average:
+
+| | Three scenes | Still and jumps | Grainy pan |
+| --- | --- | --- | --- |
+| Speed 10, `aq=3` | +4.8 / +4.8% | −3.8 / −2.9% | −3.2 / −1.4% |
+| Speed 9, `aq=3` | +2.9 / +2.8% | +1.7 / +2.5% | +0.8 / +3.2% |
+| libvpx realtime 8, `-aq-mode 3` against 0 | +4.8 / +4.2% | −11.2 / −9.2% | −14.9 / −8.2% |
+| Speed 10 `aq=3` against libvpx rt 8 `-aq-mode 3` | −9.1 / −7.2% | −16.5 / −16.7% | −15.0 / −16.4% |
+| Speed 9 `aq=3` against libvpx rt 8 `-aq-mode 3` | −18.8 / −15.4% | −44.4 / −41.6% | −28.8 / −27.4% |
+
+As in libvpx, it is for how a call looks (no block stays coarse for
+long) rather than for PSNR; libvpx gains PSNR by it on two clips because
+its constant bitrate without it is far behind (this encoder's speed 10
+without it is 12 to 14% ahead of libvpx's realtime 8 with `-aq-mode 3`
+at PSNR-Y). Time: 1.01 to 1.06 of the
+time without.
+
+**360° pictures** (`AqMode::Equator360`, `-aq-mode 4`): libvpx's bands,
+the outer eighths of the rows in segment 2 at the bits of 0.6 of the
+rate, the eighths next to them in segment 1 at 0.75, on every frame. On
+the three scenes (not a 360° picture) at `q=120`, 0.9% fewer bits for
+0.25 dB less PSNR-Y over the whole picture; libvpx's `-crf 30 -aq-mode 4`
+against `-aq-mode 0` 2.7% fewer for 0.29 dB.
+
 Decoders: FFmpeg's `vp9` and `libvpx-vp9` decoders have no options of
 their own; of the generic ones, frame threads and slice (tile) threads
 are `Vp9Decoder`'s frame threads and tile-column parse threads, and
@@ -1657,7 +1693,7 @@ carries the colour space, range and render size.
 | Scaled references (a size change mid-stream) | yes | no |
 | Lossless (WHT) | yes | yes |
 | Tile columns and rows | yes | yes |
-| Segmentation: quantizer | yes | yes (AQ) |
+| Segmentation: quantizer | yes | yes (AQ, cyclic refresh, 360°) |
 | Segmentation: loop filter, reference, skip; temporal map | yes | no |
 | Loop filter sharpness | yes | yes (added) |
 | Loop filter deltas (mode, reference) | yes | defaults only |
@@ -1678,8 +1714,8 @@ carries the colour space, range and render size.
   rectangular partitions below 4; probability updates of the
   coefficients and of every other updatable probability (modes, filter,
   references, partition, tx size, skip, vectors) at all speeds;
-  segmentation with adaptive quantization (`aq`, off by default).
-  Segment features other than the quantizer, temporal segment maps,
+  segmentation with adaptive quantization (`aq`, `aq_mode`, off by
+  default). Segment features other than the quantizer, temporal segment maps,
   intra-only frames, scaled references (a size change within the
   stream) and `show_existing_frame` are not written. Error resilient frames take no
   compound prediction (with it their compressed headers did not parse

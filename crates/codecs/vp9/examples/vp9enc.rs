@@ -1,5 +1,5 @@
 //! Encodes raw video to an IVF file:
-//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|422|440|444] [bits=8|10|12]`
+//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1|3|4] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|422|440|444] [bits=8|10|12]`
 //! and the libvpx-like options `min_q=` `max_q=` (quantizer indices),
 //! `crf=0..63` (a quality level: constant quality, or with `rate=`
 //! constrained quality), `cq=QINDEX`, `sharpness=0..7`,
@@ -18,7 +18,7 @@
 use std::io::{Read, Write};
 use std::time::Instant;
 
-use cutlass_vp9::{Chroma, ColorSpace, Vp9Encoder, Vp9Options};
+use cutlass_vp9::{AqMode, Chroma, ColorSpace, Vp9Encoder, Vp9Options};
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
@@ -53,7 +53,13 @@ fn main() -> Result<(), String> {
             "keyint" => opts.keyint = n,
             "threads" => opts.threads = n as usize,
             "lag" => opts.lag = Some(n),
-            "aq" => opts.aq = n != 0,
+            "aq" => match n {
+                0 => opts.aq = false,
+                1 => opts.aq = true,
+                3 => opts.aq_mode = AqMode::CyclicRefresh,
+                4 => opts.aq_mode = AqMode::Equator360,
+                _ => return Err("aq=0|1|3|4".into()),
+            },
             "tile_rows" => opts.tile_rows = n as u8,
             "cbr" => opts.cbr_buffer_ms = n,
             "twopass" => twopass = n != 0,

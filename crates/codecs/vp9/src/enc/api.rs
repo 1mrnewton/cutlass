@@ -63,6 +63,27 @@ impl ColorSpace {
     }
 }
 
+/// Adaptive quantization by segment (libvpx's `aq-mode`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AqMode {
+    /// None (0).
+    #[default]
+    Off,
+    /// Variance AQ (1), the same as [`Vp9Options::aq`].
+    Variance,
+    /// Cyclic refresh (3), for realtime: each inter frame codes a tenth
+    /// of the picture's superblocks, the next ones in turn, at a finer
+    /// quantizer (the bits of three times the rate, at most half the
+    /// index finer), so that what coarse frames left is cleaned up a band at a
+    /// time rather than by costly golden and key frames.
+    CyclicRefresh,
+    /// Equirectangular 360° pictures (4): rows of blocks away from the
+    /// equator, which the projection stretches, coarser: the outer
+    /// eighths of the rows at the bits of 0.6 of the rate, the eighths
+    /// next to them at 0.75 (libvpx's bands and ratios).
+    Equator360,
+}
+
 /// How the encoder codes.
 #[derive(Clone, Copy, Debug)]
 pub struct Vp9Options {
@@ -185,6 +206,9 @@ pub struct Vp9Options {
     /// frames, golden frames, alt-refs and the frames they come with are
     /// never dropped. 0: none is.
     pub drop_frame_pct: u32,
+    /// Adaptive quantization by segment (libvpx's `aq-mode`; `aq` is
+    /// [`AqMode::Variance`] too). Not with lossless coding.
+    pub aq_mode: AqMode,
 }
 
 /// The lookahead below speed 9 unless set: with it, alt-refs take 10 to
@@ -267,10 +291,18 @@ impl Vp9Options {
         if self.tile_columns.is_some_and(|t| t > 6) {
             return bad("vp9 tile columns past 6");
         }
+        if self.aq && !matches!(self.aq_mode, AqMode::Off | AqMode::Variance) {
+            return bad("vp9 variance AQ with another AQ mode");
+        }
         if self.drop_frame_pct > 100 {
             return bad("vp9 drop-frame threshold past 100");
         }
         Ok(())
+    }
+
+    /// Whether variance AQ is on.
+    fn variance_aq(&self) -> bool {
+        self.aq || self.aq_mode == AqMode::Variance
     }
 
     fn threads(&self) -> usize {
@@ -315,6 +347,7 @@ impl Default for Vp9Options {
             tile_columns: None,
             level: 0,
             drop_frame_pct: 0,
+            aq_mode: AqMode::Off,
         }
     }
 }
@@ -362,6 +395,8 @@ struct Core<P: EncPixel> {
     /// With the realtime pool ([`RT_POOL_SPEED`]): the profile of the
     /// luma coded last ([`Core::rt_step`]).
     last_prof: Option<super::arf::Profile>,
+    /// Cyclic refresh: the superblock the next refresh starts at.
+    refresh_at: usize,
 }
 
 /// A picture a reference slot holds, as its source.
@@ -697,6 +732,7 @@ impl<P: EncPixel> Core<P> {
             shown: 0,
             pos: (0, 0),
             last_prof: None,
+            refresh_at: 0,
         }
     }
 
@@ -912,7 +948,7 @@ impl<P: EncPixel> Core<P> {
                 // short search would code it as intra.
                 speed: self.opts.speed.min(ARF_SPEED),
                 altref_future: false,
-                aq: self.opts.aq,
+                aq: self.opts.variance_aq(),
                 second_pass: self.rc.pass2.is_some(),
                 full_search: self.full_search(),
                 fast_arf: self.opts.speed >= FAST_ARF_SPEED,
@@ -1058,6 +1094,7 @@ impl<P: EncPixel> Core<P> {
         };
         self.enc.load(planes);
         let qindex = self.rc.qindex(kind, seconds, cut);
+        self.segment(key, qindex);
         // Between an alt-ref and its overlay, ALTREF is ahead.
         // (Error resilient frames take no compound prediction.)
         let altref_future =
@@ -1069,7 +1106,7 @@ impl<P: EncPixel> Core<P> {
             qindex,
             speed: self.opts.speed,
             altref_future,
-            aq: self.opts.aq,
+            aq: self.opts.variance_aq(),
             second_pass: self.rc.pass2.is_some(),
             full_search: self.full_search(),
             fast_arf: false,
@@ -1120,6 +1157,32 @@ impl<P: EncPixel> Core<P> {
                 .extend_from_slice(&y[r * stride..r * stride + w]);
         }
         Ok(Some((coded.data, coded.key)))
+    }
+
+    /// The segmentation of a shown frame at `qindex` with
+    /// [`Vp9Options::aq_mode`]'s other modes than variance AQ.
+    fn segment(&mut self, key: bool, qindex: u8) {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let mi = (w.div_ceil(8), h.div_ceil(8));
+        let bd = self.opts.bit_depth;
+        match self.opts.aq_mode {
+            AqMode::CyclicRefresh if !key => {
+                let delta = delta_of_ratio(qindex, CR_RATE_RATIO, bd)
+                    .max(-(i16::from(qindex) * CR_MAX_DELTA_PCT / 100));
+                if delta < 0 {
+                    let plan = super::aq::cyclic(&mut self.refresh_at, mi, CR_PERCENT, delta);
+                    self.enc.set_segmentation(plan);
+                }
+            }
+            AqMode::Equator360 => {
+                let mut deltas = [0i16; 8];
+                for (d, &r) in deltas.iter_mut().zip(&super::aq::EQUATOR_RATIOS) {
+                    *d = delta_of_ratio(qindex, r, bd);
+                }
+                self.enc.set_segmentation(super::aq::equator(mi, deltas));
+            }
+            _ => {}
+        }
     }
 
     /// One pass at a variable bitrate, before the first picture: the
@@ -1309,6 +1372,7 @@ impl<P: EncPixel> Core<P> {
         self.gold_src = None;
         self.shown = 0;
         self.pos = (0, 0);
+        self.refresh_at = 0;
     }
 
     /// The place of the golden frame after the one (or the key frame) at
@@ -2497,6 +2561,30 @@ impl Rate {
             );
         }
     }
+}
+
+/// Cyclic refresh ([`AqMode::CyclicRefresh`]): the share of the
+/// superblocks each inter frame refreshes, in percent (libvpx's
+/// `percent_refresh`), the rate ratio of their quantizer (libvpx's
+/// `rate_ratio_qdelta`), and the most it may be finer, in percent of the
+/// frame's index (libvpx's `max_qdelta_perc`). Speed 10 at a constant
+/// bitrate on the README's three clips, BD-rate against no AQ at the
+/// same PSNR-Y / FFmpeg's average: the ratio at 2 (libvpx's usual one),
+/// +4.0 / +6.5 points summed over the clips; at 3, −2.2 / +0.4; at 4,
+/// −6.8 / −3.6 but +6.9 / +6.4 on the three scenes (the clip of a still
+/// picture gains most, where the refresh also brings the stream down to
+/// its lowest rate); a twentieth of the superblocks a frame, +0.6 / +1.7
+/// at 3; none on golden frames, +3.8 / +6.1 at 2.
+const CR_PERCENT: u32 = 10;
+const CR_RATE_RATIO: f64 = 3.0;
+const CR_MAX_DELTA_PCT: i16 = 50;
+
+/// The quantizer delta from `q` at which a frame takes `ratio` times its
+/// bits (bits ∝ step^-[`EXP`]; libvpx's `vp9_compute_qdelta_by_rate`),
+/// the index kept within 1 to 255.
+fn delta_of_ratio(q: u8, ratio: f64, bd: u8) -> i16 {
+    let to = q_of_step(step_of(q, bd) * ratio.powf(-1.0 / EXP), bd);
+    i16::from(to) - i16::from(q)
 }
 
 /// `diff` bits over (positive) or under the target `budget` so far, less

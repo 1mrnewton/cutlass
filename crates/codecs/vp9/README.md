@@ -276,8 +276,9 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   a pan by a sample and a half a picture (a fractal panned at 2560×1440
   and scaled down, with grain), 15.1% / 18.1% fewer bits than before at
   the same PSNR-Y / averaged PSNR, in a third less time, most of it the noise's
-  end of the search. One pass is unchanged, bit for bit, as every
-  one-pass stream.
+  end of the search. One pass was unchanged by that round, bit for bit;
+  since, one pass keeps the reference pool too, up to speed 7 (see
+  "Chroma" in "Against FFmpeg's libvpx-vp9").
 
   Where the chroma gap came from: the grainy pan is of a fractal, flat
   colour gradients and an edge of fine colour detail, and its luma moves
@@ -774,18 +775,47 @@ whole-process wall clock, the mean over the four rates of the median of
 three runs interleaved with FFmpeg's, on the shared 4-core VM (other
 sessions loaded it throughout: single runs moved by ±10%).
 
-At its defaults (BD-rate at the same PSNR-Y / averaged PSNR, time a
-stream, FFmpeg / Cutlass), on four threads (`-threads 4`, `threads=4`)
-and on one (`-threads 1`, `threads=1`: libvpx keeps its four tile
-columns there, this encoder codes one, which is why its BD-rate moves):
+At its defaults, on four threads (`-threads 4`, `threads=4`) and on one
+(`-threads 1`, `threads=1`: libvpx keeps its four tile columns there,
+this encoder codes one, which is why its BD-rate moves). BD-rate at the
+same PSNR-Y, PSNR-U, PSNR-V, FFmpeg's `psnr` "average" (pixel-weighted,
+(4 Y + U + V) / 6 in samples) and the (6 Y + U + V) / 8 average of the
+per-plane PSNRs; time a stream, FFmpeg / Cutlass, and their ratio:
 
-| Clip | Speed 5, 4 threads | Time | Ratio | Speed 5, 1 thread | Time | Ratio |
+| Speed 5, 4 threads | Y | U | V | FFmpeg avg | 6:1:1 | Time | Ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| three scenes | −3.2% | −1.1% | −3.3% | −2.9% | −3.0% | 6.91 / 3.81 s | 0.55 |
+| still scene, two jumps | −20.2% | −33.7% | −33.9% | −28.1% | −25.1% | 4.70 / 2.89 s | 0.62 |
+| grainy pan | −31.5% | −50.5% | −50.6% | −43.5% | −39.3% | 2.92 / 2.37 s | 0.81 |
+
+| Speed 5, 1 thread | Y | U | V | FFmpeg avg | 6:1:1 | Time | Ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| three scenes | −3.8% | −2.6% | −4.6% | −3.8% | −3.8% | 12.70 / 7.49 s | 0.59 |
+| still scene, two jumps | −22.0% | −36.3% | −36.6% | −30.6% | −27.3% | 11.55 / 6.71 s | 0.58 |
+| grainy pan | −32.9% | −54.9% | −55.2% | −46.9% | −42.1% | 7.27 / 5.93 s | 0.82 |
+
+On 16 November 2026, at commit `cc2ed538` (times: medians of three runs
+on four threads, two on one, interleaved with FFmpeg's and with the
+build before). Before it, in the same runs and measured the same way:
+
+| Speed 5, before | Y | U | V | FFmpeg avg | 6:1:1 | Ratio, 4 / 1 threads |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| three scenes | −9.2% / −3.0% | 6.10 / 3.13 s | 0.51 | −10.1% / −4.0% | 12.30 / 6.87 s | 0.56 |
-| still scene, two jumps | −13.7% / −10.3% | 4.18 / 2.45 s | 0.59 | −16.8% / −12.8% | 10.94 / 6.43 s | 0.59 |
-| grainy pan | −20.1% / −15.9% | 2.78 / 1.93 s | 0.69 | −19.6% / −20.5% | 6.93 / 5.15 s | 0.74 |
+| three scenes, 4 threads | −9.2% | +21.6% | +17.2% | +2.1% | −3.0% | 0.51 / 0.57 |
+| still scene, 4 threads | −13.7% | −3.3% | −3.8% | −7.1% | −10.3% | 0.58 / 0.60 |
+| grainy pan, 4 threads | −20.1% | −10.4% | −11.1% | −12.5% | −15.9% | 0.73 / 0.80 |
+| three scenes, 1 thread | −10.1% | +19.9% | +15.0% | +0.9% | −4.0% | |
+| still scene, 1 thread | −16.8% | −4.8% | −5.2% | −9.0% | −12.8% | |
+| grainy pan, 1 thread | −19.6% | −21.0% | −21.6% | −20.5% | −20.5% | |
 
-On 16 November 2026, at commit `e97ec739`. Every rate is under FFmpeg's
+See "Chroma" below for what changed. The tables after it are from the
+round before unless they say otherwise.
+
+The round before, on 16 November 2026, at commit `e97ec739`: speed 5 at
+−9.2% / −3.0%, −13.7% / −10.3% and −20.1% / −15.9% at the same PSNR-Y /
+6:1:1 average on four threads in 0.51, 0.59 and 0.69 of FFmpeg's time,
+and −10.1% / −4.0%, −16.8% / −12.8% and −19.6% / −20.5% on one in 0.56,
+0.59 and 0.74 (6.10 / 3.13 s, 4.18 / 2.45 s, 2.78 / 1.93 s and 12.30 /
+6.87 s, 10.94 / 6.43 s, 6.93 / 5.15 s a stream). Every rate was under FFmpeg's
 time: the closest are the pan at 4 Mb/s on four threads (0.77) and at
 2 Mb/s on one (0.78). The pan's rates, a stream (FFmpeg / Cutlass):
 
@@ -800,6 +830,112 @@ time, and −9.2% / −2.6%, −16.4% / −10.4% and −18.9% / −18.4% on one 
 0.73, 0.81 and 1.20 (the pan at 3 Mb/s in 10.3 s against 7.8 s). In the
 round before that: −14.0% / −6.6%, −6.3% / −4.5% and −16.2% / −15.5% at
 1.04, 1.39 and 1.71 times FFmpeg's time on four threads.
+
+**Chroma.** On the three scenes, at the same bits as FFmpeg's default,
+this encoder's PSNR-U and V were 1.2 dB under libvpx's with PSNR-Y level
+or over it: bits went to luma at chroma's expense. Taken apart by scene
+(the three 30-picture scenes coded alone, BD-rate against FFmpeg's
+default at the same PSNR-Y / U): `mandelbrot` −1.7% / +9.8%, the grainy
+pan −14.3% / +3.5%, `testsrc2` +9.1% / +50.6%. In the clip, the pan got
+half libvpx's bits (155 kB against 230 kB at 2 Mb/s) and its inter
+frames' chroma swung between 35.6 and 40.9 dB picture to picture: its
+content moves whole luma samples, so every other picture's chroma is
+at a half sample from LAST and GOLDEN, and blurs (see "Where the chroma
+gap came from" above). What moved (commit `cc2ed538`; speeds 9 and 10
+and the first pass of two are the same streams):
+
+- One pass keeps the reference pool of two passes up to speed 7
+  (`api::POOL_SPEED`): GOLDEN reads whichever of the last five pictures,
+  or the golden frame, predicts the chroma at whole samples. On its own
+  at speed 5: −16 / −32 points of BD-rate at the same PSNR-Y / U on the
+  pan, −16 / −19 on the still scene's clip, −1 / −5 on the three scenes.
+  At a fixed quantizer it costs no time; at a bitrate the pictures it
+  predicts better leave the bitrate finer quantizers, which on the pan
+  at 3 and 4 Mb/s took 1.3 to 1.6 times the time on one thread.
+- Up to speed 6 (`tile::CHROMA_SPEED`) chroma's coefficient bits weigh
+  0.8 of luma's in RD quantization (`CHROMA_RATE`; 1/0.7 before, libvpx
+  0.6 and 0.625 in its coefficient optimization), and chroma's error
+  weighs twice luma's in the trials' decisions of mode, partition,
+  transform size and skip (`CHROMA_DIST`). Before the pool, 0.8 traded 8
+  points of PSNR-Y for 12 of PSNR-U on the three scenes, with FFmpeg's
+  average where it was; with it, the trade on the three scenes is 7 for
+  15, FFmpeg's average gains 1.5, and the other two clips give 5 to 10
+  points of the pool's PSNR-Y margin for 1 to 9 of PSNR-U. The
+  error weight adds 3 points at PSNR-U and V and 1 to 2.5 at FFmpeg's
+  average for 0.6 of PSNR-Y on the three scenes.
+- The partition search's stop at a whole block that codes a little
+  (`CHEAP_RATE`, `CHEAP_DIST`) takes errors up to 0.64 of the step
+  squared a sample (0.16) and 12/256 bits a sample (8): at the finer
+  quantizers the pool brings, grain is over the step's noise and the
+  stop never came. The pan's time on one thread went back from 1.04 to
+  0.78–0.82 of FFmpeg's for under half a point of BD-rate (a point of
+  PSNR-U on the three scenes from the rate's 12).
+
+Speed 6 (four threads; before → now): three scenes −8.2 / +22.4 / +17.5
+/ +3.0 / −2.0% → −1.5 / +0.2 / −2.1 / −1.3 / −1.4% (Y / U / V / FFmpeg
+average / 6:1:1); still scene −12.6 / +0.4 / −0.1 / −4.2 / −8.3% →
+−21.2 / −34.9 / −35.1 / −29.3 / −26.2%; pan −17.7 / −11.8 / −12.4 /
+−13.3 / −15.4% → −30.7 / −49.1 / −49.2 / −42.3 / −38.3%; in 0.54, 0.59
+and 0.78 of FFmpeg's time (0.51, 0.55 and 0.75 before). Speed 7 against
+the same FFmpeg default: the still scene −5.2 / −6.1% at PSNR-Y / U
+(+17.9 / +27.9% before), the pan −13.1 / −23.1% (−1.4 / +9.5%), the
+three scenes still +23% / +79% (+25% / +94%). Speed 8 is changed only in
+its alt-refs, coded at speed 6 (within 3 points, a little worse).
+
+Two passes (`twopass=1` against `-pass 1/2`, four threads; before →
+now): three scenes −11.2 / +28.6 / +21.0 / +3.7 / −2.4% → −4.7 / +9.6 /
++4.5 / −0.1 / −1.7%; still scene −43.1 / −26.7 / −26.8 / −35.1 /
+−38.4% → −38.3 / −32.8 / −32.7 / −35.2 / −36.4%; pan −24.1 / −15.7 /
+−15.4 / −19.7 / −21.1% → −15.9 / −25.5 / −24.9 / −21.0 / −19.8%, in
+1.06, 1.07 and 0.97 of the time before (still about a third of
+libvpx's). Two passes already had the pool; the weights alone trade
+luma for chroma there, and on the pan they lose 8 points of PSNR-Y for
+10 of PSNR-U. Other weights for the second pass (0.65 to 1.43 and 1 to
+3) were no better at FFmpeg's average.
+
+Realtime (speeds 9 and 10 against `-deadline realtime -cpu-used 8`, the
+same streams as before): speed 10 −6.0 / +4.9 / +1.7 / −2.5 / −4.1% on
+the three scenes, −66.7 / −52.8 / −53.4 / −61.3 / −64.8% on the still
+scene, n/a / −56.6 / −57.5 / −67.8 / −74.3% on the pan; speed 9 −14.7 /
+−2.9 / −5.3 / −10.6 / −12.5%, −68.9 / −55.0 / −55.7 / −63.5 / −67.0%,
+n/a / −58.8 / −59.4 / −69.6 / −75.7%. Speed 10's chroma on the three
+scenes is still behind; a lower chroma lambda in its dead-zone costs
+(0.7 or 0.5 of luma's) moved 2.5 points of PSNR-U for 3 of PSNR-Y and
+lost at FFmpeg's average; the pool changes nothing there (no lookahead)
+and the error weight lost 4 points of PSNR-Y for 2 of PSNR-U, so they
+are left as they were.
+
+Tried and left out: a finer chroma quantizer in the frame header
+(`uv_dc_delta_q`, `uv_ac_delta_q` −8 and −15 on `testsrc2`: PSNR-U 3 to
+7 points worse at the same bits, as RD quantization then drops more),
+every chroma intra mode tried (or the best by chroma SATD; in every
+frame or key frames only: within 1.5 points), the chroma SAD weighing
+two or three times luma's in the candidates' ranking (within a point,
+3 worse on the pan at three), the loop filter level ±3 and ±6 (within 2
+points, but the pan 4 points worse at PSNR-U at −3), golden frames and
+alt-refs at 0.45 or 0.35 of the inter step (0.55; worse on two clips),
+the probe's inter model scaled for the pool (rates 2 to 4% nearer on the
+pan, 0.5 to 3.5 points worse on the three scenes), a key frame's spread of its
+excess bits also for a cut (1 point better at FFmpeg's average on the
+three scenes, but 3% over the rate), a floor on the inter quantizer at
+the picture's noise (time, but 10 to 25% under the rate), and a stop
+of the partition search at a coded block under the picture's noise (40
+points worse).
+
+Still behind: `testsrc2` alone, where libvpx is ahead at every speed
+here on PSNR-Y too (at fixed quantizers against `-crf`: +9% / +33% at
+PSNR-Y / U at speed 5, −2.8% / +18% at speed 1); its key frame takes 9%
+more bits than libvpx's at the same PSNR-Y with 1.2 dB less PSNR-U.
+Rate: the grainy pan predicts nearly whole from the pool (inter frames
+of 1 to 2 kB at 2 Mb/s, PSNR-Y level at 44.3 dB from 2.7 to 3.9 Mb/s),
+and one pass comes in 12%, 16%, 9% and 3% under 1, 2, 3 and 4 Mb/s
+there (6%, 2% under and 0.3%, 1.5% over before; FFmpeg 14% and 1% over
+and 12% and 18% under); the other two clips are where they were (the
+three scenes 6% over at 1 Mb/s, the still scene within 5%). At a
+constant bitrate (2 Mb/s, `cbr=1000`, speed 5) the pan comes in 6.4%
+over (2.6% before), the other two within 1.6% and 3.8% as before. The pan on
+four threads is at 0.81 of FFmpeg's time (0.73 before), the rest at
+0.55 to 0.62.
 
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and
@@ -931,6 +1067,15 @@ and as measured before it and three rounds before:
 Sampled at `q=50` to `225` instead (seven points), the still scene is at
 0.0% / −0.1% (+3.8% / +4.1% before). There the gap was at the low rates
 (0.3 to 0.6 Mb/s), and is still (see "What is left").
+
+After "Chroma" (commit `cc2ed538`; Y / U / V / FFmpeg average / 6:1:1,
+four threads): three scenes +0.2 / −10.2 / −10.1 / −4.1 / −2.5% (−5.3 /
++11.2 / +9.9 / +1.7 / −1.4% before), still scene −0.9 / −33.3 / −33.3 /
+−23.1 / −15.2% (−4.4 / −3.5 / −3.7 / −3.4 / −4.1%), pan −21.1 / −39.7 /
+−39.7 / −32.5 / −27.9% (−13.9 / −5.0 / −5.6 / −7.5 / −10.8%). At a fixed
+quantizer the chroma weights move bits from luma to chroma with no rate
+control to give them back: PSNR-Y on the three scenes is now level with
+libvpx's (+0.2%), behind by a hair.
 
 What moved in this round (16 November 2026, commits `84916b5c` and
 `ca9c61bf`): the realtime speeds under FFmpeg's realtime 8 time, and
@@ -1122,17 +1267,24 @@ What is left:
   it lost the pan), the above-right seed of the search dropped so that a
   row needs only the superblock above it (8% faster, 5% more bits on the
   pan), three or four rows on threads per tile column (no faster).
-- Chroma, and speed 6's margin. Speed 6 is ahead of libvpx's cpu-used
-  1 on the three scenes by 2.0 points at the averaged PSNR (8.2 at
-  PSNR-Y), speed 5 by 3.0: chroma is still where the margin is thin.
-  At speed 6, a coarser gate on the smaller transform (128 bits an
+- Time on the pan with the reference pool in one pass (see "Chroma"):
+  0.81 of FFmpeg's on four threads and 0.78 to 0.82 on one, at its
+  finer quantizers; and its rate, 3 to 16% under (see there).
+- Chroma, and the three scenes' margin. Speed 5 is now ahead of libvpx's
+  cpu-used 1 there on every plane and average, but by 1.1 to 4.6
+  points (on four threads: −3.2% PSNR-Y, −1.1% PSNR-U), and speed 6 is
+  at +0.2% at PSNR-U; `testsrc2` is where it is lost (see "Chroma").
+  Speed 10 is +4.9% at PSNR-U there and two passes +9.6% (their PSNR-Y
+  −6.0% and −4.7%). Before this round: speed 6 was ahead of libvpx's
+  cpu-used 1 on the three scenes by 2.0 points at the averaged PSNR (8.2
+  at PSNR-Y), speed 5 by 3.0. At speed 6, a coarser gate on the smaller transform (128 bits an
   8×8) lost 5 points, intra left out of 64×64 blocks 1.1, speed 5's
   threshold for trying intra at eight levels 1.9, and no compound
   prediction or no whole-sample check around the diamond's choice 2.7
   and 4 points. Weighing chroma's bits more in RD quantization (2.2 times
   luma's, from 1/0.7) gains 6–17% at the same PSNR-Y and 1–7% at the
   6:1:1 average but loses 2–5% at FFmpeg's 4:1:1 average and 9–18% at
-  PSNR-U, so it is left as it was.
+  PSNR-U, so it was left as it was (and is now 0.8, the other way).
 - Constant quality on the still scene: −4.4% / −4.1% at `q=60` to
   `210`, but 0.0% / −0.1% sampled at `q=50` to `225`: at `-crf 48` (0.3
   Mb/s) libvpx codes the pan after the still picture (frames 31 to 90) in
@@ -1262,11 +1414,14 @@ carries the colour space, range and render size.
   back: to look into).
 - Against FFmpeg's `libvpx-vp9` as FFmpeg runs it ("Against FFmpeg's
   libvpx-vp9" above), the default speed takes fewer bits at the same
-  PSNR on every clip, in 0.51 to 0.74 of libvpx's time on one thread and
-  on four; two passes in about a third of its time; constant quality
-  with 1.4% to 10.8% fewer bits at the same averaged PSNR; speed 6
-  fewer bits than libvpx's default on every clip too (2.0% to 15.4% at
-  the same averaged PSNR), in 0.89 to 0.96 of speed 5's time. Speed 10
+  PSNR-Y, PSNR-U, PSNR-V and averaged PSNR on every clip (1.1% to 55%),
+  in 0.55 to 0.82 of libvpx's time on one thread and on four; two passes
+  in about a third of its time (but 9.6% more bits at the same PSNR-U on
+  the three scenes); constant quality with 2.5% to 28% fewer bits at the
+  same 6:1:1 average (PSNR-Y level on the three scenes); speed 6 fewer
+  bits than libvpx's default on every clip at PSNR-Y and the averages
+  (+0.2% at PSNR-U on the three scenes), in 0.95 to 0.98 of speed 5's
+  time. Speed 10
   takes 0.82 to 0.91 of libvpx realtime 8's time on four threads and
   0.83 to 0.89 on one, with 4% to 74% fewer bits at the same PSNR; speed
   9 takes 0.77 to 0.94 of it, with 12% to 76% fewer.

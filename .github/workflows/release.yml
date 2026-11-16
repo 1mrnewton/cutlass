@@ -36,7 +36,7 @@ env:
   # beside it; the update check asks for them by these names (crates/update
   # checks they are here). Cutlass.apk joins them when the Android upload
   # key is set, and gets a checksum the same way.
-  PACKAGES: Cutlass.dmg Cutlass-setup.exe Cutlass-x86_64.AppImage
+  PACKAGES: Cutlass.dmg Cutlass-x86_64-setup.exe Cutlass-aarch64-setup.exe Cutlass-x86_64.AppImage
 
 jobs:
   version:
@@ -166,10 +166,28 @@ jobs:
           if-no-files-found: error
 
   windows:
+    # One installer per processor, each built, installed and smoke tested on
+    # a machine of its own kind. The installer refuses a PC that cannot run
+    # it; x64 Windows on Arm runs through emulation, slower than its own.
     needs: version
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x86_64
+          - runner: windows-11-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      INSTALLER: Cutlass-${{ matrix.arch }}-setup.exe
     steps:
       - uses: actions/checkout@v4
+      # The Arm image is not promised to carry Python, which the build and
+      # packaging scripts run on.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools
@@ -180,19 +198,21 @@ jobs:
         run: |
           command -v makensis || choco install nsis -y --no-progress
           echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+      # The script reads the processor from cutlass.exe and fails when it
+      # is not the one the installer's name says.
       - name: Package
-        run: python scripts/windows_installer.py target/release/cutlass.exe dist/Cutlass-setup.exe
+        run: python scripts/windows_installer.py target/release/cutlass.exe dist/${{ env.INSTALLER }}
       - name: Install and smoke test
         shell: pwsh
         run: |
           $dir = "$env:RUNNER_TEMP\CutlassInstall"
-          Start-Process -Wait -FilePath dist\Cutlass-setup.exe -ArgumentList "/S", "/D=$dir"
+          Start-Process -Wait -FilePath "dist\$env:INSTALLER" -ArgumentList "/S", "/D=$dir"
           python scripts/smoke.py "$dir\cutlass.exe"
           if ($LASTEXITCODE -ne 0) { throw "the smoke test failed" }
       - uses: actions/upload-artifact@v4
         with:
-          name: release-windows
-          path: dist/Cutlass-setup.exe
+          name: release-windows-${{ matrix.arch }}
+          path: dist/${{ env.INSTALLER }}
           if-no-files-found: error
 
   appimage:

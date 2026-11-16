@@ -17,8 +17,8 @@ pub const FEED_LIMIT: usize = 1 << 20;
 pub enum Platform {
     /// `Cutlass.dmg`.
     MacOs,
-    /// `Cutlass-setup.exe`.
-    Windows,
+    /// `Cutlass-<arch>-setup.exe`, the installer for that processor.
+    Windows { arch: &'static str },
     /// `Cutlass-<arch>.AppImage`.
     Linux { arch: &'static str },
 }
@@ -30,7 +30,9 @@ impl Platform {
         if cfg!(target_os = "macos") {
             Some(Self::MacOs)
         } else if cfg!(target_os = "windows") {
-            Some(Self::Windows)
+            Some(Self::Windows {
+                arch: std::env::consts::ARCH,
+            })
         } else if cfg!(target_os = "linux") {
             Some(Self::Linux {
                 arch: std::env::consts::ARCH,
@@ -45,7 +47,7 @@ impl Platform {
     pub fn asset_name(self) -> String {
         match self {
             Self::MacOs => "Cutlass.dmg".to_owned(),
-            Self::Windows => "Cutlass-setup.exe".to_owned(),
+            Self::Windows { arch } => format!("Cutlass-{arch}-setup.exe"),
             Self::Linux { arch } => format!("Cutlass-{arch}.AppImage"),
         }
     }
@@ -170,8 +172,10 @@ mod tests {
         let assets: Vec<String> = [
             "Cutlass.dmg",
             "Cutlass.dmg.sha256",
-            "Cutlass-setup.exe",
-            "Cutlass-setup.exe.sha256",
+            "Cutlass-x86_64-setup.exe",
+            "Cutlass-x86_64-setup.exe.sha256",
+            "Cutlass-aarch64-setup.exe",
+            "Cutlass-aarch64-setup.exe.sha256",
             "Cutlass-x86_64.AppImage",
             "Cutlass-x86_64.AppImage.sha256",
         ]
@@ -208,7 +212,8 @@ mod tests {
             .collect();
         for platform in [
             Platform::MacOs,
-            Platform::Windows,
+            Platform::Windows { arch: "x86_64" },
+            Platform::Windows { arch: "aarch64" },
             Platform::Linux { arch: "x86_64" },
         ] {
             let name = platform.asset_name();
@@ -224,7 +229,14 @@ mod tests {
         let json = feed("v0.2.0");
         for (platform, name) in [
             (Platform::MacOs, "Cutlass.dmg"),
-            (Platform::Windows, "Cutlass-setup.exe"),
+            (
+                Platform::Windows { arch: "x86_64" },
+                "Cutlass-x86_64-setup.exe",
+            ),
+            (
+                Platform::Windows { arch: "aarch64" },
+                "Cutlass-aarch64-setup.exe",
+            ),
             (
                 Platform::Linux { arch: "x86_64" },
                 "Cutlass-x86_64.AppImage",
@@ -256,7 +268,12 @@ mod tests {
         }
         let newer = Version::parse("0.3.0").unwrap();
         assert_eq!(
-            offer(&feed("v0.2.0"), &newer, Platform::Windows).unwrap(),
+            offer(
+                &feed("v0.2.0"),
+                &newer,
+                Platform::Windows { arch: "x86_64" }
+            )
+            .unwrap(),
             None
         );
     }
@@ -290,7 +307,7 @@ mod tests {
         let unsummed = json.replace("Cutlass.dmg.sha256", "Cutlass.dmg.md5");
         assert_eq!(offer(&unsummed, &running(), Platform::MacOs).unwrap(), None);
         assert!(
-            offer(&unsummed, &running(), Platform::Windows)
+            offer(&unsummed, &running(), Platform::Windows { arch: "x86_64" })
                 .unwrap()
                 .is_some()
         );

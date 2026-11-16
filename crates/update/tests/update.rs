@@ -197,10 +197,13 @@ fn a_newer_release_downloads_checked_and_an_old_one_offers_nothing() {
 
 #[test]
 fn a_package_that_does_not_match_its_checksum_is_refused() {
-    let platform = Platform::Windows;
+    let platform = Platform::Windows { arch: "x86_64" };
     let package = vec![7u8; 300_000];
     let mut files = files_for(platform, &package);
-    files.insert("/pkg/Cutlass-setup.exe".to_owned(), vec![8u8; 300_000]);
+    files.insert(
+        "/pkg/Cutlass-x86_64-setup.exe".to_owned(),
+        vec![8u8; 300_000],
+    );
     let files = serve(files);
     let mut feed_files = HashMap::new();
     feed_files.insert(
@@ -223,7 +226,7 @@ fn a_package_that_does_not_match_its_checksum_is_refused() {
         matches!(&error, UpdateError::Network(message) if message.contains("checksum")),
         "{error}"
     );
-    assert!(!folder.join("0.2.0/Cutlass-setup.exe").exists());
+    assert!(!folder.join("0.2.0/Cutlass-x86_64-setup.exe").exists());
     fs::remove_dir_all(&folder).unwrap();
 }
 

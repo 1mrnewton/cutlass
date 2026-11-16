@@ -1,8 +1,10 @@
 name: release
 
-# A tag `v<version>` builds the desktop packages and the Android APK,
-# writes `<package>.sha256` beside each, and uploads them as a draft GitHub
-# release. A check job
+# A tag `v<version>` builds every package, one per processor: the macOS
+# app for Apple Silicon and Intel, the Windows installer for x64 and Arm,
+# the Linux AppImage for x64, and one Android APK for Arm and x86_64. It
+# writes `<package>.sha256` beside each and uploads them as a draft GitHub
+# release. The iOS app (Arm) goes to TestFlight instead. A check job
 # downloads the draft's files and checks each against its checksum; the
 # draft is then published by hand. The desktop's update check reads the
 # published release from the API's `releases/latest`, which leaves drafts
@@ -374,6 +376,95 @@ jobs:
           name: play-android
           path: ${{ runner.temp }}/Cutlass.aab
           if-no-files-found: error
+
+  ios:
+    # The iPhone and iPad app, for Arm devices. It goes to TestFlight, not
+    # to the GitHub release: an iOS app installs only through the App Store
+    # or TestFlight. With the App Store Connect API key above, Xcode signs
+    # it for distribution with certificates Apple keeps for the team (the
+    # key needs the Admin role) and uploads it; the build then waits in
+    # App Store Connect for testers to be given it. That needs the app's
+    # record in App Store Connect, under com.scytheralpha.cutlass. Without
+    # the key, or for a pre-release tag, the app is only built, unsigned.
+    # The draft release does not wait on this job.
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+      - name: Rust library and bindings
+        run: |
+          apps/ios/build-rust.sh
+          git diff --exit-code -- apps/ios/ios/Generated apps/ios/Rust/include
+      # The workspace version, as the App Store takes it: the marketing
+      # version without a pre-release part, and a build number that grows
+      # with it (0.8.0 is 8000), as on Android.
+      - name: Version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          release=${version%%-*}
+          IFS=. read -r major minor patch <<< "$release"
+          echo "MARKETING_VERSION=$release" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$((major * 1000000 + minor * 1000 + patch))" >> "$GITHUB_ENV"
+      - name: Upload to TestFlight or only build
+        id: lane
+        env:
+          API_KEY: ${{ secrets.APPSTORE_API_KEY_P8 }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) echo "upload=no" >> "$GITHUB_OUTPUT" ;;
+            *) echo "upload=$([ -n "$API_KEY" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: Build unsigned
+        if: steps.lane.outputs.upload == 'no'
+        run: |
+          xcodebuild build -project apps/ios/ios.xcodeproj -scheme ios -configuration Release \
+            -destination generic/platform=iOS -derivedDataPath "$RUNNER_TEMP/ios" \
+            CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="$MARKETING_VERSION" CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+          app="$RUNNER_TEMP/ios/Build/Products/Release-iphoneos/ios.app"
+          lipo -archs "$app/ios" | grep -qx arm64
+      - name: App Store Connect API key
+        if: steps.lane.outputs.upload == 'yes'
+        env:
+          API_KEY: ${{ secrets.APPSTORE_API_KEY_P8 }}
+        run: echo "$API_KEY" | base64 --decode > "$RUNNER_TEMP/appstore.p8"
+      - name: Archive, sign and upload to TestFlight
+        if: steps.lane.outputs.upload == 'yes'
+        env:
+          KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+        run: |
+          auth=(-allowProvisioningUpdates -authenticationKeyPath "$RUNNER_TEMP/appstore.p8"
+            -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$ISSUER")
+          archive="$RUNNER_TEMP/Cutlass.xcarchive"
+          xcodebuild archive -project apps/ios/ios.xcodeproj -scheme ios -configuration Release \
+            -destination generic/platform=iOS -archivePath "$archive" \
+            MARKETING_VERSION="$MARKETING_VERSION" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" "${auth[@]}"
+          cat > "$RUNNER_TEMP/export.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>FR82ZG29F6</string>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$RUNNER_TEMP/export.plist" \
+            -exportPath "$RUNNER_TEMP/export" "${auth[@]}"
+      - name: Remove the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/appstore.p8"
+      - name: Say what happened to iOS
+        run: |
+          if [ "${{ steps.lane.outputs.upload }}" = yes ]; then
+            echo "iOS: $MARKETING_VERSION ($BUILD_NUMBER) uploaded to TestFlight."
+          else
+            echo "::warning::iOS: built unsigned only (a pre-release tag, or no APPSTORE_API_KEY_P8)."
+          fi
 
   publish:
     # The packages go up as a draft, which the update check never sees.

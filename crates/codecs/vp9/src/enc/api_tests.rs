@@ -2518,6 +2518,57 @@ fn ssim_tuning_moves_bits_to_flat_blocks() {
 }
 
 #[test]
+fn film_tuning_keeps_more_grain() {
+    // A flat ramp under fresh faint grain each frame: tuned for film, the
+    // inter frames' reconstruction keeps more of the grain's variance
+    // (candidates that smooth it cost more in the RD search).
+    let (w, h) = (128u32, 64u32);
+    let frame = |i: u32| {
+        let mut f = moving(w, h, 0);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let (r, c) = (k as u32 / w, k as u32 % w);
+            let n = ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 29;
+            *v = (100 + r / 8 + c / 16 + n) as u8;
+        }
+        f
+    };
+    let grain = |tune_content| {
+        let opts = super::Vp9Options {
+            tune_content,
+            speed: 5,
+            ..lag0(100)
+        };
+        let p = encode_with(opts, (w, h), 6, frame);
+        let mut dec = Decoder::new();
+        let mut var = 0.0;
+        for (i, p) in p.iter().enumerate() {
+            let y = dec.decode(&p.data).expect("decode").expect("shown").y;
+            if i == 0 {
+                continue;
+            }
+            // Each 8×8 block's variance about its mean.
+            for by in 0..h as usize / 8 {
+                for bx in 0..w as usize / 8 {
+                    let at =
+                        |r: usize, c: usize| f64::from(y[(by * 8 + r) * w as usize + bx * 8 + c]);
+                    let mean = (0..64).map(|k| at(k / 8, k % 8)).sum::<f64>() / 64.0;
+                    var += (0..64)
+                        .map(|k| (at(k / 8, k % 8) - mean).powi(2))
+                        .sum::<f64>();
+                }
+            }
+        }
+        (var, packet_bytes(&p))
+    };
+    let (plain, plain_bytes) = grain(super::TuneContent::Default);
+    let (film, film_bytes) = grain(super::TuneContent::Film);
+    assert!(
+        film > plain,
+        "{film} against {plain} ({film_bytes} and {plain_bytes} bytes)"
+    );
+}
+
+#[test]
 fn the_denoiser_brings_a_noisy_still_picture_near_the_clean_one() {
     // A still picture under fresh noise each frame, coded losslessly: what
     // comes out is the denoised source.

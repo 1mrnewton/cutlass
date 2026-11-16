@@ -125,6 +125,8 @@ pub struct Stream {
     /// Screen content (libvpx's `tune-content=screen`): see
     /// [`tile::Shared::screen`].
     pub screen: bool,
+    /// Film (libvpx's `tune-content=film`): see [`tile::Shared::film`].
+    pub film: bool,
     /// libvpx's `tune=ssim`: see [`tile::Shared::ssim`].
     pub ssim: bool,
 }
@@ -140,6 +142,7 @@ impl Default for Stream {
             frame_parallel: false,
             static_thresh: 0,
             screen: false,
+            film: false,
             ssim: false,
         }
     }
@@ -904,6 +907,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             noise: fp.noise,
             static_thresh: self.stream.static_thresh,
             screen: self.stream.screen,
+            film: self.stream.film,
             ssim: &self.ssim,
             global: self.global.take(),
             gold_mv: self.gold_mv.take(),

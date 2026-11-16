@@ -251,6 +251,12 @@ pub struct Shared<'a, P> {
     /// from nothing before them), and a whole-sample vector that matches
     /// exactly is not refined (text moves by whole samples).
     pub screen: bool,
+    /// Film (libvpx's `tune-content=film`): an inter frame's candidates
+    /// whose reconstruction is smoother than the source on a block of
+    /// little variance (film grain lost), and intra and compound
+    /// candidates on a block whose 8×8 parts differ in energy, cost more
+    /// in the RD search ([`Tile::film_rd`]).
+    pub film: bool,
     /// A vector the whole picture moved by from LAST, far past where the
     /// searches reach (see [`super::FrameEncoder::set_global`]): a start
     /// of every block's search on LAST.
@@ -326,6 +332,10 @@ impl Default for TxRd {
 
 /// [`TxRd::rate`] not counted.
 const NO_RATE: u32 = u32::MAX;
+
+/// See [`Tile::film_rd`]: libvpx's `LOW_VAR_THRESH`, a variance a 8×8
+/// block (64 times a sample's).
+const FILM_VAR: u64 = 250;
 
 /// See [`Shared::screen`]: the mean error a sample of the best inter
 /// candidate over which an inter frame's block tries intra modes. On the
@@ -777,6 +787,20 @@ fn residual_of<P: EncPixel>(
 /// length that is a multiple of 16): sixteen squares at a time in 32 bits
 /// (at most 268 million), so that it runs in vector lanes.
 #[inline(always)]
+/// The variance of a `w`×`h` block of samples (rows `stride` apart), times
+/// its samples.
+fn block_var<P: Pixel>(a: &[P], stride: usize, w: usize, h: usize) -> u64 {
+    let (mut sum, mut sq) = (0u64, 0u64);
+    for r in 0..h {
+        for &v in &a[r * stride..r * stride + w] {
+            let v = v.get() as u64;
+            sum += v;
+            sq += v * v;
+        }
+    }
+    sq - sum * sum / (w * h) as u64
+}
+
 fn sum_sq(res: &[i32]) -> i64 {
     let mut total = 0i64;
     for c in res.as_chunks::<16>().0 {
@@ -1710,6 +1734,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // sample predicted, or reconstructed, before it is read), so the
         // samples the one before left need not be put back.
         let inside = row + bh_mi <= s.mi_rows && col + bw_mi <= s.mi_cols;
+        // Film: the range of the energy of the block's 8×8 parts.
+        let film = s.film && !s.intra_frame;
+        let energy =
+            (film && bsize >= geom::BLOCK_16X16 && inside).then(|| self.energy_range(&base));
         let try_one =
             |t: &mut Self, i: usize, b: &Blk, best: &mut (f64, usize), last: &mut usize| {
                 if *last != usize::MAX {
@@ -1722,6 +1750,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let c0 = t.cost;
                 let d = t.code_block(b);
                 let j = d + (t.cost - c0) as f64 * lam;
+                let j = if film { t.film_rd(b, j, energy) } else { j };
                 *last = i;
                 if j < best.0 {
                     *best = (j, i);
@@ -1799,6 +1828,92 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         }
         self.last_skip = self.choice_skip;
         (best.0, cands[best.1])
+    }
+
+    /// Film ([`Shared::film`]): the RD cost `j` of the inter frame's
+    /// candidate `b` just coded, raised as libvpx's
+    /// `rd_variance_adjustment` and its film bias raise it: an intra
+    /// candidate by the range of the energy of the block's 8×8 parts
+    /// (`energy`, from 16×16; DC by all of it, the others by a quarter),
+    /// a compound one by a quarter when they differ; then, where the
+    /// source or the reconstruction has a variance of at most
+    /// [`FILM_VAR`] a 8×8 (a second pass: twice that for intra and
+    /// compound, ten times for DC), by 2.5 times the share the
+    /// reconstruction's variance falls short of the source's (a quarter
+    /// of what it is over), at most 2.5 times (5 for intra and
+    /// compound).
+    fn film_rd(&mut self, b: &Blk, j: f64, energy: Option<(i32, i32)>) -> f64 {
+        let s = self.s;
+        let intra = b.refs[0] == INTRA_FRAME;
+        let comp = b.refs[1] != INTRA_FRAME;
+        let dc = intra && b.mode == geom::DC;
+        let mut j = j;
+        if let Some((lo, hi)) = energy
+            && hi > lo
+        {
+            let r = f64::from(hi - lo);
+            if dc {
+                j += j * r;
+            } else if intra {
+                j += j * r / 4.0;
+            } else if comp {
+                j += j / 4.0;
+            }
+        }
+        let (_, _, vw, vh) = self.visible(b, 0);
+        let (w, h) = (vw * 4, vh * 4);
+        if w == 0 || h == 0 {
+            return j;
+        }
+        let (x, y) = (b.col * 8, b.row * 8);
+        let shift = 2 * u32::from(s.h.bit_depth - 8);
+        let n8 = ((w * h) / 64).max(1) as u64;
+        let (src, sst) = (s.src.planes[0], s.src.strides[0]);
+        let sv = (block_var(&src[y * sst + x..], sst, w, h) >> shift) / n8;
+        let v = &mut self.rec.views()[0];
+        let stride = v.stride;
+        let rv = (block_var(v.at(y, x), stride, w, h) >> shift) / n8;
+        let mut thresh = FILM_VAR;
+        if s.second_pass {
+            if dc {
+                thresh *= 10;
+            } else if intra || comp {
+                thresh *= 2;
+            }
+        }
+        if sv.min(rv) > thresh {
+            return j;
+        }
+        let diff = if sv > rv {
+            (sv - rv) * 2
+        } else {
+            (rv - sv) / 2
+        };
+        let mut f = (250 * diff / sv.max(1)).min(250);
+        if intra || comp {
+            f *= 2;
+        }
+        j + j * f as f64 / 100.0
+    }
+
+    /// The least and most energy of the 8×8 parts of `b`'s source luma
+    /// (libvpx's `vp9_get_sub_block_energy`: the log of 256 times the
+    /// variance a sample, less 10, rounded, from −4 to 1).
+    fn energy_range(&self, b: &Blk) -> (i32, i32) {
+        let s = self.s;
+        let (src, sst) = (s.src.planes[0], s.src.strides[0]);
+        let shift = 2 * u32::from(s.h.bit_depth - 8);
+        let (mut lo, mut hi) = (u64::MAX, 0);
+        for r in 0..b.bh {
+            for c in 0..b.bw {
+                let (x, y) = ((b.col + c) * 8, (b.row + r) * 8);
+                let v = (block_var(&src[y * sst + x..], sst, 8, 8) >> shift) * 4;
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        let e = |v: u64| ((v as f64 + 1.0).ln() - 10.0).round().clamp(-4.0, 1.0) as i32;
+        (e(lo), e(hi))
     }
 
     /// A block at `(row, col)` with the defaults.

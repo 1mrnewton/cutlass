@@ -11,7 +11,8 @@
 //! `keyint_min=N`, `max_intra=PCT`, `tile_columns=0..6`, `level=N`
 //! (10 × the level) and `lossless=1`; `drop=PCT` (FFmpeg's
 //! `-drop-threshold`: dropped frames leave gaps in the IVF timestamps),
-//! `screen=1` (`-tune-content screen`), `ssim=1` (`-tune ssim`) and
+//! `screen=1` (`-tune-content screen`), `film=1` (`-tune-content film`),
+//! `ssim=1` (`-tune ssim`) and
 //! `noise=0..6` (`-noise-sensitivity`); `layers=2|3` (temporal layers),
 //! with `keep_layers=N` writing only the packets of the lowest N; and a
 //! region of interest map: `roi_q=N` (the middle half N quantizer
@@ -128,6 +129,11 @@ fn main() -> Result<(), String> {
             "ssim" => {
                 if n != 0 {
                     opts.tune = Tune::Ssim;
+                }
+            }
+            "film" => {
+                if n != 0 {
+                    opts.tune_content = TuneContent::Film;
                 }
             }
             "screen" => {

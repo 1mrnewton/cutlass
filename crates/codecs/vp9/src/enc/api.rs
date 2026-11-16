@@ -139,6 +139,12 @@ pub enum TuneContent {
     /// in inter frames at a smaller error of the best inter candidate,
     /// and no sub-sample refinement of a vector that matches exactly.
     Screen,
+    /// Film with grain: in inter frames' RD searches (speeds 0 to 6),
+    /// candidates that lose the grain of a flat block (a reconstruction
+    /// smoother than the source), and intra and compound ones on blocks
+    /// of mixed texture, which blur grain, cost more (libvpx's
+    /// `rd_variance_adjustment` and film bias).
+    Film,
 }
 
 /// How the encoder codes.
@@ -381,6 +387,7 @@ impl Vp9Options {
             frame_parallel: self.frame_parallel,
             static_thresh: self.static_thresh,
             screen: self.tune_content == TuneContent::Screen,
+            film: self.tune_content == TuneContent::Film,
             ssim: self.tune == Tune::Ssim,
         }
     }

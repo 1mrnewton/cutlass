@@ -1581,7 +1581,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-tune psnr` | `tune` | the default |
 | `-tune ssim` | `tune=ssim` | `tune: Tune::Ssim` (`ssim=1`, added); see "Options measured" |
 | `-tune-content screen` | `tune-content` | `tune_content: TuneContent::Screen` (`screen=1`, added); see "Options measured" |
-| `-tune-content film` | `tune-content` | missing (libvpx's VP9 encoder changes little for it) |
+| `-tune-content film` | `tune-content` | `tune_content: TuneContent::Film` (`film=1`, added): libvpx's RD penalties on grain lost; see "Options measured" |
 | `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ), or `aq_mode: AqMode::Variance` |
 | `-aq-mode 3` / `4` | cyclic refresh, equator360 | `aq_mode`: `AqMode::CyclicRefresh` (`aq=3`), `AqMode::Equator360` (`aq=4`), added |
 | `-aq-mode 2` | complexity AQ | `aq_mode: AqMode::Complexity` (`aq=2`, added): each superblock's segment by the rate its source's variance projects, before it is coded (libvpx's is the rate its search spent); see "Options measured" |
@@ -1733,6 +1733,41 @@ Speed 6 without it was 27% behind libvpx's good deadline on this clip
 interval). libvpx's own `-tune-content screen` changes nothing at the
 good deadline (the same bytes) and costs 40% at realtime 8 here, where it
 also overshoots the rate by 1.5 to 2.6 times.
+
+**Film** (`TuneContent::Film`, `-tune-content film`). What libvpx's
+film tuning does, in `vp9_rdopt.c`, applied in this encoder's RD search
+of inter frames (speeds 0 to 6; libvpx's realtime search has none of
+it): each candidate's RD cost, once it is coded, is raised by libvpx's
+`rd_variance_adjustment`, where the lower of the source's and the
+reconstruction's variance is at most 250 an 8×8 block (in a second pass
+500 for intra and compound candidates, 2500 for DC): by 2.5 times the
+share by which the reconstruction's variance falls short of the
+source's (a quarter of the share it is over), at most 2.5 times, twice
+that for intra and compound candidates (libvpx without film: at most
+16%, from 125). Before that, on blocks from 16×16 whose 8×8 parts differ
+in energy (libvpx's `vp9_get_sub_block_energy` range), an intra DC
+candidate's cost is raised by the range, other intra ones by a quarter
+of it, compound ones by a quarter. Grain is noise a smooth prediction
+drops; the penalties keep it. Not done: libvpx's film also searches
+more intra modes in its speed features, weakens its temporal filter by 2
+on 32×32 blocks of variance at most 2 a sample, and scales the 250 by
+the first pass's noise estimate of the group (this encoder has none).
+On the grainy pan, one pass and two at speed 5 (four threads) against
+FFmpeg's default and `-tune-content film`, BD-rate at the same PSNR-Y /
+FFmpeg's average, and the reconstruction's share of the source's
+variance in its flat 8×8 blocks (variance under 8 a sample: 77% of the
+blocks) at 1 to 4 Mb/s:
+
+| | BD-rate against the same without film | Grain kept, without → with film |
+| --- | --- | --- |
+| Speed 5, `film=1` | +2.6 / +5.5% | 25.5, 24.6, 25.2, 27.9% → 25.6, 24.8, 25.7, 29.0% |
+| Two passes, `film=1` | +4.9 / +7.9% | 25.0, 24.4, 24.4, 25.1% → 25.3, 24.7, 25.0, 26.6% |
+| libvpx `-tune-content film` | +1.7 / −0.1% | 25.2, 24.7, 24.8, 25.2% → 26.9, 25.5, 25.5, 26.3% |
+| Speed 5 `film=1` against libvpx `-tune-content film` | −31.3 / −41.2% | |
+
+Both keep a little more grain for a few percent of PSNR, ours more of it
+at the higher rates and libvpx's at the lowest; ours in 0.95 to 1.09 of
+the time without it.
 
 **SSIM tuning** (`Tune::Ssim`, `-tune ssim`). libvpx's scale of the RD
 lambda by 16×16 block (from the mean variance of its 8×8 blocks, by

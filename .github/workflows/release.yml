@@ -36,7 +36,7 @@ env:
   # beside it; the update check asks for them by these names (crates/update
   # checks they are here). Cutlass.apk joins them when the Android upload
   # key is set, and gets a checksum the same way.
-  PACKAGES: Cutlass.dmg Cutlass-x86_64-setup.exe Cutlass-aarch64-setup.exe Cutlass-x86_64.AppImage
+  PACKAGES: Cutlass-aarch64.dmg Cutlass-x86_64.dmg Cutlass-x86_64-setup.exe Cutlass-aarch64-setup.exe Cutlass-x86_64.AppImage
 
 jobs:
   version:
@@ -79,8 +79,25 @@ jobs:
           esac
 
   macos:
+    # One app per processor, each built with its own profiles, signed,
+    # notarized and smoke tested on a Mac of its own kind. Not one universal
+    # app: that would be twice the size (each build is about 200 MB) for
+    # every download and update. An Intel app runs on Apple Silicon through
+    # Rosetta; the Apple Silicon one does not open on Intel.
     needs: version
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: aarch64
+            lipo: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+            lipo: x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      DMG: Cutlass-${{ matrix.arch }}.dmg
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -94,6 +111,13 @@ jobs:
         run: python3 scripts/pgo_profile.py "$RUNNER_TEMP/av1.profdata"
       - name: Build
         run: PGO_MERGE="$RUNNER_TEMP/av1.profdata" python3 scripts/pgo.py -p cutlass --features public-release
+      - name: The binary is for this processor
+        run: |
+          archs=$(lipo -archs target/release/cutlass)
+          if [ "$archs" != "${{ matrix.lipo }}" ]; then
+            echo "target/release/cutlass is built for $archs, not ${{ matrix.lipo }}" >&2
+            exit 1
+          fi
       # Signing comes after the build, so no build script runs while the
       # certificate is in a keychain. Each secret is given only to the step
       # that needs it. Without the certificate the bundle is signed ad hoc;
@@ -144,7 +168,9 @@ jobs:
         env:
           NOTARY_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
-        run: python3 scripts/macos_bundle.py target/release/cutlass dist
+        run: |
+          python3 scripts/macos_bundle.py target/release/cutlass dist
+          mv dist/Cutlass.dmg "dist/$DMG"
       - name: Remove the signing keychain and key
         if: always()
         run: |
@@ -161,8 +187,8 @@ jobs:
         run: python3 scripts/smoke.py dist/Cutlass.app/Contents/MacOS/cutlass
       - uses: actions/upload-artifact@v4
         with:
-          name: release-macos
-          path: dist/Cutlass.dmg
+          name: release-macos-${{ matrix.arch }}
+          path: dist/${{ env.DMG }}
           if-no-files-found: error
 
   windows:

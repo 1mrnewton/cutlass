@@ -238,14 +238,14 @@ fn an_unreachable_or_missing_feed_is_a_network_error() {
         &Http::new(),
         &format!("{}/feed", empty.base),
         &running,
-        Platform::MacOs,
+        Platform::MacOs { arch: "aarch64" },
     );
     assert!(matches!(missing, Err(UpdateError::Network(message)) if message.contains("404")));
     let closed = check(
         &Http::new(),
         "http://127.0.0.1:9/feed",
         &running,
-        Platform::MacOs,
+        Platform::MacOs { arch: "aarch64" },
     );
     assert!(matches!(closed, Err(UpdateError::Network(_))));
 }
@@ -432,12 +432,16 @@ mod macos {
         );
         let running = Version::parse(&plist(&bundle, "CFBundleShortVersionString")).unwrap();
         let package = fs::read(dmg).unwrap();
-        let (feed_server, _files) = release(Platform::MacOs, &package, &format!("v{version}"));
+        let (feed_server, _files) = release(
+            Platform::MacOs { arch: "aarch64" },
+            &package,
+            &format!("v{version}"),
+        );
         let offer = check(
             &Http::new(),
             &format!("{}/feed", feed_server.base),
             &running,
-            Platform::MacOs,
+            Platform::MacOs { arch: "aarch64" },
         )?
         .ok_or_else(|| UpdateError::Feed("nothing offered".to_owned()))?;
         let downloaded = download(
@@ -448,7 +452,7 @@ mod macos {
             &|| false,
         )?;
         let exe = bundle.join("Contents/MacOS/cutlass");
-        let installed = Installed::detect(Platform::MacOs, &exe, None)?;
+        let installed = Installed::detect(Platform::MacOs { arch: "aarch64" }, &exe, None)?;
         assert_eq!(installed, Installed::Bundle(bundle.clone()));
         let relaunch = install(&installed, &downloaded, &offer.version, 99_999)?;
         assert_eq!(relaunch.args.last().unwrap(), bundle.as_os_str());

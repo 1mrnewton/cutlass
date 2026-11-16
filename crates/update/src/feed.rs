@@ -15,8 +15,8 @@ pub const FEED_LIMIT: usize = 1 << 20;
 /// Which package a machine installs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Platform {
-    /// `Cutlass.dmg`.
-    MacOs,
+    /// `Cutlass-<arch>.dmg`, the app built for that processor.
+    MacOs { arch: &'static str },
     /// `Cutlass-<arch>-setup.exe`, the installer for that processor.
     Windows { arch: &'static str },
     /// `Cutlass-<arch>.AppImage`.
@@ -28,7 +28,9 @@ impl Platform {
     #[must_use]
     pub fn current() -> Option<Self> {
         if cfg!(target_os = "macos") {
-            Some(Self::MacOs)
+            Some(Self::MacOs {
+                arch: std::env::consts::ARCH,
+            })
         } else if cfg!(target_os = "windows") {
             Some(Self::Windows {
                 arch: std::env::consts::ARCH,
@@ -46,7 +48,7 @@ impl Platform {
     #[must_use]
     pub fn asset_name(self) -> String {
         match self {
-            Self::MacOs => "Cutlass.dmg".to_owned(),
+            Self::MacOs { arch } => format!("Cutlass-{arch}.dmg"),
             Self::Windows { arch } => format!("Cutlass-{arch}-setup.exe"),
             Self::Linux { arch } => format!("Cutlass-{arch}.AppImage"),
         }
@@ -170,8 +172,10 @@ mod tests {
     /// publishes them.
     fn feed(tag: &str) -> String {
         let assets: Vec<String> = [
-            "Cutlass.dmg",
-            "Cutlass.dmg.sha256",
+            "Cutlass-aarch64.dmg",
+            "Cutlass-aarch64.dmg.sha256",
+            "Cutlass-x86_64.dmg",
+            "Cutlass-x86_64.dmg.sha256",
             "Cutlass-x86_64-setup.exe",
             "Cutlass-x86_64-setup.exe.sha256",
             "Cutlass-aarch64-setup.exe",
@@ -211,7 +215,8 @@ mod tests {
             .split_whitespace()
             .collect();
         for platform in [
-            Platform::MacOs,
+            Platform::MacOs { arch: "aarch64" },
+            Platform::MacOs { arch: "x86_64" },
             Platform::Windows { arch: "x86_64" },
             Platform::Windows { arch: "aarch64" },
             Platform::Linux { arch: "x86_64" },
@@ -228,7 +233,8 @@ mod tests {
     fn each_platform_gets_its_package_and_checksum() {
         let json = feed("v0.2.0");
         for (platform, name) in [
-            (Platform::MacOs, "Cutlass.dmg"),
+            (Platform::MacOs { arch: "aarch64" }, "Cutlass-aarch64.dmg"),
+            (Platform::MacOs { arch: "x86_64" }, "Cutlass-x86_64.dmg"),
             (
                 Platform::Windows { arch: "x86_64" },
                 "Cutlass-x86_64-setup.exe",
@@ -249,7 +255,9 @@ mod tests {
             assert!(found.package.url.ends_with(&format!("/v0.2.0/{name}")));
             assert!(found.package.size >= 1000);
         }
-        let found = offer(&json, &running(), Platform::MacOs).unwrap().unwrap();
+        let found = offer(&json, &running(), Platform::MacOs { arch: "aarch64" })
+            .unwrap()
+            .unwrap();
         assert_eq!(
             found.notes_head(3),
             ["Faster export.", "- Captions keep their style", "- Fixes"]
@@ -261,7 +269,7 @@ mod tests {
     fn the_same_or_an_older_release_offers_nothing() {
         for tag in ["v0.1.0", "0.0.9", "v0.1.0+rebuild"] {
             assert_eq!(
-                offer(&feed(tag), &running(), Platform::MacOs).unwrap(),
+                offer(&feed(tag), &running(), Platform::MacOs { arch: "aarch64" }).unwrap(),
                 None,
                 "{tag}"
             );
@@ -281,17 +289,28 @@ mod tests {
     #[test]
     fn a_pre_release_or_a_draft_is_ignored() {
         assert_eq!(
-            offer(&feed("v0.2.0-rc.1"), &running(), Platform::MacOs).unwrap(),
+            offer(
+                &feed("v0.2.0-rc.1"),
+                &running(),
+                Platform::MacOs { arch: "aarch64" }
+            )
+            .unwrap(),
             None
         );
         let flagged = feed("v0.2.0").replace(r#""prerelease":false"#, r#""prerelease":true"#);
-        assert_eq!(offer(&flagged, &running(), Platform::MacOs).unwrap(), None);
+        assert_eq!(
+            offer(&flagged, &running(), Platform::MacOs { arch: "aarch64" }).unwrap(),
+            None
+        );
         let draft = feed("v0.2.0").replace(r#""draft":false"#, r#""draft":true"#);
-        assert_eq!(offer(&draft, &running(), Platform::MacOs).unwrap(), None);
+        assert_eq!(
+            offer(&draft, &running(), Platform::MacOs { arch: "aarch64" }).unwrap(),
+            None
+        );
         // A pre-release running build is offered the release it leads to.
         let dev = Version::parse("0.2.0-dev").unwrap();
         assert!(
-            offer(&feed("v0.2.0"), &dev, Platform::MacOs)
+            offer(&feed("v0.2.0"), &dev, Platform::MacOs { arch: "aarch64" })
                 .unwrap()
                 .is_some()
         );
@@ -304,15 +323,21 @@ mod tests {
             offer(&json, &running(), Platform::Linux { arch: "aarch64" }).unwrap(),
             None
         );
-        let unsummed = json.replace("Cutlass.dmg.sha256", "Cutlass.dmg.md5");
-        assert_eq!(offer(&unsummed, &running(), Platform::MacOs).unwrap(), None);
+        let unsummed = json.replace("Cutlass-aarch64.dmg.sha256", "Cutlass-aarch64.dmg.md5");
+        assert_eq!(
+            offer(&unsummed, &running(), Platform::MacOs { arch: "aarch64" }).unwrap(),
+            None
+        );
         assert!(
             offer(&unsummed, &running(), Platform::Windows { arch: "x86_64" })
                 .unwrap()
                 .is_some()
         );
         let empty = r#"{"tag_name":"v9.0.0","assets":[]}"#;
-        assert_eq!(offer(empty, &running(), Platform::MacOs).unwrap(), None);
+        assert_eq!(
+            offer(empty, &running(), Platform::MacOs { arch: "aarch64" }).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -326,7 +351,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    offer(json, &running(), Platform::MacOs),
+                    offer(json, &running(), Platform::MacOs { arch: "aarch64" }),
                     Err(UpdateError::Feed(_))
                 ),
                 "{json}"
@@ -334,7 +359,7 @@ mod tests {
         }
         let local = feed("v0.2.0").replace("https://github.com", "file:///etc");
         assert!(matches!(
-            offer(&local, &running(), Platform::MacOs),
+            offer(&local, &running(), Platform::MacOs { arch: "aarch64" }),
             Err(UpdateError::Feed(_))
         ));
     }

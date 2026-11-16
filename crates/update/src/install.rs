@@ -42,7 +42,7 @@ impl Installed {
         appimage: Option<&OsStr>,
     ) -> Result<Self, UpdateError> {
         match platform {
-            Platform::MacOs => {
+            Platform::MacOs { .. } => {
                 let bundle = exe
                     .parent()
                     .filter(|dir| dir.file_name() == Some(OsStr::new("MacOS")))
@@ -406,19 +406,20 @@ mod tests {
         touch(&exe);
         assert!(
             matches!(
-                Installed::detect(Platform::MacOs, &exe, None),
+                Installed::detect(Platform::MacOs { arch: "aarch64" }, &exe, None),
                 Err(UpdateError::NotInstalled(_))
             ),
             "no Info.plist yet"
         );
         touch(&app.join("Contents/Info.plist"));
         assert_eq!(
-            Installed::detect(Platform::MacOs, &exe, None).unwrap(),
+            Installed::detect(Platform::MacOs { arch: "aarch64" }, &exe, None).unwrap(),
             Installed::Bundle(app.clone())
         );
         let bare = dir.join("target/debug/cutlass");
         touch(&bare);
-        let refused = Installed::detect(Platform::MacOs, &bare, None).unwrap_err();
+        let refused =
+            Installed::detect(Platform::MacOs { arch: "aarch64" }, &bare, None).unwrap_err();
         assert!(refused.to_string().contains("Cutlass.app"), "{refused}");
         fs::remove_dir_all(&dir).unwrap();
     }

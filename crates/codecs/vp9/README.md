@@ -1584,7 +1584,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-tune-content film` | `tune-content` | missing (libvpx's VP9 encoder changes little for it) |
 | `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ), or `aq_mode: AqMode::Variance` |
 | `-aq-mode 3` / `4` | cyclic refresh, equator360 | `aq_mode`: `AqMode::CyclicRefresh` (`aq=3`), `AqMode::Equator360` (`aq=4`), added |
-| `-aq-mode 2` | complexity AQ | missing: libvpx puts each superblock in a segment by the bits its search spent at the frame's quantizer, which this encoder knows only once the block is coded |
+| `-aq-mode 2` | complexity AQ | `aq_mode: AqMode::Complexity` (`aq=2`, added): each superblock's segment by the rate its source's variance projects, before it is coded (libvpx's is the rate its search spent); see "Options measured" |
 | `-noise-sensitivity` | `noise-sensitivity` | `noise_sensitivity` (`noise=`, added): a temporal denoiser of luma; see "Options measured" |
 | `-static-thresh` | `static-thresh` | `static_thresh` (`static_thresh=`, added) |
 | `-sharpness` | `sharpness` | `sharpness` (`sharpness=`, added) |
@@ -1670,6 +1670,36 @@ time without. Weighing the refreshed superblocks' rate against their
 error at their own quantizer's lambda, as region of interest maps do
 (see below), gained 6.8 points summed at speed 10 but lost 9.8 at speed
 9, and was left out.
+
+**Complexity AQ** (`AqMode::Complexity`, `-aq-mode 2`). libvpx's
+`vp9_aq_complexity.c`: five segments, 3 at the frame's quantizer and the
+others at the quantizers of 1.75 to 2.5, 1.25 to 1.75, 1.05 to 1.25 and
+0.8 to 0.9 times its rate (by strength, from the quantizer's step), and
+each superblock in the first segment both of whose thresholds it is
+under, of its rate over the frame's mean (0.15 to 0.75, then 2) and of
+its log variance (`ln(256 var + 1)`, 6 to 9): flat, cheap superblocks
+finer, the costliest coarser. libvpx's rate is the one its RD search spent on
+the block at the frame's quantizer; here it is projected before the frame
+is coded, from the variance of each 8×8 block of the source (the bits of
+a Gaussian of that variance at the step: half the log of 1 + 12 var over
+the pixel step squared, a sample), on every frame, hidden alt-refs too.
+Each segment's blocks weigh rate against error at their own quantizer
+(at the frame's lambda it lost 27.9 points summed over the clips, 6.1
+with it). With a bitrate, as in libvpx, there is no segmentation while a
+superblock's share of a frame is under 256 bits (at 720p and 30 pictures
+a second, under about 1.7 Mb/s). One pass at speed 5, four threads,
+BD-rate at the same PSNR-Y / FFmpeg's average:
+
+| | Three scenes | Still and jumps | Grainy pan |
+| --- | --- | --- | --- |
+| `aq=2` against no AQ | +1.9 / +1.4% | +1.0 / +1.0% | +3.2 / +4.2% |
+| libvpx `-aq-mode 2` against 0 | +8.5 / +9.3% | +46.1 / +38.1% | +42.8 / +31.9% |
+| `aq=2` against libvpx `-aq-mode 2` | −8.0 / −8.6% | −42.1 / −45.0% | −50.7 / −55.3% |
+
+As every AQ mode, it gives up PSNR to spend bits where coding errors
+show; libvpx's (1.14) gives up far more in one pass here, in 1.8 to 2.0
+times its time. Ours takes 1.04 (the pan) to 1.3 (still and jumps at 3
+Mb/s) times the time without it.
 
 **360° pictures** (`AqMode::Equator360`, `-aq-mode 4`): libvpx's bands,
 the outer eighths of the rows in segment 2 at the bits of 0.6 of the
@@ -1894,7 +1924,7 @@ carries the colour space, range and render size.
 | Scaled references (a size change mid-stream) | yes | no |
 | Lossless (WHT) | yes | yes |
 | Tile columns and rows | yes | yes |
-| Segmentation: quantizer | yes | yes (AQ, cyclic refresh, 360°) |
+| Segmentation: quantizer | yes | yes (AQ, complexity AQ, cyclic refresh, 360°) |
 | Segmentation: loop filter, reference, skip | yes | yes (ROI map, added) |
 | Segmentation: temporal map | yes | no |
 | Loop filter sharpness | yes | yes (added) |

@@ -2368,6 +2368,48 @@ fn cyclic_refresh_moves_a_band_of_finer_superblocks() {
 }
 
 #[test]
+fn complexity_aq_codes_flat_superblocks_finer_and_busy_ones_coarser() {
+    // 4×2 superblocks: the right column under heavy noise, the rest flat.
+    let (w, h) = (256u32, 128u32);
+    let frame = |i: u32| {
+        let mut f = solid(w, h, 120, 128, 128);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            if k as u32 % w >= 192 {
+                let n =
+                    ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 26;
+                *v = 60 + n as u8;
+            }
+        }
+        f
+    };
+    let opts = super::Vp9Options {
+        aq_mode: super::AqMode::Complexity,
+        speed: 6,
+        ..lag0(120)
+    };
+    let packets = encode_with(opts, (w, h), 3, frame);
+    assert_decodes(&packets, (w, h), 3);
+    let mi_cols = 32;
+    for (i, (hd, map)) in segmaps_of(&packets).iter().enumerate() {
+        let s = &hd.seg;
+        assert!(s.enabled, "frame {i}");
+        assert!(s.feature_data[0][0] < 0 && s.feature_data[4][0] > 0);
+        assert!(!s.feature_on[3][0]);
+        for (k, &seg) in map.iter().enumerate() {
+            let busy = k % mi_cols >= 24;
+            assert_eq!(seg, if busy { 4 } else { 0 }, "frame {i} block {k}");
+        }
+    }
+    // With a bitrate under 256 bits a superblock a frame: none.
+    let low = super::Vp9Options {
+        bitrate: 10_000,
+        ..opts
+    };
+    let packets = encode_with(low, (w, h), 3, frame);
+    assert!(segmaps_of(&packets).iter().all(|(hd, _)| !hd.seg.enabled));
+}
+
+#[test]
 fn equator_aq_codes_the_polar_rows_coarser() {
     let (w, h) = (128u32, 256u32);
     let opts = super::Vp9Options {

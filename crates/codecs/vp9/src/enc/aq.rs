@@ -170,6 +170,121 @@ pub fn equator((mi_cols, mi_rows): (usize, usize), deltas: [i16; 8]) -> Plan {
     Plan::of_map(map, deltas)
 }
 
+/// Complexity AQ (libvpx's `aq-mode=2`, `vp9_aq_complexity.c`): its
+/// segment of the base quantizer, which the others' deltas move from.
+pub const COMPLEXITY_NEUTRAL: usize = 3;
+
+/// Complexity AQ by strength (libvpx's `get_aq_c_strength`, from the base
+/// quantizer's step): each segment's rate over the base quantizer's
+/// (`aq_c_q_adj_factor`), the most a superblock's projected rate may be
+/// over the frame's mean for it (`aq_c_transitions`), and the most its
+/// log variance may be over [`COMPLEXITY_LOW_VAR`] (`aq_c_var_thresholds`).
+pub const COMPLEXITY_RATE: [[f64; 5]; 3] = [
+    [1.75, 1.25, 1.05, 1.00, 0.90],
+    [2.00, 1.50, 1.15, 1.00, 0.85],
+    [2.50, 1.75, 1.25, 1.00, 0.80],
+];
+const COMPLEXITY_TRANSITIONS: [[f64; 5]; 3] = [
+    [0.15, 0.30, 0.55, 2.00, 100.0],
+    [0.20, 0.40, 0.65, 2.00, 100.0],
+    [0.25, 0.50, 0.75, 2.00, 100.0],
+];
+const COMPLEXITY_VAR: [[f64; 5]; 3] = [
+    [-4.0, -3.0, -2.0, 100.0, 100.0],
+    [-3.5, -2.5, -1.5, 100.0, 100.0],
+    [-3.0, -2.0, -1.0, 100.0, 100.0],
+];
+
+/// libvpx's `DEFAULT_LV_THRESH`: the log of 256 times a sample's variance
+/// the thresholds of [`COMPLEXITY_VAR`] are from.
+const COMPLEXITY_LOW_VAR: f64 = 10.0;
+
+/// Complexity AQ's strength at the base quantizer's AC step `step` (8-bit
+/// scale): libvpx's `get_aq_c_strength`.
+pub fn complexity_strength(step: f64) -> usize {
+    let base = (step / 4.0).trunc();
+    usize::from(base > 10.0) + usize::from(base > 25.0)
+}
+
+/// Complexity AQ's map (libvpx's `vp9_caq_select_segment`, with the rate
+/// projected from the source before the frame is coded): each
+/// superblock's segment by its luma `y` (rows `stride` apart, `w`×`h`
+/// visible, `bd` bits) against the base quantizer's AC step `step` (8-bit
+/// scale): the first of segments 0 to 4 whose rate threshold its
+/// projected rate a sample is under (as a share of the frame's mean) and
+/// whose log variance threshold its log variance is under, so that flat,
+/// cheap superblocks go finer and the costliest coarser. The projected
+/// rate of each 8×8 block is the bits of a Gaussian of its variance at
+/// the step in the pixels (an eighth of the coefficients'): half the log
+/// of 1 + 12 times the variance over the step squared, a sample.
+/// `deltas` are the segments' quantizer deltas.
+#[allow(clippy::too_many_arguments)]
+pub fn complexity<P: Pixel>(
+    y: &[P],
+    stride: usize,
+    (w, h): (usize, usize),
+    (mi_cols, mi_rows): (usize, usize),
+    step: f64,
+    strength: usize,
+    bd: u8,
+    deltas: [i16; 8],
+) -> Plan {
+    let (sc, sr) = (mi_cols.div_ceil(8), mi_rows.div_ceil(8));
+    let scale = f64::from(1u32 << (2 * u32::from(bd - 8)));
+    let q = (step / 8.0).max(1.0);
+    // Each superblock's projected bits a sample and log variance.
+    let mut sbs = Vec::with_capacity(sc * sr);
+    let (mut bits, mut area) = (0.0f64, 0.0f64);
+    for r in 0..sr {
+        for c in 0..sc {
+            let (x0, y0) = (c * 64, r * 64);
+            let (x1, y1) = ((x0 + 64).min(w), (y0 + 64).min(h));
+            let (mut sb_bits, mut n) = (0.0, 0usize);
+            let (mut sum, mut sq) = (0f64, 0f64);
+            for by in (y0..y1).step_by(8) {
+                for bx in (x0..x1).step_by(8) {
+                    let (bw, bh) = ((bx + 8).min(x1) - bx, (by + 8).min(y1) - by);
+                    let (mut s1, mut s2) = (0f64, 0f64);
+                    for yy in by..by + bh {
+                        for &v in &y[yy * stride + bx..yy * stride + bx + bw] {
+                            let v = f64::from(v.get());
+                            s1 += v;
+                            s2 += v * v;
+                        }
+                    }
+                    let k = (bw * bh) as f64;
+                    let var = ((s2 - s1 * s1 / k) / k / scale).max(0.0);
+                    sb_bits += k * 0.5 * (1.0 + 12.0 * var / (q * q)).log2();
+                    sum += s1;
+                    sq += s2;
+                    n += bw * bh;
+                }
+            }
+            let k = n.max(1) as f64;
+            let var = ((sq - sum * sum / k) / k / scale).max(0.0);
+            sbs.push((sb_bits / k, (256.0 * var + 1.0).ln()));
+            bits += sb_bits;
+            area += k;
+        }
+    }
+    let mean = bits / area.max(1.0);
+    let t = &COMPLEXITY_TRANSITIONS[strength];
+    let v = &COMPLEXITY_VAR[strength];
+    let mut map = vec![0u8; mi_cols * mi_rows];
+    for (i, &(rate, logvar)) in sbs.iter().enumerate() {
+        let seg = (0..5)
+            .find(|&k| rate < mean * t[k] && logvar < COMPLEXITY_LOW_VAR + v[k])
+            .unwrap_or(4) as u8;
+        let (r0, c0) = ((i / sc) * 8, (i % sc) * 8);
+        for r in r0..(r0 + 8).min(mi_rows) {
+            map[r * mi_cols + c0..r * mi_cols + (c0 + 8).min(mi_cols)].fill(seg);
+        }
+    }
+    let mut plan = Plan::of_map(map, deltas);
+    plan.seg_lambda = true;
+    plan
+}
+
 /// The segment tree's probabilities for ids used `used` times.
 fn tree_probs(used: &[u32; 8]) -> [u8; 7] {
     let mut branch = [[0u64; 2]; 7];

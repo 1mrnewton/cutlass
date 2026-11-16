@@ -98,6 +98,15 @@ pub enum AqMode {
     /// index finer), so that what coarse frames left is cleaned up a band at a
     /// time rather than by costly golden and key frames.
     CyclicRefresh,
+    /// Complexity AQ (2): each superblock in one of five segments by the
+    /// rate its luma's variance projects at the frame's quantizer against
+    /// the frame's mean, and by its log variance (libvpx's thresholds,
+    /// which depend on the quantizer): flat, cheap superblocks finer (up
+    /// to the bits of 1.75 to 2.5 times the rate), the costliest coarser
+    /// (0.8 to 0.9). Each segment's blocks weigh rate against error at
+    /// its own quantizer. With a bitrate, not while a superblock's share
+    /// of a frame's bits is under 256 (libvpx's floor).
+    Complexity,
     /// Equirectangular 360° pictures (4): rows of blocks away from the
     /// equator, which the projection stretches, coarser: the outer
     /// eighths of the rows at the bits of 0.6 of the rate, the eighths
@@ -1169,6 +1178,11 @@ impl<P: EncPixel> Core<P> {
             self.enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
             self.rc.alt_ref(k);
             let qindex = self.rc.qindex(1, f.seconds, false);
+            if self.opts.aq_mode == AqMode::Complexity
+                && let Some(plan) = self.complexity_plan((&src[0], w), qindex, 0.0)
+            {
+                self.enc.set_segmentation(plan);
+            }
             let coded = self.enc.encode(FrameParams {
                 key: false,
                 golden: false,
@@ -1558,7 +1572,7 @@ impl<P: EncPixel> Core<P> {
         }
         self.rc.layer = (layered && !key).then_some(usize::from(self.layer));
         let qindex = self.rc.qindex(kind, seconds, cut);
-        self.segment(key, qindex);
+        self.segment(key, qindex, planes[0], seconds);
         if layered && !key {
             let (_, refresh, refs) = layer_of(self.opts.temporal_layers, self.since_key);
             self.enc.set_layer(refresh, refs);
@@ -1647,7 +1661,7 @@ impl<P: EncPixel> Core<P> {
 
     /// The segmentation of a shown frame at `qindex` with
     /// [`Vp9Options::aq_mode`]'s other modes than variance AQ.
-    fn segment(&mut self, key: bool, qindex: u8) {
+    fn segment(&mut self, key: bool, qindex: u8, luma: (&[P], usize), seconds: f64) {
         let (w, h) = (self.width as usize, self.height as usize);
         let mi = (w.div_ceil(8), h.div_ceil(8));
         let bd = self.opts.bit_depth;
@@ -1670,6 +1684,12 @@ impl<P: EncPixel> Core<P> {
                     self.enc.set_segmentation(plan);
                 }
             }
+            AqMode::Complexity => {
+                let (y, stride) = luma;
+                if let Some(plan) = self.complexity_plan((y, stride), qindex, seconds) {
+                    self.enc.set_segmentation(plan);
+                }
+            }
             AqMode::Equator360 => {
                 let mut deltas = [0i16; 8];
                 for (d, &r) in deltas.iter_mut().zip(&super::aq::EQUATOR_RATIOS) {
@@ -1679,6 +1699,51 @@ impl<P: EncPixel> Core<P> {
             }
             _ => {}
         }
+    }
+
+    /// [`AqMode::Complexity`]'s plan for a frame of luma `y` (rows
+    /// `stride` apart) at `qindex`, shown for `seconds` (0: a hidden
+    /// frame); `None` without segmentation: lossless, or with a bitrate
+    /// under [`COMPLEXITY_SB_BITS`] a superblock.
+    fn complexity_plan(
+        &self,
+        (y, stride): (&[P], usize),
+        qindex: u8,
+        seconds: f64,
+    ) -> Option<super::aq::Plan> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let bd = self.opts.bit_depth;
+        if qindex == 0 {
+            return None;
+        }
+        if self.opts.bitrate > 0 {
+            let frame =
+                f64::from(self.opts.bitrate) * if seconds > 0.0 { seconds } else { 1.0 / 30.0 };
+            if frame * 4096.0 < COMPLEXITY_SB_BITS * (w * h) as f64 {
+                return None;
+            }
+        }
+        let step = step_of(qindex, bd);
+        let strength = super::aq::complexity_strength(step);
+        let mut deltas = [0i16; 8];
+        for (k, d) in deltas.iter_mut().enumerate().take(5) {
+            if k == super::aq::COMPLEXITY_NEUTRAL {
+                continue;
+            }
+            let delta = delta_of_ratio(qindex, super::aq::COMPLEXITY_RATE[strength][k], bd);
+            // (Never lossless: a segment at index 0 takes 1.)
+            *d = delta.max(1 - i16::from(qindex));
+        }
+        Some(super::aq::complexity(
+            y,
+            stride,
+            (w, h),
+            (w.div_ceil(8), h.div_ceil(8)),
+            step,
+            strength,
+            bd,
+            deltas,
+        ))
     }
 
     /// One pass at a variable bitrate, before the first picture: the
@@ -3171,6 +3236,12 @@ fn layer_of(layers: u8, at: u32) -> (u8, u8, u8) {
 /// at, and how far a clip's share of the bitrate may be from 1.
 const CORPUS_Q: u8 = 100;
 const CORPUS_RANGE: f64 = 4.0;
+
+/// [`AqMode::Complexity`]: with a bitrate, the least share of a frame's
+/// bits a superblock's area takes for the frame to be segmented
+/// (libvpx's `sb64_target_rate` floor; under it the segment ids cost more
+/// than they move).
+const COMPLEXITY_SB_BITS: f64 = 256.0;
 
 /// Cyclic refresh ([`AqMode::CyclicRefresh`]): the share of the
 /// superblocks each inter frame refreshes, in percent (libvpx's

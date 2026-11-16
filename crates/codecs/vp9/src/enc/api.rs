@@ -822,7 +822,10 @@ impl<P: EncPixel> Core<P> {
             )
         {
             let c = k - 1;
-            let radius = usize::from(self.opts.arnr_max_frames.unwrap_or(7) - 1) / 2;
+            // One pass at a fixed quantizer: see Q_TUNED_SPEED.
+            let q_tuned = self.opts.bitrate == 0 && self.opts.speed <= Q_TUNED_SPEED;
+            let frames = if q_tuned { Q_ARF_FRAMES } else { 7 };
+            let radius = usize::from(self.opts.arnr_max_frames.unwrap_or(frames) - 1) / 2;
             let lo = c.saturating_sub(radius);
             let hi = (c + radius).min(self.queue.len() - 1);
             let pics: Vec<super::arf::Picture<'_, P>> = (lo..=hi)
@@ -843,6 +846,8 @@ impl<P: EncPixel> Core<P> {
                 u32::from(s)
             } else if self.pooled() {
                 3
+            } else if q_tuned {
+                Q_ARF_STRENGTH
             } else if q > 100 {
                 5
             } else if q > 50 {
@@ -1465,6 +1470,26 @@ const GF_MIN_INTERVAL: u32 = 6;
 /// inter frames'.
 const STEP_SCALE: [f64; 3] = [0.35, 0.55, 1.0];
 
+/// Up to this speed, one pass at a fixed quantizer (FFmpeg's `-crf N -b:v
+/// 0`) codes its golden frames and alt-refs at [`Q_GOLDEN_SCALE`] of the
+/// inter step, and filters its alt-refs at [`Q_ARF_STRENGTH`] over
+/// [`Q_ARF_FRAMES`] pictures. (Not at 9 and 10: speed 10 at a fixed
+/// quantizer is the first pass of two, whose bits the second reads.)
+const Q_TUNED_SPEED: u8 = 8;
+
+/// Against FFmpeg's `-crf 24` to `48`, at `q=60` to `210` (speed 5, one
+/// pass): finer golden frames and alt-refs, filtered less over fewer
+/// pictures, take the clip of a still scene and two jumps from +1.3% /
+/// +1.3% to −4.4% / −4.1% (BD-rate at the same PSNR-Y / averaged PSNR),
+/// the three scenes from −4.5% / −0.3% to −5.3% / −1.4% and the grainy pan
+/// from −8.4% / −4.9% to −13.9% / −10.8%; at `q=50` to `225`, from
+/// +3.8% / +4.1% to 0.0% / −0.1% on the still scene. (The golden scale
+/// alone took the still scene to +0.1% / −0.3%, the weaker filter alone to
+/// −0.2% / +0.4%.) At speeds 6 and 8, fewer bits on all three too.
+const Q_GOLDEN_SCALE: f64 = 0.5;
+const Q_ARF_STRENGTH: u32 = 1;
+const Q_ARF_FRAMES: u8 = 5;
+
 /// At a constant bitrate, the first key frame's step over the one the
 /// bitrate guesses for inter frames.
 const CBR_FIRST_SCALE: f64 = 1.5;
@@ -1813,11 +1838,13 @@ impl Rate {
             if q == 0 {
                 return 0;
             }
-            return q_of_step(
-                step_of(q, self.opts.bit_depth) * STEP_SCALE[kind],
-                self.opts.bit_depth,
-            )
-            .clamp(self.opts.min_q, q.max(self.opts.min_q));
+            let scale = if kind == 1 && self.opts.speed <= Q_TUNED_SPEED {
+                Q_GOLDEN_SCALE
+            } else {
+                STEP_SCALE[kind]
+            };
+            return q_of_step(step_of(q, self.opts.bit_depth) * scale, self.opts.bit_depth)
+                .clamp(self.opts.min_q, q.max(self.opts.min_q));
         }
         if let Some(p) = &mut self.pass2 {
             // Two passes. Frame i's bits are about k·b_i·(s/s1)^-EXP, with

@@ -207,6 +207,18 @@ pub struct Vp9Options {
     /// Alt-ref frames with the lookahead (libvpx's `auto-alt-ref`; on by
     /// default).
     pub alt_ref: bool,
+    /// Layers of alt-refs, 1 to 3 (libvpx's `auto-alt-ref` past 1, its
+    /// multi-layer alt-refs). With 2 or more, the span between an
+    /// alt-ref and the picture coded last is halved by a further hidden
+    /// alt-ref, one layer down, while the layers allow and the span is
+    /// [`MID_SPAN`] pictures or more: each is filtered from the pictures
+    /// around its own target, coded finer than the inter frames by its
+    /// layer, read as ALTREF by the pictures before it, and shown in its
+    /// target's place as it is (`show_existing_frame`), after which the
+    /// next picture reads it as LAST. They take slots 3 to 7 from the
+    /// reference pool while they wait. 0 or 1: one alt-ref a golden
+    /// group.
+    pub alt_ref_layers: u8,
     /// The alt-ref temporal filter's strength, 0 (none) to 6 (libvpx's
     /// `arnr-strength`); `None`: 3 to 5 by quantizer (3 in two passes).
     pub arnr_strength: Option<u8>,
@@ -302,6 +314,22 @@ pub const DEFAULT_LAG: u32 = 16;
 /// The fastest speed an alt-ref frame is coded at.
 const ARF_SPEED: u8 = 6;
 
+/// The most [`Vp9Options::alt_ref_layers`].
+const MAX_ARF_LAYERS: u8 = 3;
+
+/// Layered alt-refs: the least span (pictures from the one coded last to
+/// the alt-ref ahead) a hidden alt-ref of the second and of the third
+/// layer halves. In two passes on the
+/// README's three clips, BD-rate at the same PSNR-Y summed over them
+/// against one layer: 4, +7.5 points; 8, +5.8.
+const MID_SPAN: [u32; 2] = [8, 6];
+
+/// Layered alt-refs: the step of a hidden alt-ref of the second and third
+/// layer over the inter frames'. (Measured as [`MID_SPAN`] at 4, the
+/// second layer's: 0.56, +19.9 points; 0.7, +11.9; 0.84, +7.5; 1.05,
+/// +8.4.)
+const MID_STEP_SCALE: [f64; 2] = [0.84, 0.95];
+
 impl Vp9Options {
     /// The lookahead in pictures.
     pub fn lag(&self) -> u32 {
@@ -386,6 +414,9 @@ impl Vp9Options {
         if self.aq && !matches!(self.aq_mode, AqMode::Off | AqMode::Variance) {
             return bad("vp9 variance AQ with another AQ mode");
         }
+        if self.alt_ref_layers > MAX_ARF_LAYERS {
+            return bad("vp9 alt-ref layers past 3");
+        }
         if self.temporal_layers > 3 {
             return bad("vp9 temporal layers past 3");
         }
@@ -435,6 +466,7 @@ impl Default for Vp9Options {
             frame_parallel: false,
             static_thresh: 0,
             alt_ref: true,
+            alt_ref_layers: 1,
             arnr_strength: None,
             arnr_max_frames: None,
             undershoot_pct: 0,
@@ -481,6 +513,16 @@ struct Core<P: EncPixel> {
     queue: std::collections::VecDeque<Queued<P>>,
     /// Where the overlay of the alt-ref coded last goes (`since_key`).
     overlay_at: Option<u32>,
+    /// With [`Vp9Options::alt_ref_layers`]: the hidden alt-refs inside the
+    /// outer one's span still to be shown, the nearest last.
+    mids: Vec<Mid<P>>,
+    /// The slot of the layered alt-ref shown last, which the next coded
+    /// picture reads as LAST, and with the reference pool its picture
+    /// (which then joins the pool).
+    shown_mid: Option<(u8, Option<Held<P>>)>,
+    /// The layer of the alt-ref shown last within the outer one's span (1
+    /// after the outer one is coded).
+    mid_layer: u8,
     /// The places (`since_key`) of the last golden (or key) frame and of
     /// the next.
     gold: (u32, u32),
@@ -516,6 +558,17 @@ struct Held<P> {
     /// Where its content stood (see [`Core::pos`]).
     pos: (isize, isize),
     planes: [Vec<P>; 3],
+}
+
+/// A layered alt-ref waiting to be shown ([`Core::code_mids`]).
+struct Mid<P> {
+    /// Where it is shown (`since_key`).
+    at: u32,
+    slot: u8,
+    /// Its layer: the outer alt-ref's is 1.
+    layer: u8,
+    /// With the reference pool: its filtered planes and where they stand.
+    held: Option<Held<P>>,
 }
 
 /// A picture in the lookahead.
@@ -895,6 +948,9 @@ impl<P: EncPixel> Core<P> {
             cancel: Arc::new(AtomicBool::new(false)),
             queue: std::collections::VecDeque::new(),
             overlay_at: None,
+            mids: Vec::new(),
+            shown_mid: None,
+            mid_layer: 1,
             gold: (0, GF_INTERVAL),
             last_luma: Vec::new(),
             pool: Vec::new(),
@@ -1048,6 +1104,9 @@ impl<P: EncPixel> Core<P> {
         // first picture has nothing to cut from.
         let cut = f.cut && self.since_key != 0;
         let key_next = self.force_key || self.since_key >= self.opts.keyint;
+        if !key_next && self.mids.last().is_some_and(|m| m.at == self.since_key) {
+            return self.show_mid(f).map(Some);
+        }
         let idx = if key_next { 0 } else { self.since_key };
         let target = self.gold.1;
         let k = target.saturating_sub(idx) as usize; // the target is queue[k - 1]
@@ -1072,10 +1131,7 @@ impl<P: EncPixel> Core<P> {
             )
         {
             let c = k - 1;
-            // One pass at a fixed quantizer: see Q_TUNED_SPEED.
-            let q_tuned = self.opts.bitrate == 0 && self.opts.speed <= Q_TUNED_SPEED;
-            let frames = if q_tuned { Q_ARF_FRAMES } else { 7 };
-            let radius = usize::from(self.opts.arnr_max_frames.unwrap_or(frames) - 1) / 2;
+            let (radius, strength) = self.arf_filter();
             let lo = c.saturating_sub(radius);
             let hi = (c + radius).min(self.queue.len() - 1);
             let pics: Vec<super::arf::Picture<'_, P>> = (lo..=hi)
@@ -1087,24 +1143,6 @@ impl<P: EncPixel> Core<P> {
                     ],
                 })
                 .collect();
-            // (Two passes: 3 at any quantizer, the pictures predicting
-            // from the pool's unfiltered ones too: on the grainy pan, 1%
-            // fewer bits at the same averaged PSNR, 0.6% on the clip from
-            // a fractal to `testsrc2`.)
-            let q = self.rc.peek_q();
-            let strength = if let Some(s) = self.opts.arnr_strength {
-                u32::from(s)
-            } else if self.pooled() {
-                3
-            } else if q_tuned {
-                Q_ARF_STRENGTH
-            } else if q > 100 {
-                5
-            } else if q > 50 {
-                4
-            } else {
-                3
-            };
             arf_source = Some(super::arf::filter(
                 &pics,
                 c - lo,
@@ -1117,7 +1155,7 @@ impl<P: EncPixel> Core<P> {
                 self.rc.pass2.is_some(),
             ));
         }
-        let mut data = Vec::new();
+        let mut hidden = Vec::new();
         if let Some(src) = arf_source {
             // (Where its target stands: the steps of the pictures to it.)
             let at = self
@@ -1147,14 +1185,21 @@ impl<P: EncPixel> Core<P> {
                 uv_delta: 0,
                 golden_slot: golden_slot.0,
                 also_refresh: 0,
+                last_slot: self.shown_mid.as_ref().map_or(0, |m| m.0),
+                altref_slot: 2,
+                hidden_slot: 2,
                 noise: golden_slot.1,
             })?;
             self.rc.account(coded.data.len(), 0.0, 1, qindex);
             self.overlay_at = Some(target);
-            data = coded.data;
+            self.mid_layer = 1;
+            hidden.push(coded.data);
+        }
+        if !key_next && !cut && self.opts.alt_ref_layers > 1 {
+            hidden.extend(self.code_mids(idx, f.step)?);
         }
         // (The picture after an alt-ref goes with it: it is not dropped.)
-        let may_drop = data.is_empty();
+        let may_drop = hidden.is_empty();
         let Some((frame, key)) = self.code(
             [(&f.planes[0], w), (&f.planes[1], cw), (&f.planes[2], cw)],
             f.seconds,
@@ -1164,12 +1209,208 @@ impl<P: EncPixel> Core<P> {
         else {
             return Ok(None);
         };
-        let data = if data.is_empty() {
+        let data = if hidden.is_empty() {
             frame
         } else {
-            superframe(&[&data, &frame])
+            let mut all: Vec<&[u8]> = hidden.iter().map(Vec::as_slice).collect();
+            all.push(&frame);
+            superframe(&all)
         };
         Ok(Some((data, key, (f.pts, f.duration, f.timescale))))
+    }
+
+    /// The alt-ref filter's radius in pictures and its strength.
+    fn arf_filter(&self) -> (usize, u32) {
+        // One pass at a fixed quantizer: see Q_TUNED_SPEED.
+        let q_tuned = self.opts.bitrate == 0 && self.opts.speed <= Q_TUNED_SPEED;
+        let frames = if q_tuned { Q_ARF_FRAMES } else { 7 };
+        let radius = usize::from(self.opts.arnr_max_frames.unwrap_or(frames) - 1) / 2;
+        // (Two passes: 3 at any quantizer, the pictures predicting
+        // from the pool's unfiltered ones too: on the grainy pan, 1%
+        // fewer bits at the same averaged PSNR, 0.6% on the clip from
+        // a fractal to `testsrc2`.)
+        let q = self.rc.peek_q();
+        let strength = if let Some(s) = self.opts.arnr_strength {
+            u32::from(s)
+        } else if self.pooled() {
+            3
+        } else if q_tuned {
+            Q_ARF_STRENGTH
+        } else if q > 100 {
+            5
+        } else if q > 50 {
+            4
+        } else {
+            3
+        };
+        (radius, strength)
+    }
+
+    /// Layered alt-refs ([`Vp9Options::alt_ref_layers`]), before the
+    /// picture `idx` (`since_key`; the lookahead's front was it, its step
+    /// `step`): while the layers allow, a hidden alt-ref one layer down
+    /// halfway from the picture coded last to the nearest alt-ref ahead,
+    /// when that is [`MID_SPAN`] pictures or more away. Each is filtered
+    /// from the pictures around its own target (no further than half its
+    /// span), coded finer than the inter frames by its layer
+    /// ([`MID_STEP_SCALE`]), and reads the alt-ref ahead of it as ALTREF.
+    fn code_mids(&mut self, idx: u32, step: (isize, isize)) -> Result<Vec<Vec<u8>>, CodecError> {
+        let mut out = Vec::new();
+        let Some(outer) = self.overlay_at else {
+            return Ok(out);
+        };
+        let (w, h) = (self.width as usize, self.height as usize);
+        let cw = self.opts.chroma_dims(w, h).0;
+        loop {
+            // (The layer one past the deeper of the two alt-refs around:
+            // libvpx's tree of them.)
+            let (top, above) = self.mids.last().map_or((outer, 1), |m| (m.at, m.layer));
+            let layer = above.max(self.mid_layer) + 1;
+            if layer > self.opts.alt_ref_layers || idx == 0 {
+                break;
+            }
+            let Some(span) = (top + 1).checked_sub(idx) else {
+                break;
+            };
+            if span < MID_SPAN[usize::from(layer) - 2] {
+                break;
+            }
+            let m = idx - 1 + span / 2;
+            let j = (m - idx - 1) as usize; // the target is queue[j]
+            if j >= self.queue.len() || self.queue.iter().take(j + 1).any(|q| q.cut) {
+                break;
+            }
+            let (radius, strength) = self.arf_filter();
+            let radius = radius.min((span / 2) as usize);
+            let lo = j.saturating_sub(radius);
+            let hi = (j + radius).min(self.queue.len() - 1);
+            let pics: Vec<super::arf::Picture<'_, P>> = (lo..=hi)
+                .map(|i| super::arf::Picture {
+                    planes: [
+                        &self.queue[i].planes[0],
+                        &self.queue[i].planes[1],
+                        &self.queue[i].planes[2],
+                    ],
+                })
+                .collect();
+            let src = super::arf::filter(
+                &pics,
+                j - lo,
+                w,
+                h,
+                strength,
+                self.opts.threads(),
+                self.opts.ss(),
+                self.opts.bit_depth,
+                self.rc.pass2.is_some(),
+            );
+            let at = self
+                .queue
+                .iter()
+                .take(j + 1)
+                .fold((self.pos.0 + step.0, self.pos.1 + step.1), |p, q| {
+                    (p.0 + q.step.0, p.1 + q.step.1)
+                });
+            let golden_slot = self.pick_golden([&src[0], &src[1], &src[2]], at);
+            self.enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
+            self.rc.mid_alt_ref((m - idx) as usize);
+            let qindex = self
+                .rc
+                .hidden_qindex(MID_STEP_SCALE[usize::from(layer) - 2]);
+            let slot = self.free_slot(true);
+            let coded = self.enc.encode(FrameParams {
+                key: false,
+                golden: false,
+                hidden: true,
+                qindex,
+                speed: self.opts.speed.min(ARF_SPEED),
+                altref_future: false,
+                aq: self.opts.variance_aq(),
+                second_pass: self.rc.pass2.is_some(),
+                full_search: self.full_search(),
+                fast_arf: self.opts.speed >= FAST_ARF_SPEED,
+                uv_delta: 0,
+                golden_slot: golden_slot.0,
+                also_refresh: 0,
+                last_slot: self.shown_mid.as_ref().map_or(0, |m| m.0),
+                altref_slot: self.mids.last().map_or(2, |m| m.slot),
+                hidden_slot: slot,
+                noise: golden_slot.1,
+            })?;
+            self.rc.account(coded.data.len(), 0.0, 3, qindex);
+            let held = self.pooled().then_some(Held {
+                slot,
+                shown: 0,
+                pos: at,
+                planes: src,
+            });
+            self.mids.push(Mid {
+                at: m,
+                slot,
+                layer,
+                held,
+            });
+            out.push(coded.data);
+        }
+        Ok(out)
+    }
+
+    /// Shows the layered alt-ref waiting for picture `f` (the lookahead's
+    /// front) as it is: a `show_existing_frame` of its slot, which the
+    /// next coded picture reads as LAST.
+    #[allow(clippy::type_complexity)]
+    fn show_mid(&mut self, f: Queued<P>) -> Result<(Vec<u8>, bool, (i64, i64, u32)), CodecError> {
+        let Some(mut m) = self.mids.pop() else {
+            return Err(CodecError::InvalidApi {
+                what: "no alt-ref to show",
+            });
+        };
+        let data = self.enc.show_existing(m.slot);
+        if let Some(h) = &mut m.held {
+            h.shown = self.shown;
+        }
+        if self.pooled() {
+            self.pos = (self.pos.0 + f.step.0, self.pos.1 + f.step.1);
+        }
+        self.mid_layer = m.layer;
+        self.shown_mid = Some((m.slot, m.held));
+        self.rc.account(data.len(), f.seconds, 3, 0);
+        self.shown += 1;
+        self.since_key += 1;
+        self.last_luma.clear();
+        self.last_luma.extend_from_slice(&f.planes[0]);
+        Ok((data, false, (f.pts, f.duration, f.timescale)))
+    }
+
+    /// With layered alt-refs, a slot of 3 to 7 that no layered alt-ref
+    /// holds, for the pool (`mid` false) or for a layered alt-ref: one
+    /// the pool does not hold while it holds fewer than its pictures (any
+    /// for a layered alt-ref), or else the pool's oldest picture's, which
+    /// a layered alt-ref takes from it.
+    fn free_slot(&mut self, mid: bool) -> u8 {
+        let held = |s: u8| {
+            self.mids.iter().any(|m| m.slot == s)
+                || self.shown_mid.as_ref().is_some_and(|m| m.0 == s)
+        };
+        let free: Vec<u8> = (POOL_FIRST..8).filter(|&s| !held(s)).collect();
+        let n = usize::from(if self.rt_pool() { RT_POOL } else { POOL });
+        if (mid || self.pool.len() < n)
+            && let Some(&s) = free
+                .iter()
+                .find(|&&s| self.pool.iter().all(|e| e.slot != s))
+        {
+            return s;
+        }
+        let s = self
+            .pool
+            .iter()
+            .filter(|e| free.contains(&e.slot))
+            .min_by_key(|e| e.shown)
+            .map_or(free[0], |e| e.slot);
+        if mid {
+            self.pool.retain(|e| e.slot != s);
+        }
+        s
     }
 
     /// Codes one shown picture; `cut` is whether it cuts from the picture
@@ -1221,7 +1462,15 @@ impl<P: EncPixel> Core<P> {
         if key || overlay || cut {
             // (An alt-ref of the scene before a cut has nothing to show.)
             self.overlay_at = None;
+            self.mids.clear();
         }
+        if key {
+            self.shown_mid = None;
+        }
+        // Layered alt-refs: ALTREF is the nearest one ahead, and after one
+        // was shown, LAST is it.
+        let altref_slot = self.mids.last().map_or(2, |m| m.slot);
+        let last_slot = self.shown_mid.as_ref().map_or(0, |m| m.0);
         // An inter frame that is no golden frame (nor a cut, nor a jump)
         // may be dropped while the buffer runs low: it spends its share of
         // the rate on nothing, and the next frame predicts from the one
@@ -1281,7 +1530,11 @@ impl<P: EncPixel> Core<P> {
             _ => (1, 0.0),
         };
         let n = if rt { RT_POOL } else { POOL };
-        let pool_slot = POOL_FIRST + (self.shown % u64::from(n)) as u8;
+        let pool_slot = if self.opts.alt_ref_layers > 1 {
+            self.free_slot(false)
+        } else {
+            POOL_FIRST + (self.shown % u64::from(n)) as u8
+        };
         let also_refresh = if tight.is_some() && !key {
             1 << pool_slot
         } else {
@@ -1332,6 +1585,9 @@ impl<P: EncPixel> Core<P> {
             },
             golden_slot: golden_slot.0,
             also_refresh,
+            last_slot,
+            altref_slot,
+            hidden_slot: 2,
             noise: golden_slot.1,
         })?;
         let kind = if coded.key { 0 } else { kind };
@@ -1352,6 +1608,21 @@ impl<P: EncPixel> Core<P> {
                     pos: self.pos,
                     planes: t,
                 });
+            }
+        }
+        // The layered alt-ref this picture read as LAST joins the pool, in
+        // place of its oldest picture past its size.
+        if let Some((_, held)) = self.shown_mid.take()
+            && let Some(m) = held
+            && !coded.key
+            && self.pooled()
+        {
+            self.pool.retain(|e| e.slot != m.slot);
+            self.pool.push(m);
+            if self.pool.len() > usize::from(n)
+                && let Some(i) = (0..self.pool.len()).min_by_key(|&i| self.pool[i].shown)
+            {
+                self.pool.remove(i);
             }
         }
         self.shown += 1;
@@ -1447,6 +1718,9 @@ impl<P: EncPixel> Core<P> {
                 uv_delta: 0,
                 golden_slot: 1,
                 also_refresh: 0,
+                last_slot: 0,
+                altref_slot: 2,
+                hidden_slot: 2,
                 noise: 0.0,
             })?;
             bits.push(coded.data.len() as f64 * 8.0);
@@ -1596,6 +1870,8 @@ impl<P: EncPixel> Core<P> {
         self.rc = Rate::new(self.opts, u64::from(self.width) * u64::from(self.height));
         self.queue.clear();
         self.overlay_at = None;
+        self.mids.clear();
+        self.shown_mid = None;
         self.gold = (0, GF_INTERVAL);
         self.pool.clear();
         self.gold_src = None;
@@ -2227,12 +2503,13 @@ impl Pass2 {
     }
 
     /// An alt-ref is coded now for picture `target`: it takes most of that
-    /// picture's first-pass bits, its overlay the rest.
-    fn alt_ref(&mut self, target: usize) {
+    /// picture's first-pass bits, its overlay the rest (`keep`; a layered
+    /// alt-ref, shown as it is, takes them all).
+    fn alt_ref(&mut self, target: usize, keep: f64) {
         if let Some(t) = self.first.get_mut(target) {
             // Its bits stay left in their class until it is coded.
             let w = self.w[target];
-            let keep = t.0 * OVERLAY_SHARE;
+            let keep = t.0 * keep;
             self.left[t.1] -= keep * w;
             self.left[0] += keep * w;
             self.arf = ((t.0 - keep) * w, t.1);
@@ -2766,8 +3043,33 @@ impl Rate {
         self.arf_next = true;
         let at = self.frames as usize + ahead;
         if let Some(p) = &mut self.pass2 {
-            p.alt_ref(at);
+            p.alt_ref(at, OVERLAY_SHARE);
         }
+    }
+
+    /// A layered alt-ref ([`Core::code_mids`]) is coded now for the
+    /// picture `ahead` after the next shown one, which shows it as it is.
+    fn mid_alt_ref(&mut self, ahead: usize) {
+        let at = self.frames as usize + ahead;
+        if let Some(p) = &mut self.pass2 {
+            p.alt_ref(at, 0.0);
+        }
+    }
+
+    /// A layered alt-ref's quantizer: the inter step now times `scale`.
+    fn hidden_qindex(&self, scale: f64) -> u8 {
+        let bd = self.opts.bit_depth;
+        let step = if self.opts.bitrate == 0 {
+            if self.opts.qindex == 0 {
+                return 0;
+            }
+            step_of(self.opts.qindex, bd)
+        } else if let Some(p) = &self.pass2 {
+            p.base * p.scale
+        } else {
+            step_of(self.last_q, bd)
+        };
+        q_of_step(step * scale, bd).clamp(self.opts.min_q, self.opts.max_q)
     }
 
     /// The inter frames' quantizer now.
@@ -2807,6 +3109,10 @@ impl Rate {
             self.key_extra = ((bits - self.per_frame).max(0.0), 0.0);
         } else if seconds > 0.0 {
             self.key_extra.1 += 1.0;
+        }
+        if kind > 2 {
+            // A layered alt-ref, or its showing: no model of their own.
+            return;
         }
         let m = bits * step_of(qindex, self.opts.bit_depth).powf(EXP);
         if let (Some(l), 2) = (self.layer, kind) {

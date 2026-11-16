@@ -87,6 +87,13 @@ pub struct FrameParams {
     pub golden_slot: u8,
     /// Slots this frame also refreshes, besides its type's.
     pub also_refresh: u8,
+    /// The slot ALTREF reads (2 but with layered alt-refs: see
+    /// [`super::api`]'s `Vp9Options::alt_ref_layers`).
+    pub altref_slot: u8,
+    /// The slot LAST reads (0 but after a layered alt-ref was shown).
+    pub last_slot: u8,
+    /// The slot a hidden frame refreshes (2 but with layered alt-refs).
+    pub hidden_slot: u8,
     /// With the reference pool: the error a luma sample of the picture
     /// keeps from its best reference picture (its noise), 0 when unknown.
     pub noise: f32,
@@ -558,6 +565,21 @@ impl<P: EncPixel> FrameEncoder<P> {
         }
     }
 
+    /// A frame that shows the picture of `slot` again
+    /// (`show_existing_frame`): its uncompressed header alone.
+    pub fn show_existing(&self, slot: u8) -> Vec<u8> {
+        let mut b = BitWriter::new();
+        b.write(2, 2); // frame marker
+        let profile = u32::from(self.ss != (1, 1)) | if self.bd > 8 { 2 } else { 0 };
+        b.write(((profile & 1) << 1) | (profile >> 1), 2);
+        if profile == 3 {
+            b.write_bit(false);
+        }
+        b.write_bit(true); // show_existing_frame
+        b.write(u32::from(slot), 3);
+        b.finish()
+    }
+
     /// The uncompressed and compressed headers.
     fn headers(
         &self,
@@ -625,7 +647,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             }
             // LAST, and GOLDEN on a golden frame; an alt-ref only ALTREF.
             let refresh = if hidden {
-                0x04
+                1 << fp.hidden_slot
             } else if fp.golden {
                 0x03
             } else {
@@ -634,7 +656,12 @@ impl<P: EncPixel> FrameEncoder<P> {
             let refresh = self.layer.map_or(refresh, |l| u32::from(l.0));
             b.write(refresh, 8);
             let future = Self::coded(key, fp).compound_allowed;
-            for (i, slot) in [0, u32::from(fp.golden_slot), 2].into_iter().enumerate() {
+            let slots = [
+                u32::from(fp.last_slot),
+                u32::from(fp.golden_slot),
+                u32::from(fp.altref_slot),
+            ];
+            for (i, slot) in slots.into_iter().enumerate() {
                 b.write(slot, 3); // LAST 0, GOLDEN (1), ALTREF 2
                 b.write_bit(i == 2 && future); // sign bias
             }

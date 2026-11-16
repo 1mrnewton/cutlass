@@ -1572,7 +1572,8 @@ brackets). "Added" is new in this round; each has a test in
 | `-pass 1` / `-pass 2` | `g_pass`, stats | `Vp9Encoder::first_pass_qindex`, `set_second_pass` (`twopass=1`) |
 | `-deadline` best / good / realtime, `-cpu-used` (`-speed`, `-quality`) | | `speed` 0–10 (`speed=`); see the speeds below |
 | `-lag-in-frames` (`-rc_lookahead`) | `g_lag_in_frames` | `lag` (`lag=`) |
-| `-auto-alt-ref` 0 / 1 | `enable-auto-alt-ref` | `alt_ref` (`alt_ref=0`, added); libvpx's levels 2–6 (layered alt-refs) are not |
+| `-auto-alt-ref` 0 / 1 | `enable-auto-alt-ref` | `alt_ref` (`alt_ref=0`, added) |
+| `-auto-alt-ref` 2–6 | multi-layer alt-refs | `alt_ref_layers` 2 or 3 (`arf_layers=`, added): hidden alt-refs within the golden group, shown with `show_existing_frame`; see "Options measured" (they lose here) |
 | `-arnr-maxframes` | `arnr-maxframes` | `arnr_max_frames` (`arnr_frames=`, added) |
 | `-arnr-strength` | `arnr-strength` | `arnr_strength` (`arnr_strength=`, added) |
 | `-arnr-type` | `arnr-type` | n/a: libvpx's VP9 encoder ignores it too (VP8 only) |
@@ -1834,6 +1835,45 @@ corpus at 2 Mb/s (complexities 588, 293 and 311; the corpus 408):
 | `corpus=408` | 2975, 45.15 | 1486, 43.77 | 1501, 43.89 | 2048 kB |
 | libvpx `-cpu-used 4`, then `-corpus-complexity 400` | 2365 → 2312 | 2012 → 1686 | 1844 → 1717 | |
 
+**Layered alt-refs** (`alt_ref_layers`, `-auto-alt-ref` 2 to 6). With
+the lookahead, once the golden group's alt-ref is coded, the span from
+the picture coded last to the nearest alt-ref ahead is halved by a
+further hidden alt-ref one layer down, while the layers allow and the
+span is 8 pictures or more (6 for the third layer): filtered from the
+pictures around its own target (at most half the span away), coded at
+0.84 (third layer 0.95) of the inter step, and reading the alt-ref ahead
+of it as ALTREF, as the pictures before it do. In its target's place it is
+shown as it is (`show_existing_frame`, one byte), as libvpx shows its
+mid-group alt-refs, and the next picture reads it as LAST. It takes its
+slot from 3 to 7 out of the reference pool while it waits, and joins the
+pool once shown. The streams decode alike in FFmpeg's `vp9` (frame
+threads and one thread), libvpx and ours. Two passes at speed 5 (lag 16),
+BD-rate at the same PSNR-Y / FFmpeg's average; libvpx two passes,
+`-lag-in-frames 25`:
+
+| | Three scenes | Still and jumps | Grainy pan |
+| --- | --- | --- | --- |
+| `arf_layers=2` against one layer | +1.5 / +1.2% | +3.5 / +5.4% | +0.8 / +1.6% |
+| `arf_layers=3` against one layer | +2.4 / +2.0% | +2.9 / +5.1% | +0.8 / +1.6% |
+| libvpx `-auto-alt-ref 2` against 1 | −8.0 / −6.2% | −6.7 / −2.4% | −5.3 / −3.0% |
+| libvpx `-auto-alt-ref 6` against 1 | −6.4 / −2.8% | −9.8 / +0.1% | −10.4 / −1.2% |
+| One layer against libvpx `-auto-alt-ref 1` | −6.3 / −5.5% | −37.6 / −35.9% | −14.6 / −22.6% |
+| `arf_layers=2` against libvpx `-auto-alt-ref 2` | +3.4 / +2.1% | −30.8 / −33.9% | −10.0 / −22.1% |
+| `arf_layers=3` against libvpx `-auto-alt-ref 6` | +2.8 / −0.2% | −29.0 / −37.3% | −9.9 / −23.6% |
+
+They lose here, in 1.0 to 1.1 times the time: this encoder's golden
+groups are short (12 pictures, 6 to 12 by motion in two passes), its
+reference pool already gives each picture near ones, and a mid-group
+alt-ref is a filtered picture shown in place of its source. Longer
+groups, where
+libvpx gains, cost more than layers win back: golden groups of up to 16
+with lag 25 took one layer 27.8 points (PSNR-Y, summed over the clips)
+over the default, and two layers won 6.5 of them back. Halving spans
+from 4 pictures lost 7.5 points summed (11.9 with the second layer at
+0.7 of the step, 19.9 at 0.56); an overlay coded in the target's place
+instead of `show_existing_frame` (with the slots taken from the pool for
+good) lost 15.6.
+
 Decoders: FFmpeg's `vp9` and `libvpx-vp9` decoders have no options of
 their own; of the generic ones, frame threads and slice (tile) threads
 are `Vp9Decoder`'s frame threads and tile-column parse threads, and
@@ -1849,7 +1889,7 @@ carries the colour space, range and render size.
 | Render size | yes | yes (added) |
 | Key, inter, hidden (alt-ref) frames, superframes | yes | yes |
 | Intra-only frames | yes | no (libvpx writes them for SVC and resilience) |
-| `show_existing_frame` | yes | no |
+| `show_existing_frame` | yes | yes (layered alt-refs, added) |
 | Error resilient, frame parallel | yes | yes (added) |
 | Scaled references (a size change mid-stream) | yes | no |
 | Lossless (WHT) | yes | yes |
@@ -1879,8 +1919,9 @@ carries the colour space, range and render size.
   segmentation with adaptive quantization (`aq`, `aq_mode`, off by
   default), and a region of interest map's quantizer, loop filter,
   reference and skip by segment (`set_roi_map`). Temporal segment maps,
-  intra-only frames, scaled references (a size change within the
-  stream) and `show_existing_frame` are not written. Error resilient frames take no
+  intra-only frames and scaled references (a size change within the
+  stream) are not written; `show_existing_frame` only with layered
+  alt-refs. Error resilient frames take no
   compound prediction (with it their compressed headers did not parse
   back: to look into).
 - Against FFmpeg's `libvpx-vp9` as FFmpeg runs it ("Against FFmpeg's

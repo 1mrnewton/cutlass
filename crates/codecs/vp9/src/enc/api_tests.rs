@@ -2799,3 +2799,65 @@ fn a_corpus_gives_its_hard_clip_the_bits_of_its_easy_one() {
         "{sum} against {before}"
     );
 }
+
+#[test]
+fn layered_alt_refs_are_shown_as_they_are() {
+    // A scrolling page at a fixed quantizer with the lookahead: with layers,
+    // hidden alt-refs within the golden groups are shown in their
+    // targets' places as they are (`show_existing_frame`, one byte),
+    // and the pictures decode near the source, as with one layer.
+    let (w, h) = (128u32, 96u32);
+    let clip = |i: u32| page(w, h, i / 4);
+    let opts = super::Vp9Options {
+        qindex: 120,
+        lag: Some(16),
+        speed: 6,
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let shows = |p: &[Packet]| {
+        p.iter()
+            .filter(|p| p.data.len() == 1 && p.data[0] >> 3 & 1 == 1)
+            .count()
+    };
+    let worst = |p: &[Packet]| {
+        let params = CodecParams::with_format(CodecId::Vp9, w, h, PixelFormat::Yuv420p);
+        let mut decoder = Vp9Decoder::open(&params).expect("decoder");
+        let mut out = Vec::new();
+        for p in p {
+            out.extend(decoder.push_all(p).expect("decode"));
+        }
+        assert_eq!(out.len(), 30);
+        out.iter()
+            .enumerate()
+            .map(|(i, o)| psnr(&vis(&clip(i as u32).y), &vis(&o.frame.y)))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let one = encode_with(opts, (w, h), 30, clip);
+    assert_eq!(shows(&one), 0);
+    let base = worst(&one);
+    let mut n = Vec::new();
+    for layers in [2u8, 3] {
+        let p = encode_with(
+            super::Vp9Options {
+                alt_ref_layers: layers,
+                ..opts
+            },
+            (w, h),
+            30,
+            clip,
+        );
+        assert_eq!(p.len(), 30);
+        n.push(shows(&p));
+        let q = worst(&p);
+        assert!(q > base - 1.5, "{layers} layers: {q} against {base}");
+    }
+    // One in the golden group of twelve with an alt-ref, three with three
+    // layers (at 6, then 3 and 9).
+    assert_eq!(n, [1, 3]);
+    let past = super::Vp9Options {
+        alt_ref_layers: 4,
+        ..opts
+    };
+    assert!(Vp9Encoder::with_options(w, h, past).is_err());
+}

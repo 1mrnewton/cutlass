@@ -5,7 +5,8 @@
 //! constrained quality), `cq=QINDEX`, `sharpness=0..7`,
 //! `colorspace=0..7` (VP9's codes; 7 is sRGB), `range=1` (full),
 //! `render=WxH`, `error_resilient=1`, `frame_parallel=1`,
-//! `static_thresh=N`, `alt_ref=0`, `arnr_strength=0..6`,
+//! `static_thresh=N`, `alt_ref=0`, `arf_layers=1..3` (layered alt-refs,
+//! `-auto-alt-ref` past 1), `arnr_strength=0..6`,
 //! `arnr_frames=1..15`, `undershoot=PCT`, `overshoot=PCT`,
 //! `keyint_min=N`, `max_intra=PCT`, `tile_columns=0..6`, `level=N`
 //! (10 × the level) and `lossless=1`; `drop=PCT` (FFmpeg's
@@ -106,6 +107,7 @@ fn main() -> Result<(), String> {
             "frame_parallel" => opts.frame_parallel = n != 0,
             "static_thresh" => opts.static_thresh = n,
             "alt_ref" => opts.alt_ref = n != 0,
+            "arf_layers" => opts.alt_ref_layers = n as u8,
             "arnr_strength" => opts.arnr_strength = Some(n as u8),
             "arnr_frames" => opts.arnr_max_frames = Some(n as u8),
             "undershoot" => opts.undershoot_pct = n,

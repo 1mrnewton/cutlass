@@ -77,6 +77,9 @@ fn round_trip_with(
                 uv_delta: 0,
                 golden_slot: 1,
                 also_refresh: 0,
+                altref_slot: 2,
+                last_slot: 0,
+                hidden_slot: 2,
                 noise: 0.0,
             })
             .expect("encode");
@@ -187,6 +190,9 @@ fn row_lanes_code_the_frames_rows_one_after_another_do() {
                         uv_delta: 0,
                         golden_slot: 1,
                         also_refresh: 0,
+                        altref_slot: 2,
+                        last_slot: 0,
+                        hidden_slot: 2,
                         noise: 0.0,
                     })
                     .expect("encode")
@@ -262,6 +268,9 @@ fn a_far_jump_is_found_and_searched_from() {
                     uv_delta: 0,
                     golden_slot: 1,
                     also_refresh: 0,
+                    altref_slot: 2,
+                    last_slot: 0,
+                    hidden_slot: 2,
                     noise: 0.0,
                 })
                 .expect("encode");

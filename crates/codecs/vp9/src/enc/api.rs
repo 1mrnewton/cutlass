@@ -245,6 +245,21 @@ pub struct Vp9Options {
     /// toward the last denoised picture along its motion by libvpx's
     /// steps ([`super::denoise`]); from 3 harder. 0: off.
     pub noise_sensitivity: u8,
+    /// Temporal layers (libvpx's temporal scalability, FFmpeg's
+    /// `-ts-parameters`): 2 or 3 code the pictures in libvpx's patterns
+    /// (`vpx_temporal_svc_encoder` modes 1 and 3), so that the pictures of
+    /// the lower layers decode without those of the higher: with 2, layer
+    /// 0 every second picture predicting only from layer 0, layer 1 the
+    /// others; with 3, every fourth picture in layer 0, the third of each
+    /// four in layer 1 (predicting from layer 0), the others in layer 2
+    /// (predicting from both, and from no picture of layer 2). Every frame
+    /// is then error resilient (no probabilities, motion or segmentation
+    /// carried from the frame before, which a decoder of fewer layers
+    /// does not have), with no lookahead, no alt-refs, no golden frames
+    /// or cuts of their own and no reference pool. Key frames start the
+    /// pattern again; [`Vp9Encoder::temporal_layer`] tells the layer of
+    /// the picture coded last. 0 or 1: one layer.
+    pub temporal_layers: u8,
 }
 
 /// The lookahead below speed 9 unless set: with it, alt-refs take 10 to
@@ -259,8 +274,16 @@ const ARF_SPEED: u8 = 6;
 impl Vp9Options {
     /// The lookahead in pictures.
     pub fn lag(&self) -> u32 {
+        if self.layered() {
+            return 0;
+        }
         self.lag
             .unwrap_or(if self.speed >= 9 { 0 } else { DEFAULT_LAG })
+    }
+
+    /// Whether the pictures go in temporal layers.
+    fn layered(&self) -> bool {
+        self.temporal_layers > 1
     }
 
     /// Chroma subsampling across and down.
@@ -286,7 +309,7 @@ impl Vp9Options {
             color_space: self.color_space.code(),
             full_range: self.full_range || self.color_space == ColorSpace::Srgb,
             render_size: self.render_size,
-            error_resilient: self.error_resilient,
+            error_resilient: self.error_resilient || self.layered(),
             frame_parallel: self.frame_parallel,
             static_thresh: self.static_thresh,
             screen: self.tune_content == TuneContent::Screen,
@@ -331,6 +354,9 @@ impl Vp9Options {
         }
         if self.aq && !matches!(self.aq_mode, AqMode::Off | AqMode::Variance) {
             return bad("vp9 variance AQ with another AQ mode");
+        }
+        if self.temporal_layers > 3 {
+            return bad("vp9 temporal layers past 3");
         }
         if self.noise_sensitivity > 6 {
             return bad("vp9 noise sensitivity past 6");
@@ -392,6 +418,7 @@ impl Default for Vp9Options {
             tune_content: TuneContent::Default,
             tune: Tune::Psnr,
             noise_sensitivity: 0,
+            temporal_layers: 1,
         }
     }
 }
@@ -443,6 +470,8 @@ struct Core<P: EncPixel> {
     refresh_at: usize,
     /// [`Vp9Options::noise_sensitivity`]'s denoiser.
     denoiser: Option<super::denoise::Denoiser<P>>,
+    /// The temporal layer of the picture coded last.
+    layer: u8,
 }
 
 /// A picture a reference slot holds, as its source.
@@ -595,6 +624,17 @@ impl Vp9Encoder {
         match &self.lane {
             Lane::Eight(c) => c.rc.first_pass_qindex(seconds),
             Lane::Deep(c) => c.rc.first_pass_qindex(seconds),
+        }
+    }
+
+    /// The temporal layer of the picture coded last
+    /// ([`Vp9Options::temporal_layers`]; 0 for a key frame, and without
+    /// layers). A decoder of layers up to `n` takes the packets of those
+    /// layers and leaves the others out.
+    pub fn temporal_layer(&self) -> u8 {
+        match &self.lane {
+            Lane::Eight(c) => c.layer,
+            Lane::Deep(c) => c.layer,
         }
     }
 
@@ -781,6 +821,7 @@ impl<P: EncPixel> Core<P> {
             refresh_at: 0,
             denoiser: (opts.noise_sensitivity > 0)
                 .then(|| super::denoise::Denoiser::new(opts.noise_sensitivity)),
+            layer: 0,
         }
     }
 
@@ -1046,7 +1087,10 @@ impl<P: EncPixel> Core<P> {
         // each block still chooses intra or inter, and the probabilities
         // the stream has learnt are kept (a key frame would reset them, and
         // costs more on a cut to another picture of the same subject).
-        let cut = !forced && cut.unwrap_or_else(|| self.is_cut(planes[0]));
+        // (In temporal layers a cut is an inter frame: a golden frame
+        // would refresh slots another layer reads.)
+        let layered = self.opts.layered();
+        let cut = !forced && !layered && cut.unwrap_or_else(|| self.is_cut(planes[0]));
         // What looks a cut may be the picture moved far ([`super::arf::jump`]):
         // then it is an inter frame whose blocks also search there.
         let jump = if cut { self.jump_of(planes[0]) } else { None };
@@ -1063,7 +1107,7 @@ impl<P: EncPixel> Core<P> {
         // A golden frame every `GF_INTERVAL` frames, coded finer: the
         // frames after it predict from it. After an alt-ref, the golden
         // frame is its overlay, coded as an inter frame.
-        let golden = !key && (cut || self.since_key == self.gold.1);
+        let golden = !key && !layered && (cut || self.since_key == self.gold.1);
         let overlay = golden && !cut && self.overlay_at == Some(self.since_key);
         let kind = if key {
             0
@@ -1153,8 +1197,17 @@ impl<P: EncPixel> Core<P> {
             }
             None => self.enc.load(planes),
         }
+        self.layer = 0;
+        if layered && !key {
+            self.layer = layer_of(self.opts.temporal_layers, self.since_key).0;
+        }
+        self.rc.layer = (layered && !key).then_some(usize::from(self.layer));
         let qindex = self.rc.qindex(kind, seconds, cut);
         self.segment(key, qindex);
+        if layered && !key {
+            let (_, refresh, refs) = layer_of(self.opts.temporal_layers, self.since_key);
+            self.enc.set_layer(refresh, refs);
+        }
         // Between an alt-ref and its overlay, ALTREF is ahead.
         // (Error resilient frames take no compound prediction.)
         let altref_future =
@@ -1293,7 +1346,8 @@ impl<P: EncPixel> Core<P> {
     /// Whether the reference pool is kept ([`POOL`]): two passes, and one
     /// pass up to [`POOL_SPEED`].
     fn pooled(&self) -> bool {
-        self.rc.pass2.is_some() || self.opts.speed <= POOL_SPEED || self.rt_pool()
+        !self.opts.layered()
+            && (self.rc.pass2.is_some() || self.opts.speed <= POOL_SPEED || self.rt_pool())
     }
 
     /// The realtime pool's motion from the picture coded last to `to`
@@ -1319,7 +1373,10 @@ impl<P: EncPixel> Core<P> {
 
     /// Whether the reference pool is the realtime one ([`RT_POOL_SPEED`]).
     fn rt_pool(&self) -> bool {
-        self.rc.pass2.is_none() && self.opts.speed >= RT_POOL_SPEED && self.opts.bitrate > 0
+        self.rc.pass2.is_none()
+            && self.opts.speed >= RT_POOL_SPEED
+            && self.opts.bitrate > 0
+            && !self.opts.layered()
     }
 
     /// The slot GOLDEN reads for the picture `to` (tight planes): the
@@ -2104,7 +2161,17 @@ struct Rate {
     /// libvpx's decimation factor and count (`vp9_test_drop`).
     buffer: f64,
     decimation: (u32, u32),
+    /// With temporal layers, the layer of the inter frame coded next, and
+    /// each layer's model and last quantizer ([`LAYER_SHARE`]).
+    layer: Option<usize>,
+    layer_model: [Option<f64>; 3],
+    layer_q: [Option<u8>; 3],
 }
+
+/// With temporal layers, the share of a frame's budget each layer's
+/// frames take: libvpx's usual split of the rate, 60% to layer 0 and 40%
+/// to layer 1 with two layers, 60%, 20% and 20% with three (WebRTC's).
+const LAYER_SHARE: [[f64; 3]; 2] = [[1.2, 0.8, 0.0], [2.4, 0.8, 0.4]];
 
 /// [`Vp9Options::drop_frame_pct`] at a variable bitrate: libvpx's buffer
 /// (`rc_buf_sz`), in milliseconds.
@@ -2187,6 +2254,9 @@ impl Rate {
             // (libvpx's buffer starts at 4 of its 6 seconds.)
             buffer: Self::buffer_size(&opts) * 4.0 / 6.0,
             decimation: (0, 0),
+            layer: None,
+            layer_model: [None; 3],
+            layer_q: [None; 3],
         }
     }
 
@@ -2421,6 +2491,30 @@ impl Rate {
             let buffer = f64::from(self.opts.cbr_buffer_ms) / 1000.0 / seconds;
             horizon = horizon.min((buffer / 2.0).max(2.0));
         }
+        if let (Some(l), 2) = (self.layer, kind) {
+            // Temporal layers: each layer's frames their share of the
+            // budget, at the quantizer its own model gives, moving a few
+            // steps a frame from that layer's last.
+            let share = LAYER_SHARE[usize::from(self.opts.temporal_layers > 2)][l];
+            let m = self.layer_model[l].unwrap_or(m);
+            let debt = if banded {
+                band(self.debt, self.per_frame * f64::from(self.frames))
+            } else {
+                self.debt
+            };
+            let target = (self.per_frame * share - debt / horizon).max(self.per_frame * 0.1);
+            let step = (m / target).powf(1.0 / EXP);
+            let q = q_of_step(step, self.opts.bit_depth).clamp(floor[2], self.opts.max_q);
+            let q = match self.layer_q[l] {
+                Some(last) => q.clamp(last.saturating_sub(48), last.saturating_add(48)),
+                None => q,
+            };
+            self.layer_q[l] = Some(q);
+            if l == 0 {
+                self.last_q = q;
+            }
+            return q;
+        }
         if !cbr {
             // At a variable bitrate the frame types' steps are the inter
             // frames' scaled (as with a fixed quantizer and in two passes),
@@ -2597,6 +2691,9 @@ impl Rate {
             self.key_extra.1 += 1.0;
         }
         let m = bits * step_of(qindex, self.opts.bit_depth).powf(EXP);
+        if let (Some(l), 2) = (self.layer, kind) {
+            self.layer_model[l] = Some(self.layer_model[l].map_or(m, |old| old * 0.6 + m * 0.4));
+        }
         // (The probe's inter model counts as [`PROBE_WEIGHT`] frames.)
         let prior = (kind == 2).then_some(self.probed.map(|p| p.1)).flatten();
         let first = self.probed.map_or(0.0, |_| PROBE_WEIGHT);
@@ -2623,6 +2720,26 @@ impl Rate {
                 self.opts.bit_depth,
             );
         }
+    }
+}
+
+/// The temporal layer of the picture `at` pictures after a key frame in
+/// `layers` layers (libvpx's `vpx_temporal_svc_encoder` modes 1 and 3),
+/// the slots it refreshes and the references it may use (bit 0 LAST, 1
+/// GOLDEN): layer 0 reads and refreshes LAST; layer 1 refreshes GOLDEN
+/// (and reads it with two layers); layer 2 refreshes nothing.
+fn layer_of(layers: u8, at: u32) -> (u8, u8, u8) {
+    if layers == 2 {
+        return match at % 2 {
+            0 => (0, 0x01, 0x01),
+            _ => (1, 0x02, 0x03),
+        };
+    }
+    match at % 4 {
+        0 => (0, 0x01, 0x01),
+        1 => (2, 0x00, 0x01),
+        2 => (1, 0x02, 0x01),
+        _ => (2, 0x00, 0x03),
     }
 }
 

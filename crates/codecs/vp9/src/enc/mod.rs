@@ -287,6 +287,10 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// With `tune=ssim`, the frame's scales of the RD lambda by
     /// superblock ([`ssim_scales`]).
     ssim: Vec<f32>,
+    /// The next frame's slots to refresh and references its blocks may
+    /// use ([`FrameEncoder::set_layer`]), and the frame's being coded.
+    next_layer: Option<(u8, u8)>,
+    layer: Option<(u8, u8)>,
     /// Each reference's picture in the last inter frame, the share of its
     /// area that frame predicted from it (in 1/1024), and how many frames
     /// in a row it has been left out of the search.
@@ -372,6 +376,8 @@ impl<P: EncPixel> FrameEncoder<P> {
             aq: None,
             next_plan: None,
             ssim: Vec::new(),
+            next_layer: None,
+            layer: None,
             ref_use: [(0, 1024, 0); 3],
             stream: Stream::default(),
             threads: threads.max(1),
@@ -399,6 +405,13 @@ impl<P: EncPixel> FrameEncoder<P> {
     /// pictures), unless it is adaptively quantized or lossless.
     pub fn set_segmentation(&mut self, plan: aq::Plan) {
         self.next_plan = Some(plan);
+    }
+
+    /// The next inter frame refreshes the slots of `refresh` (a mask; its
+    /// type's otherwise) and its blocks use only the references of `refs`
+    /// (bit 0 LAST, 1 GOLDEN, 2 ALTREF): a temporal layer's frame.
+    pub fn set_layer(&mut self, refresh: u8, refs: u8) {
+        self.next_layer = Some((refresh, refs));
     }
 
     /// What every frame signals from now on.
@@ -470,6 +483,7 @@ impl<P: EncPixel> FrameEncoder<P> {
     pub fn encode(&mut self, fp: FrameParams) -> Result<Coded, CodecError> {
         let key = fp.key || self.dec.ref_pic::<P>(0).is_none();
         let lossless = fp.qindex == 0;
+        self.layer = self.next_layer.take().filter(|_| !key);
         let next = self.next_plan.take();
         self.aq = (fp.aq && !lossless).then(|| {
             let (w, h) = (self.width as usize, self.height as usize);
@@ -617,6 +631,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             } else {
                 0x01
             } | u32::from(fp.also_refresh);
+            let refresh = self.layer.map_or(refresh, |l| u32::from(l.0));
             b.write(refresh, 8);
             let future = Self::coded(key, fp).compound_allowed;
             for (i, slot) in [0, u32::from(fp.golden_slot), 2].into_iter().enumerate() {
@@ -764,6 +779,11 @@ impl<P: EncPixel> FrameEncoder<P> {
         // search while the same picture predicted under 1% of the last
         // inter frame that searched it, but tried again every fourth frame.
         let ids = refs.map(|r| r.map_or(0, |p| std::ptr::from_ref(p) as usize));
+        if let Some((_, refs)) = self.layer {
+            for (r, live) in refs_live.iter_mut().enumerate() {
+                *live &= refs >> r & 1 != 0;
+            }
+        }
         let searched_before = refs_live;
         if !h.is_intra() && fp.speed >= REF_PRUNE_SPEED && !fp.altref_future {
             for r in 1..3 {

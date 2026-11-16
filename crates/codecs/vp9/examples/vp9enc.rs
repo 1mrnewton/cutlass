@@ -11,7 +11,8 @@
 //! (10 × the level) and `lossless=1`; `drop=PCT` (FFmpeg's
 //! `-drop-threshold`: dropped frames leave gaps in the IVF timestamps),
 //! `screen=1` (`-tune-content screen`), `ssim=1` (`-tune ssim`) and
-//! `noise=0..6` (`-noise-sensitivity`).
+//! `noise=0..6` (`-noise-sensitivity`); `layers=2|3` (temporal layers),
+//! with `keep_layers=N` writing only the packets of the lowest N.
 //! With `bits=10` or `12` the input has little-endian 16-bit samples
 //! (FFmpeg's `yuv420p10le` and the like).
 
@@ -35,6 +36,7 @@ fn main() -> Result<(), String> {
     let mut twopass = false;
     let mut first_speed = 10u8;
     let mut crf = None;
+    let mut keep_layers = u8::MAX;
     for a in &args[5..] {
         let (k, v) = a.split_once('=').ok_or("option")?;
         if k == "render" {
@@ -106,6 +108,8 @@ fn main() -> Result<(), String> {
             "level" => opts.level = n as u8,
             "drop" => opts.drop_frame_pct = n,
             "noise" => opts.noise_sensitivity = n as u8,
+            "layers" => opts.temporal_layers = n as u8,
+            "keep_layers" => keep_layers = n as u8,
             "ssim" => {
                 if n != 0 {
                     opts.tune = Tune::Ssim;
@@ -194,7 +198,9 @@ fn main() -> Result<(), String> {
             for (data, _, (pts, _, _)) in
                 push(&mut enc, &buf, &mut wide, (w, h, cw, ch), fps, clock)?
             {
-                packets.push((data, pts));
+                if enc.temporal_layer() < keep_layers {
+                    packets.push((data, pts));
+                }
             }
             n += 1;
             let _ = back_tx.send(buf);

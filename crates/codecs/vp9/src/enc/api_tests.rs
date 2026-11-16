@@ -2517,3 +2517,73 @@ fn the_denoiser_brings_a_noisy_still_picture_near_the_clean_one() {
     };
     assert!(Vp9Encoder::with_options(w, h, past).is_err());
 }
+
+#[test]
+fn each_temporal_layer_decodes_without_those_above() {
+    let (w, h) = (128u32, 64u32);
+    for (layers, pattern) in [(2u8, &[0u8, 1][..]), (3, &[0, 2, 1, 2][..])] {
+        let opts = super::Vp9Options {
+            temporal_layers: layers,
+            bitrate: 300_000,
+            cbr_buffer_ms: 1000,
+            speed: 9,
+            lag: Some(16),
+            ..lag0(100)
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let mut coded = Vec::new();
+        for i in 0..24u32 {
+            let p = encoder
+                .push(&VideoInput {
+                    frame: noisy(w, h, i, i),
+                    pts: i64::from(i),
+                    duration: 1,
+                    timescale: 30,
+                })
+                .expect("push");
+            // No lookahead in layers: each picture comes out at once.
+            assert_eq!(p.len(), 1);
+            coded.push((encoder.temporal_layer(), p[0].data.clone()));
+        }
+        let mut dec = Decoder::new();
+        for (i, (layer, data)) in coded.iter().enumerate() {
+            assert_eq!(*layer, pattern[i % pattern.len()], "picture {i}");
+            let h = header::parse(dec.persist(), data).expect("header").header;
+            dec.decode(data).expect("decode");
+            assert!(h.error_resilient || i == 0);
+            if i > 0 {
+                let refresh = match layer {
+                    0 => 0x01,
+                    1 => 0x02,
+                    _ => 0x00,
+                };
+                assert_eq!(h.refresh_flags, refresh, "picture {i}");
+            }
+        }
+        // All the layers, then each set of the lower ones alone: the
+        // pictures of a set are those of all.
+        let decode = |top: u8| -> Vec<(usize, Vec<u8>)> {
+            let mut dec = Decoder::new();
+            coded
+                .iter()
+                .enumerate()
+                .filter(|(_, (l, _))| *l <= top)
+                .map(|(i, (_, d))| (i, dec.decode(d).expect("decode").expect("shown").y))
+                .collect()
+        };
+        let all = decode(layers - 1);
+        assert_eq!(all.len(), 24);
+        for top in 0..layers - 1 {
+            let some = decode(top);
+            assert!(some.len() < 24);
+            for (i, y) in &some {
+                assert_eq!(y, &all[*i].1, "{layers} layers, up to {top}, picture {i}");
+            }
+        }
+    }
+    let past = super::Vp9Options {
+        temporal_layers: 4,
+        ..lag0(100)
+    };
+    assert!(Vp9Encoder::with_options(w, h, past).is_err());
+}

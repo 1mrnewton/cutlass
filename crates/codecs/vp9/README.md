@@ -1595,7 +1595,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-row-mt 1` | `row-mt` | always below speed 9: rows on threads (`enc::tile::Lanes`, added); from speed 9 one thread a tile column, as many as the threads allow beyond one |
 | `-threads` | `g_threads` | `threads` (`threads=`) |
 | `-level` | `target-level` | `level`: named in `vpcC` (added), not enforced |
-| `-ts-parameters` | temporal layers | missing (no SVC / temporal layers) |
+| `-ts-parameters` | temporal layers | `temporal_layers` 2 or 3 (`layers=`, added): libvpx's L1T2 and L1T3 patterns; spatial layers are not |
 | `-corpus-complexity` | corpus VBR | missing |
 | `-enable-tpl` | TPL model | n/a: two passes have their own allocation |
 | `-pix_fmt yuv420p` … `yuv444p12le` | profiles 0–3 | `chroma`, `bit_depth` (`chroma=`, `bits=`) |
@@ -1750,6 +1750,39 @@ Mb/s). It takes 3.7 ms a 720p picture on one thread (speed 9: from 0.89
 to 1.11 s for the 60 pictures). FFmpeg 6.1's `libvpx-vp9` here was built
 without libvpx's denoiser (`-noise-sensitivity 1` writes the same bytes),
 so there is no comparison.
+
+**Temporal layers** (`temporal_layers`, `-ts-parameters`). libvpx's
+patterns (`vpx_temporal_svc_encoder` modes 1 and 3): with two layers,
+layer 0 every second picture, reading and refreshing LAST, and layer 1
+the others, reading LAST and GOLDEN and refreshing GOLDEN; with three,
+pictures 0, 1, 2, 3 of each four in layers 0, 2, 1, 2, layer 0 reading
+and refreshing LAST, layer 1 reading LAST and refreshing GOLDEN, layer 2
+reading LAST (and GOLDEN on the fourth) and refreshing nothing. Every
+frame is error resilient: a decoder of fewer layers misses frames whose
+probabilities and motion the next frame would otherwise read (WebRTC
+sets libvpx's error resilience for the same reason). No lookahead, no
+alt-refs or golden frames of their own, cuts coded as inter frames, no
+reference pool. The rate control gives each layer's frames libvpx's
+usual split (60/40%; 60/20/20%) with a model of their own.
+`Vp9Encoder::temporal_layer` names the layer of the picture coded last
+(`vp9enc keep_layers=N` writes the packets of the lowest N). The packets
+of layers 0, and 0 and 1, decode alone to exactly the full stream's
+pictures in our decoder, FFmpeg's and libvpx's. Speed 9, three layers, a
+constant bitrate (1 s buffer), BD-rate at the same PSNR-Y / FFmpeg's
+average against libvpx's realtime 8 with `-ts-parameters` (the same
+pattern and split) and `-error-resilient default` (without it, its base
+layer does not decode alone):
+
+| | Three scenes | Still and jumps | Grainy pan |
+| --- | --- | --- | --- |
+| All layers | +11.0 / +7.2% | −15.2 / −15.5% | −52.7 / −50.5% |
+| Layer 0 alone (7.5 pictures a second) | +7.7 / +10.9% | +27.4 / +27.1% | −24.4 / −22.6% |
+| All layers, against one layer at the same speed | +57.0 / +46.1% | +98.2 / +89.9% | +0.2 / −1.0% |
+
+One layer at speed 9 is far ahead of libvpx on the first two clips by
+its reference pool, golden frames and cuts, which layers give up, and by
+the probabilities it carries from frame to frame; the base layer, whose
+pictures are four apart, is where libvpx stays ahead on two clips.
 
 Decoders: FFmpeg's `vp9` and `libvpx-vp9` decoders have no options of
 their own; of the generic ones, frame threads and slice (tile) threads

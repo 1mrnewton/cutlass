@@ -154,3 +154,5 @@ Cutlass is free under either license. Pick one.
 * [MIT License](LICENSE-MIT)
 
 Copyright (c) 2026 1mrnewton
+
+Windows releases are signed under the [code signing policy](CODE_SIGNING_POLICY.md).

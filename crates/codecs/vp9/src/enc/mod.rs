@@ -315,6 +315,11 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// The next frame's whole-picture motion from LAST, if far.
     global: Option<Mv>,
     gold_mv: Option<Mv>,
+    /// The loop filter level the frame being coded searched
+    /// ([`pick_level`]), for its final header.
+    lf_pick: Option<u8>,
+    /// [`pick_level`]'s band of luma rows, unfiltered and filtered.
+    lf_band: Vec<P>,
 }
 
 /// What one tile column's encoder keeps from frame to frame.
@@ -394,6 +399,8 @@ impl<P: EncPixel> FrameEncoder<P> {
             row_lanes: 0,
             global: None,
             gold_mv: None,
+            lf_pick: None,
+            lf_band: Vec::new(),
         }
     }
 
@@ -523,9 +530,14 @@ impl<P: EncPixel> FrameEncoder<P> {
         // The tiles are coded against the probabilities as they stand; their
         // symbols are kept, the coefficient probabilities that pay for
         // their update are updated, and the symbols written with them.
+        self.lf_pick = None;
         let head = self.headers(key, fp, None, None)?;
         let parsed = header::parse(self.dec.persist(), &head)?;
-        let (counts, mvs, segmap, pic, coded) = self.tiles(&parsed, fp, key)?;
+        let tiles = self.tiles(&parsed, fp, key);
+        if tiles.is_err() {
+            self.lf_pick = None;
+        }
+        let (counts, mvs, segmap, pic, coded) = tiles?;
         let Written {
             old,
             new,
@@ -533,8 +545,9 @@ impl<P: EncPixel> FrameEncoder<P> {
             new_nc,
             tiles,
         } = coded;
-        let head = self.headers(key, fp, Some((&old, &new)), Some((&old_nc, &new_nc)))?;
-        let mut data = head;
+        let head = self.headers(key, fp, Some((&old, &new)), Some((&old_nc, &new_nc)));
+        self.lf_pick = None;
+        let mut data = head?;
         // Tiles go row by row; every one but the last carries its size.
         let cols = tiles.into_iter().collect::<Result<Vec<_>, _>>()?;
         let rows = cols.first().map_or(0, Vec::len);
@@ -687,7 +700,8 @@ impl<P: EncPixel> FrameEncoder<P> {
         let level = if lossless {
             0
         } else {
-            filter_level(qindex, key, self.bd)
+            self.lf_pick
+                .unwrap_or_else(|| filter_level(qindex, key, self.bd))
         };
         b.write(u32::from(level), 6);
         b.write(u32::from(st.sharpness.min(7)), 3);
@@ -1023,8 +1037,12 @@ impl<P: EncPixel> FrameEncoder<P> {
         // With one lane a tile column on threads, the loop filter follows
         // the tiles row by row ([`lf_rows`]) instead of filtering the frame
         // after them: on four threads at speed 10 it was a tenth of the
-        // time. (Not with a grid: 4:2:2 and 4:4:0 filter chroma from it.)
-        let piped = lanes == 1 && ntiles > 1 && !needs_grid;
+        // time. (Not with a grid: 4:2:2 and 4:4:0 filter chroma from it;
+        // nor when the level is searched, on the whole frame's samples.)
+        let seg_lf = h.seg.enabled && (0..8).any(|i| h.seg.feature_on[i][1]);
+        let lf_search =
+            filter_on && fp.speed <= LF_SEARCH_SPEED && !seg_lf && lpf::rebasable(h.filter_level);
+        let piped = lanes == 1 && ntiles > 1 && !needs_grid && !lf_search;
         // At EARLY_SPEED, piped and with one tile row: the probability
         // updates are decided once every tile column has coded the rows
         // up to `early_row`, and each tile's symbols are written on a
@@ -1351,6 +1369,38 @@ impl<P: EncPixel> FrameEncoder<P> {
             }
             counts.add(&st.counts);
         }
+        // The loop filter level: searched on a band of the frame (see
+        // [`LF_SEARCH_SPEED`]), the masks rebased to it.
+        let mut lf_level = h.filter_level;
+        if lf_search {
+            let pick = pick_level(
+                &self.src,
+                &work,
+                &edges,
+                &dims,
+                &masks,
+                &levels,
+                &geo,
+                lf_level,
+                h.tx_mode != geom::ONLY_4X4,
+                &mut self.lf_band,
+            );
+            if pick != lf_level {
+                for m in &mut masks {
+                    m.rebase(lf_level, pick);
+                }
+                lf_level = pick;
+            }
+        }
+        self.lf_pick = Some(lf_level);
+        // (The chroma of 4:2:2 and 4:4:0 takes its levels from the grid.)
+        let lf_levels = if needs_grid && lf_level != h.filter_level {
+            let mut hl = h.clone();
+            hl.filter_level = lf_level;
+            lpf::levels(&hl)
+        } else {
+            levels
+        };
         let lossless = h.lossless;
         let old = flat_coef(&parsed.fc);
         let old_nc = probs::flatten(&parsed.fc);
@@ -1390,7 +1440,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                 .collect()
         };
         let work = &work[..];
-        let (m, l, g, ed, gr) = (&masks, &levels, &geo, &edges, &grid);
+        let (m, l, g, ed, gr) = (&masks, &lf_levels, &geo, &edges, &grid);
         let tiles = std::thread::scope(|sc| {
             for (p, mut v) in writer.tails().map(View::of).into_iter().enumerate() {
                 if piped {
@@ -1834,6 +1884,177 @@ pub fn filter_level(qindex: u8, key: bool, bd: u8) -> u8 {
         guess -= 4;
     }
     guess.clamp(0, 63) as u8
+}
+
+/// Speeds at and below which the loop filter level of each frame is
+/// searched ([`pick_level`]) rather than taken from the quantizer
+/// ([`filter_level`], libvpx's `LPF_PICK_FROM_Q`).
+pub const LF_SEARCH_SPEED: u8 = 5;
+
+/// [`pick_level`] filters one superblock row in this many, spread over
+/// the frame.
+const LF_BAND_EVERY: usize = 4;
+
+/// The share of its error (the three planes', each relative to its own
+/// at the quantizer's level, averaged) a searched level must take off to
+/// be kept over the quantizer's.
+const LF_MARGIN: f64 = 0.01;
+
+/// libvpx's `search_filter_level` on part of the picture
+/// (`LPF_PICK_FROM_SUBIMAGE`), on the frame's samples before the filter:
+/// one superblock row in [`LF_BAND_EVERY`] (each with the rows above it
+/// that its top edge's taps read), filtered at a level and at the levels
+/// a step either side of it, from `l0` (the quantizer's, at which the
+/// masks were built) and a step of a quarter of it (4 under 16); it moves
+/// to the side whose luma error is the least, a lower level at a little
+/// more error and a higher one only at a little less (libvpx's bias), and
+/// the step halves while the level stands, down to 2. Kept only if the
+/// three planes' errors there, each over its own at `l0`, average under
+/// 1 − [`LF_MARGIN`]; `l0` otherwise. Levels 2 to 61
+/// ([`lpf::rebasable`]: the masks take the level by [`lpf::Mask::rebase`]).
+/// 4:2:2 and 4:4:0 chroma, filtered from the grid, is left out of the
+/// measure.
+#[allow(clippy::too_many_arguments)]
+fn pick_level<P: EncPixel>(
+    src: &[Vec<P>; 3],
+    work: &[&TileWork<P>],
+    edges: &[usize],
+    dims: &Dims,
+    masks: &[lpf::Mask],
+    levels: &lpf::Levels,
+    geo: &lf::Geo,
+    l0: u8,
+    big_tx: bool,
+    band: &mut Vec<P>,
+) -> u8 {
+    let sb_rows = geo.mi_rows.div_ceil(8);
+    let sb_cols = geo.sb_cols;
+    let n = sb_rows.div_ceil(LF_BAND_EVERY);
+    let planes = if geo.ss_x == geo.ss_y { 3 } else { 1 };
+    // Each band: its plane and superblock row, its first and end rows
+    // (from the rows above it that its top edge's taps read), and its
+    // place in `band`.
+    let mut bands = Vec::with_capacity(3 * n);
+    let mut len = 0;
+    for p in 0..planes {
+        let sy = if p == 0 { 0 } else { geo.ss_y };
+        for k in 0..n {
+            let r = ((2 * k + 1) * sb_rows) / (2 * n);
+            let y_top = ((r * 64) >> sy).saturating_sub(8);
+            let y1 = (((r + 1) * 64) >> sy).min(dims.rows[p]);
+            bands.push((p, r, y_top, y1, len));
+            len += (y1 - y_top) * dims.stride[p];
+        }
+    }
+    band.clear();
+    band.resize(2 * len, P::default());
+    let (orig, trial) = band.split_at_mut(len);
+    for &(p, _, y_top, y1, at) in &bands {
+        let stride = dims.stride[p];
+        let sx = if p == 0 { 0 } else { geo.ss_x };
+        for (i, t) in work.iter().enumerate() {
+            let (x0, x1) = ((edges[i] * 8) >> sx, ((edges[i + 1] * 8) >> sx).min(stride));
+            for row in y_top..y1 {
+                let o = at + (row - y_top) * stride;
+                orig[o + x0..o + x1]
+                    .copy_from_slice(&t.pix[p][row * stride + x0..row * stride + x1]);
+            }
+        }
+    }
+    let mut mk = vec![lpf::Mask::default(); sb_rows * sb_cols];
+    // The squared error of each plane's bands (of the first `np` planes)
+    // filtered at level `l`.
+    let mut err = |l: u8, np: usize| -> [u64; 3] {
+        let mut e = [0; 3];
+        let mut rebased = usize::MAX;
+        for &(p, r, y_top, y1, at) in bands.iter().filter(|b| b.0 < np) {
+            let stride = dims.stride[p];
+            let end = at + (y1 - y_top) * stride;
+            let data = &mut trial[at..end];
+            data.copy_from_slice(&orig[at..end]);
+            if rebased != r {
+                let ms = r * sb_cols..(r + 1) * sb_cols;
+                for (m, &o) in mk[ms.clone()].iter_mut().zip(&masks[ms]) {
+                    *m = o;
+                    if l != l0 {
+                        m.rebase(l0, l);
+                    }
+                }
+                rebased = r;
+            }
+            let mut v = View {
+                data: &mut data[..],
+                base: y_top * stride,
+                stride,
+            };
+            lf::sb_row_plane(&mut v, p, &mk, &[], levels, geo, r);
+            let sy = if p == 0 { 0 } else { geo.ss_y };
+            let y0 = (r * 64) >> sy;
+            let h = dims.h[p].min(y1).saturating_sub(y0);
+            let o = (y0 - y_top) * stride;
+            let w = dims.w[p];
+            for x in (0..w).step_by(64) {
+                let cw = (w - x).min(64);
+                e[p] += P::sse(
+                    &src[p][y0 * stride + x..],
+                    stride,
+                    &data[o + x..],
+                    stride,
+                    cw,
+                    h,
+                );
+            }
+        }
+        e
+    };
+    let mut luma = [None::<u64>; 64];
+    let mut mid = i32::from(l0);
+    let mut step = if mid < 16 { 4 } else { mid / 4 };
+    let mut best_err = err(l0, 1)[0];
+    luma[usize::from(l0)] = Some(best_err);
+    let mut best = mid;
+    let mut dir = 0;
+    while step > 0 {
+        let (low, high) = ((mid - step).clamp(2, 61), (mid + step).clamp(2, 61));
+        let mut bias = (best_err >> (15 - mid / 8)) * step as u64;
+        if big_tx {
+            bias >>= 1;
+        }
+        let mut get = |l: i32| *luma[l as usize].get_or_insert_with(|| err(l as u8, 1)[0]);
+        if dir <= 0 && low != mid {
+            let e = get(low);
+            if e.saturating_sub(bias) < best_err {
+                best_err = best_err.min(e);
+                best = low;
+            }
+        }
+        if dir >= 0 && high != mid {
+            let e = get(high);
+            if e < best_err.saturating_sub(bias) {
+                best_err = e;
+                best = high;
+            }
+        }
+        if best == mid {
+            step /= 2;
+            if step < 2 {
+                break;
+            }
+            dir = 0;
+        } else {
+            dir = if best < mid { -1 } else { 1 };
+            mid = best;
+        }
+    }
+    if best == i32::from(l0) {
+        return l0;
+    }
+    let (a, b) = (err(l0, 3), err(best as u8, 3));
+    let r = (0..3)
+        .map(|p| (b[p] as f64 + 1.0) / (a[p] as f64 + 1.0))
+        .sum::<f64>()
+        / 3.0;
+    if r <= 1.0 - LF_MARGIN { best as u8 } else { l0 }
 }
 
 /// Speeds at and below which each inter block picks its filter.

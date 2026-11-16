@@ -49,7 +49,9 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   with the alt-ref ahead, chosen per block, speeds 0–6), sub-sample motion
   (to eighths where the vector may be), per-block transform size
   (`TX_MODE_SELECT`, 4×4 to 32×32 with the intra ADST types), skip, the loop
-  filter (libvpx's level from the quantizer), probability adaptation.
+  filter (its level searched on part of each frame up to speed 5, as
+  libvpx's `LPF_PICK_FROM_SUBIMAGE`, and libvpx's level from the quantizer
+  past it), probability adaptation.
 - Alpha (`Vp9Options::alpha`, FFmpeg's `-pix_fmt yuva420p`): the alpha
   plane coded by a second encoder as its own VP9 stream, one alpha packet
   beside each packet ("Options measured").
@@ -118,7 +120,7 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   from the bit depth's own step (its square grows as the SSE does), the
   SAD lambda is libvpx's `sad_per_bit16` on the step brought to 8 bits
   and scaled back up, the loop filter level is libvpx's `LPF_PICK_FROM_Q`
-  for 10 and 12 bits, the temporal filter's thresholds and strength and
+  for 10 and 12 bits (and the search's start up to speed 5), the temporal filter's thresholds and strength and
   the intra trial's threshold scale with the samples, the largest token
   category takes 16 or 18 bits, and rate control models 8-bit-scaled
   steps. On 8-bit content shifted up two or four bits (a grainy 720p pan,
@@ -397,7 +399,8 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
 
 - `enc::mod`: a frame. It writes the headers, parses them back with the
   decoder's own parser, codes the tile columns (on threads), merges them,
-  filters, and commits the frame through `Decoder::commit` — so the encoder
+  searches the loop filter level (`pick_level`, up to speed 5), filters,
+  and commits the frame through `Decoder::commit` — so the encoder
   predicts from exactly the references, motion and probabilities a decoder
   holds, and its reconstruction is the decoder's (`dec::recon`, `dec::lf`).
 - `enc::tile`: a tile column. For each superblock, `rd_node` searches the

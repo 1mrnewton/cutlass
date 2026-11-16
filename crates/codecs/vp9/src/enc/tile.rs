@@ -620,6 +620,18 @@ const CHEAP_SPEED: u8 = 5;
 /// pan at a bitrate (and 0.6 and 1.3 on the README's other two clips).
 const ONE_CAND_SPEED: u8 = 5;
 
+/// With [`super::FrameParams::full_search`] (a fixed quantizer up to speed
+/// 5), where one inter candidate is tried (speed 5's blocks of 32×32 and
+/// up), a NEW vector's block also tries the free vector (NEAREST, NEAR or
+/// ZERO, of the same reference) ranked after it when that one's score is
+/// within this share of its. On a smooth picture the search finds vectors
+/// a sample or more off the motion whose SAD is a few units under the
+/// exact one's (the reference's quantization noise), and their bits lose
+/// to NEAREST's at the exact vector: on the gradient of "Synthetic pans"
+/// in the README, the 64×64 blocks' second candidate won a sixth of the
+/// time (a quarter of the 32×32 ones'). At 1%, two thirds of the gain.
+const CLOSE_FREE: f64 = 0.03;
+
 /// From this speed the sub-sample refinement tries, of the four diagonals,
 /// only the one between the better of up and down and of left and right.
 const PRUNED_SUBPEL_SPEED: u8 = 5;
@@ -649,6 +661,21 @@ const TX_DOMAIN_SPEED: u8 = 5;
 /// level (costed as RD quantization costs it, with its end of block
 /// chosen); the blocks the search chooses are coded with RD quantization.
 const DZ_TRIAL_SPEED: u8 = 5;
+
+/// Up to this speed, with [`super::FrameParams::full_search`] (a fixed
+/// quantizer, or a second pass), a key frame's blocks try the four best
+/// intra modes by SATD however far behind the best's (speed 5 tries
+/// three, and from [`CAND_MARGIN_SPEED`] only those within a fifth of the
+/// best's). On a smooth picture SATD ranks the modes poorly: on the
+/// gradient of "Synthetic pans" in the README, a key frame at speed 5 was
+/// 0.6 dB under speed 3's at the same quantizer, for 6% more bits (now
+/// 0.06 dB and 2%), and the stream 15.2% over libvpx's at the same PSNR-Y
+/// (now 10.9%). A key frame takes 1.18 times the instructions (720p,
+/// fine quantizer); with the trials quantized by RD too (not by the dead
+/// zone, [`DZ_TRIAL_SPEED`]), 10.0% for 1.69 times. Not at a bitrate in
+/// one pass, where the key frame's size moves the rate control: the
+/// grainy pan's chroma lost 2 points at the same PSNR for its luma's 2.5.
+pub const KEY_FULL_SPEED: u8 = 5;
 
 /// The dead zone's offsets at speeds 9 and 10 (0.5 rounds to nearest).
 const DZ_INTRA_ROUND: f32 = 0.42;
@@ -2129,6 +2156,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.last_satd = scored.first().map_or(u64::MAX, |t| t.0);
         let k = match s.speed {
             0..=3 => 4,
+            _ if s.intra_frame && s.full_search && s.speed <= KEY_FULL_SPEED => 4,
             4 => 3,
             // (Inter frames' intra blocks seldom win: 4 to 15% of the
             // blocks that try them.)
@@ -2143,7 +2171,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         };
         // From CAND_MARGIN_SPEED, as for inter: within a fifth of the best.
         // (No product with infinity, which a zero SATD would make NaN.)
-        let first = if s.speed >= CAND_MARGIN_SPEED {
+        let first = if s.speed >= CAND_MARGIN_SPEED
+            && !(s.intra_frame && s.full_search && s.speed <= KEY_FULL_SPEED)
+        {
             self.last_satd as f64 * 1.2
         } else {
             f64::INFINITY
@@ -2396,6 +2426,21 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             scored.first().map_or(0, |t| t.0) as f64 * 1.1
         } else {
             f64::INFINITY
+        };
+        // With a full search, the second too when the first is a NEW
+        // vector and the second a free one (NEAREST, NEAR, ZERO) of the
+        // same reference within CLOSE_FREE of its score.
+        let k = if k == 1
+            && s.full_search
+            && scored.len() > 1
+            && scored[0].1.mode == NEW
+            && scored[1].1.mode != NEW
+            && scored[1].1.refs == scored[0].1.refs
+            && (scored[1].0 as f64) <= scored[0].0 as f64 * (1.0 + CLOSE_FREE)
+        {
+            2
+        } else {
+            k
         };
         out.extend(
             scored

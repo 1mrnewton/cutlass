@@ -284,3 +284,112 @@ fn a_far_jump_is_found_and_searched_from() {
         "{with} bytes with the jump, {without} without"
     );
 }
+
+/// Codes four pictures of a moving texture with `bd`-bit samples and chroma `ss` subsampled, at
+/// speed 5 and quantizer `qindex`: each decodes as the encoder
+/// reconstructed it. Returns how many took a loop filter level other than
+/// the quantizer's.
+fn searched_levels<P: super::EncPixel>(
+    ss: (usize, usize),
+    bd: u8,
+    threads: usize,
+    qindex: u8,
+) -> usize {
+    let (w, h) = (520usize, 136usize);
+    let mut enc = FrameEncoder::<P>::with_depth(w as u32, h as u32, threads, ss, bd);
+    let mut dec = Decoder::new();
+    let (cw, ch) = (w.div_ceil(1 << ss.0), h.div_ceil(1 << ss.1));
+    let max = (1i32 << bd) - 1;
+    let mut searched = 0;
+    for t in 0..4 {
+        let plane = |pw: usize, ph: usize, k: usize| -> Vec<P> {
+            (0..pw * ph)
+                .map(|i| {
+                    let (x, y) = ((i % pw + 2 * t + 9 * k) as f64, (i / pw + t) as f64);
+                    let v = 128.0
+                        + 60.0 * (x / 7.0).sin() * (y / 11.0).cos()
+                        + 40.0 * ((x + y) / 23.0).sin();
+                    P::new((v as i32).clamp(0, 255) * max / 255)
+                })
+                .collect()
+        };
+        let src = [plane(w, h, 0), plane(cw, ch, 1), plane(cw, ch, 2)];
+        enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
+        let coded = enc
+            .encode(FrameParams {
+                key: t == 0,
+                golden: false,
+                hidden: false,
+                qindex,
+                speed: 5,
+                altref_future: false,
+                aq: false,
+                second_pass: false,
+                full_search: true,
+                fast_arf: false,
+                uv_delta: 0,
+                golden_slot: 1,
+                also_refresh: 0,
+                altref_slot: 2,
+                last_slot: 0,
+                hidden_slot: 2,
+                noise: 0.0,
+            })
+            .expect("encode");
+        let head = crate::header::parse(dec.persist(), &coded.data)
+            .expect("header")
+            .header;
+        if head.filter_level != super::filter_level(qindex, t == 0, bd) {
+            searched += 1;
+        }
+        let pic = dec.decode(&coded.data).expect("decode").expect("shown");
+        let rec = enc.last().expect("recon");
+        for p in 0..3 {
+            let (pw, ph) = if p == 0 { (w, h) } else { (cw, ch) };
+            let (data, stride) = rec.buf.plane(p);
+            let bytes = match p {
+                0 => &pic.y,
+                1 => &pic.u,
+                _ => &pic.v,
+            };
+            let got: Vec<i32> = if bd > 8 {
+                bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&b| i32::from(u16::from_le_bytes(b)))
+                    .collect()
+            } else {
+                bytes.iter().map(|&b| i32::from(b)).collect()
+            };
+            for r in 0..ph {
+                let want: Vec<i32> = data[r * stride..r * stride + pw]
+                    .iter()
+                    .map(|v| v.get())
+                    .collect();
+                assert_eq!(
+                    &got[r * pw..(r + 1) * pw],
+                    &want[..],
+                    "{bd}-bit {ss:?} q{qindex} picture {t} plane {p} row {r}"
+                );
+            }
+        }
+    }
+    eprintln!("{bd}-bit {ss:?}, {threads} threads, q{qindex}: {searched} of 4 searched");
+    searched
+}
+
+#[test]
+fn a_searched_filter_level_decodes_as_the_encoder_filtered() {
+    // 4:2:0 and 4:4:4 (chroma in the search), 4:2:2 and 4:4:0 (luma alone,
+    // their chroma filtered from the grid at the level searched), 8 and 10
+    // bits, on one tile column and on two (520 samples wide).
+    for q in [60, 100] {
+        assert!(searched_levels::<u8>((1, 1), 8, 1, q) > 0);
+        assert!(searched_levels::<u8>((1, 1), 8, 2, q) > 0);
+        assert!(searched_levels::<u16>((1, 1), 10, 2, q) > 0);
+        assert!(searched_levels::<u8>((0, 0), 8, 2, q) > 0);
+        assert!(searched_levels::<u16>((1, 0), 10, 1, q) > 0);
+        assert!(searched_levels::<u8>((0, 1), 8, 1, q) > 0);
+    }
+}

@@ -34,4 +34,4 @@ This program will not transfer any information to other networked systems unless
 
 ## Reporting a problem
 
-If you find a signed file that was not built from this repository, or think a signing key or account is compromised, open a [security advisory](https://github.com/1mrnewton/cutlass/security/advisories/new) on this repository.
+If you find a signed file that was not built from this repository, or think a signing key or account is compromised, email [founder@1mrnewton.com](mailto:founder@1mrnewton.com).

@@ -607,24 +607,31 @@ A detailed picture panning 7 pixels a frame, with film grain, 60 frames
 | Cutlass | libvpx-vp9 | BD-rate Y | BD-rate avg | Time (Cutlass / libvpx) |
 | --- | --- | ---: | ---: | --- |
 | speed 4 | good, cpu-used 0 | −24% | −1.6% | 4.33 s / 7.50 s |
-| speed 6 | good, cpu-used 0 | −18% | −0.9% | 2.61 s / 7.50 s |
-| speed 6 | good, cpu-used 1 | −24% | −16% | 2.61 s / 2.43 s |
-| speed 6, lag 0 | good, cpu-used 1 | −16% | −3.6% | 2.15 s / 2.43 s |
-| speed 6, lag 0 | good, cpu-used 2 | −19% | −1.2% | 2.15 s / 2.29 s |
-| speed 7, lag 0 | good, cpu-used 3 | −27% | −4.8% | 1.51 s / 1.68 s |
-| speed 7, lag 0 | good, cpu-used 5 | −32% | −13% | 1.51 s / 1.61 s |
+| speed 6 | good, cpu-used 0 | −25% | −2.7% | 1.37 s / 7.12 s |
+| speed 6 | good, cpu-used 1 | −29% | −17% | 1.37 s / 2.61 s |
+| speed 6, lag 0 | good, cpu-used 1 | −30% | −4.1% | 1.15 s / 2.61 s |
+| speed 6, lag 0 | good, cpu-used 2 | −33% | −1.7% | 1.15 s / 2.08 s |
+| speed 7, lag 0 | good, cpu-used 3 | −26% | −3.8% | 1.08 s / 1.61 s |
+| speed 7, lag 0 | good, cpu-used 5 | −31% | −12% | 1.08 s / 1.74 s |
 | speed 9 | realtime, cpu-used 6 | −49% | −41% | 0.45 s / 0.51 s |
 | speed 10 | realtime, cpu-used 8 | −68% | −62% | 0.38 s / 0.43 s |
 
-All in one sitting, Cutlass at its defaults unless `lag 0` (16 pictures
-of lookahead below speed 9, none at 9 and 10); speed 10's time is the
+The speed 6 and 7 rows (and libvpx's cpu-used 0 to 5) are from 16
+November 2026, at commit `e97ec739`; the others are from the sitting
+before. With the build before that commit, speed 6 was −27% / +6.3%
+against cpu-used 0 and −31.5% / −0.1% without lookahead against
+cpu-used 2, in 1.58 and 1.27 s; speed 7 −26% / −3.6% and −31% / −12%, in
+1.11 s.
+
+The rest in one sitting, Cutlass at its defaults unless `lag 0` (16
+pictures of lookahead below speed 9, none at 9 and 10); speed 10's time is the
 median of five runs interleaved with libvpx's (all five faster; the
 sitting's single run was 0.46 s against 0.43 s). FFmpeg's `libvpx-vp9`
 encodes at good, cpu-used 1 with 25 pictures of lookahead unless told
 otherwise: speed 6 without lookahead is ahead of it on both measures in
 less time, and every libvpx preset, from good cpu-used 0 to realtime 8,
 has a Cutlass speed ahead of it on both measures in less time. Speed 6
-with its lookahead is past libvpx's slowest, cpu-used 0, in a third of
+with its lookahead is past libvpx's slowest, cpu-used 0, in a fifth of
 its time. Without alt-refs, cpu-used 0 keeps more chroma (0.8 dB more U
 and V PSNR at 13% fewer bits than speed 5's 42.96 dB Y at 1.3 Mb/s):
 from frame 16 on, its temporally filtered alt-refs predict the
@@ -763,70 +770,139 @@ columns there, this encoder codes one, which is why its BD-rate moves):
 
 | Clip | Speed 5, 4 threads | Time | Ratio | Speed 5, 1 thread | Time | Ratio |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| three scenes | −8.6% / −1.8% | 6.61 / 4.24 s | 0.64 | −9.2% / −2.6% | 12.67 / 9.24 s | 0.73 |
-| still scene, two jumps | −12.0% / −5.6% | 4.45 / 3.32 s | 0.75 | −16.4% / −10.4% | 11.37 / 9.26 s | 0.81 |
-| grainy pan | −19.9% / −16.1% | 2.94 / 2.89 s | 0.98 | −18.9% / −18.4% | 7.35 / 8.85 s | 1.20 |
+| three scenes | −9.2% / −3.0% | 6.10 / 3.13 s | 0.51 | −10.1% / −4.0% | 12.30 / 6.87 s | 0.56 |
+| still scene, two jumps | −13.7% / −10.3% | 4.18 / 2.45 s | 0.59 | −16.8% / −12.8% | 10.94 / 6.43 s | 0.59 |
+| grainy pan | −20.1% / −15.9% | 2.78 / 1.93 s | 0.69 | −19.6% / −20.5% | 6.93 / 5.15 s | 0.74 |
 
-Before the changes in "What moved" below (four threads): −14.0% /
-−6.6%, −6.3% / −4.5% and −16.2% / −15.5%, at 1.04, 1.39 and 1.71 times
-FFmpeg's time; on one thread about 1.6 times on the pan at 2 Mb/s
-(10.0 s against 6.2 s). Speeds 6 to 8 changed too (they share some of
-the prunes), so their numbers below are from before.
+On 16 November 2026, at commit `e97ec739`. Every rate is under FFmpeg's
+time: the closest are the pan at 4 Mb/s on four threads (0.77) and at
+2 Mb/s on one (0.78). The pan's rates, a stream (FFmpeg / Cutlass):
 
-From before those changes, with `-row-mt 1` (and with `-row-mt 1
--tile-columns 2 -frame-parallel 1`, which wrote the same streams here, in
-5.40, 3.99 and 2.76 s a stream):
+| Pan | 1 Mb/s | 2 Mb/s | 3 Mb/s | 4 Mb/s |
+| --- | ---: | ---: | ---: | ---: |
+| 4 threads | 2.35 / 1.25 s | 2.46 / 1.78 s | 3.15 / 2.23 s | 3.18 / 2.46 s |
+| 1 thread | 5.21 / 3.34 s | 5.86 / 4.58 s | 7.60 / 5.81 s | 9.05 / 6.86 s |
 
-| Clip | Speed 5 | Speed 6 | FFmpeg time |
-| --- | ---: | ---: | ---: |
-| three scenes | −13.6% / −6.5% | −1.6% / +4.2% | 4.91 s |
-| still scene, two jumps | −5.6% / −5.3% | −4.7% / −5.1% | 4.17 s |
-| grainy pan | −15.5% / −14.5% | −11.8% / −10.5% | 2.61 s |
+Before the changes in "What moved" below: −8.6% / −1.8%, −12.0% / −5.6%
+and −19.9% / −16.1% on four threads at 0.64, 0.75 and 0.98 of FFmpeg's
+time, and −9.2% / −2.6%, −16.4% / −10.4% and −18.9% / −18.4% on one at
+0.73, 0.81 and 1.20 (the pan at 3 Mb/s in 10.3 s against 7.8 s). In the
+round before that: −14.0% / −6.6%, −6.3% / −4.5% and −16.2% / −15.5% at
+1.04, 1.39 and 1.71 times FFmpeg's time on four threads.
+
+With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
+-frame-parallel 1` wrote the same streams), and speed 6 against it and
+against the defaults (BD-rate; FFmpeg's time a stream with `-row-mt 1`,
+and Cutlass's at speeds 5 and 6):
+
+| Clip | Speed 5 / `-row-mt 1` | Speed 6 / `-row-mt 1` | Speed 6 / defaults | Time (FFmpeg / 5 / 6) |
+| --- | ---: | ---: | ---: | ---: |
+| three scenes | −8.9% / −2.8% | +3.0% / +8.8% | +2.6% / +8.6% | 4.61 / 3.13 / 3.11 s |
+| still scene, two jumps | −13.0% / −10.9% | −7.7% / −7.0% | −8.3% / −6.3% | 3.70 / 2.45 / 2.50 s |
+| grainy pan | −19.4% / −14.9% | −13.4% / −11.6% | −14.2% / −12.6% | 2.43 / 1.93 / 1.88 s |
+
+Speed 5 is ahead of `-row-mt 1` on both measures in 0.66 to 0.79 of its
+time. Speed 6 is behind libvpx's cpu-used 1 on the three scenes, as it
+was before these changes (+2.2% / +8.0% against `-row-mt 1` with the
+build before them, −1.6% / +4.2% in the round before that): its chroma
+is under libvpx's there at coarse quantizers (see "What is left"). By
+these runs and the presets in "Speed and size against FFmpeg", speed 6
+is libvpx's cpu-used 2 to 3.
 
 Two passes (`-pass 1` then `-pass 2`, cpu-used 1 both) against
-`twopass=1` (a speed-10 first pass, then speed 5), one run each, now and
-before the changes in "What moved" below (the second pass leaves out the
-one-pass prune of the smaller transform, which cost 4 points on the
-three scenes there):
+`twopass=1` (a speed-10 first pass, then speed 5), one run each. The
+second pass leaves out the one-pass prunes (its prune of the smaller
+transform cost 4 points on the three scenes there, the cheap-block stop
+and one candidate below a point or two): its streams are the same as
+before the changes below, and the times of the round before are in the
+last column.
 
-| Clip | `-pass 1/2` | Time (FFmpeg / Cutlass) | Before | Time before |
-| --- | ---: | ---: | ---: | ---: |
-| three scenes | −11.2% / −2.4% | 21.65 / 6.09 s | −12.5% / −4.3% | 8.93 s |
-| still scene, two jumps | −43.1% / −38.4% | 20.90 / 5.59 s | −42.5% / −38.9% | 7.98 s |
-| grainy pan | −24.1% / −21.1% | 14.57 / 5.19 s | −24.1% / −22.9% | 7.31 s |
+| Clip | `-pass 1/2` | Time (FFmpeg / Cutlass) | Time before |
+| --- | ---: | ---: | ---: |
+| three scenes | −11.2% / −2.4% | 18.38 / 4.94 s | 21.65 / 6.09 s |
+| still scene, two jumps | −43.1% / −38.4% | 17.15 / 4.70 s | 20.90 / 5.59 s |
+| grainy pan | −24.1% / −21.1% | 12.97 / 4.51 s | 14.57 / 5.19 s |
 
 Against the recipe of Google's VOD guide (`-row-mt 1 -tile-columns 2`,
-`-speed 4` then `-speed 2`), before: −18.0% / −9.7%, −41.2% / −39.1% and
-−25.2% / −24.3%, in 9.19, 8.07 and 6.87 s against libvpx's 11.42, 12.91
-and 8.95 s.
+`-speed 4` then `-speed 2`): −16.7% / −7.9%, −42.0% / −38.5% and
+−25.3% / −22.5%, in 4.94, 4.70 and 4.51 s against libvpx's 10.22, 11.66
+and 8.48 s.
 
 Realtime (`-deadline realtime -cpu-used 8`) against speeds 9 and 10 (no
-lookahead):
+lookahead; the same streams as before the changes below):
 
 | Clip | Speed 10 | Speed 9 | Time (FFmpeg / 10 / 9) |
 | --- | ---: | ---: | ---: |
-| three scenes | −6.0% / −4.1% | −15.2% / −13.1% | 0.65 / 0.72 / 0.88 s |
-| still scene, two jumps | −66.7% / −64.8% | −68.8% / −66.9% | 0.57 / 0.69 / 0.74 s |
-| grainy pan | n/a / −74.3% | n/a | 0.50 / 0.50 / 0.49 s |
+| three scenes | −6.0% / −4.1% | −15.2% / −13.1% | 0.56 / 0.61 / 0.74 s |
+| still scene, two jumps | −66.7% / −64.8% | −68.8% / −66.9% | 0.51 / 0.61 / 0.67 s |
+| grainy pan | n/a / −74.3% | n/a | 0.45 / 0.42 / 0.46 s |
 
-(The same streams as before the changes below, which took 0.79 / 0.96,
-0.81 / 0.84 and 0.52 / 0.53 s in the same runs.)
+(The round before measured 0.65 / 0.72 / 0.88, 0.57 / 0.69 / 0.74 and
+0.50 / 0.50 / 0.49 s in its runs.)
 
 On the pan the curves do not meet: speed 9 at 1.1 Mb/s (41.6 dB PSNR-Y)
 is past libvpx's realtime 8 at 4.3 Mb/s (40.6 dB).
 
 Constant quality (`-crf 24, 32, 40, 48 -b:v 0`) against a fixed
-quantizer (`q=60` to `210`, speed 5), before the changes below:
+quantizer (`q=60` to `210` in steps of 30, speed 5; times are the mean
+over each curve's points), and as measured two rounds before:
 
-| Clip | BD-rate | Time (FFmpeg / Cutlass) |
-| --- | ---: | ---: |
-| three scenes | −7.3% / −2.9% | 6.73 / 6.11 s |
-| still scene, two jumps | +10.0% / +4.9% | 3.93 / 4.76 s |
-| grainy pan | −1.3% / −0.3% | 2.64 / 3.09 s |
+| Clip | BD-rate | Time (FFmpeg / Cutlass) | Two rounds before |
+| --- | ---: | ---: | ---: |
+| three scenes | −4.5% / −0.3% | 6.57 / 2.69 s | −7.3% / −2.9%, 6.73 / 6.11 s |
+| still scene, two jumps | +1.3% / +1.3% | 3.59 / 1.81 s | +10.0% / +4.9%, 3.93 / 4.76 s |
+| grainy pan | −8.4% / −4.9% | 2.51 / 1.32 s | −1.3% / −0.3%, 2.64 / 3.09 s |
 
-What moved most recently: speed 5 in 0.53 to 0.63 of its time on four
-threads (4.24, 3.32 and 2.89 s a stream, from 6.76, 6.27 and 5.02 s),
-each step measured on the three clips at speed 5:
+What moved most recently: speed 5 in 0.67 to 0.74 of its time on four
+threads (3.13, 2.45 and 1.93 s a stream, from 4.24, 3.32 and 2.89 s) and
+0.58 to 0.74 on one (6.87, 6.43 and 5.15 s, from 9.24, 9.26 and 8.85 s),
+with as many bits at the same PSNR or fewer:
+
+- Bit for bit the same streams, 7% of the time on the pan at 3 Mb/s: the
+  RD walk's first pass over a transform block (each coefficient's size
+  in steps, their squares' sum, the scan's last that could take a level)
+  was written for the compiler to vectorize and ran scalar, as did a
+  trial's second pass in scan order for its dead-zone levels, context
+  energies and gains (together a tenth of the encoder's time). They are
+  one AVX2 pass in natural order now (`cutlass_simd::vp9::quant::scan`),
+  the levels and energies kept by natural position for the walk.
+- A whole block that codes a residual in under 8/256 bits a sample, mode
+  info and all, with an error under 0.16 of the step squared a sample,
+  ends the partition search (speeds 5 and 6, one pass). On the pan at
+  3 Mb/s the 64×64 block stayed whole in 72% of the superblocks, three
+  quarters of those whose split was tried came out within 2% of not
+  splitting either way, and the split's trials were three quarters of
+  the search: a block coding a few levels with the largest transform
+  splits into quarters that code the same again, each with its own mode
+  info. 0.81 of the time on the pan at 4 Mb/s, one thread.
+- One pass ranks its best inter candidates again with their chroma's SAD
+  added (speeds 5 and 6, as the second pass did), and at speed 5 blocks
+  of 32×32 and up then try only the first: the second, within a tenth of
+  the first's luma score, won 40% of the 64×64 trials, mostly for its
+  chroma (without the ranking, one candidate cost 8 to 12 points at the
+  averaged PSNR; with it, the same within the noise). −9% of the time.
+- At speed 5, an inter frame's 64×64 block does not try the next smaller
+  transform (−8%), and inter frames try one intra mode (two; −4%).
+- Speed 6 shares the second and third (0.8 to 0.94 of its time): at
+  fixed quantizers on the pan it is ahead of libvpx's cpu-used 0 again
+  with its lookahead (−24.8% / −2.7%; the round before's prunes had left
+  it at −26.7% / +6.3%), and of cpu-used 2 without (−32.6% / −1.7%, from
+  −31.5% / −0.1%); at a bitrate it trades 4 points at the same PSNR-Y on
+  the pan for 1.5 at the averaged PSNR, and is within 1.3 points on the
+  other two clips. Speeds 7 and 8 change only in their alt-refs (coded
+  at speed 6): within 0.3 points.
+- Left out: one inter candidate at speed 6 too (2 points of chroma
+  against cpu-used 2); the speed-5 prunes in the second pass (0.6 to 1.7
+  points there, which is in a quarter of libvpx's time already); and,
+  from the trials' costs, a split given up when its first quarters,
+  extrapolated, cost more than the whole block (on the three scenes it
+  lost several percent of the trials' cost for any real saving), and
+  stops by rate alone (they also caught blocks that skip, whose splits
+  win by 20% and more).
+
+The round before, speed 5 in 0.53 to 0.63 of its time on four threads
+(4.24, 3.32 and 2.89 s a stream, from 6.76, 6.27 and 5.02 s), each step
+measured on the three clips at speed 5:
 
 - Bit for bit the same streams, about a fifth of the time: 8-bit SADs and
   SSE on AVX2 (`cutlass_simd::vp9::sad8`: 32 samples a `vpsadbw`, the sums
@@ -886,15 +962,19 @@ scene, grainy pan), from −2.0% / +2.7%, +6.5% / +14.6% and +32% / +22%:
 
 What is left:
 
-- Time on one thread on the pan: 1.2 times libvpx's (on four threads
-  0.98), all of it at its top rates (7.2 s against 6.1 s at 2 Mb/s,
-  10.7 s against 8.1 at 3, 13.2 s against 9.5 at 4; at 1 Mb/s 0.74), where
-  the quantizer is under the grain, nearly every block codes a residual
-  and the search goes on to 8×8 blocks everywhere: libvpx's learnt
-  partition pruning (`ml_var_partition_pruning`, `rd_ml_partition`) has
-  no counterpart here. The margin on the three scenes is thin at the
-  averaged PSNR (−1.8% on four threads, −2.6% on one). Tried and left
-  out before: a still block taking LAST at zero without a search (7%
+- Time on the pan at its top rates: 0.76 to 0.78 of libvpx's on one
+  thread from 2 to 4 Mb/s, where the quantizer is under the grain and
+  nearly every block codes a residual. The partition search is still
+  most of the time there: of the whole encode, the RD walk of the trials'
+  levels is a quarter (one token after another, each one's context from
+  the ones before it), the forward transforms a tenth and the motion
+  search about a sixth. libvpx's learnt partition pruning
+  (`ml_var_partition_pruning`, `rd_ml_partition`) has no counterpart
+  here: a block's rate and error tell its tied splits from the ones that
+  win (above), but not the ones that win by a little from the ones that
+  lose by a little. The margin on the three scenes at the averaged PSNR
+  is −3.0% on four threads and −4.0% on one. Tried and left out
+  before: a still block taking LAST at zero without a search (7%
   faster on the still clip, but at any threshold loose enough to matter
   it lost the pan), the above-right seed of the search dropped so that a
   row needs only the superblock above it (8% faster, 5% more bits on the
@@ -905,13 +985,14 @@ What is left:
   luma's, from 1/0.7) gains 6–17% at the same PSNR-Y and 1–7% at the
   6:1:1 average but loses 2–5% at FFmpeg's 4:1:1 average and 9–18% at
   PSNR-U, so it is left as it was.
-- Constant quality on the still scene: +10% / +4.9%. libvpx's one pass
+- Constant quality on the still scene: +1.3% / +1.3% (+10% / +4.9%
+  two rounds before). libvpx's one pass
   at a fixed level modulates its quantizer by position (finer every
   second, fourth and eighth frame: 192, 184, 173, 154 at `-crf 48`) and
   spends most where little moves; a fixed quantizer with that pattern
   was 3% worse here, and the scene's low rates (0.3–0.6 Mb/s) are where
   the gap is.
-- Realtime time: speeds 9 and 10 take 1.0 to 1.35 times libvpx's
+- Realtime time: speeds 9 and 10 take 0.9 to 1.35 times libvpx's
   realtime 8 at the same bitrate (with 4 to 75% fewer bits at the same
   PSNR).
 

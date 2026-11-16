@@ -1114,7 +1114,11 @@ chroma's error weighed 2.5 (PSNR-U −0.3% only); no compound prediction
 (`COMPOUND_SPEED` 5, to take speed 6 under speed 5's time on the three
 scenes): 3.5 to 9.8 points more bits at the same PSNR-Y than speed 6
 with it, and behind FFmpeg's default on the three scenes (+3.1 / +3.8 /
-+1.2 / +2.9 / +3.0), so speed 6 keeps it. Speed 8: the old stop
++1.2 / +2.9 / +3.0), so speed 6 keeps it. Leaving out its extra chroma intra modes
+(as speed 7 does) cost less but still too much: −0.2 / −0.0 / −1.7 /
+−0.5 / −0.4 on the three scenes, level with FFmpeg at PSNR-U, so speed
+6 keeps those too and takes speed 5's time there; everything it does
+past speed 5 is what keeps it ahead. Speed 8: the old stop
 with speed 6's chroma weights (0.3 to 1.4 points better at PSNR-U, 0.8
 worse at PSNR-Y on the three scenes).
 

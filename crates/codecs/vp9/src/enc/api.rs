@@ -1706,6 +1706,17 @@ struct Rate {
     arf_next: bool,
 }
 
+/// At this speed (no lookahead by default, so no alt-refs) one pass at a
+/// variable bitrate budgets the golden frames to come at the key frame's
+/// step they take, not at an alt-ref's: budgeted at the alt-ref's, a
+/// golden frame every 12 took 1.8 times the share it was given, and the
+/// debt it left stood, so that streams came in 6 to 9% over the rate (at
+/// 3 and 4 Mb/s on the three scenes, where FFmpeg's realtime 8 comes in
+/// under it, 3.24 and 4.27 Mb/s). Budgeted at the key frame's, within 4% of
+/// the rate on the three clips of the README, with 1 point fewer bits at
+/// the same PSNR.
+const GOLDEN_KEY_SPEED: u8 = 9;
+
 /// How bits fall with the quantizer step: bits ∝ step^-EXP.
 const EXP: f64 = 1.25;
 
@@ -1961,9 +1972,17 @@ impl Rate {
                 .or(self.model[0].map(|k| k * 0.5))
                 .unwrap_or(m * 3.0);
             let w = 1.0 / f64::from(GF_INTERVAL);
+            // The golden frames to come at the step they take: at
+            // [`GOLDEN_KEY_SPEED`], with no lookahead and so no alt-refs,
+            // a key frame's.
+            let gold_scale = if self.opts.speed == GOLDEN_KEY_SPEED && self.opts.lag() == 0 {
+                STEP_SCALE[0]
+            } else {
+                STEP_SCALE[1]
+            };
             let unit = match (self.model[2], self.probed) {
                 (None, Some((_, inter))) => inter,
-                _ => (1.0 - w) * m + w * golden * STEP_SCALE[1].powf(-EXP),
+                _ => (1.0 - w) * m + w * golden * gold_scale.powf(-EXP),
             };
             let mut debt = if banded {
                 band(self.debt, self.per_frame * f64::from(self.frames))

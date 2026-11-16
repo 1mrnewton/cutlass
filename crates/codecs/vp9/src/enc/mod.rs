@@ -18,9 +18,9 @@ pub mod tile;
 pub mod tx;
 
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, OnceLock};
 
 use cutlass_decode::CodecError;
 
@@ -131,6 +131,16 @@ pub const ONE_LANE_SPEED: u8 = 9;
 /// (Not at speed 10: it is also the first pass of two passes and the probe
 /// of one, whose bits the rate control of the other speeds reads.)
 pub const FUSED_SPEED: u8 = 9;
+
+/// At this speed, with tile columns on threads, the frame's probability
+/// updates are decided on the counts of its first three quarters of
+/// superblock rows, so that each tile's symbols are written as it codes
+/// them, on a thread of its own, instead of after the frame (on four
+/// threads that was an eighth of the time at 4 Mb/s, one tile column's
+/// symbols after another's coding). The updates chosen on three quarters
+/// of the frame cost nothing measurable at the same PSNR (on half of it,
+/// 1.5 points on the three scenes).
+pub const EARLY_SPEED: u8 = 9;
 
 /// One coded frame.
 pub struct Coded {
@@ -865,13 +875,28 @@ impl<P: EncPixel> FrameEncoder<P> {
         // after them: on four threads at speed 10 it was a tenth of the
         // time. (Not with a grid: 4:2:2 and 4:4:0 filter chroma from it.)
         let piped = lanes == 1 && ntiles > 1 && !needs_grid;
+        // At EARLY_SPEED, piped and with one tile row: the probability
+        // updates are decided once every tile column has coded the rows
+        // up to `early_row`, and each tile's symbols are written on a
+        // thread of its own as they come (see [`Early`]).
+        let early_row = sb_rows - sb_rows / 4;
+        let early = (fp.speed == EARLY_SPEED && piped && h.log2_tile_rows == 0).then(|| Early {
+            wait: Mutex::new((ntiles, Box::new(prob::Counts::new()))),
+            decided: Condvar::new(),
+            probs: OnceLock::new(),
+            old: flat_coef(&parsed.fc),
+            old_nc: probs::flatten(&parsed.fc),
+            coded: Self::coded(key, fp),
+            max_tx: if h.lossless { 0 } else { 3 },
+        });
         let run = |t: &mut TileWork<P>,
                    col0: usize,
                    col1: usize,
                    lane: usize,
                    sync: Option<&tile::Lanes<P>>,
                    pipe: Option<&[mpsc::Sender<Band<P>>]>,
-                   mut lazy: Option<Lazy<'_, '_, P>>|
+                   mut lazy: Option<Lazy<'_, '_, P>>,
+                   early: Option<&EarlyTile<'_>>|
          -> Result<(), CodecError> {
             for (p, buf) in t.pix.iter_mut().enumerate() {
                 buf.resize(plane_len[p], P::default());
@@ -930,6 +955,20 @@ impl<P: EncPixel> FrameEncoder<P> {
                 tile.sb_row(r * 8);
                 (seeds, t.bufs) = tile.finish();
                 t.row_ends.push(t.out.len());
+                if let Some(e) = early {
+                    // The row's symbols to the tile's writer, and the counts
+                    // to the decision once the rows up to `early_row` are in.
+                    if r + 1 == early_row {
+                        e.arrive(&t.state.counts);
+                    }
+                    let fresh = e.back.try_recv().unwrap_or_default();
+                    if e.tx.send(std::mem::replace(&mut t.out, fresh)).is_err() {
+                        return Err(CodecError::Malformed {
+                            at_bit: 0,
+                            what: "vp9 encoder symbol writer",
+                        });
+                    }
+                }
                 if let Some(pipe) = pipe {
                     // The row's samples and filter masks, for the loop
                     // filter (a receiver gone has failed: the frame does).
@@ -970,6 +1009,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             Ok(())
         };
         let work = &mut self.work[..ntiles * lanes];
+        let mut early_tiles = Vec::new();
         if ntiles * lanes == 1 {
             // (Each entry is written before it is read.)
             let mut bufs = std::mem::take(&mut self.pre_bufs);
@@ -986,7 +1026,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                 }
                 _ => None,
             };
-            let r = run(&mut work[0], 0, mi_cols, 0, None, None, lazy);
+            let r = run(&mut work[0], 0, mi_cols, 0, None, None, lazy, None);
             self.pre_bufs = bufs;
             r?;
         } else {
@@ -1005,7 +1045,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             } else {
                 fused.clear();
             }
-            let results: Vec<Result<(), CodecError>> = std::thread::scope(|sc| {
+            let (results, written) = std::thread::scope(|sc| {
                 // Piped: each plane's rows go into the picture and through
                 // the loop filter as every tile column finishes them.
                 let mut lf_threads = Vec::new();
@@ -1020,6 +1060,36 @@ impl<P: EncPixel> FrameEncoder<P> {
                         );
                     }
                 }
+                // Early: each tile's symbol writer, and what its coder
+                // sends it.
+                let mut ends = Vec::new();
+                let mut writers = Vec::new();
+                if let Some(e) = &early {
+                    for _ in 0..ntiles {
+                        let (tx, rx) = mpsc::channel::<tile::Out>();
+                        let (back_tx, back) = mpsc::channel::<tile::Out>();
+                        ends.push(Some(EarlyTile {
+                            early: e,
+                            tx,
+                            back,
+                            arrived: AtomicBool::new(false),
+                        }));
+                        writers.push(sc.spawn(move || {
+                            let table = &e.decided().2;
+                            let mut w = BoolWriter::new();
+                            for mut syms in rx {
+                                w.write_all(syms.iter().map(|&(bit, id)| {
+                                    (u32::from(bit), u32::from(table[usize::from(id)]))
+                                }));
+                                syms.clear();
+                                // (A coder that has stopped takes no more.)
+                                let _ = back_tx.send(syms);
+                            }
+                            w.finish().map(|b| vec![b])
+                        }));
+                    }
+                }
+                let mut ends = ends.into_iter();
                 let mut fused_it = fused.iter_mut();
                 let handles: Vec<_> = work
                     .iter_mut()
@@ -1034,11 +1104,14 @@ impl<P: EncPixel> FrameEncoder<P> {
                         let sync = (lanes > 1).then(|| &syncs[i]);
                         let run = &run;
                         let pipe = piped.then(|| txs.clone());
+                        let end = ends.next().flatten();
                         sc.spawn(move || {
                             // (A lane that stops lets the others stop
-                            // waiting for it.)
+                            // waiting for it; a tile column that stops
+                            // still lets the updates be decided.)
                             let _guard = Release(sync);
-                            let r = run(t, c0, c1, lane, sync, pipe.as_deref(), lazy);
+                            let _arrive = end.as_ref().map(Arrive);
+                            let r = run(t, c0, c1, lane, sync, pipe.as_deref(), lazy, end.as_ref());
                             if r.is_err()
                                 && let Some(l) = sync
                             {
@@ -1065,8 +1138,18 @@ impl<P: EncPixel> FrameEncoder<P> {
                     }
                     out.push(thread_err());
                 }
-                out
+                let written: Vec<Result<Vec<Vec<u8>>, CodecError>> = writers
+                    .into_iter()
+                    .map(|h| {
+                        h.join().unwrap_or(Err(CodecError::Malformed {
+                            at_bit: 0,
+                            what: "vp9 encoder thread",
+                        }))
+                    })
+                    .collect();
+                (out, written)
             });
+            early_tiles = written;
             for (i, (seeds, _)) in fused.iter().enumerate() {
                 let (c0, c1) = (edges[i], edges[i + 1]);
                 for r in 0..mi_rows {
@@ -1085,6 +1168,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             }
         }
         let work: Vec<&TileWork<P>> = self.work[..ntiles * lanes].iter().step_by(lanes).collect();
+        let early = early.and_then(|e| e.probs.into_inner());
         // The tiles' state into the frame's, and the probability updates
         // it pays for. Then, at once: each plane's columns into the
         // picture and its loop filter, and each tile's symbols into its
@@ -1118,9 +1202,14 @@ impl<P: EncPixel> FrameEncoder<P> {
         }
         let lossless = h.lossless;
         let old = flat_coef(&parsed.fc);
-        let new = coef_updates(&old, &counts, if lossless { 0 } else { 3 });
         let old_nc = probs::flatten(&parsed.fc);
-        let new_nc = probs::updates(&old_nc, &counts, &Self::coded(key, fp));
+        let (new, new_nc) = match &early {
+            Some((new, new_nc, _)) => (*new, *new_nc),
+            None => (
+                coef_updates(&old, &counts, if lossless { 0 } else { 3 }),
+                probs::updates(&old_nc, &counts, &Self::coded(key, fp)),
+            ),
+        };
         // A tile column's symbols, one coder for each tile row.
         let log2_rows = h.log2_tile_rows;
         let probs = tile::prob_table(&new, &new_nc);
@@ -1175,6 +1264,10 @@ impl<P: EncPixel> FrameEncoder<P> {
                     }
                 });
             }
+            if early.is_some() {
+                // (Written already.)
+                return std::mem::take(&mut early_tiles);
+            }
             let write = &write;
             let hs: Vec<_> = work.iter().map(|&t| sc.spawn(move || write(t))).collect();
             hs.into_iter()
@@ -1196,7 +1289,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             render_width: h.render_width,
             render_height: h.render_height,
             out: Mutex::new(None),
-            made_cv: std::sync::Condvar::new(),
+            made_cv: Condvar::new(),
             made: AtomicBool::new(false),
         });
         let mut segmap = vec![0u8; mi_cols * mi_rows];
@@ -1246,6 +1339,84 @@ impl<P: EncPixel> FrameEncoder<P> {
                 tiles,
             },
         ))
+    }
+}
+
+/// The frame's probability updates decided while its tiles are coded (see
+/// [`EARLY_SPEED`]): from the counts each tile column sends once it has
+/// coded the rows up to the decision's, when the last one has.
+struct Early {
+    /// The tile columns still to send their counts, and the sum so far.
+    wait: Mutex<(usize, Box<prob::Counts>)>,
+    decided: Condvar,
+    /// The coefficient and other updates, and the symbols' table of them.
+    probs: OnceLock<([u8; 1728], probs::Flat, Vec<u8>)>,
+    old: [u8; 1728],
+    old_nc: probs::Flat,
+    coded: probs::Coded,
+    max_tx: usize,
+}
+
+impl Early {
+    /// A tile column's counts; the last one decides.
+    fn arrive(&self, counts: &prob::Counts) {
+        let mut w = self
+            .wait
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        w.1.add(counts);
+        w.0 -= 1;
+        if w.0 == 0 {
+            let new = coef_updates(&self.old, &w.1, self.max_tx);
+            let new_nc = probs::updates(&self.old_nc, &w.1, &self.coded);
+            let table = tile::prob_table(&new, &new_nc);
+            let _ = self.probs.set((new, new_nc, table));
+            self.decided.notify_all();
+        }
+    }
+
+    /// The updates, once decided.
+    fn decided(&self) -> &([u8; 1728], probs::Flat, Vec<u8>) {
+        let mut w = self
+            .wait
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if let Some(p) = self.probs.get() {
+                return p;
+            }
+            w = self
+                .decided
+                .wait(w)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
+/// A tile column's ends of [`Early`]: its symbols to its writer, the
+/// buffers back, and whether it has sent its counts.
+struct EarlyTile<'a> {
+    early: &'a Early,
+    tx: mpsc::Sender<tile::Out>,
+    back: mpsc::Receiver<tile::Out>,
+    arrived: AtomicBool,
+}
+
+impl EarlyTile<'_> {
+    fn arrive(&self, counts: &prob::Counts) {
+        if !self.arrived.swap(true, Ordering::Relaxed) {
+            self.early.arrive(counts);
+        }
+    }
+}
+
+/// Sends a tile column's (empty) counts when it stops before its rows
+/// were in, so that the other writers do not wait for it.
+struct Arrive<'a, 'b>(&'a EarlyTile<'b>);
+
+impl Drop for Arrive<'_, '_> {
+    fn drop(&mut self) {
+        self.0.arrive(&prob::Counts::new());
     }
 }
 

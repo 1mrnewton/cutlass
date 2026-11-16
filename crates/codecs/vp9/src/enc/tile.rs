@@ -308,6 +308,22 @@ const NO_RATE: u32 = u32::MAX;
 /// The shift of the context in [`TxRd::rate`].
 const RATE_CTX: u32 = 28;
 
+/// A context in [`TxRd::rate`] that stands for every one: a rate from the
+/// dead zone's bit model, whatever context the block starts in.
+const ANY_CTX: u32 = 15;
+
+/// From speed 9 the fast path's trials of intra against inter cost each
+/// tx block's tokens by the dead zone's bit model (`quant::Sums::bits`,
+/// one more for the end of block), at this many 1/256 bits a model bit,
+/// instead of walking its tokens: the walk was a tenth of speed 9's time
+/// (the blocks that try intra are the detailed ones), and the model at
+/// 180 costs 0.3 points at the same PSNR on the three scenes (0.7 at 256).
+const DZ_TRIAL_RATE: u32 = 180;
+
+/// Speed 9's 16×16 blocks whose best starting vector has under this much
+/// SAD a sample skip the diamond search.
+const STILL_SAD: u64 = 4;
+
 /// A tx block's coefficients: plane, size, position (4×4 units in the
 /// block), levels, end of block.
 type Tok = (usize, u8, usize, usize, Vec<i32>, usize, u32);
@@ -698,6 +714,7 @@ pub struct TileBufs<P> {
     fcoef: Vec<f32>,
     snaps: Vec<Snap<P>>,
     toks: Vec<Tok>,
+    kept: Vec<Tok>,
     pool: Vec<Vec<i32>>,
     mctmp: Vec<u8>,
     rdq: Rdq,
@@ -711,6 +728,7 @@ impl<P> Default for TileBufs<P> {
             fcoef: Vec::new(),
             snaps: Vec::new(),
             toks: Vec::new(),
+            kept: Vec::new(),
             pool: Vec::new(),
             mctmp: Vec::new(),
             rdq: Rdq::default(),
@@ -862,6 +880,16 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     /// Snapshots: 0 the superblock, then four per level.
     snaps: Vec<Snap<P>>,
     toks: Vec<Tok>,
+    /// The fast path's trials: the tokens of the best candidate so far,
+    /// while a later one is tried.
+    kept: Vec<Tok>,
+    /// The block coded last, as it was coded (skip and transform
+    /// decided).
+    coded_blk: Blk,
+    /// The next [`Tile::code_block`] writes the block a trial coded,
+    /// whose samples are in place and tokens in `toks`, without coding
+    /// it again.
+    replay: bool,
     /// The cost of the best inter candidate last ranked (SAD units).
     last_sad: u64,
     /// The SATD (and mode rate) of the best intra mode last ranked.
@@ -921,6 +949,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             mut fcoef,
             mut snaps,
             toks,
+            kept,
             pool,
             mut mctmp,
             mut rdq,
@@ -966,6 +995,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             rect: [[[Blk::default(); 2]; 21]; 2],
             snaps,
             toks,
+            kept,
+            coded_blk: Blk::default(),
+            replay: false,
             last_sad: 0,
             last_satd: u64::MAX,
             found: [(Mv::ZERO, u64::MAX); 85],
@@ -997,6 +1029,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 fcoef: self.fcoef,
                 snaps: self.snaps,
                 toks: self.toks,
+                kept: self.kept,
                 pool: self.pool,
                 mctmp: self.mctmp,
                 rdq: self.rdq,
@@ -1267,7 +1300,15 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             let n = MI_WH[usize::from(bsize)].0;
             self.trial = true;
             self.save(row, col, (n, n), 1);
-            let mut best = (f64::INFINITY, 0);
+            // From speed 9 a trial reconstructs as coding does (no
+            // transform-domain measure): the winner is written as its
+            // trial coded it, not coded again. The best so far: its cost,
+            // index and block as coded; when a candidate after it is
+            // tried, its samples are kept in snapshot 2 and its tokens in
+            // `kept`.
+            let keep = self.s.speed >= 9;
+            let mut best = (f64::INFINITY, 0, Blk::default());
+            let last = cands.len() - 1;
             for (i, b) in cands.iter().enumerate() {
                 if i > 0 {
                     self.restore(1);
@@ -1275,12 +1316,27 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let c0 = self.cost;
                 let j = self.code_block(b) + (self.cost - c0) as f64 * lam;
                 if j < best.0 {
-                    best = (j, i);
+                    best = (j, i, self.coded_blk);
+                    if keep && i < last {
+                        self.save(row, col, (n, n), 2);
+                        std::mem::swap(&mut self.toks, &mut self.kept);
+                    }
                 }
             }
-            self.restore(1);
             self.trial = false;
-            best.1
+            if !keep {
+                self.restore(1);
+                best.1
+            } else {
+                self.restore_ctx(1);
+                if best.1 < last {
+                    self.restore_pix(2);
+                    std::mem::swap(&mut self.toks, &mut self.kept);
+                }
+                self.replay = true;
+                self.code_block(&best.2);
+                return;
+            }
         };
         if let Some(b) = cands.get(pick).copied() {
             self.code_block(&b);
@@ -2279,6 +2335,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     /// Puts back what snapshot `k` kept.
     fn restore(&mut self, k: usize) {
         self.restore_ctx(k);
+        self.restore_pix(k);
+    }
+
+    /// [`Tile::restore`] but for the contexts, which stay as they are.
+    fn restore_pix(&mut self, k: usize) {
         let sn = &self.snaps[k];
         let (row, col, nw, nh) = sn.at;
         let views = self.rec.views();
@@ -2689,55 +2750,60 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 [[b.mv, b.mv2]; 4]
             },
         };
-        if inter {
-            self.rec.predict_inter(&rec);
-        }
         // Coefficients of every tx block, kept until the mode info is
         // written (intra predicts tx block by tx block from the ones
         // before, so it is reconstructed as it goes).
         let mut toks = std::mem::take(&mut self.toks);
-        for t in toks.drain(..) {
-            self.pool.push(t.4);
-        }
-        let mut eobs = 0;
-        // (libvpx's static threshold: a prediction near enough codes no
-        // residual.)
-        let breakout = inter && !s.h.lossless && s.static_thresh > 0 && self.static_skip(&b);
-        // From TX_DOMAIN_SPEED, a trial of an inter block measures its
-        // error on the coefficients (libvpx's transform-domain distortion)
-        // and leaves the prediction unreconstructed.
-        self.tx_dom =
-            self.trial && inter && !s.h.lossless && (TX_DOMAIN_SPEED..9).contains(&s.speed);
-        let (coded, dropped) = if breakout {
-            (0.0, 0.0)
-        } else {
-            self.residual(&b, &rec, &mut toks, &mut eobs)
-        };
-        if bsize < BLOCK_8X8 && !inter {
-            b.bmode = self.sub;
-            b.mode = b.bmode[3];
-        }
-        if inter && eobs > 0 && !s.h.lossless {
-            // Skip when the residual is not worth its bits (never in a
-            // lossless frame, which must come back exact).
-            let ctx = usize::from(self.above_nb(&b).is_some_and(|n| n.skip))
-                + usize::from(self.left_nb(&b).is_some_and(|n| n.skip));
-            let p = s.fc.skip[ctx];
-            let lam = s.rd_lambda / 256.0;
-            let j_skip = dropped + lam * bit_cost(true, p) as f32;
-            let j_coded = coded + lam * bit_cost(false, p) as f32;
-            if j_skip <= j_coded {
-                eobs = 0;
-                if !self.tx_dom {
-                    self.rec.predict_inter(&rec);
+        let mut breakout = false;
+        // A replay writes what a trial of `b0` decided and reconstructed.
+        if !std::mem::take(&mut self.replay) {
+            if inter {
+                self.rec.predict_inter(&rec);
+            }
+            for t in toks.drain(..) {
+                self.pool.push(t.4);
+            }
+            let mut eobs = 0;
+            // (libvpx's static threshold: a prediction near enough codes
+            // no residual.)
+            breakout = inter && !s.h.lossless && s.static_thresh > 0 && self.static_skip(&b);
+            // From TX_DOMAIN_SPEED, a trial of an inter block measures its
+            // error on the coefficients (libvpx's transform-domain
+            // distortion) and leaves the prediction unreconstructed.
+            self.tx_dom =
+                self.trial && inter && !s.h.lossless && (TX_DOMAIN_SPEED..9).contains(&s.speed);
+            let (coded, dropped) = if breakout {
+                (0.0, 0.0)
+            } else {
+                self.residual(&b, &rec, &mut toks, &mut eobs)
+            };
+            if bsize < BLOCK_8X8 && !inter {
+                b.bmode = self.sub;
+                b.mode = b.bmode[3];
+            }
+            if inter && eobs > 0 && !s.h.lossless {
+                // Skip when the residual is not worth its bits (never in a
+                // lossless frame, which must come back exact).
+                let ctx = usize::from(self.above_nb(&b).is_some_and(|n| n.skip))
+                    + usize::from(self.left_nb(&b).is_some_and(|n| n.skip));
+                let p = s.fc.skip[ctx];
+                let lam = s.rd_lambda / 256.0;
+                let j_skip = dropped + lam * bit_cost(true, p) as f32;
+                let j_coded = coded + lam * bit_cost(false, p) as f32;
+                if j_skip <= j_coded {
+                    eobs = 0;
+                    if !self.tx_dom {
+                        self.rec.predict_inter(&rec);
+                    }
                 }
             }
+            b.skip = eobs == 0;
+            if inter && b.skip {
+                // A skipped inter block takes the largest transform.
+                b.tx = geom::max_tx(bsize).min(geom::tx_mode_biggest(s.h.tx_mode));
+            }
         }
-        b.skip = eobs == 0;
-        if inter && b.skip {
-            // A skipped inter block takes the largest transform.
-            b.tx = geom::max_tx(bsize).min(geom::tx_mode_biggest(s.h.tx_mode));
-        }
+        self.coded_blk = b;
         // Mode info.
         if s.intra_frame {
             self.write_intra_frame_info(&b);
@@ -2764,7 +2830,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             for (plane, tx, r4, c4, levels, eob, rate) in toks.iter() {
                 if self.trial
                     && *rate != NO_RATE
-                    && (*rate >> RATE_CTX) as usize == self.first_ctx(&b, *plane, *tx, *r4, *c4)
+                    && (*rate >> RATE_CTX == ANY_CTX
+                        || (*rate >> RATE_CTX) as usize
+                            == self.first_ctx(&b, *plane, *tx, *r4, *c4))
                 {
                     // A trial's bits, as the walk that chose them counted
                     // (when the tx blocks before it in the block left the
@@ -3231,7 +3299,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             TxRd {
                 coded: (d_coded + lam * (bits + 1.0) * g) / g,
                 dropped: (d_all + lam * g) / g,
-                rate: NO_RATE,
+                // A trial's tokens cost by the model (see DZ_TRIAL_RATE).
+                rate: if self.trial {
+                    ((bits as u32 + 1) * DZ_TRIAL_RATE) | (ANY_CTX << RATE_CTX)
+                } else {
+                    NO_RATE
+                },
                 dist: (d_coded / g, d_all / g),
             },
             any,
@@ -4856,6 +4929,12 @@ fn search_in<P: EncPixel>(
         (_, 3..=6) => 4,
         _ => 2,
     };
+    // Speed 9's 16×16 blocks whose best start is already under
+    // [`STILL_SAD`] a sample take it (their diamonds seldom moved: 0.3
+    // points on the three scenes for 3% of the time).
+    if bsize == geom::BLOCK_16X16 && s.speed == 9 && best_sad < STILL_SAD * (w * h) as u64 {
+        step = 0;
+    }
     while step >= 1 {
         let mut moved = true;
         let mut iters = 0;

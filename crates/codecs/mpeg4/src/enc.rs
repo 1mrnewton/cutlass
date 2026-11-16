@@ -911,62 +911,164 @@ impl Predicted<'_> {
     }
 
     fn search_at(&self, x: usize, y: usize, size: usize, pred: (i32, i32)) -> (i32, i32) {
-        let mut best = clamp_mv(pred.0, pred.1);
-        let mut best_cost = self.block_cost(x, y, size, best, pred);
-        let step = motion_step(self.quarter);
-        for dy in (-SEARCH..=SEARCH).step_by(step) {
-            for dx in (-SEARCH..=SEARCH).step_by(step) {
-                let mv = clamp_mv(pred.0 + dx, pred.1 + dy);
-                let cost = self.block_cost(x, y, size, mv, pred);
-                if cost < best_cost {
-                    best = mv;
-                    best_cost = cost;
-                }
-            }
-        }
-        let center = best;
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                let mv = clamp_mv(center.0 + dx, center.1 + dy);
-                let cost = self.block_cost(x, y, size, mv, pred);
-                if cost < best_cost {
-                    best = mv;
-                    best_cost = cost;
-                }
-            }
-        }
-        let zero = self.block_cost(x, y, size, (0, 0), pred);
-        if zero < best_cost { (0, 0) } else { best }
+        let [reference, _, _] = self.past.refs((self.width as u32, self.height as u32));
+        search(
+            self.y,
+            self.width,
+            &reference,
+            (x, y, size),
+            pred,
+            self.quarter,
+        )
     }
 
     fn block_cost(&self, x: usize, y: usize, size: usize, mv: (i32, i32), pred: (i32, i32)) -> u32 {
-        let mut predicted = [0u8; 256];
         let [reference, _, _] = self.past.refs((self.width as u32, self.height as u32));
-        mc::luma_block(
-            &reference,
-            x as i32,
-            y as i32,
-            size,
-            size,
-            mv.0,
-            mv.1,
-            motion_pel(self.quarter),
-            Rows::Frame,
-            false,
-            &mut predicted,
+        let block = Block {
+            current: self.y,
+            width: self.width,
+            reference: &reference,
+            at: (x, y, size),
+            pred,
+            quarter: self.quarter,
+        };
+        block.cost(mv, u32::MAX)
+    }
+}
+
+/// One luma block of the picture being coded, matched against a reference.
+struct Block<'a> {
+    current: &'a [u8],
+    width: usize,
+    reference: &'a mc::RefPlane<'a>,
+    /// Left, top and side of the block.
+    at: (usize, usize, usize),
+    /// The vector the block's vector is coded against.
+    pred: (i32, i32),
+    quarter: bool,
+}
+
+impl Block<'_> {
+    /// Twice the block's sum of absolute differences predicted by `mv`,
+    /// plus the vector's distance from the prediction. Once that reaches
+    /// `bound` the block is read no further and `u32::MAX` says the vector
+    /// loses.
+    fn cost(&self, mv: (i32, i32), bound: u32) -> u32 {
+        let (x, y, size) = self.at;
+        let distance = (mv.0 - self.pred.0).unsigned_abs() + (mv.1 - self.pred.1).unsigned_abs();
+        if distance >= bound {
+            return u32::MAX;
+        }
+        // A whole-sample vector inside the reference predicts with the
+        // reference's own samples, which is what interpolating gives it.
+        let step = motion_step(self.quarter) as i32;
+        let (ix, iy) = (
+            x as i32 + mv.0.div_euclid(step),
+            y as i32 + mv.1.div_euclid(step),
         );
+        let direct = mv.0.rem_euclid(step) == 0
+            && mv.1.rem_euclid(step) == 0
+            && ix >= 0
+            && iy >= 0
+            && ix + size as i32 <= self.reference.edge_w
+            && iy + size as i32 <= self.reference.edge_h;
+        let mut predicted = [0u8; 256];
+        if !direct {
+            mc::luma_block(
+                self.reference,
+                x as i32,
+                y as i32,
+                size,
+                size,
+                mv.0,
+                mv.1,
+                motion_pel(self.quarter),
+                Rows::Frame,
+                false,
+                &mut predicted,
+            );
+        }
         let mut sad = 0u32;
         for row in 0..size {
-            for col in 0..size {
-                let sample = self
-                    .y
-                    .get((y + row) * self.width + x + col)
-                    .copied()
-                    .unwrap_or(0);
-                sad += u32::from(sample.abs_diff(predicted[row * size + col]));
+            let line = if direct {
+                let from = (iy as usize + row) * self.reference.stride + ix as usize;
+                self.reference.data.get(from..from + size)
+            } else {
+                predicted.get(row * size..row * size + size)
+            };
+            let start = (y + row) * self.width + x;
+            match (self.current.get(start..start + size), line) {
+                (Some(samples), Some(line)) => {
+                    for (&sample, &guess) in samples.iter().zip(line) {
+                        sad += u32::from(sample.abs_diff(guess));
+                    }
+                }
+                // Past the end of a plane, samples read as zero.
+                _ => {
+                    for col in 0..size {
+                        let sample = self.current.get(start + col).copied().unwrap_or(0);
+                        let guess = line.and_then(|line| line.get(col)).copied().unwrap_or(0);
+                        sad += u32::from(sample.abs_diff(guess));
+                    }
+                }
+            }
+            if sad.saturating_mul(2).saturating_add(distance) >= bound {
+                return u32::MAX;
             }
         }
-        sad.saturating_mul(2) + (mv.0 - pred.0).unsigned_abs() + (mv.1 - pred.1).unsigned_abs()
+        sad.saturating_mul(2) + distance
+    }
+}
+
+/// The vector for the block at `at` of `current` against `reference`: the
+/// best whole sample within [`SEARCH`] of `pred`, refined by one step, or
+/// no motion when that predicts better. A candidate is dropped as soon as
+/// it cannot beat the best so far, so the vector is the one comparing
+/// every candidate in full gives.
+fn search(
+    current: &[u8],
+    width: usize,
+    reference: &mc::RefPlane<'_>,
+    at: (usize, usize, usize),
+    pred: (i32, i32),
+    quarter: bool,
+) -> (i32, i32) {
+    let block = Block {
+        current,
+        width,
+        reference,
+        at,
+        pred,
+        quarter,
+    };
+    let mut best = clamp_mv(pred.0, pred.1);
+    let mut best_cost = block.cost(best, u32::MAX);
+    let step = motion_step(quarter);
+    for dy in (-SEARCH..=SEARCH).step_by(step) {
+        for dx in (-SEARCH..=SEARCH).step_by(step) {
+            let mv = clamp_mv(pred.0 + dx, pred.1 + dy);
+            let cost = block.cost(mv, best_cost);
+            if cost < best_cost {
+                best = mv;
+                best_cost = cost;
+            }
+        }
+    }
+    let center = best;
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let mv = clamp_mv(center.0 + dx, center.1 + dy);
+            let cost = block.cost(mv, best_cost);
+            if cost < best_cost {
+                best = mv;
+                best_cost = cost;
+            }
+        }
+    }
+    if block.cost((0, 0), best_cost) < best_cost {
+        (0, 0)
+    } else {
+        best
     }
 }
 
@@ -1563,62 +1665,8 @@ fn search_frame(
     pred: (i32, i32),
     quarter: bool,
 ) -> (i32, i32) {
-    let (x, y0, size) = at;
-    let cost = |mv: (i32, i32)| -> u32 {
-        let mut predicted = [0u8; 256];
-        let [plane, _, _] =
-            reference.refs(((reference.mbw * 16) as u32, (reference.mbh * 16) as u32));
-        mc::luma_block(
-            &plane,
-            x as i32,
-            y0 as i32,
-            size,
-            size,
-            mv.0,
-            mv.1,
-            motion_pel(quarter),
-            Rows::Frame,
-            false,
-            &mut predicted,
-        );
-        let mut sad = 0u32;
-        for row in 0..size {
-            for col in 0..size {
-                let sample = y.get((y0 + row) * width + x + col).copied().unwrap_or(0);
-                sad += u32::from(sample.abs_diff(predicted[row * size + col]));
-            }
-        }
-        sad.saturating_mul(2) + (mv.0 - pred.0).unsigned_abs() + (mv.1 - pred.1).unsigned_abs()
-    };
-    let mut best = clamp_mv(pred.0, pred.1);
-    let mut best_cost = cost(best);
-    let step = motion_step(quarter);
-    for dy in (-SEARCH..=SEARCH).step_by(step) {
-        for dx in (-SEARCH..=SEARCH).step_by(step) {
-            let mv = clamp_mv(pred.0 + dx, pred.1 + dy);
-            let score = cost(mv);
-            if score < best_cost {
-                best = mv;
-                best_cost = score;
-            }
-        }
-    }
-    let center = best;
-    for dy in -1..=1 {
-        for dx in -1..=1 {
-            let mv = clamp_mv(center.0 + dx, center.1 + dy);
-            let score = cost(mv);
-            if score < best_cost {
-                best = mv;
-                best_cost = score;
-            }
-        }
-    }
-    if cost((0, 0)) < best_cost {
-        (0, 0)
-    } else {
-        best
-    }
+    let [plane, _, _] = reference.refs(((reference.mbw * 16) as u32, (reference.mbh * 16) as u32));
+    search(y, width, &plane, at, pred, quarter)
 }
 
 /// One accepted picture, padded out to whole macroblocks.

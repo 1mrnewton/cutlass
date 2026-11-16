@@ -703,7 +703,7 @@ fn projects_home(
     #[cfg(not(target_os = "macos"))]
     window_buttons(shell, ui, bar);
     let menu = Rect::from_min_size(
-        bar.min + Vec2::new(78.0, 0.0),
+        bar.min + Vec2::new(MENUS_LEFT, 0.0),
         Vec2::new(120.0, bar.height()),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
@@ -1105,7 +1105,7 @@ fn project_bar(
         tokens::TEXT,
     );
     let export = Rect::from_min_size(
-        bar.right_center() - Vec2::new(12.0 + 72.0, 13.0),
+        bar.right_center() - Vec2::new(CAPTION_WIDTH + 12.0 + 72.0, 13.0),
         Vec2::new(72.0, 26.0),
     );
     let response = ui
@@ -1141,28 +1141,174 @@ fn project_bar(
     }
 }
 
+/// Where the window's own menus start on the bar: past the system's window
+/// buttons on macOS, near the left edge elsewhere.
+#[cfg(target_os = "macos")]
+const MENUS_LEFT: f32 = 78.0;
+#[cfg(not(target_os = "macos"))]
+const MENUS_LEFT: f32 = 8.0;
+
+/// What the window buttons take from the right end of the bar.
+#[cfg(target_os = "macos")]
+const CAPTION_WIDTH: f32 = 0.0;
+#[cfg(not(target_os = "macos"))]
+const CAPTION_WIDTH: f32 = 3.0 * tokens::CAPTION_BUTTON;
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy, PartialEq)]
+enum Caption {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+/// Off macOS the system's title bar is off, so the bar stands in for it, as
+/// Windows draws one: dragged, it moves the window; double-clicked, it
+/// maximizes or restores it; minimize, maximize and close sit at its right
+/// end. Call it before anything else goes on the bar, so that sits over the
+/// part that drags.
 #[cfg(not(target_os = "macos"))]
 fn window_buttons(shell: &mut Shell, ui: &mut Ui, bar: Rect) {
-    let colors = [tokens::CLOSE, tokens::MINIMIZE, tokens::MAXIMIZE];
-    for (index, color) in colors.into_iter().enumerate() {
-        let center = bar.left_center() + Vec2::new(18.0 + index as f32 * 20.0, 0.0);
-        ui.painter()
-            .circle_filled(center, tokens::WINDOW_BUTTON * 0.5, color);
-        let response = ui.allocate_rect(
-            Rect::from_center_size(center, Vec2::splat(tokens::WINDOW_BUTTON)),
+    let ctx = ui.ctx().clone();
+    let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+    if !maximized {
+        window_edges(&ctx);
+    }
+    let drag = ui.interact(
+        bar,
+        egui::Id::unique("cutlass window drag"),
+        Sense::click_and_drag(),
+    );
+    if drag.drag_started_by(egui::PointerButton::Primary) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+    if drag.double_clicked() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    }
+    let size = Vec2::new(tokens::CAPTION_BUTTON, bar.height());
+    let buttons = [Caption::Minimize, Caption::Maximize, Caption::Close];
+    for (index, caption) in buttons.into_iter().enumerate() {
+        let left = bar.right() - CAPTION_WIDTH + index as f32 * size.x;
+        let rect = Rect::from_min_size(Pos2::new(left, bar.top()), size);
+        let response = ui.interact(
+            rect,
+            egui::Id::unique(("cutlass window button", index)),
             Sense::click(),
         );
-        if response.clicked() && index == 0 {
-            shell.chrome.close_requested = true;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        let pressed = response.is_pointer_button_down_on();
+        let fill = match (caption, response.hovered(), pressed) {
+            (_, false, false) => None,
+            (Caption::Close, _, false) => Some(tokens::CAPTION_CLOSE_HOVER),
+            (Caption::Close, _, true) => Some(tokens::CAPTION_CLOSE_HOVER.gamma_multiply(0.8)),
+            (_, _, false) => Some(tokens::ACTIVE),
+            (_, _, true) => Some(tokens::PRESSED),
+        };
+        // The bottom pixel is the bar's foot line; leave it showing.
+        let shaded = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.max.y - 1.0));
+        if let Some(fill) = fill {
+            ui.painter().rect_filled(shaded, 0.0, fill);
         }
-        if response.clicked() && index == 1 {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        let ink = if caption == Caption::Close && fill.is_some() {
+            Color32::WHITE
+        } else {
+            tokens::TEXT
+        };
+        paint_caption_glyph(ui.painter(), rect.center(), caption, maximized, ink);
+        let response = response.on_hover_text(match caption {
+            Caption::Minimize => "Minimize",
+            Caption::Maximize if maximized => "Restore Down",
+            Caption::Maximize => "Maximize",
+            Caption::Close => "Close",
+        });
+        if !response.clicked() {
+            continue;
         }
-        if response.clicked() && index == 2 {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        match caption {
+            Caption::Minimize => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+            Caption::Maximize => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+            }
+            Caption::Close => {
+                shell.chrome.close_requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+}
+
+/// How far in from the window's edge a press resizes it.
+#[cfg(not(target_os = "macos"))]
+const RESIZE_BAND: f32 = 5.0;
+
+/// Without the system's frame the window has no border to resize by, so
+/// the band along its edges is one: the pointer shows the arrow there, and
+/// a press hands the resize to the system.
+#[cfg(not(target_os = "macos"))]
+fn window_edges(ctx: &egui::Context) {
+    use egui::{CursorIcon, ResizeDirection as Dir};
+    let window = ctx.content_rect();
+    let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) else {
+        return;
+    };
+    let west = pointer.x - window.left() < RESIZE_BAND;
+    let east = window.right() - pointer.x < RESIZE_BAND;
+    let north = pointer.y - window.top() < RESIZE_BAND;
+    let south = window.bottom() - pointer.y < RESIZE_BAND;
+    let (direction, icon) = match (north, south, west, east) {
+        (true, _, true, _) => (Dir::NorthWest, CursorIcon::ResizeNwSe),
+        (_, true, _, true) => (Dir::SouthEast, CursorIcon::ResizeNwSe),
+        (true, _, _, true) => (Dir::NorthEast, CursorIcon::ResizeNeSw),
+        (_, true, true, _) => (Dir::SouthWest, CursorIcon::ResizeNeSw),
+        (true, ..) => (Dir::North, CursorIcon::ResizeVertical),
+        (_, true, ..) => (Dir::South, CursorIcon::ResizeVertical),
+        (.., true, _) => (Dir::West, CursorIcon::ResizeHorizontal),
+        (.., true) => (Dir::East, CursorIcon::ResizeHorizontal),
+        _ => return,
+    };
+    ctx.set_cursor_icon(icon);
+    if ctx.input(|i| i.pointer.primary_pressed()) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+    }
+}
+
+/// The ten-point line glyphs Windows puts on its window buttons. Maximized,
+/// the maximize button shows restore: two offset squares.
+#[cfg(not(target_os = "macos"))]
+fn paint_caption_glyph(
+    painter: &egui::Painter,
+    center: Pos2,
+    caption: Caption,
+    maximized: bool,
+    ink: Color32,
+) {
+    let stroke = egui::Stroke::new(1.0, ink);
+    // Lines one physical pixel wide stay sharp on the pixel's middle.
+    let pixel = 1.0 / painter.pixels_per_point();
+    let snap = |v: f32| ((v / pixel).floor() + 0.5) * pixel;
+    let c = Pos2::new(snap(center.x), snap(center.y));
+    let half = 5.0;
+    match caption {
+        Caption::Minimize => {
+            painter.hline((c.x - half)..=(c.x + half), c.y, stroke);
+        }
+        Caption::Maximize if maximized => {
+            let front = Rect::from_min_size(c + Vec2::new(-half, -half + 2.0), Vec2::splat(8.0));
+            painter.rect_stroke(front, 0.0, stroke, egui::StrokeKind::Middle);
+            // The back square shows only above and to the right of the front.
+            let top = c.y - half;
+            let right = c.x + half;
+            painter.hline((c.x - half + 2.0)..=right, top, stroke);
+            painter.vline(right, top..=(c.y + half - 2.0), stroke);
+        }
+        Caption::Maximize => {
+            let square = Rect::from_center_size(c, Vec2::splat(2.0 * half));
+            painter.rect_stroke(square, 0.0, stroke, egui::StrokeKind::Middle);
+        }
+        Caption::Close => {
+            let a = Vec2::new(half, half);
+            let b = Vec2::new(half, -half);
+            painter.line_segment([c - a, c + a], stroke);
+            painter.line_segment([c - b, c + b], stroke);
         }
     }
 }
@@ -1175,7 +1321,7 @@ fn menus(
     parent: Option<&eframe::Frame>,
 ) {
     let menu = Rect::from_min_size(
-        bar.min + Vec2::new(78.0, 0.0),
+        bar.min + Vec2::new(MENUS_LEFT, 0.0),
         Vec2::new(400.0, bar.height()),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
@@ -10351,6 +10497,25 @@ mod tests {
     }
     use cutlass_settings::Settings;
     use egui::Color32;
+
+    /// The window as `harness` paints it now.
+    ///
+    /// egui_kittest waits 10 seconds for a frame. On a runner with no GPU,
+    /// the first frame that draws a styled title builds its pipelines in
+    /// software and takes about 24 seconds; the ones after take a few
+    /// milliseconds. A wait that times out leaves its frame running, so
+    /// paint again until a frame lands, for up to a minute.
+    fn window_image<State>(harness: &mut egui_kittest::Harness<'_, State>) -> image::RgbaImage {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match harness.render() {
+                Ok(image) => return image,
+                Err(error)
+                    if error.contains("timed out") && std::time::Instant::now() < deadline => {}
+                Err(error) => panic!("the renderer draws the window: {error:?}"),
+            }
+        }
+    }
 
     #[test]
     fn film_textures_let_go_of_the_least_recently_drawn() {
@@ -19528,7 +19693,7 @@ mod tests {
         harness.run_steps(8);
         let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(harness);
             // Not one flat colour: something was drawn.
             let first = image.get_pixel(0, 0);
             assert!(
@@ -19663,7 +19828,7 @@ mod tests {
             assert_eq!(harness.query_all_by_label(label).count(), 1, "{label}");
         }
         if let Some(dir) = &keep {
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(&mut harness);
             std::fs::create_dir_all(dir).unwrap();
             image.save(dir.join("assistant-steps.png")).unwrap();
         }
@@ -19716,7 +19881,7 @@ mod tests {
             let Some(dir) = &keep else {
                 return;
             };
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(harness);
             std::fs::create_dir_all(dir).unwrap();
             image.save(dir.join(format!("{name}.png"))).unwrap();
         };
@@ -19850,7 +20015,7 @@ mod tests {
         };
         let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(harness);
             if let Some(dir) = &keep {
                 std::fs::create_dir_all(dir).unwrap();
                 image.save(dir.join(format!("{name}.png"))).unwrap();
@@ -20106,7 +20271,7 @@ mod tests {
         assert_eq!(listed(&harness, "No font has that name"), 0);
         if let Some(dir) = &keep {
             std::fs::create_dir_all(dir).unwrap();
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(&mut harness);
             image.save(dir.join("font-search.png")).unwrap();
         }
         // A click in the field kept the menu open; more letters that no
@@ -20330,7 +20495,7 @@ mod tests {
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
             // Enough frames for a page's tile pictures.
             harness.run_steps(16);
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(harness);
             let first = image.get_pixel(0, 0);
             assert!(
                 image.pixels().any(|pixel| pixel != first),
@@ -20443,7 +20608,7 @@ mod tests {
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
             harness.run_steps(8);
             let Some(dir) = &keep else { return };
-            let image = harness.render().expect("the renderer draws the window");
+            let image = window_image(harness);
             std::fs::create_dir_all(dir).unwrap();
             image.save(dir.join(format!("{name}.png"))).unwrap();
         };

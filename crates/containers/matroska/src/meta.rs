@@ -189,6 +189,9 @@ pub struct TrackEntry {
     pub pixel_height: u64,
     pub display_width: Option<u64>,
     pub display_height: Option<u64>,
+    /// AlphaMode (RFC 9559, 5.1.4.1.28.4): 1 when the BlockAdditional of
+    /// BlockAddID 1 holds alpha as the codec mapping defines it (VP8, VP9).
+    pub alpha_mode: u64,
     pub sampling_frequency: f64,
     pub output_sampling_frequency: Option<f64>,
     pub channels: u64,
@@ -216,6 +219,7 @@ impl TrackEntry {
             pixel_height: 0,
             display_width: None,
             display_height: None,
+            alpha_mode: 0,
             sampling_frequency: 8000.0,
             output_sampling_frequency: None,
             channels: 1,
@@ -326,6 +330,7 @@ fn parse_video(data: &[u8], track: &mut TrackEntry) -> Result<()> {
             ids::DISPLAY_HEIGHT => {
                 track.display_height = Some(ebml::uint(child.id, child.data)?);
             }
+            ids::ALPHA_MODE => track.alpha_mode = ebml::uint(child.id, child.data)?,
             _ => {}
         }
     }

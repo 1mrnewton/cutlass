@@ -107,7 +107,8 @@ impl Timestamp {
 /// `bytes` is the payload a decoder receives. `stream` is the track id
 /// assigned by the container. `keyframe` is the random-access flag.
 /// The packet is one access unit: a container does not pack several
-/// frames into it, and this type does not split it.
+/// frames into it, and this type does not split it. `additions` are the
+/// data the container keeps beside it (Matroska's BlockAdditions).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Packet {
     stream: u32,
@@ -115,6 +116,16 @@ pub struct Packet {
     timestamp: Timestamp,
     timescale: Timescale,
     keyframe: bool,
+    additions: Vec<BlockAddition>,
+}
+
+/// Data stored beside an access unit under an id: Matroska's BlockMore,
+/// a BlockAddID and its BlockAdditional (RFC 9559, 5.1.3.5.2). For VP9 in
+/// WebM, id 1 is the alpha plane coded as a second VP9 stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockAddition {
+    pub id: u64,
+    pub data: Vec<u8>,
 }
 
 impl Packet {
@@ -138,7 +149,30 @@ impl Packet {
             timestamp,
             timescale,
             keyframe,
+            additions: Vec::new(),
         })
+    }
+
+    /// The packet with `additions` stored beside it.
+    #[must_use]
+    pub fn with_additions(mut self, additions: Vec<BlockAddition>) -> Self {
+        self.additions = additions;
+        self
+    }
+
+    /// The data stored beside the access unit, in file order.
+    #[must_use]
+    pub fn additions(&self) -> &[BlockAddition] {
+        &self.additions
+    }
+
+    /// The addition with BlockAddID `id`, if the packet has one.
+    #[must_use]
+    pub fn addition(&self, id: u64) -> Option<&[u8]> {
+        self.additions
+            .iter()
+            .find(|addition| addition.id == id)
+            .map(|addition| addition.data.as_slice())
     }
 
     #[must_use]
@@ -196,7 +230,7 @@ impl std::error::Error for PacketError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Packet, PacketError, Timescale, Timestamp};
+    use super::{BlockAddition, Packet, PacketError, Timescale, Timestamp};
 
     fn ticks(decode: Option<i64>, presentation: Option<i64>, duration: Option<i64>) -> Timestamp {
         Timestamp::try_new(decode, presentation, duration).expect("timestamp")
@@ -227,6 +261,21 @@ mod tests {
         )
         .expect("packet");
         assert_eq!(packet.into_bytes(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn additions_ride_beside_the_access_unit() {
+        let packet = Packet::try_new(1, vec![9], Timestamp::missing(), Timescale::new(0), true)
+            .expect("packet");
+        assert!(packet.additions().is_empty());
+        assert_eq!(packet.addition(1), None);
+        let packet = packet.with_additions(vec![BlockAddition {
+            id: 1,
+            data: vec![5, 6],
+        }]);
+        assert_eq!(packet.addition(1), Some(&[5_u8, 6][..]));
+        assert_eq!(packet.addition(2), None);
+        assert_eq!(packet.bytes(), &[9]);
     }
 
     #[test]

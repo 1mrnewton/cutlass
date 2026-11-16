@@ -1227,7 +1227,14 @@ fn access_packet(packet: &cutlass_codec::Packet) -> AccessPacket {
         duration: packet.timestamp().duration().unwrap_or(0),
         timescale: packet.timescale().ticks_per_second(),
         keyframe: packet.keyframe(),
-        side: Vec::new(),
+        side: packet
+            .additions()
+            .iter()
+            .map(|addition| SideData::BlockAdditional {
+                id: addition.id,
+                data: addition.data.clone(),
+            })
+            .collect(),
     }
 }
 

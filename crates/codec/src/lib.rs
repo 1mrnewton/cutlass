@@ -14,7 +14,7 @@ mod packet;
 mod params;
 
 pub use id::{CodecId, ContainerId, StreamCodec, TagError, UnknownCodec};
-pub use packet::{Packet, PacketError, Timescale, Timestamp};
+pub use packet::{BlockAddition, Packet, PacketError, Timescale, Timestamp};
 pub use params::{
     AudioParamsError, ChannelsError, FrameSize, FrameSizeError, RateError, StreamParams,
 };

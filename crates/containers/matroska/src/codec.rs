@@ -696,6 +696,7 @@ mod tests {
             pixel_height: 48,
             display_width: None,
             display_height: None,
+            alpha_mode: 0,
             sampling_frequency: 44_100.0,
             output_sampling_frequency: None,
             channels: 2,

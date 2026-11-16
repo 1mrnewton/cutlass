@@ -42,6 +42,16 @@
 //! nanoseconds; a packet with another duration is written in a BlockGroup
 //! with its BlockDuration.
 //!
+//! # Block additions
+//!
+//! A packet with [`cutlass_codec::BlockAddition`]s is written as a
+//! BlockGroup whose BlockAdditions hold one BlockMore for each, its
+//! BlockAddID and BlockAdditional, as FFmpeg writes them (RFC 9559,
+//! 5.1.3.5.2). A VP8 or VP9 track whose packets carry id 1 when the header
+//! is written gets AlphaMode 1: id 1 is then its alpha plane, coded as a
+//! second stream of the same codec (the WebM alpha mapping; FFmpeg's
+//! `libvpx-vp9` with `yuva420p`).
+//!
 //! # Codec delay and padding
 //!
 //! An Opus track's CodecDelay is its pre-skip and its SeekPreRoll 80 ms
@@ -130,6 +140,8 @@ struct Track {
     previous: Option<i64>,
     /// A block of this track is in the open Cluster.
     in_cluster: bool,
+    /// AlphaMode 1: a VP8 or VP9 track whose packets carry BlockAddID 1.
+    alpha: bool,
 }
 
 impl Track {
@@ -361,6 +373,11 @@ impl<W: Write + Seek> MatroskaMux<W> {
                 .front()
                 .and_then(|held| held.packet.timestamp().duration())
                 .filter(|duration| *duration > 0);
+            track.alpha = matches!(track.codec, CodecId::Vp8 | CodecId::Vp9)
+                && track
+                    .queue
+                    .iter()
+                    .any(|held| held.packet.addition(1).is_some());
         }
         self.position = self.writer.stream_position().map_err(io)?;
         let mut out = Vec::new();
@@ -474,6 +491,9 @@ impl<W: Write + Seek> MatroskaMux<W> {
                 let mut video = Vec::new();
                 put_uint(&mut video, ids::PIXEL_WIDTH, u64::from(size.width()));
                 put_uint(&mut video, ids::PIXEL_HEIGHT, u64::from(size.height()));
+                if track.alpha {
+                    put_uint(&mut video, ids::ALPHA_MODE, 1);
+                }
                 put_master(&mut entry, ids::VIDEO, &video);
             } else if let (Some(rate), Some(channels)) =
                 (track.params.sample_rate(), track.params.channels())
@@ -546,9 +566,7 @@ impl<W: Write + Seek> MatroskaMux<W> {
             let Some(held) = self.tracks[index].queue.pop_front() else {
                 return Ok(());
             };
-            self.held = self
-                .held
-                .saturating_sub(u64::try_from(held.packet.bytes().len()).unwrap_or(0));
+            self.held = self.held.saturating_sub(held_bytes(&held.packet));
             self.write_block(index, &held)?;
         }
     }
@@ -591,7 +609,9 @@ impl<W: Write + Seek> MatroskaMux<W> {
         let (played, discard_ns) = trailing(track, held, duration);
         let video = track.is_video();
         let keyframe = packet.keyframe();
-        let needs_group = track.default_duration != Some(duration) || discard_ns > 0;
+        let additions = packet.additions();
+        let needs_group =
+            track.default_duration != Some(duration) || discard_ns > 0 || !additions.is_empty();
         let strip = track
             .written
             .as_ref()
@@ -644,6 +664,16 @@ impl<W: Write + Seek> MatroskaMux<W> {
             head.push(0);
             let block_len = len(&head) + frame_len;
             let mut tail = Vec::new();
+            if !additions.is_empty() {
+                let mut mores = Vec::new();
+                for addition in additions {
+                    let mut more = Vec::new();
+                    put_uint(&mut more, ids::BLOCK_ADD_ID, addition.id);
+                    put_bytes(&mut more, ids::BLOCK_ADDITIONAL, &addition.data);
+                    put_master(&mut mores, ids::BLOCK_MORE, &more);
+                }
+                put_master(&mut tail, ids::BLOCK_ADDITIONS, &mores);
+            }
             let block_duration = self
                 .to_segment(played, timescale)
                 .and_then(|value| u64::try_from(value).ok())
@@ -874,6 +904,16 @@ impl<W: Write + Seek> MatroskaMux<W> {
 /// (RFC 9559, 5.1.6). The UID must not be zero and should be as random as
 /// possible; it is a 64-bit FNV-1a hash of the picture, so the same cover
 /// gives the same file.
+/// The bytes a packet holds: its frame and its block additions.
+fn held_bytes(packet: &Packet) -> u64 {
+    packet
+        .additions()
+        .iter()
+        .fold(len(packet.bytes()), |sum, addition| {
+            sum.saturating_add(len(&addition.data))
+        })
+}
+
 fn cover_attachments(jpeg: &[u8]) -> Vec<u8> {
     let mut file = Vec::with_capacity(jpeg.len() + 48);
     put_bytes(&mut file, ids::FILE_NAME, COVER_NAME);
@@ -1083,6 +1123,7 @@ impl<W: Write + Seek + Send> Mux for MatroskaMux<W> {
             late_private: None,
             previous: None,
             in_cluster: false,
+            alpha: false,
         });
         Ok(id)
     }
@@ -1105,7 +1146,11 @@ impl<W: Write + Seek + Send> Mux for MatroskaMux<W> {
         else {
             return Err(self.fail(MuxError::MissingTimestamp));
         };
-        let bytes = len(packet.bytes());
+        // A BlockAddID of 0 is outside the schema's range.
+        if packet.additions().iter().any(|addition| addition.id == 0) {
+            return Err(self.fail(rejected("BlockAddID 0")));
+        }
+        let bytes = held_bytes(packet);
         if bytes > self.limits.max_packet_bytes {
             return Err(self.fail(MuxError::HostileSize {
                 declared: bytes,

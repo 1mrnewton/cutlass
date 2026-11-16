@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use cutlass_codec::access::SideData;
 use cutlass_codec::{
-    FrameSize, Packet as FilePacket, StreamCodec, StreamParams, Timescale, Timestamp,
+    BlockAddition, FrameSize, Packet as FilePacket, StreamCodec, StreamParams, Timescale, Timestamp,
 };
 use cutlass_container::{Mux, MuxStatus, NewStream, TrackDuration, TrackId, Trim};
 use cutlass_encode::{
@@ -1045,6 +1045,7 @@ pub(crate) fn write_packets<M: Mux>(
     ticks: &mut i64,
 ) -> Result<(), ExportError> {
     for packet in packets {
+        let mut additions = Vec::new();
         for side in &packet.side {
             match side {
                 SideData::Config(config) => {
@@ -1065,10 +1066,16 @@ pub(crate) fn write_packets<M: Mux>(
                     mux.set_trim(TrackId::new(stream), trim)
                         .map_err(ExportError::Mux)?;
                 }
-                _ => return Err(ExportError::SideData),
+                // Data the container keeps beside the frame (a VP9 alpha
+                // stream); a container without a place for it leaves it out.
+                SideData::BlockAdditional { id, data } => additions.push(BlockAddition {
+                    id: *id,
+                    data: data.clone(),
+                }),
+                SideData::Protection { .. } => return Err(ExportError::SideData),
             }
         }
-        let file = file_packet(stream, packet)?;
+        let file = file_packet(stream, packet)?.with_additions(additions);
         let duration = file.timestamp().duration().ok_or(ExportError::Packet)?;
         mux.write_packet(&file).map_err(ExportError::Mux)?;
         *ticks = ticks.checked_add(duration).ok_or(ExportError::Limit)?;

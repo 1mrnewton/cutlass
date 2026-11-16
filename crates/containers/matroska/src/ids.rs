@@ -54,6 +54,10 @@ pub const BLOCK: u32 = 0xA1;
 pub const BLOCK_DURATION: u32 = 0x9B;
 pub const REFERENCE_BLOCK: u32 = 0xFB;
 pub const DISCARD_PADDING: u32 = 0x75A2;
+pub const BLOCK_ADDITIONS: u32 = 0x75A1;
+pub const BLOCK_MORE: u32 = 0xA6;
+pub const BLOCK_ADD_ID: u32 = 0xEE;
+pub const BLOCK_ADDITIONAL: u32 = 0xA5;
 
 // Tracks (5.1.4).
 pub const TRACK_ENTRY: u32 = 0xAE;
@@ -74,6 +78,7 @@ pub const PIXEL_WIDTH: u32 = 0xB0;
 pub const PIXEL_HEIGHT: u32 = 0xBA;
 pub const DISPLAY_WIDTH: u32 = 0x54B0;
 pub const DISPLAY_HEIGHT: u32 = 0x54BA;
+pub const ALPHA_MODE: u32 = 0x53C0;
 pub const AUDIO: u32 = 0xE1;
 pub const SAMPLING_FREQUENCY: u32 = 0xB5;
 pub const OUTPUT_SAMPLING_FREQUENCY: u32 = 0x78B5;

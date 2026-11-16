@@ -34,6 +34,10 @@ pub enum SideData {
     /// also covers that header. It is absent when the CRC covers one raw
     /// data block of a multi-block frame.
     Protection { crc: u16, header: Option<Vec<u8>> },
+    /// Data a container stores beside the frame under an id, as Matroska's
+    /// BlockAdditional with its BlockAddID (RFC 9559, 5.1.3.5.2). For VP9,
+    /// id 1 is WebM's alpha: the alpha plane coded as a second VP9 stream.
+    BlockAdditional { id: u64, data: Vec<u8> },
 }
 
 impl Packet {

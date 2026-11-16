@@ -898,6 +898,7 @@ impl<P: EncPixel> Core<P> {
                 second_pass: self.rc.pass2.is_some(),
                 full_search: self.full_search(),
                 fast_arf: self.opts.speed >= FAST_ARF_SPEED,
+                uv_delta: 0,
                 golden_slot: golden_slot.0,
                 also_refresh: 0,
                 noise: golden_slot.1,
@@ -1030,6 +1031,11 @@ impl<P: EncPixel> Core<P> {
             second_pass: self.rc.pass2.is_some(),
             full_search: self.full_search(),
             fast_arf: false,
+            uv_delta: if self.rt_pool() && self.opts.speed >= RT_UV_SPEED {
+                RT_UV_DELTA
+            } else {
+                0
+            },
             golden_slot: golden_slot.0,
             also_refresh,
             noise: golden_slot.1,
@@ -1108,6 +1114,7 @@ impl<P: EncPixel> Core<P> {
                 second_pass: false,
                 full_search: false,
                 fast_arf: false,
+                uv_delta: 0,
                 golden_slot: 1,
                 also_refresh: 0,
                 noise: 0.0,
@@ -1532,6 +1539,21 @@ const POOL_SPEED: u8 = 7;
 /// Where the content stands is the sum of each picture's motion
 /// ([`Core::rt_step`]). The pool holds no planes (none is measured).
 const RT_POOL_SPEED: u8 = 9;
+
+/// From this speed, one pass at a bitrate codes chroma [`RT_UV_DELTA`]
+/// quantizer steps finer than luma (the header's chroma deltas).
+const RT_UV_SPEED: u8 = 10;
+
+/// See [`RT_UV_SPEED`]. Speed 10 against libvpx's realtime 8 on the
+/// README's three scenes, four threads, BD-rate at the same PSNR-Y / U /
+/// V / FFmpeg's average / 6:1:1: at 0, −8.3 / −0.7 / −2.5 / −5.8 / −7.0;
+/// at −3, −6.9 / −1.6 / −4.3 / −5.5 / −6.1 (the closest measure 1.6
+/// points ahead rather than 0.7); at −6, −5.1 / −2.3 / −5.3 / −4.7 /
+/// −4.9; at −10, −2.6 / −3.5 / −6.4 / −3.6 / −3.3. The other two clips
+/// lose at most 2.5 points at PSNR-U, all far ahead. At speed 9 (−3:
+/// −15.4 / −9.7 / −11.5 / −13.7 / −14.5 from −17.0 / −9.4 / −10.7 /
+/// −14.4 / −15.6) it bought nothing.
+const RT_UV_DELTA: i8 = -3;
 
 /// The realtime pool's pictures (slots from [`POOL_FIRST`]): with fewer
 /// pictures held, fewer buffers. On a pan of 7 or 8 samples a picture one

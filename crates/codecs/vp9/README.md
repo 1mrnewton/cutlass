@@ -1118,6 +1118,37 @@ with it, and behind FFmpeg's default on the three scenes (+3.1 / +3.8 /
 with speed 6's chroma weights (0.3 to 1.4 points better at PSNR-U, 0.8
 worse at PSNR-Y on the three scenes).
 
+The two thinnest margins, then widened. Speed 10's PSNR-U on the three
+scenes (−0.7%) and two passes' (−0.9%) were the closest any measure came
+to libvpx's. Speed 10 at a bitrate now codes chroma 3 quantizer steps
+finer than luma (`api::RT_UV_DELTA`, the header's chroma deltas, which
+the encoder had always written as 0), and the second pass weighs chroma's
+bits 0.7 of luma's (`tile::CHROMA_RATE_TWO`, from 0.75). BD-rate at the
+same PSNR-Y / U / V / FFmpeg's average / 6:1:1, four threads:
+
+| Three scenes | Before | Now |
+| --- | --- | --- |
+| Speed 10 vs realtime 8 | −8.3 / −0.7 / −2.5 / −5.8 / −7.0 | −6.9 / −1.6 / −4.3 / −5.5 / −6.1 |
+| Two passes vs `-pass 1/2` | −6.4 / −0.9 / −5.3 / −5.1 / −5.6 | −6.0 / −1.6 / −5.9 / −5.2 / −5.4 |
+
+The closest measure is now 1.6 points ahead in both, where it was 0.7
+and 0.9; each gives back a little PSNR-Y for it. On the other two clips speed 10 is −69.6 /
+−57.2 / −57.7 / −65.0 / −68.0 (still scene) and n/a / −59.3 / −60.0 /
+−70.0 / n/a (pan), and two passes −37.6 / −34.3 / −34.2 / −35.5 / −36.3
+and −14.3 / −29.0 / −28.3 / −21.9 / −20.0. Larger chroma deltas trade
+on: −6 gives −5.1 / −2.3 / −5.3 / −4.7 / −4.9 on the three scenes, −10
+−2.6 / −3.5 / −6.4 / −3.6 / −3.3. At speed 9, whose closest measure is
+9 points ahead, −3 bought nothing (−15.4 / −9.7 / −11.5 / −13.7 / −14.5
+from −17.0 / −9.4 / −10.7 / −14.4 / −15.6); a chroma bit weight of 1.15
+instead of 1/0.7 at speeds 9 and 10 changed no stream (their realtime
+path does not weigh chroma's bits). Speed 10 on four threads: 0.92,
+0.96 and 0.82 of realtime 8's time (0.91, 0.92 and 0.83 for the build
+before, in the same runs). The streams were checked in FFmpeg's `vp9`
+(threaded and on one thread), libvpx and this decoder: 20 of 20 decodes
+the same; every other configuration of the identity check is
+byte-identical (36 of 41; the five that changed are speed 10 at a
+bitrate and two passes).
+
 Still behind: `testsrc2` alone, where libvpx is ahead at every speed
 here on PSNR-Y too (at fixed quantizers against `-crf`: +9% / +33% at
 PSNR-Y / U at speed 5, −2.8% / +18% at speed 1); its key frame takes 9%
@@ -1471,9 +1502,10 @@ What is left:
   points (on four threads: −3.2% PSNR-Y, −1.1% PSNR-U); `testsrc2` is
   where it is lost (see "Chroma"). After "The gaps", every mode is
   ahead of its FFmpeg counterpart on every column there, but narrowly
-  at PSNR-U: speed 6 −1.4%, speed 10 −0.7%, two passes −0.9% (at a
-  chroma rate of 0.8 in the second pass, +0.04%); a run on another
-  number of threads (other tile columns) moves these by a point. Speed 6
+  at PSNR-U: speed 6 −1.4%, speed 10 −1.6%, two passes −1.6% (−0.7%
+  and −0.9% before the chroma deltas and weights above); a run on
+  another number of threads (other tile columns) moves these by a
+  point. Speed 6
   takes speed 5's time on the three scenes (it did before too), and
   speed 10 0.82 to 0.95 of FFmpeg's realtime 8 on four threads, after
   the loop filter's planes went to one thread (the reference pool had

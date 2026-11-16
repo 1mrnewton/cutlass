@@ -77,6 +77,10 @@ pub struct FrameParams {
     /// that codes a little takes the thresholds it had before the
     /// reference pool came to one pass (`tile::CHEAP_FAST_ARF`).
     pub fast_arf: bool,
+    /// The chroma quantizers' offset from `qindex` (the header's
+    /// `delta_q_uv_dc` and `delta_q_uv_ac`; 0 in a lossless frame): see
+    /// [`super::api`]'s `RT_UV_DELTA`.
+    pub uv_delta: i8,
     /// The slot GOLDEN reads (1 but with [`super::api`]'s reference pool:
     /// two passes, and one pass up to speed 7).
     pub golden_slot: u8,
@@ -607,7 +611,15 @@ impl<P: EncPixel> FrameEncoder<P> {
         b.write_bit(true); // mode_ref_delta_enabled (the defaults)
         b.write_bit(false); // no update
         b.write(u32::from(qindex), 8);
-        b.write(0, 3); // no dc / uv deltas
+        let uvd = if lossless { 0 } else { fp.uv_delta };
+        b.write_bit(false); // no y dc delta
+        for _ in 0..2 {
+            b.write_bit(uvd != 0);
+            if uvd != 0 {
+                b.write(u32::from(uvd.unsigned_abs()), 4);
+                b.write_bit(uvd < 0);
+            }
+        }
         match &self.aq {
             Some(plan) => {
                 b.write_bit(true); // segmentation

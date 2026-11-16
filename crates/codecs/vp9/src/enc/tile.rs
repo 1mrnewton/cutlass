@@ -473,7 +473,7 @@ pub const CHROMA_SPEED: u8 = 6;
 /// PSNR-U. Speeds 7 and 8 lost with it (1/0.7 there).
 const CHROMA_RATE: f32 = 0.8;
 
-/// [`CHROMA_RATE`] at speed 6 in one pass, and in a second pass. Two
+/// [`CHROMA_RATE`] at speed 6 in one pass (and, before [`CHROMA_RATE_TWO`], in a second pass). Two
 /// passes against FFmpeg's on the three scenes: at 0.8, −6.8 / +0.04 /
 /// −4.9% at the same PSNR-Y / U / V; at 0.75, −6.4 / −0.9 / −5.3% (and
 /// 0.4 and 1.3 points of PSNR-Y for 1 to 3 of PSNR-U on the other two
@@ -483,6 +483,14 @@ const CHROMA_RATE: f32 = 0.8;
 /// of PSNR-Y for 1 of PSNR-U on the other two clips, FFmpeg's average
 /// the same or better); at 0.7, −0.3 / −1.4 / −3.2%.
 const CHROMA_RATE_SIX: f32 = 0.75;
+
+/// [`CHROMA_RATE`] in a second pass. Two passes against FFmpeg's on the
+/// README's three scenes, four threads, BD-rate at the same PSNR-Y / U /
+/// V / FFmpeg's average / 6:1:1: at 0.75 (as speed 6), −6.4 / −0.9 /
+/// −5.3 / −5.1 / −5.6; at 0.7, −6.0 / −1.6 / −5.9 / −5.2 / −5.4 (the
+/// closest measure 1.6 points ahead rather than 0.9; the other two clips
+/// within 0.4 points of before on every measure).
+const CHROMA_RATE_TWO: f32 = 0.7;
 
 /// See [`CHROMA_SPEED`]: with [`CHROMA_RATE`], 2 rather than 1 (the
 /// planes' errors summed as they are) takes 3 points off the bits at the
@@ -3489,7 +3497,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // and clean 720p at speed 6 before the reference pool).
         let chroma = if s.fast_arf {
             CHROMA_RATE_FAST
-        } else if self.six() || s.second_pass {
+        } else if s.second_pass {
+            CHROMA_RATE_TWO
+        } else if self.six() {
             CHROMA_RATE_SIX
         } else if s.speed <= CHROMA_SPEED {
             CHROMA_RATE

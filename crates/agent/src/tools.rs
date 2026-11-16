@@ -756,7 +756,9 @@ where
                 })
             }
             "media.probe" => {
-                text_arg(arguments, "media.probe").map(|path| Invocation::MediaProbe { path })
+                let path = text_arg(arguments, "media.probe")?;
+                full_path(&path, "media.probe")?;
+                Ok(Invocation::MediaProbe { path })
             }
             "speech.start" => {
                 let (start_us, duration_us) = two_i64(arguments, "speech.start")?;
@@ -1417,6 +1419,9 @@ const IMPORT_SLACK_US: i64 = 100_000;
 /// the caller builds by hand and is left alone.
 fn check_imports(media: &mut impl Media, requests: &[Request]) -> Result<(), ToolError> {
     for (index, request) in requests.iter().enumerate() {
+        if let Request::LinkMedia { path, .. } = request {
+            full_path(path, &format!("request {index} link_media"))?;
+        }
         let Request::Import { medium } = request else {
             continue;
         };
@@ -1427,6 +1432,7 @@ fn check_imports(media: &mut impl Media, requests: &[Request]) -> Result<(), Too
         if path.trim().is_empty() {
             continue;
         }
+        full_path(path, &format!("request {index} import"))?;
         let info = media.probe(path).map_err(|error| {
             ToolError::BadArguments(format!(
                 "request {index} import: the file cannot be read ({error}); give its full \
@@ -1443,6 +1449,21 @@ fn check_imports(media: &mut impl Media, requests: &[Request]) -> Result<(), Too
         }
     }
     Ok(())
+}
+
+/// Refuse a path that is not given from the root. A relative one would be
+/// read against whatever folder the host happens to run in, which is not
+/// the project's, and a draft that kept it would lose the file when it is
+/// opened anywhere else.
+fn full_path(path: &str, what: &str) -> Result<(), ToolError> {
+    if Path::new(path).is_absolute() {
+        Ok(())
+    } else {
+        Err(ToolError::BadArguments(format!(
+            "{what}: {path} is not a full path; give the file's path from the root, such as \
+             /Users/me/Movies/clip.mp4"
+        )))
+    }
 }
 
 fn host_unit(result: Result<(), String>) -> Result<String, ToolError> {
@@ -1742,6 +1763,7 @@ fn parse_export(arguments: &str) -> Result<Invocation, ToolError> {
                 .extension()
                 .map(|ending| ending.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
+            full_path(path, "export.start")?;
             if !EXPORT_ENDINGS.contains(&ending.as_str()) {
                 return Err(ToolError::BadArguments(format!(
                     "export.start writes a .png (the frame at the player's time) or a .mp4 or \
@@ -3163,14 +3185,14 @@ mod tests {
     fn media_probe_uses_the_injected_trait() {
         let temp = Temp::new();
         let mut registry = open(&temp, Gate::refuse());
-        let call = registry.parse("media.probe", "my clip.mov").unwrap();
+        let call = registry.parse("media.probe", "/m/my clip.mov").unwrap();
         let text = registry.invoke(call).unwrap();
         assert_eq!(
             text,
             "type=video duration=1500000 width=1280 height=720 streams=video,audio"
         );
         assert_eq!(registry.media.calls, 1);
-        assert_eq!(registry.media.path, "my clip.mov");
+        assert_eq!(registry.media.path, "/m/my clip.mov");
         assert_eq!(registry.draft.session().revision(), 0);
     }
 
@@ -3179,11 +3201,45 @@ mod tests {
         let temp = Temp::new();
         let mut registry = open(&temp, Gate::refuse());
         registry.media.info.kind = String::new();
-        let call = registry.parse("media.probe", "clip.mov").unwrap();
+        let call = registry.parse("media.probe", "/m/clip.mov").unwrap();
         assert_eq!(
             registry.invoke(call).unwrap(),
             "duration=1500000 width=1280 height=720 streams=video,audio"
         );
+    }
+
+    #[test]
+    fn a_path_not_from_the_root_is_refused() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let refused = |result: Result<Invocation, ToolError>| match result {
+            Err(ToolError::BadArguments(text)) => text,
+            other => panic!("{other:?}"),
+        };
+        assert!(refused(registry.parse("media.probe", "clip.mov")).contains("not a full path"));
+        assert!(
+            refused(registry.parse("export.start", "new out/cut.mp4")).contains("not a full path")
+        );
+        let import = r#"{"expected_revision":0,"requests":[{"op":"import","medium":{"video":
+            {"id":"m","type":"video","path":"clip.mov","width":1280,"height":720,
+            "duration":1000000,"has_audio":true}}}]}"#;
+        let text = registry
+            .invoke(registry.parse("draft.apply", import).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            text.contains("request 0 import: clip.mov is not a full path"),
+            "{text}"
+        );
+        assert_eq!(registry.media.calls, 0, "nothing was probed");
+        let link = r#"{"expected_revision":0,"requests":[{"op":"link_media",
+            "material_id":"m","path":"moved.mov","width":1280,"height":720,"duration":1000000}]}"#;
+        let text = registry
+            .invoke(registry.parse("draft.apply", link).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(text.contains("request 0 link_media: moved.mov"), "{text}");
+        assert_eq!(registry.draft.session().revision(), 0);
     }
 
     #[test]
@@ -3275,20 +3331,20 @@ mod tests {
         let temp = Temp::new();
         let mut registry = open(&temp, Gate::refuse());
         let call = registry
-            .parse("export.start", "replace out file.mp4")
+            .parse("export.start", "replace /m/out file.mp4")
             .unwrap();
         let error = registry.invoke(call).unwrap_err();
         assert!(error.to_string().contains("refused"));
         assert!(matches!(
             error,
-            ToolError::Approval(refused) if refused.action == ApprovalAction::ExportReplace { path: "out file.mp4".to_owned() }
+            ToolError::Approval(refused) if refused.action == ApprovalAction::ExportReplace { path: "/m/out file.mp4".to_owned() }
         ));
         assert_eq!(registry.export.calls, 0);
         assert_eq!(registry.draft.session().revision(), 0);
         assert_eq!(
             registry.approver.actions,
             vec![ApprovalAction::ExportReplace {
-                path: "out file.mp4".to_owned(),
+                path: "/m/out file.mp4".to_owned(),
             }]
         );
     }
@@ -3298,27 +3354,27 @@ mod tests {
         let temp = Temp::new();
         let mut registry = open(&temp, Gate::allow());
         let created = registry
-            .invoke(registry.parse("export.start", "new fresh.mp4").unwrap())
+            .invoke(registry.parse("export.start", "new /m/fresh.mp4").unwrap())
             .unwrap();
         assert_eq!(created, "job=export-1");
         assert!(registry.approver.actions.is_empty());
         assert_eq!(registry.export.calls, 1);
-        assert_eq!(registry.export.path, "fresh.mp4");
+        assert_eq!(registry.export.path, "/m/fresh.mp4");
         let replaced = registry
             .invoke(
                 registry
-                    .parse("export.start", "replace final cut.mp4")
+                    .parse("export.start", "replace /m/final cut.mp4")
                     .unwrap(),
             )
             .unwrap();
         assert_eq!(replaced, "job=export-1");
         assert_eq!(registry.export.calls, 2);
-        assert_eq!(registry.export.path, "final cut.mp4");
+        assert_eq!(registry.export.path, "/m/final cut.mp4");
         assert_eq!(registry.draft.session().revision(), 0);
         assert_eq!(
             registry.approver.actions,
             vec![ApprovalAction::ExportReplace {
-                path: "final cut.mp4".to_owned(),
+                path: "/m/final cut.mp4".to_owned(),
             }]
         );
     }

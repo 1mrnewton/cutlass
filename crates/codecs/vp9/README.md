@@ -1578,7 +1578,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-arnr-type` | `arnr-type` | n/a: libvpx's VP9 encoder ignores it too (VP8 only) |
 | `-min-gf-interval` | `min-gf-interval` | internal (golden every 12; 6 to 12 by motion in two passes), not an option |
 | `-tune psnr` | `tune` | the default |
-| `-tune ssim` | `tune=ssim` | missing |
+| `-tune ssim` | `tune=ssim` | `tune: Tune::Ssim` (`ssim=1`, added); see "Options measured" |
 | `-tune-content screen` | `tune-content` | `tune_content: TuneContent::Screen` (`screen=1`, added); see "Options measured" |
 | `-tune-content film` | `tune-content` | missing (libvpx's VP9 encoder changes little for it) |
 | `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ), or `aq_mode: AqMode::Variance` |
@@ -1699,6 +1699,27 @@ Speed 6 without it was 27% behind libvpx's good deadline on this clip
 interval). libvpx's own `-tune-content screen` changes nothing at the
 good deadline (the same bytes) and costs 40% at realtime 8 here, where it
 also overshoots the rate by 1.5 to 2.6 times.
+
+**SSIM tuning** (`Tune::Ssim`, `-tune ssim`). libvpx's scale of the RD
+lambda by 16×16 block (from the mean variance of its 8×8 blocks, by
+libvpx's fit 67.035434 (1 − e^(−0.0021489 var)) + 17.492222, over the
+scales' geometric mean in the frame), but a superblock's geometric mean
+of them, to the power 0.5, for every block in it: with a lambda per 16×16
+block the partition search weighed a block's rate against its parts' at
+different lambdas, and took 33 to 46% more bits at the
+same SSIM. One pass at 0.5/1 to 3/4 Mb/s, speed 5, BD-rate at the same
+SSIM-Y in dB (FFmpeg's `ssim` filter) / PSNR-Y, against no tuning:
+
+| | Three scenes | Still and jumps |
+| --- | --- | --- |
+| `ssim=1`, power 0.5 | +2.2 / +2.6% | −0.8 / +1.9% |
+| `ssim=1`, power 1 (libvpx's) | +8.0% / — | +9.0% / — |
+| libvpx `-tune ssim` against its default | +10.2% / — | −4.8% / — |
+| `ssim=1` against libvpx `-tune ssim` | +1.6% | −1.6% |
+
+Neither encoder gains SSIM by it on these clips; the grainy pan's SSIM
+stops rising at 15.3 dB from 1.7 Mb/s for both, so a BD-rate there means
+nothing. It is there for the option's sake, at what it costs.
 
 Decoders: FFmpeg's `vp9` and `libvpx-vp9` decoders have no options of
 their own; of the generic ones, frame threads and slice (tile) threads

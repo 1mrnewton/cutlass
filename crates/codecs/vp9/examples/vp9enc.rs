@@ -9,7 +9,8 @@
 //! `arnr_frames=1..15`, `undershoot=PCT`, `overshoot=PCT`,
 //! `keyint_min=N`, `max_intra=PCT`, `tile_columns=0..6`, `level=N`
 //! (10 × the level) and `lossless=1`; `drop=PCT` (FFmpeg's
-//! `-drop-threshold`: dropped frames leave gaps in the IVF timestamps).
+//! `-drop-threshold`: dropped frames leave gaps in the IVF timestamps),
+//! `screen=1` (`-tune-content screen`) and `ssim=1` (`-tune ssim`).
 //! With `bits=10` or `12` the input has little-endian 16-bit samples
 //! (FFmpeg's `yuv420p10le` and the like).
 
@@ -18,7 +19,7 @@
 use std::io::{Read, Write};
 use std::time::Instant;
 
-use cutlass_vp9::{AqMode, Chroma, ColorSpace, TuneContent, Vp9Encoder, Vp9Options};
+use cutlass_vp9::{AqMode, Chroma, ColorSpace, Tune, TuneContent, Vp9Encoder, Vp9Options};
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
@@ -103,6 +104,11 @@ fn main() -> Result<(), String> {
             "tile_columns" => opts.tile_columns = Some(n as u8),
             "level" => opts.level = n as u8,
             "drop" => opts.drop_frame_pct = n,
+            "ssim" => {
+                if n != 0 {
+                    opts.tune = Tune::Ssim;
+                }
+            }
             "screen" => {
                 if n != 0 {
                     opts.tune_content = TuneContent::Screen;

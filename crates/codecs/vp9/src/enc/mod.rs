@@ -117,6 +117,8 @@ pub struct Stream {
     /// Screen content (libvpx's `tune-content=screen`): see
     /// [`tile::Shared::screen`].
     pub screen: bool,
+    /// libvpx's `tune=ssim`: see [`tile::Shared::ssim`].
+    pub ssim: bool,
 }
 
 impl Default for Stream {
@@ -130,6 +132,7 @@ impl Default for Stream {
             frame_parallel: false,
             static_thresh: 0,
             screen: false,
+            ssim: false,
         }
     }
 }
@@ -280,6 +283,9 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// The segmentation the next frame codes when it is not adaptively
     /// quantized ([`FrameEncoder::set_segmentation`]).
     next_plan: Option<aq::Plan>,
+    /// With `tune=ssim`, the frame's scales of the RD lambda by
+    /// superblock ([`ssim_scales`]).
+    ssim: Vec<f32>,
     /// Each reference's picture in the last inter frame, the share of its
     /// area that frame predicted from it (in 1/1024), and how many frames
     /// in a row it has been left out of the search.
@@ -364,6 +370,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             pre_frame: Vec::new(),
             aq: None,
             next_plan: None,
+            ssim: Vec::new(),
             ref_use: [(0, 1024, 0); 3],
             stream: Stream::default(),
             threads: threads.max(1),
@@ -475,6 +482,18 @@ impl<P: EncPixel> FrameEncoder<P> {
         });
         if self.aq.is_none() && !lossless {
             self.aq = next;
+        }
+        if self.stream.ssim && !lossless {
+            let (w, h) = (self.width as usize, self.height as usize);
+            ssim_scales(
+                &self.src[0],
+                self.strides[0],
+                (w, h),
+                self.bd,
+                &mut self.ssim,
+            );
+        } else {
+            self.ssim.clear();
         }
         // The tiles are coded against the probabilities as they stand; their
         // symbols are kept, the coefficient probabilities that pay for
@@ -821,6 +840,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             noise: fp.noise,
             static_thresh: self.stream.static_thresh,
             screen: self.stream.screen,
+            ssim: &self.ssim,
             global: self.global.take(),
             gold_mv: self.gold_mv.take(),
         };
@@ -1648,6 +1668,77 @@ fn sad_per_bit(ac: i32, bd: u8) -> u32 {
 /// doubled: measured against libvpx's good quality on grainy and clean
 /// 720p, twice the weight on rate takes 8 to 17% off the bitrate at the
 /// same PSNR, Y or averaged over the planes, in the same time.
+/// See [`ssim_scales`]: the power of libvpx's scales a superblock's
+/// lambda takes. On the README's three scenes and the clip of a still
+/// picture (speed 5, 0.5/1 to 3/4 Mb/s, four threads), BD-rate at the
+/// same SSIM-Y (FFmpeg's `ssim`, in dB) against no tuning: at 1 (libvpx's),
+/// +8.0% and +9.0%; at 0.5, +2.2% and −0.8%. A scale by 16×16 block, as
+/// libvpx's, made the partition search weigh a block's rate against its
+/// parts' at different lambdas: +33% and +46%; one by superblock for the
+/// searches but by block for the quantization, +16% and +28% (+1.9% and
+/// +1.8% at 0.5).
+const SSIM_STRENGTH: f64 = 0.5;
+
+/// libvpx's `tune=ssim` (`set_mb_ssim_rdmult_scaling`): each superblock's
+/// scale of the RD lambda, from the mean variance of the 8×8 blocks of
+/// each of its 16×16 blocks in luma `y` (rows `stride` apart, `w`×`h`
+/// visible) by libvpx's fit, 67.035434 (1 − e^(−0.0021489 var)) +
+/// 17.492222: flat blocks, where SSIM sees coding errors most, take a
+/// smaller lambda and so more bits. The scales go over their geometric
+/// mean in the frame, and a superblock takes the geometric mean of its
+/// 16×16 blocks' to the power [`SSIM_STRENGTH`], into `out` in raster
+/// order.
+fn ssim_scales<P: EncPixel>(
+    y: &[P],
+    stride: usize,
+    (w, h): (usize, usize),
+    bd: u8,
+    out: &mut Vec<f32>,
+) {
+    let (mi_cols, mi_rows) = (w.div_ceil(8), h.div_ceil(8));
+    let (cols, rows) = (mi_cols.div_ceil(2), mi_rows.div_ceil(2));
+    let scale = f64::from(1u32 << (2 * u32::from(bd - 8)));
+    // Each 16×16 block's log scale.
+    let mut f = vec![0f64; cols * rows];
+    for r in 0..rows {
+        for c in 0..cols {
+            let (mut var, mut n) = (0.0, 0.0);
+            for mr in 2 * r..(2 * r + 2).min(mi_rows) {
+                for mc in 2 * c..(2 * c + 2).min(mi_cols) {
+                    // (The source is padded to whole superblocks.)
+                    let (mut sum, mut sq) = (0u64, 0u64);
+                    for yy in mr * 8..mr * 8 + 8 {
+                        for &v in &y[yy * stride + mc * 8..yy * stride + mc * 8 + 8] {
+                            let v = v.get() as u64;
+                            sum += v;
+                            sq += v * v;
+                        }
+                    }
+                    var += (sq as f64 - (sum * sum) as f64 / 64.0) / 64.0 / scale;
+                    n += 1.0;
+                }
+            }
+            let var = var / n;
+            f[r * cols + c] = (67.035434 * (1.0 - (-0.0021489 * var).exp()) + 17.492222).ln();
+        }
+    }
+    let mean = f.iter().sum::<f64>() / f.len() as f64;
+    let (sb_cols, sb_rows) = (mi_cols.div_ceil(8), mi_rows.div_ceil(8));
+    out.clear();
+    for sr in 0..sb_rows {
+        for sc in 0..sb_cols {
+            let (mut sum, mut n) = (0.0, 0.0);
+            for r in 4 * sr..(4 * sr + 4).min(rows) {
+                for &v in &f[r * cols + 4 * sc..r * cols + (4 * sc + 4).min(cols)] {
+                    sum += v - mean;
+                    n += 1.0;
+                }
+            }
+            out.push((SSIM_STRENGTH * sum / n).exp() as f32);
+        }
+    }
+}
+
 fn rd_lambda(dc: i32) -> f32 {
     0.00358 * (dc * dc) as f32
 }

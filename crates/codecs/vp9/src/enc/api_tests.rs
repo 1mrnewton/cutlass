@@ -2432,3 +2432,45 @@ fn screen_content_codes_no_alt_ref() {
     assert_eq!(screen.len(), 30);
     assert_decodes(&screen, (w, h), 30);
 }
+
+#[test]
+fn ssim_tuning_moves_bits_to_flat_blocks() {
+    // Left: a gentle ramp under faint noise; right: heavy noise.
+    let (w, h) = (128u32, 64u32);
+    let picture = || {
+        let mut f = moving(w, h, 0);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let (r, c) = (k as u32 / w, k as u32 % w);
+            let n = (k as u32).wrapping_mul(2_654_435_761) >> 24;
+            *v = if c < 64 {
+                (60 + r + c / 4 + n % 12) as u8
+            } else {
+                (30 + n * 3 / 4) as u8
+            };
+        }
+        f
+    };
+    let err = |tune| {
+        let opts = super::Vp9Options { tune, ..lag0(80) };
+        let p = encode_with(opts, (w, h), 1, |_| picture());
+        let decoded = Decoder::new()
+            .decode(&p[0].data)
+            .expect("decode")
+            .expect("shown");
+        let src = vis(&picture().y);
+        let (mut flat, mut busy) = (0u64, 0u64);
+        for (k, (&a, &b)) in src.iter().zip(&decoded.y).enumerate() {
+            let d = u64::from(a.abs_diff(b)).pow(2);
+            if k as u32 % w < 64 {
+                flat += d
+            } else {
+                busy += d
+            }
+        }
+        (flat, busy)
+    };
+    let (psnr_flat, psnr_busy) = err(super::Tune::Psnr);
+    let (ssim_flat, ssim_busy) = err(super::Tune::Ssim);
+    assert!(ssim_flat < psnr_flat, "{ssim_flat} against {psnr_flat}");
+    assert!(ssim_busy >= psnr_busy, "{ssim_busy} against {psnr_busy}");
+}

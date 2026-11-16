@@ -234,6 +234,9 @@ pub struct Shared<'a, P> {
     pub noise: f32,
     /// See [`super::Stream::static_thresh`].
     pub static_thresh: u32,
+    /// libvpx's `tune=ssim`: each superblock's scale of `rd_lambda` (see
+    /// [`super::ssim_scales`]), in raster order; empty: 1 everywhere.
+    pub ssim: &'a [f32],
     /// Screen content: inter frames below speed 10 try intra blocks at a
     /// smaller error ([`SCREEN_INTRA_ERROR`]; text and windows that appear predict
     /// from nothing before them), and a whole-sample vector that matches
@@ -958,6 +961,8 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     cache: [u8; 1024],
     /// The segment of the block being coded (its quantizer).
     seg: usize,
+    /// The block being coded's scale of `rd_lambda` ([`Shared::ssim`]).
+    lam_mul: f32,
     pred: Vec<P>,
     res: Vec<i32>,
     fcoef: Vec<f32>,
@@ -1080,6 +1085,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             left_nz: [[0; 16]; 3],
             cache: [0; 1024],
             seg: 0,
+            lam_mul: 1.0,
             pred,
             res,
             fcoef,
@@ -1395,7 +1401,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             // prediction's SAD.
             usize::from(self.last_satd.saturating_mul(5) < self.last_sad.saturating_mul(4))
         } else {
-            let lam = f64::from(self.s.rd_lambda) / 256.0;
+            let lam = f64::from(self.s.rd_lambda * self.lam_at(row, col)) / 256.0;
             let n = MI_WH[usize::from(bsize)].0;
             self.trial = true;
             self.save(row, col, (n, n), 1);
@@ -1471,10 +1477,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         if row >= s.mi_rows || col >= s.mi_cols {
             return 0.0;
         }
-        let lam = f64::from(s.rd_lambda) / 256.0;
         let n = 1usize << level;
         let hbs = n / 2;
         let bsize = SQUARE[level];
+        let lam = f64::from(s.rd_lambda * self.lam_at(row, col)) / 256.0;
         let whole = level == 0 || (row + hbs < s.mi_rows && col + hbs < s.mi_cols);
         // Slots: the state before, after the best whole shape so far, and
         // two for the blocks' own trials.
@@ -1672,7 +1678,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     /// before it.
     fn best_block(&mut self, row: usize, col: usize, bsize: u8, slot: usize) -> (f64, Blk) {
         let s = self.s;
-        let lam = f64::from(s.rd_lambda) / 256.0;
+        let lam = f64::from(s.rd_lambda * self.lam_at(row, col)) / 256.0;
         let (bw_mi, bh_mi) = MI_WH[usize::from(bsize)];
         self.save(row, col, (bw_mi, bh_mi), slot);
         let mut cands: Vec<Blk> = Vec::with_capacity(8);
@@ -2021,6 +2027,16 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
 
     /// Whether intra is worth trying in an inter frame: when the best
     /// inter prediction is poor.
+    /// The scale of `rd_lambda` of the block at `(row, col)`
+    /// ([`Shared::ssim`]): its superblock's, 1 without `tune=ssim`.
+    fn lam_at(&self, row: usize, col: usize) -> f32 {
+        let s = self.s;
+        if s.ssim.is_empty() {
+            return 1.0;
+        }
+        s.ssim[(row / 8) * s.mi_cols.div_ceil(8) + col / 8]
+    }
+
     fn intra_worth(&self, base: &Blk, cands: &[Blk]) -> bool {
         if cands.is_empty() {
             return true;
@@ -2855,6 +2871,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let s = self.s;
         let mut b = *b0;
         self.seg = usize::from(b.seg);
+        self.lam_mul = self.lam_at(b.row, b.col);
         let (row, col, bsize) = (b.row, b.col, b.bsize);
         let (bw, bh) = (b.bw, b.bh);
         let inter = b.refs[0] != INTRA_FRAME;
@@ -2917,7 +2934,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let ctx = usize::from(self.above_nb(&b).is_some_and(|n| n.skip))
                     + usize::from(self.left_nb(&b).is_some_and(|n| n.skip));
                 let p = s.fc.skip[ctx];
-                let lam = s.rd_lambda / 256.0;
+                let lam = s.rd_lambda * self.lam_mul / 256.0;
                 let j_skip = dropped + lam * bit_cost(true, p) as f32;
                 let j_coded = coded + lam * bit_cost(false, p) as f32;
                 if j_skip <= j_coded {
@@ -3317,7 +3334,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             // What the dead zone's costs come to for zeros: the error all
             // dropped, and an end of block either way.
             let ss = res_ss as f32;
-            let lam = s.rd_lambda;
+            let lam = s.rd_lambda * self.lam_mul;
             self.rd = TxRd {
                 coded: ss + lam,
                 dropped: ss + lam,
@@ -3438,7 +3455,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let d_all = dc.energy + ac.energy;
         let bits = (dc.bits + ac.bits) as f32;
         let any = dc.nonzero || ac.nonzero;
-        let lam = s.rd_lambda;
+        let lam = s.rd_lambda * self.lam_mul;
         (
             TxRd {
                 coded: (d_coded + lam * (bits + 1.0) * g) / g,
@@ -3523,7 +3540,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         } else {
             CHROMA_RATE_FAST
         };
-        let lam = s.rd_lambda * g / 256.0 * if plane > 0 { chroma } else { 1.0 };
+        let lam = s.rd_lambda * self.lam_mul * g / 256.0 * if plane > 0 { chroma } else { 1.0 };
         let (scan, nb) = scan_pair(tx, kind);
         // Each scan position's place in the transposed block.
         let tpos = crate::dec::parse::scan_pair(tx, kind).2;

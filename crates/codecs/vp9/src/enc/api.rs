@@ -84,6 +84,19 @@ pub enum AqMode {
     Equator360,
 }
 
+/// The measure the encoder's choices aim at (libvpx's `tune`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Tune {
+    /// PSNR: every block's rate against its squared error alike.
+    #[default]
+    Psnr,
+    /// SSIM: each block's rate weighed against its error by its 16×16
+    /// block's variance (libvpx's `set_mb_ssim_rdmult_scaling`): flat
+    /// blocks, where SSIM sees coding errors most, take more bits, busy
+    /// ones fewer.
+    Ssim,
+}
+
 /// What the pictures are (libvpx's `tune-content`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TuneContent {
@@ -225,6 +238,8 @@ pub struct Vp9Options {
     pub aq_mode: AqMode,
     /// What the pictures are (libvpx's `tune-content`).
     pub tune_content: TuneContent,
+    /// The measure the choices aim at (libvpx's `tune`).
+    pub tune: Tune,
 }
 
 /// The lookahead below speed 9 unless set: with it, alt-refs take 10 to
@@ -270,6 +285,7 @@ impl Vp9Options {
             frame_parallel: self.frame_parallel,
             static_thresh: self.static_thresh,
             screen: self.tune_content == TuneContent::Screen,
+            ssim: self.tune == Tune::Ssim,
         }
     }
 
@@ -366,6 +382,7 @@ impl Default for Vp9Options {
             drop_frame_pct: 0,
             aq_mode: AqMode::Off,
             tune_content: TuneContent::Default,
+            tune: Tune::Psnr,
         }
     }
 }

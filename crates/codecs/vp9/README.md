@@ -75,6 +75,11 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   byte those one thread makes. At speed 7 and up the motion search runs
   first over the whole frame, its superblock rows shared evenly among
   the threads, and luma and chroma are filtered on separate threads.
+  From speed 9 each tile column's rows are on one thread (a superblock
+  is too little work for the wavefront), the loop filter follows the
+  tiles row by row on threads of its own, and at speed 9 each tile
+  column's thread makes its own part of the motion search as it goes; on
+  one thread, each row's search comes just before the row.
 - Every chroma format of 8-bit VP9 (`Vp9Options::chroma`: 4:2:0 in
   profile 0, and 4:2:2, 4:4:0 and 4:4:4 in profile 1, FFmpeg's `-pix_fmt
   yuv420p` to `yuv444p`; `CodecParams` with those formats opens them).
@@ -194,7 +199,10 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   (`end-usage=vbr`); `-crf` with `-b:v` is that with a floor on the
   quantizer (`Vp9Options::cq_level`, libvpx's constrained quality), and
   `-crf` with `-b:v 0` a fixed quantizer, where
-  `Vp9Encoder::qindex_of_level` turns libvpx's 0–63 levels into indices.
+  `Vp9Encoder::qindex_of_level` turns libvpx's 0–63 levels into indices
+  (up to speed 8 a fixed quantizer codes golden frames and alt-refs at
+  half the inter step, and filters alt-refs at strength 1 over 5
+  pictures).
   At a variable bitrate in one pass, golden frames, alt-refs and key
   frames take the inter step scaled by their type (as a fixed quantizer
   and two passes do), and the inter step is the one at which the frames
@@ -828,32 +836,110 @@ Against the recipe of Google's VOD guide (`-row-mt 1 -tile-columns 2`,
 −25.3% / −22.5%, in 4.94, 4.70 and 4.51 s against libvpx's 10.22, 11.66
 and 8.48 s.
 
-Realtime (`-deadline realtime -cpu-used 8`) against speeds 9 and 10 (no
-lookahead; the same streams as before the changes below):
+Realtime (`-deadline realtime -cpu-used 8`, `-threads 4` and
+`-threads 1`) against speeds 9 and 10 (no lookahead), BD-rate and time a
+stream (FFmpeg / speed 10 / speed 9, the mean over the four rates of
+medians of five interleaved runs), and the ratios of speed 10's and
+speed 9's times to FFmpeg's:
 
-| Clip | Speed 10 | Speed 9 | Time (FFmpeg / 10 / 9) |
-| --- | ---: | ---: | ---: |
-| three scenes | −6.0% / −4.1% | −15.2% / −13.1% | 0.56 / 0.61 / 0.74 s |
-| still scene, two jumps | −66.7% / −64.8% | −68.8% / −66.9% | 0.51 / 0.61 / 0.67 s |
-| grainy pan | n/a / −74.3% | n/a | 0.45 / 0.42 / 0.46 s |
+| Clip | Speed 10 | Speed 9 | 4 threads | Ratio | 1 thread | Ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| three scenes | −6.0% / −4.1% | −14.3% / −12.2% | 0.58 / 0.54 / 0.63 s | 0.92 / 1.09 | 1.01 / 0.87 / 1.05 s | 0.86 / 1.04 |
+| still scene, two jumps | −66.7% / −64.8% | −69.0% / −67.1% | 0.55 / 0.52 / 0.55 s | 0.94 / 0.99 | 1.02 / 0.92 / 1.01 s | 0.90 / 0.99 |
+| grainy pan | n/a / −74.3% | n/a | 0.46 / 0.37 / 0.39 s | 0.81 / 0.86 | 0.85 / 0.73 / 0.77 s | 0.85 / 0.90 |
 
-(The round before measured 0.65 / 0.72 / 0.88, 0.57 / 0.69 / 0.74 and
-0.50 / 0.50 / 0.49 s in its runs.)
-
-On the pan the curves do not meet: speed 9 at 1.1 Mb/s (41.6 dB PSNR-Y)
-is past libvpx's realtime 8 at 4.3 Mb/s (40.6 dB).
+On 16 November 2026, at commit `84916b5c`; the BD-rates are on four
+threads (on one: −6.1% / −4.1% and −15.1% / −13.0% on the three scenes,
+−67.2% / −65.4% and −69.0% / −67.2% on the still scene). Before it
+(the same BD-rates, but speed 9's −15.2% / −13.1% on the three scenes),
+speed 10 took 1.10, 1.13 and 0.91 of FFmpeg's time on four threads and
+1.09, 1.09 and 0.99 on one; speed 9 1.31, 1.21 and 0.98, and 1.33, 1.25
+and 1.18. On the pan the curves do not meet: speed 9 at 1.1 Mb/s (41.6
+dB PSNR-Y) is past libvpx's realtime 8 at 4.3 Mb/s (40.6 dB). At 3 and 4
+Mb/s on the three scenes FFmpeg comes in under the rate (2.96 and 3.72
+Mb/s) and this encoder over it (3.24 and 4.27 Mb/s), and those rates are
+where speed 9 is furthest behind on time (1.13 and 1.22 on one thread).
 
 Constant quality (`-crf 24, 32, 40, 48 -b:v 0`) against a fixed
 quantizer (`q=60` to `210` in steps of 30, speed 5; times are the mean
-over each curve's points), and as measured two rounds before:
+over each curve's points, medians of three runs), at commit `ca9c61bf`,
+and as measured before it and three rounds before:
 
-| Clip | BD-rate | Time (FFmpeg / Cutlass) | Two rounds before |
-| --- | ---: | ---: | ---: |
-| three scenes | −4.5% / −0.3% | 6.57 / 2.69 s | −7.3% / −2.9%, 6.73 / 6.11 s |
-| still scene, two jumps | +1.3% / +1.3% | 3.59 / 1.81 s | +10.0% / +4.9%, 3.93 / 4.76 s |
-| grainy pan | −8.4% / −4.9% | 2.51 / 1.32 s | −1.3% / −0.3%, 2.64 / 3.09 s |
+| Clip | BD-rate | Time (FFmpeg / Cutlass) | Before | Three rounds before |
+| --- | ---: | ---: | ---: | ---: |
+| three scenes | −5.3% / −1.4% | 6.45 / 2.53 s | −4.5% / −0.3% | −7.3% / −2.9%, 6.73 / 6.11 s |
+| still scene, two jumps | −4.4% / −4.1% | 3.57 / 1.75 s | +1.3% / +1.3% | +10.0% / +4.9%, 3.93 / 4.76 s |
+| grainy pan | −13.9% / −10.8% | 2.44 / 1.22 s | −8.4% / −4.9% | −1.3% / −0.3%, 2.64 / 3.09 s |
 
-What moved most recently: speed 5 in 0.67 to 0.74 of its time on four
+Sampled at `q=50` to `225` instead (seven points), the still scene is at
+0.0% / −0.1% (+3.8% / +4.1% before). There the gap was at the low rates
+(0.3 to 0.6 Mb/s), and is still (see "What is left").
+
+What moved in this round (16 November 2026, commits `84916b5c` and
+`ca9c61bf`): the realtime speeds under FFmpeg's realtime 8 time, and
+constant quality ahead on every clip. Speed 10 is bit for bit the same
+streams, and so are speeds 0 to 8 at a bitrate, at a constant bitrate
+and in two passes; speed 9 and the fixed quantizer at speeds 0 to 8
+change.
+
+- A DCT block whose residual bounds every coefficient inside the dead
+  zone is not transformed (speeds 9 and 10, where every block is
+  quantized by the dead zone): the DC by the residual's sum through the
+  DC's gain, any AC coefficient by the residual's variance through the
+  transform's gain, with margins for the transform's roundings
+  (`dz_bounded`, tested against the transform and the dead zone over the
+  quantizer's range). On the grainy pan at 2 Mb/s that is two thirds of
+  the tx blocks. A tx block's residual, its squares and its sum are one
+  AVX2 pass.
+- From speed 9 a tile column's rows are coded on one thread: a
+  superblock is too little work for the wavefront's waits (on four
+  threads at speed 10 the tiles took 0.7 of the time against two lanes).
+  With one lane a tile column, the loop filter follows the tiles row by
+  row on threads of its own (`lf_rows`), each superblock row as soon as
+  every tile column has sent it, instead of after the frame: on four
+  threads it was a tenth of speed 10's time.
+- On one thread, each superblock row's fast search is made just before
+  the row is coded (the same search, in the same order, its samples
+  still in the cache), and the searches' buffers are kept from frame to
+  frame (allocated every frame, their page faults were a sixth of speed
+  9's tiles on four threads). Its candidates take each vector's SAD once,
+  and a candidate at whole samples a plain SAD.
+- The tiles' symbols are written with the coder's state in registers and
+  their probabilities looked up by id from one table (still a twelfth of
+  speed 9's time at 4 Mb/s: one coder's symbols go one after another).
+- The jump search (`arf::jump`) measures a row of vectors at once, sum
+  by sum across the row's offsets in vector lanes, and its blocks on the
+  encoder's threads: 50 to 17 ms on the still scene on one thread.
+- Speed 9's 8×8 blocks check only their candidate vectors, as speed 10's
+  smaller blocks do (their diamonds were a tenth of its time, for 0.6
+  points at the same PSNR), and on threads each tile column's thread
+  makes its own columns' part of the fast search as it codes them, with
+  its own copy of the seeds (those across its left edge are the last
+  frame's). Speed 10 keeps the frame's search on threads of its own: it
+  is also the first pass of two passes and the probe of one, whose bits
+  the other speeds' rate control reads.
+- A fixed quantizer up to speed 8 codes its golden frames and alt-refs
+  at half the inter step (0.55 before), and filters its alt-refs at
+  strength 1 over 5 pictures (5, 4 or 3 by the quantizer, over 7): the
+  golden step alone took the still scene to +0.1% / −0.3%, the weaker
+  filter alone to −0.2% / +0.4%. Speeds 6 and 8 at a fixed quantizer take
+  fewer bits on all three clips too (speed 6 on the still scene from
+  +10.6% / +7.8% to +1.9% / +0.2% against FFmpeg's cpu-used 1).
+- Tried and left out. Realtime: intra without its trial at speed 9 when
+  its SATD is a tenth of the inter SAD (it won 89% of those trials; 1.7
+  points on the three scenes, no faster in its runs), no diamond at speed
+  9's 16×16 blocks either (2.4 points, no faster in its runs), the
+  scene-cut test on threads (slower: it is a fifth of a millisecond a
+  frame), a branchless bool coder (as fast: the coder's chain of range,
+  split and shift is the time). Constant
+  quality: a finer key frame (a quarter or a fifth of the inter step: 3
+  to 20 points worse on the still scene), coarser alt-refs (worse on all
+  three), the loop filter weaker on inter frames (better on the pan,
+  worse on the still scene), no alt-refs (the still scene at −2.6% /
+  −0.4%, but the three scenes +4.5% averaged), and libvpx's quantizers
+  by position (192, 184, 173, 154 at `-crf 48`: 10 points worse).
+
+The round before that: speed 5 in 0.67 to 0.74 of its time on four
 threads (3.13, 2.45 and 1.93 s a stream, from 4.24, 3.32 and 2.89 s) and
 0.58 to 0.74 on one (6.87, 6.43 and 5.15 s, from 9.24, 9.26 and 8.85 s),
 with as many bits at the same PSNR or fewer:
@@ -900,7 +986,7 @@ with as many bits at the same PSNR or fewer:
   stops by rate alone (they also caught blocks that skip, whose splits
   win by 20% and more).
 
-The round before, speed 5 in 0.53 to 0.63 of its time on four threads
+Two rounds before, speed 5 in 0.53 to 0.63 of its time on four threads
 (4.24, 3.32 and 2.89 s a stream, from 6.76, 6.27 and 5.02 s), each step
 measured on the three clips at speed 5:
 
@@ -985,16 +1071,28 @@ What is left:
   luma's, from 1/0.7) gains 6–17% at the same PSNR-Y and 1–7% at the
   6:1:1 average but loses 2–5% at FFmpeg's 4:1:1 average and 9–18% at
   PSNR-U, so it is left as it was.
-- Constant quality on the still scene: +1.3% / +1.3% (+10% / +4.9%
-  two rounds before). libvpx's one pass
-  at a fixed level modulates its quantizer by position (finer every
-  second, fourth and eighth frame: 192, 184, 173, 154 at `-crf 48`) and
-  spends most where little moves; a fixed quantizer with that pattern
-  was 3% worse here, and the scene's low rates (0.3–0.6 Mb/s) are where
-  the gap is.
-- Realtime time: speeds 9 and 10 take 0.9 to 1.35 times libvpx's
-  realtime 8 at the same bitrate (with 4 to 75% fewer bits at the same
-  PSNR).
+- Constant quality on the still scene: −4.4% / −4.1% at `q=60` to
+  `210`, but 0.0% / −0.1% sampled at `q=50` to `225`: at `-crf 48` (0.3
+  Mb/s) libvpx codes the pan after the still picture (frames 31 to 90) in
+  43 kB at 41.7 dB PSNR-Y, where `q=165` takes 103 kB for 41.4 dB, and
+  that end of the curve decides the margin. libvpx's one pass at a fixed
+  level modulates its quantizer by position (finer every second, fourth
+  and eighth frame: 192, 184, 173, 154 at `-crf 48`); that pattern on a
+  fixed quantizer was 10 points worse here.
+- Realtime: speed 9 takes 1.04 to 1.09 of libvpx's realtime 8 time on
+  the three scenes (one thread and four; 0.86 to 0.99 on the other
+  clips), most at 3 and 4 Mb/s, where this encoder comes in over the
+  rate and libvpx under it. What is left of its time over speed 10's is
+  its trials of intra against inter (about 7% of its time, for 7 points
+  at the same PSNR) and its diamonds at 16×16 and 32×32. At four threads
+  the four tile columns carry uneven work (a tile column's thread is
+  busy about two thirds of the frame's tile time on the three scenes),
+  and the tiles'
+  symbols are written after the frame's coding, one coder at a time
+  (about 6 ns a symbol). The constant bitrate path is within 2% of the
+  rate at 1 to 4 Mb/s at both speeds, but at 500 kb/s on the still
+  scene speed 10 takes 655 kb/s at the coarsest quantizer (speed 9 is
+  on the rate there).
 
 Matching libvpx's speeds by these runs and the ones above: good
 cpu-used 0 → speed 4; cpu-used 1 (FFmpeg's default) → 5; cpu-used
@@ -1041,7 +1139,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-lossless 1` | `lossless` | `qindex` 0 (`lossless=1`) |
 | `-tile-columns` | `tile-columns` | `tile_columns` (`tile_columns=`, added; by default one per thread) |
 | `-tile-rows` | `tile-rows` | `tile_rows` (`tile_rows=`) |
-| `-row-mt 1` | `row-mt` | always: rows on threads (`enc::tile::Lanes`, added) |
+| `-row-mt 1` | `row-mt` | always below speed 9: rows on threads (`enc::tile::Lanes`, added); from speed 9 one thread a tile column, as many as the threads allow beyond one |
 | `-threads` | `g_threads` | `threads` (`threads=`) |
 | `-level` | `target-level` | `level`: named in `vpcC` (added), not enforced |
 | `-ts-parameters` | temporal layers | missing (no SVC / temporal layers) |
@@ -1104,10 +1202,12 @@ carries the colour space, range and render size.
 - Against FFmpeg's `libvpx-vp9` as FFmpeg runs it ("Against FFmpeg's
   libvpx-vp9" above), the default speed takes fewer bits at the same
   PSNR on every clip, in 0.51 to 0.74 of libvpx's time on one thread and
-  on four; two passes in about a third of its time. Constant quality is
-  1.3% behind on the still scene, and the realtime speeds take 0.93 to
-  1.33 of libvpx realtime's time, with 4% to 74% fewer bits at the same
-  PSNR.
+  on four; two passes in about a third of its time; constant quality
+  with 1.4% to 10.8% fewer bits at the same averaged PSNR. Speed 10 takes
+  0.81 to 0.94 of libvpx realtime 8's time on four threads and 0.85 to
+  0.90 on one, with 4% to 74% fewer bits at the same PSNR; speed 9 takes
+  0.86 to 1.09 of it, with 12% to 67% fewer (it is over libvpx's time on
+  the three scenes only).
 - At equal time the encoder is within about 8% of libvpx's good presets
   on moving content (ahead with more time, and far ahead on still content
   and against the realtime presets), and its fastest speed takes libvpx

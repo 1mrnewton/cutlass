@@ -2287,6 +2287,11 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 
 /**
  * One open project.
+ *
+ * Its host lives on a thread of its own. Dropping the editor ends that
+ * thread and waits for it, so the host, its GPU device and its sound are
+ * gone when the drop returns: a process that exits just after cannot tear
+ * down the GPU driver while the host is still closing its device on it.
  */
 public interface EditorInterface {
     
@@ -2822,6 +2827,11 @@ public interface EditorInterface {
 
 /**
  * One open project.
+ *
+ * Its host lives on a thread of its own. Dropping the editor ends that
+ * thread and waits for it, so the host, its GPU device and its sound are
+ * gone when the drop returns: a process that exits just after cannot tear
+ * down the GPU driver while the host is still closing its device on it.
  */
 open class Editor: Disposable, AutoCloseable, EditorInterface
 {

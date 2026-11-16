@@ -3,6 +3,20 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// The app carries the workspace version, so the APK of a release says the
+// same as its tag, a pre-release such as 0.8.0-rc.1 included. The version
+// code grows with major.minor.patch: 0.8.0 is 8000, 1.2.3 is 1002003, so
+// each release is above the last in the store's order. A pre-release has
+// its release's code; it is a trial of the pipeline and never goes to Play.
+val workspaceVersionParts: MatchResult = run {
+    val cargo = rootProject.file("../../Cargo.toml").readText()
+    Regex("""(?m)^version = "([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?"""").find(cargo)
+        ?: error("the workspace Cargo.toml names no version")
+}
+val workspaceVersion: String = workspaceVersionParts.value.substringAfter('"').removeSuffix("\"")
+val workspaceVersionCode: Int = workspaceVersionParts.groupValues.subList(1, 4).map(String::toInt)
+    .let { (major, minor, patch) -> major * 1_000_000 + minor * 1_000 + patch }
+
 android {
     namespace = "com.scytheralpha.cutlass_android"
     compileSdk {
@@ -10,17 +24,33 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.scytheralpha.cutlass_android"
+        applicationId = "com.scytheralpha.cutlass"
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = workspaceVersionCode
+        versionName = workspaceVersion
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // The upload key, from the variables the release workflow sets from the
+    // repository's secrets. Without them the release build is unsigned and
+    // cannot be installed; the debug build keeps its own key either way.
+    signingConfigs {
+        val keystore = System.getenv("CUTLASS_ANDROID_KEYSTORE")
+        if (!keystore.isNullOrEmpty()) {
+            create("release") {
+                storeFile = file(keystore)
+                storePassword = System.getenv("CUTLASS_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("CUTLASS_ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("CUTLASS_ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

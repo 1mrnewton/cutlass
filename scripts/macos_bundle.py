@@ -12,8 +12,10 @@ documents" event, which the app handles (`listen_for_opened_files`).
 Signing is ad hoc (`codesign -s -`) unless `CODESIGN_IDENTITY` names a
 Developer ID Application certificate in the keychain; then it signs with
 the hardened runtime and a timestamp. With `NOTARY_PROFILE` also set (a
-`xcrun notarytool store-credentials` profile), the DMG is notarized and
-stapled. `BUNDLE_ID` sets the bundle identifier, and `BUNDLE_VERSION` the
+`xcrun notarytool store-credentials` profile), or `NOTARY_KEY` (the path of
+an App Store Connect API key, `.p8`) with `NOTARY_KEY_ID` and
+`NOTARY_ISSUER`, as CI passes them, the DMG is notarized and stapled, and
+Gatekeeper must then accept it. `BUNDLE_ID` sets the bundle identifier, and `BUNDLE_VERSION` the
 version in Info.plist (default: the workspace version).
 """
 
@@ -141,10 +143,28 @@ def dmg(app: Path, out: Path) -> None:
             "-fs", "HFS+", "-format", "UDZO", "-ov", str(out))
     if os.environ.get("CODESIGN_IDENTITY"):
         run("codesign", "--force", "--timestamp", "--sign", os.environ["CODESIGN_IDENTITY"], str(out))
+    credentials = notary_credentials()
+    if credentials:
+        run("xcrun", "notarytool", "submit", str(out), *credentials, "--wait")
+        run("xcrun", "stapler", "staple", str(out))
+        run("xcrun", "stapler", "validate", str(out))
+        run("spctl", "--assess", "--type", "open", "--context", "context:primary-signature",
+            "--verbose=2", str(out))
+
+
+def notary_credentials() -> list[str]:
+    """The `notarytool` arguments that name who notarizes, or none."""
     profile = os.environ.get("NOTARY_PROFILE")
     if profile:
-        run("xcrun", "notarytool", "submit", str(out), "--keychain-profile", profile, "--wait")
-        run("xcrun", "stapler", "staple", str(out))
+        return ["--keychain-profile", profile]
+    key = os.environ.get("NOTARY_KEY")
+    if not key:
+        return []
+    key_id = os.environ.get("NOTARY_KEY_ID")
+    issuer = os.environ.get("NOTARY_ISSUER")
+    if not key_id or not issuer:
+        raise SystemExit("NOTARY_KEY needs NOTARY_KEY_ID and NOTARY_ISSUER as well")
+    return ["--key", key, "--key-id", key_id, "--issuer", issuer]
 
 
 def main() -> None:
@@ -154,7 +174,7 @@ def main() -> None:
     out = Path(sys.argv[2]).resolve()
     if not binary.is_file():
         raise SystemExit(f"{binary} is not a file; build it first")
-    bundle_id = os.environ.get("BUNDLE_ID", "app.cutlass.desktop")
+    bundle_id = os.environ.get("BUNDLE_ID", "com.scytheralpha.cutlass")
     out.mkdir(parents=True, exist_ok=True)
     app = out / "Cutlass.app"
     if app.exists():

@@ -20,6 +20,18 @@ pub struct Plan {
     pub map: Vec<u8>,
     pub deltas: [i16; 8],
     pub tree_probs: [u8; 7],
+    /// Each segment's loop filter level delta, reference (0 intra, 1
+    /// LAST, 2 GOLDEN, 3 ALTREF) and skip (no residual, and in an inter
+    /// frame the zero vector), when it has them (a region of interest
+    /// map's).
+    pub lf: [i8; 8],
+    pub refs: [Option<u8>; 8],
+    pub skip: [bool; 8],
+    /// Every block keeps to one segment (see `tile::Shared::seg_exact`).
+    pub exact: bool,
+    /// Each segment's blocks weigh rate against error at their own
+    /// quantizer (see `tile::Shared::seg_lam`).
+    pub seg_lambda: bool,
 }
 
 /// The plan for luma `y` (rows `stride` apart, `w`×`h` visible) at
@@ -75,6 +87,11 @@ pub fn plan<P: Pixel>(
         map,
         deltas,
         tree_probs: tree_probs(&used),
+        lf: [0; 8],
+        refs: [None; 8],
+        skip: [false; 8],
+        exact: false,
+        seg_lambda: false,
     }
 }
 
@@ -90,6 +107,11 @@ impl Plan {
             map,
             deltas,
             tree_probs: tree_probs(&used),
+            lf: [0; 8],
+            refs: [None; 8],
+            skip: [false; 8],
+            exact: false,
+            seg_lambda: false,
         }
     }
 }

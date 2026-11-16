@@ -1603,7 +1603,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-pix_fmt yuva420p` | alpha as a second stream in WebM `BlockAdditional` | missing: a container feature |
 | `-colorspace`, `-color_range` | `color-space`, `color-range` | `color_space`, `full_range` (`colorspace=`, `range=`), and from `CodecParams` (added) |
 | `-aspect` / sample aspect ratio | `VP9E_SET_RENDER_SIZE` | `render_size` (`render=WxH`, added) |
-| regions of interest (side data) | ROI map | missing |
+| regions of interest (side data) | ROI map | `Vp9Encoder::set_roi_map` with a `RoiMap` (`roi_q=`, `roi_ref=`, `roi_skip=` in `vp9enc`, added): a segment a block, each with a quantizer and loop filter delta, a reference and skip |
 
 ### Options measured
 
@@ -1784,6 +1784,35 @@ its reference pool, golden frames and cuts, which layers give up, and by
 the probabilities it carries from frame to frame; the base layer, whose
 pictures are four apart, is where libvpx stays ahead on two clips.
 
+**Region of interest map** (`Vp9Encoder::set_roi_map`, libvpx's
+`VP9E_SET_ROI_MAP`, FFmpeg's regions of interest). The caller's segment
+for every 8×8 block, and for each of the eight segments a quantizer
+delta, a loop filter level delta, one reference (inter frames) and skip
+(inter frames: no residual and the zero vector, as the bitstream implies
+them; not with the intra reference). The encoder keeps every block to one
+segment (a square that spans two is split), weighs each segment's rate
+against its error at the segment's own quantizer (with the frame's
+lambda a finer segment took the bits of its quantizer and came back no
+nearer), keeps each block of a reference segment to its reference, and
+codes a skip segment's blocks as the zero vector with no residual, never
+under 8×8; a map's lossless frames and hidden alt-refs are coded without
+it. Every feature decodes alike in FFmpeg's `vp9`, libvpx and ours
+(speeds 2, 6, 9 and 10, with and without alt-refs). The middle half of the
+three scenes (640×360 of 1280×720) 40 indices finer, 60 frames, PSNR-Y of
+the middle and of the whole picture:
+
+| | Rate | Middle | Whole |
+| --- | --- | --- | --- |
+| Speed 6, `q=120` | 2232 → 3212 kb/s | 40.35 → 43.30 dB | 43.06 → 44.19 |
+| Speed 9, 2 Mb/s constant bitrate | 1989 → 1975 kb/s | 34.87 → 36.03 | 38.32 → 37.41 |
+| libvpx realtime 8, 2 Mb/s CBR, `addroi=…:qoffset=-0.3` | 1959 → 2018 kb/s | 34.21 → 35.12 | 37.16 → 33.58 |
+
+At a bitrate the region's gain is paid for by the rest of the picture;
+here at a quarter of libvpx's cost to the whole picture for 1.3 times
+its gain in the region. libvpx (1.14 here) applies the map only at the
+realtime deadline: at the good deadline FFmpeg's `addroi` changes no
+byte.
+
 Decoders: FFmpeg's `vp9` and `libvpx-vp9` decoders have no options of
 their own; of the generic ones, frame threads and slice (tile) threads
 are `Vp9Decoder`'s frame threads and tile-column parse threads, and
@@ -1805,7 +1834,8 @@ carries the colour space, range and render size.
 | Lossless (WHT) | yes | yes |
 | Tile columns and rows | yes | yes |
 | Segmentation: quantizer | yes | yes (AQ, cyclic refresh, 360°) |
-| Segmentation: loop filter, reference, skip; temporal map | yes | no |
+| Segmentation: loop filter, reference, skip | yes | yes (ROI map, added) |
+| Segmentation: temporal map | yes | no |
 | Loop filter sharpness | yes | yes (added) |
 | Loop filter deltas (mode, reference) | yes | defaults only |
 | Compound prediction, switchable filters, 8 slots | yes | yes |
@@ -1826,7 +1856,8 @@ carries the colour space, range and render size.
   coefficients and of every other updatable probability (modes, filter,
   references, partition, tx size, skip, vectors) at all speeds;
   segmentation with adaptive quantization (`aq`, `aq_mode`, off by
-  default). Segment features other than the quantizer, temporal segment maps,
+  default), and a region of interest map's quantizer, loop filter,
+  reference and skip by segment (`set_roi_map`). Temporal segment maps,
   intra-only frames, scaled references (a size change within the
   stream) and `show_existing_frame` are not written. Error resilient frames take no
   compound prediction (with it their compressed headers did not parse

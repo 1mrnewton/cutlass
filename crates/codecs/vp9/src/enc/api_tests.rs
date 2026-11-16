@@ -2587,3 +2587,150 @@ fn each_temporal_layer_decodes_without_those_above() {
     };
     assert!(Vp9Encoder::with_options(w, h, past).is_err());
 }
+
+#[test]
+fn a_region_of_interest_map_codes_its_segments_features() {
+    // 128×64: 16×8 blocks. The top two rows of blocks skip, the left half
+    // of the rest is finer, filtered less and predicts from LAST only.
+    let (w, h) = (128u32, 64u32);
+    let mut roi = super::RoiMap {
+        map: vec![0; 16 * 8],
+        ..super::RoiMap::default()
+    };
+    for (k, s) in roi.map.iter_mut().enumerate() {
+        *s = if k < 32 {
+            2
+        } else if k % 16 < 8 {
+            1
+        } else {
+            0
+        };
+    }
+    roi.delta_q[1] = -30;
+    roi.delta_lf[1] = -10;
+    roi.ref_frame[1] = Some(1);
+    roi.skip[2] = true;
+    // (Unfiltered, so that the skipped rows away from the segments below
+    // are the picture before's.)
+    roi.delta_lf[2] = -63;
+    for speed in [2u8, 6, 9, 10] {
+        let opts = super::Vp9Options {
+            speed,
+            lag: Some(16),
+            ..lag0(120)
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        encoder.set_roi_map(Some(roi.clone())).expect("roi");
+        let mut packets = Vec::new();
+        for i in 0..20u32 {
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: noisy(w, h, i, i),
+                        pts: i64::from(i),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        assert_decodes(&packets, (w, h), 20);
+        // Each shown picture: its header's features, and the first eight
+        // skipped rows the picture before's samples (zero vector, no
+        // residual, no loop filter).
+        let mut dec = Decoder::new();
+        let mut before: Option<Vec<u8>> = None;
+        for p in &packets {
+            for f in crate::decode::split_superframe(&p.data).expect("superframe") {
+                let hd = header::parse(dec.persist(), f).expect("header").header;
+                let shown = dec.decode(f).expect("decode");
+                if !hd.show_frame {
+                    continue;
+                }
+                let s = &hd.seg;
+                assert!(s.enabled, "speed {speed}");
+                assert_eq!(s.feature_data[1][0], -30);
+                assert_eq!(s.feature_data[1][1], -10);
+                let inter = !hd.key_frame;
+                assert_eq!(s.feature_on[1][2], inter);
+                assert_eq!(s.feature_on[2][3], inter);
+                assert_eq!(dec.last_segmap(), &roi.map[..]);
+                let y = shown.expect("shown").y;
+                if let (true, Some(b)) = (inter, &before) {
+                    assert_eq!(&y[..8 * 128], &b[..8 * 128], "speed {speed}");
+                }
+                before = Some(y);
+            }
+        }
+    }
+    let mut encoder = Vp9Encoder::with_options(w, h, lag0(120)).expect("encoder");
+    let wrong = |f: &dyn Fn(&mut super::RoiMap)| {
+        let mut r = roi.clone();
+        f(&mut r);
+        r
+    };
+    for bad in [
+        wrong(&|r| r.map.pop().map_or((), |_| ())),
+        wrong(&|r| r.map[0] = 8),
+        wrong(&|r| r.delta_lf[0] = 64),
+        wrong(&|r| r.ref_frame[0] = Some(4)),
+        wrong(&|r| r.ref_frame[2] = Some(0)),
+    ] {
+        assert!(encoder.set_roi_map(Some(bad)).is_err());
+    }
+    let mut aq = Vp9Encoder::with_options(
+        w,
+        h,
+        super::Vp9Options {
+            aq: true,
+            ..lag0(120)
+        },
+    )
+    .expect("encoder");
+    assert!(aq.set_roi_map(Some(roi)).is_err());
+}
+
+#[test]
+fn a_finer_region_of_interest_comes_back_nearer_the_source() {
+    // The left half of the picture 40 indices finer: it comes back nearer
+    // the source than without the map (its blocks weigh rate against
+    // error at their own quantizer), the right half no nearer.
+    let (w, h) = (128u32, 64u32);
+    let mut roi = super::RoiMap {
+        map: (0..16 * 8).map(|k| u8::from(k % 16 < 8)).collect(),
+        ..super::RoiMap::default()
+    };
+    roi.delta_q[1] = -40;
+    for speed in [6u8, 9] {
+        let err = |map: Option<super::RoiMap>| {
+            let opts = super::Vp9Options { speed, ..lag0(120) };
+            let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+            encoder.set_roi_map(map).expect("roi");
+            let mut dec = Decoder::new();
+            let (mut left, mut right) = (0u64, 0u64);
+            for i in 0..4 {
+                let p = encoder.push(&input(noisy(w, h, i, i))).expect("push");
+                let y = dec.decode(&p[0].data).expect("decode").expect("shown").y;
+                for (k, (&a, &b)) in vis(&noisy(w, h, i, i).y).iter().zip(&y).enumerate() {
+                    let d = u64::from(a.abs_diff(b)).pow(2);
+                    if k as u32 % w < 64 {
+                        left += d
+                    } else {
+                        right += d
+                    }
+                }
+            }
+            (left, right)
+        };
+        let (plain, with) = (err(None), err(Some(roi.clone())));
+        assert!(
+            with.0 * 3 < plain.0 * 2,
+            "speed {speed}: {with:?} against {plain:?}"
+        );
+        assert!(
+            with.1 * 10 >= plain.1 * 9,
+            "speed {speed}: {with:?} against {plain:?}"
+        );
+    }
+}

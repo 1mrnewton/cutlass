@@ -29,7 +29,7 @@ mod prove;
 
 pub use decode::{Decoder, Vp9Decoder};
 pub use enc::api::{
-    AqMode, Chroma, ColorSpace, EngineEncoder, Tune, TuneContent, Vp9Encoder, Vp9Options,
+    AqMode, Chroma, ColorSpace, EngineEncoder, RoiMap, Tune, TuneContent, Vp9Encoder, Vp9Options,
     register_engine_encoders,
 };
 

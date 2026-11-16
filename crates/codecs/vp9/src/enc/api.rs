@@ -63,6 +63,27 @@ impl ColorSpace {
     }
 }
 
+/// A region of interest map (libvpx's `VP9E_SET_ROI_MAP`, FFmpeg's
+/// regions of interest): a segment for every 8×8 block and what each
+/// segment codes differently. [`Vp9Encoder::set_roi_map`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoiMap {
+    /// The segment, 0 to 7, of every 8×8 block, row by row:
+    /// `(width + 7) / 8` blocks a row, `(height + 7) / 8` rows.
+    pub map: Vec<u8>,
+    /// Each segment's quantizer index delta, −255 to 255.
+    pub delta_q: [i16; 8],
+    /// Each segment's loop filter level delta, −63 to 63.
+    pub delta_lf: [i8; 8],
+    /// The one reference each segment's blocks use (0 intra, 1 LAST, 2
+    /// GOLDEN, 3 ALTREF), in inter frames; `None`: any.
+    pub ref_frame: [Option<u8>; 8],
+    /// Each segment's blocks code no residual (and, in inter frames, the
+    /// zero vector), in inter frames: still regions at no cost. Not with
+    /// the intra reference.
+    pub skip: [bool; 8],
+}
+
 /// Adaptive quantization by segment (libvpx's `aq-mode`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum AqMode {
@@ -472,6 +493,8 @@ struct Core<P: EncPixel> {
     denoiser: Option<super::denoise::Denoiser<P>>,
     /// The temporal layer of the picture coded last.
     layer: u8,
+    /// [`Vp9Encoder::set_roi_map`]'s map.
+    roi: Option<RoiMap>,
 }
 
 /// A picture a reference slot holds, as its source.
@@ -636,6 +659,41 @@ impl Vp9Encoder {
             Lane::Eight(c) => c.layer,
             Lane::Deep(c) => c.layer,
         }
+    }
+
+    /// Codes the pictures from the next one with a region of interest map
+    /// (libvpx's `VP9E_SET_ROI_MAP`), in place of adaptive quantization;
+    /// `None` codes them without. Refused with an adaptive quantization
+    /// mode on, a map of the wrong size or a segment past 7, deltas out
+    /// of range, a reference past 3, or skip with the intra reference. A
+    /// reference or skip feature in temporal layers is the caller's to
+    /// keep within what each layer may read.
+    pub fn set_roi_map(&mut self, roi: Option<RoiMap>) -> Result<(), CodecError> {
+        let o = self.opts();
+        let bad = |what| Err(CodecError::InvalidApi { what });
+        if let Some(r) = &roi {
+            if o.variance_aq() || o.aq_mode != AqMode::Off {
+                return bad("vp9 region of interest map with adaptive quantization");
+            }
+            let (w, h) = match &self.lane {
+                Lane::Eight(c) => (c.width, c.height),
+                Lane::Deep(c) => (c.width, c.height),
+            };
+            let blocks = (w as usize).div_ceil(8) * (h as usize).div_ceil(8);
+            if r.map.len() != blocks || r.map.iter().any(|&s| s > 7) {
+                return bad("vp9 region of interest map size or segment");
+            }
+            if r.delta_q.iter().any(|d| d.abs() > 255) || r.delta_lf.iter().any(|d| d.abs() > 63) {
+                return bad("vp9 region of interest delta");
+            }
+            for (f, &skip) in r.ref_frame.iter().zip(&r.skip) {
+                if f.is_some_and(|f| f > 3) || (skip && *f == Some(0)) {
+                    return bad("vp9 region of interest reference");
+                }
+            }
+        }
+        on_lane!(self, c => c.roi = roi);
+        Ok(())
     }
 
     /// Makes the next frame a key frame.
@@ -822,6 +880,7 @@ impl<P: EncPixel> Core<P> {
             denoiser: (opts.noise_sensitivity > 0)
                 .then(|| super::denoise::Denoiser::new(opts.noise_sensitivity)),
             layer: 0,
+            roi: None,
         }
     }
 
@@ -1278,6 +1337,16 @@ impl<P: EncPixel> Core<P> {
         let (w, h) = (self.width as usize, self.height as usize);
         let mi = (w.div_ceil(8), h.div_ceil(8));
         let bd = self.opts.bit_depth;
+        if let Some(r) = &self.roi {
+            let mut plan = super::aq::Plan::of_map(r.map.clone(), r.delta_q);
+            plan.lf = r.delta_lf;
+            plan.refs = r.ref_frame;
+            plan.skip = r.skip;
+            plan.exact = true;
+            plan.seg_lambda = true;
+            self.enc.set_segmentation(plan);
+            return;
+        }
         match self.opts.aq_mode {
             AqMode::CyclicRefresh if !key => {
                 let delta = delta_of_ratio(qindex, CR_RATE_RATIO, bd)

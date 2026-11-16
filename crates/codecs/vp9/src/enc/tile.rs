@@ -208,6 +208,15 @@ pub struct Shared<'a, P> {
     pub src: Source<'a, P>,
     /// The quantizer steps of luma and chroma, DC and AC, by segment.
     pub dq: [[[i32; 2]; 2]; 8],
+    /// Whether every block keeps to one segment of [`Shared::seg_map`] (a
+    /// region of interest map's, whose segments may skip or keep to one
+    /// reference): a square spanning two is split.
+    pub seg_exact: bool,
+    /// Each segment's scale of `rd_lambda`, its DC step's over segment
+    /// 0's squared, when the plan's segments are their own quantizers
+    /// (whole superblocks, or [`Shared::seg_exact`]); `None` for variance
+    /// AQ, whose deltas are small and whose blocks span segments.
+    pub seg_lam: Option<[f32; 8]>,
     /// The segment of every 8×8 block of the frame (empty: segmentation
     /// off).
     pub seg_map: &'a [u8],
@@ -1321,7 +1330,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         }
         let n = 1usize << level;
         let hbs = n / 2;
-        let whole = row + n <= s.mi_rows && col + n <= s.mi_cols;
+        let whole = row + n <= s.mi_rows && col + n <= s.mi_cols && seg_uniform(s, row, col, n);
         let own = if whole {
             self.estimate(row, col, SQUARE[level])
         } else {
@@ -1382,6 +1391,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         if self.intra_worth(&base, &cands) {
             self.intra_cands(&base, &mut cands);
         }
+        self.seg_restrict(&base, &mut cands);
         // Up to FAST_TX_SPEED, the best inter candidate also with the next
         // smaller transform.
         if self.s.speed <= FAST_TX_SPEED
@@ -1481,7 +1491,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let hbs = n / 2;
         let bsize = SQUARE[level];
         let lam = f64::from(s.rd_lambda * self.lam_at(row, col)) / 256.0;
-        let whole = level == 0 || (row + hbs < s.mi_rows && col + hbs < s.mi_cols);
+        let whole = level == 0
+            || (row + hbs < s.mi_rows && col + hbs < s.mi_cols && seg_uniform(s, row, col, n));
         // Slots: the state before, after the best whole shape so far, and
         // two for the blocks' own trials.
         let before = 1 + 4 * (3 - level);
@@ -1530,6 +1541,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             if !s.intra_frame
                 && s.speed <= SUB8_SPEED
                 && whole
+                && !self.seg_skip(&whole_b)
                 && whole_b.refs[0] != INTRA_FRAME
                 && whole_b.refs[1] == INTRA_FRAME
             {
@@ -1690,6 +1702,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         if s.intra_frame || self.intra_worth(&base, &cands) {
             self.intra_cands(&base, &mut cands);
         }
+        let intra_first = self.seg_restrict(&base, &mut cands).unwrap_or(intra_first);
         let mut best = (f64::INFINITY, 0usize);
         let mut last = usize::MAX;
         // The state after the best so far is kept in `slot + 1`.
@@ -2031,10 +2044,65 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     /// ([`Shared::ssim`]): its superblock's, 1 without `tune=ssim`.
     fn lam_at(&self, row: usize, col: usize) -> f32 {
         let s = self.s;
+        let seg = match s.seg_lam {
+            Some(l) => l[usize::from(s.seg_map[row * s.mi_cols + col])],
+            None => 1.0,
+        };
         if s.ssim.is_empty() {
-            return 1.0;
+            return seg;
         }
-        s.ssim[(row / 8) * s.mi_cols.div_ceil(8) + col / 8]
+        seg * s.ssim[(row / 8) * s.mi_cols.div_ceil(8) + col / 8]
+    }
+
+    /// The block's segment's reference (a region of interest map's), in
+    /// an inter frame.
+    fn seg_ref(&self, b: &Blk) -> Option<u8> {
+        let seg = &self.s.h.seg;
+        let i = usize::from(b.seg);
+        (seg.enabled && !self.s.intra_frame && seg.feature_on[i][2])
+            .then(|| seg.feature_data[i][2] as u8)
+    }
+
+    /// Whether the block's segment codes no residual (a region of
+    /// interest map's skip), in an inter frame.
+    fn seg_skip(&self, b: &Blk) -> bool {
+        let seg = &self.s.h.seg;
+        seg.enabled && !self.s.intra_frame && seg.feature_on[usize::from(b.seg)][3]
+    }
+
+    /// Keeps the candidates the block's segment allows: on its reference
+    /// alone (no compound prediction), and with its skip feature one
+    /// block, the zero vector on that reference (LAST without one). When
+    /// that changes the list, the index of its first intra candidate.
+    fn seg_restrict(&self, base: &Blk, cands: &mut Vec<Blk>) -> Option<usize> {
+        let r = self.seg_ref(base);
+        let skip = self.seg_skip(base);
+        if r.is_none() && !skip {
+            return None;
+        }
+        if let Some(r) = r {
+            cands.retain(|c| c.refs[0] == r && c.refs[1] == INTRA_FRAME);
+        }
+        if skip || cands.is_empty() {
+            cands.clear();
+            let r = r.unwrap_or(LAST_FRAME);
+            cands.push(if r == INTRA_FRAME {
+                *base
+            } else {
+                Blk {
+                    refs: [r, INTRA_FRAME],
+                    mode: ZERO,
+                    tx: geom::max_tx(base.bsize).min(geom::tx_mode_biggest(self.s.h.tx_mode)),
+                    ..*base
+                }
+            });
+        }
+        Some(
+            cands
+                .iter()
+                .position(|c| c.refs[0] == INTRA_FRAME)
+                .unwrap_or(cands.len()),
+        )
     }
 
     fn intra_worth(&self, base: &Blk, cands: &[Blk]) -> bool {
@@ -2910,7 +2978,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             let mut eobs = 0;
             // (libvpx's static threshold: a prediction near enough codes
             // no residual.)
-            breakout = inter && !s.h.lossless && s.static_thresh > 0 && self.static_skip(&b);
+            // (A segment's skip feature codes none.)
+            breakout = inter
+                && !s.h.lossless
+                && ((s.static_thresh > 0 && self.static_skip(&b)) || self.seg_skip(&b));
             // From TX_DOMAIN_SPEED, a trial of an inter block measures its
             // error on the coefficients (libvpx's transform-domain
             // distortion) and leaves the prediction unreconstructed.
@@ -3932,6 +4003,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     // Syntax ---------------------------------------------------------------
 
     fn write_skip(&mut self, b: &Blk) {
+        if self.seg_skip(b) {
+            // (The segment's skip feature: implied.)
+            return;
+        }
         let ctx = usize::from(self.above_nb(b).is_some_and(|n| n.skip))
             + usize::from(self.left_nb(b).is_some_and(|n| n.skip));
         self.put_nc(u32::from(b.skip), self.s.fc.skip[ctx], probs::SKIP + ctx);
@@ -4051,14 +4126,19 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.write_seg(b);
         self.write_skip(b);
         let inter = b.refs[0] != INTRA_FRAME;
-        let ctx = ctx::intra_inter_ctx(self.above_nb(b), self.left_nb(b));
-        self.put_nc(
-            u32::from(inter),
-            s.fc.intra_inter[ctx],
-            probs::INTRA_INTER + ctx,
-        );
-        if self.collect() {
-            self.f.counts.intra_inter[ctx][usize::from(inter)] += 1;
+        // (A segment's reference feature implies the reference, and so
+        // whether the block is inter; its skip feature, the zero vector.)
+        let seg_ref = self.seg_ref(b).is_some();
+        if !seg_ref {
+            let ctx = ctx::intra_inter_ctx(self.above_nb(b), self.left_nb(b));
+            self.put_nc(
+                u32::from(inter),
+                s.fc.intra_inter[ctx],
+                probs::INTRA_INTER + ctx,
+            );
+            if self.collect() {
+                self.f.counts.intra_inter[ctx][usize::from(inter)] += 1;
+            }
         }
         self.write_tx(b, !b.skip || !inter);
         if !inter {
@@ -4079,7 +4159,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             return;
         }
         let compound = b.refs[1] > INTRA_FRAME;
-        if s.h.reference_mode == geom::REFERENCE_SELECT {
+        if !seg_ref && s.h.reference_mode == geom::REFERENCE_SELECT {
             let ctx = ctx::reference_mode_ctx(self.above_nb(b), self.left_nb(b), s.h.comp_fixed);
             self.put_nc(
                 u32::from(compound),
@@ -4090,7 +4170,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 self.f.counts.comp_inter[ctx][usize::from(compound)] += 1;
             }
         }
-        if compound {
+        if compound && !seg_ref {
             // The fixed reference takes its sign bias's place; the other
             // is one of the two variable ones.
             let ctx = ctx::comp_ref_ctx(self.above_nb(b), self.left_nb(b), s.h);
@@ -4104,13 +4184,13 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // Single reference: LAST, or GOLDEN / ALTREF.
         let c0 = ctx::single_p1(self.above_nb(b), self.left_nb(b));
         let bit0 = u32::from(b.refs[0] != LAST_FRAME);
-        if !compound {
+        if !compound && !seg_ref {
             self.put_nc(bit0, s.fc.single_ref[c0][0], probs::SINGLE_REF + 2 * c0);
             if self.collect() {
                 self.f.counts.single_ref[c0][0][bit0 as usize] += 1;
             }
         }
-        if !compound && bit0 == 1 {
+        if !compound && !seg_ref && bit0 == 1 {
             let c1 = ctx::single_p2(self.above_nb(b), self.left_nb(b));
             let bit1 = u32::from(b.refs[0] == geom::ALTREF_FRAME);
             self.put_nc(bit1, s.fc.single_ref[c1][1], probs::SINGLE_REF + 2 * c1 + 1);
@@ -4127,7 +4207,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         }
         let mctx = usize::from(COUNTER_CTX[counter as usize]).min(6);
         let p = s.fc.inter_mode[mctx];
-        if b.bsize >= BLOCK_8X8 {
+        if b.bsize >= BLOCK_8X8 && !self.seg_skip(b) {
             self.write_inter_mode(b.mode, &p, mctx);
         }
         if s.switchable {
@@ -5199,6 +5279,20 @@ pub fn prepass_sb<P: EncPixel>(
 }
 
 #[allow(clippy::type_complexity)]
+/// Whether the square of `n` 8×8 blocks at `(row, col)` keeps to one
+/// segment, or the frame need not ([`Shared::seg_exact`]).
+fn seg_uniform<P: EncPixel>(s: &Shared<'_, P>, row: usize, col: usize, n: usize) -> bool {
+    if !s.seg_exact {
+        return true;
+    }
+    let first = s.seg_map[row * s.mi_cols + col];
+    (row..(row + n).min(s.mi_rows)).all(|r| {
+        s.seg_map[r * s.mi_cols + col..r * s.mi_cols + (col + n).min(s.mi_cols)]
+            .iter()
+            .all(|&g| g == first)
+    })
+}
+
 fn pre_choose<P: EncPixel>(
     s: &Shared<'_, P>,
     rp: ((&[P], usize), (i32, i32)),
@@ -5230,7 +5324,7 @@ fn pre_choose<P: EncPixel>(
     }
     let n = 1usize << level;
     let hbs = n / 2;
-    let whole = row + n <= s.mi_rows && col + n <= s.mi_cols;
+    let whole = row + n <= s.mi_rows && col + n <= s.mi_cols && seg_uniform(s, row, col, n);
     let own = if whole {
         estimate(seeds, pre, SQUARE[level])
     } else {

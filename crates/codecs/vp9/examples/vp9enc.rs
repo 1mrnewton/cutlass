@@ -12,7 +12,10 @@
 //! `-drop-threshold`: dropped frames leave gaps in the IVF timestamps),
 //! `screen=1` (`-tune-content screen`), `ssim=1` (`-tune ssim`) and
 //! `noise=0..6` (`-noise-sensitivity`); `layers=2|3` (temporal layers),
-//! with `keep_layers=N` writing only the packets of the lowest N.
+//! with `keep_layers=N` writing only the packets of the lowest N; and a
+//! region of interest map: `roi_q=N` (the middle half N quantizer
+//! indices finer), `roi_ref=0..3` (its one reference), `roi_skip=1` (the
+//! top eighth of the rows skipped).
 //! With `bits=10` or `12` the input has little-endian 16-bit samples
 //! (FFmpeg's `yuv420p10le` and the like).
 
@@ -21,7 +24,7 @@
 use std::io::{Read, Write};
 use std::time::Instant;
 
-use cutlass_vp9::{AqMode, Chroma, ColorSpace, Tune, TuneContent, Vp9Encoder, Vp9Options};
+use cutlass_vp9::{AqMode, Chroma, ColorSpace, RoiMap, Tune, TuneContent, Vp9Encoder, Vp9Options};
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
@@ -37,6 +40,10 @@ fn main() -> Result<(), String> {
     let mut first_speed = 10u8;
     let mut crf = None;
     let mut keep_layers = u8::MAX;
+    // A region of interest map: the middle half of the picture finer by
+    // `roi_q` (segment 1, on reference `roi_ref` when given), the top
+    // eighth of its rows skipped (segment 2) with `roi_skip=1`.
+    let mut roi: (Option<i16>, Option<u8>, bool) = (None, None, false);
     for a in &args[5..] {
         let (k, v) = a.split_once('=').ok_or("option")?;
         if k == "render" {
@@ -110,6 +117,9 @@ fn main() -> Result<(), String> {
             "noise" => opts.noise_sensitivity = n as u8,
             "layers" => opts.temporal_layers = n as u8,
             "keep_layers" => keep_layers = n as u8,
+            "roi_q" => roi.0 = Some(n as i16),
+            "roi_ref" => roi.1 = Some(n as u8),
+            "roi_skip" => roi.2 = n != 0,
             "ssim" => {
                 if n != 0 {
                     opts.tune = Tune::Ssim;
@@ -150,6 +160,28 @@ fn main() -> Result<(), String> {
     let mut buf = vec![0u8; size];
     let mut wide = Vec::new();
     let mut enc = Vp9Encoder::with_options(w as u32, h as u32, opts).map_err(|e| e.to_string())?;
+    if roi != (None, None, false) {
+        let (mc, mr) = (w.div_ceil(8), h.div_ceil(8));
+        let mut map = RoiMap {
+            map: vec![0; mc * mr],
+            ..RoiMap::default()
+        };
+        for r in 0..mr {
+            for c in 0..mc {
+                map.map[r * mc + c] = if roi.2 && r < mr / 8 {
+                    2
+                } else if (mr / 4..mr - mr / 4).contains(&r) && (mc / 4..mc - mc / 4).contains(&c) {
+                    1
+                } else {
+                    0
+                };
+            }
+        }
+        map.delta_q[1] = -roi.0.unwrap_or(0);
+        map.ref_frame[1] = roi.1;
+        map.skip[2] = roi.2;
+        enc.set_roi_map(Some(map)).map_err(|e| e.to_string())?;
+    }
     if twopass {
         // The first pass: the same pictures at a fixed quantizer near the
         // one the bitrate will take, fast.

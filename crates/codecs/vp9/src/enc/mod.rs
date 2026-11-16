@@ -686,16 +686,27 @@ impl<P: EncPixel> FrameEncoder<P> {
                 b.write_bit(false); // no temporal prediction
                 b.write_bit(true); // update_data
                 b.write_bit(false); // deltas
-                for d in plan.deltas {
-                    // Feature 0, the quantizer; no others.
+                for i in 0..8 {
+                    // The quantizer and loop filter deltas (8 and 6 bits
+                    // and a sign), the reference (2 bits), skip (none).
+                    let d = plan.deltas[i];
                     b.write_bit(d != 0);
                     if d != 0 {
                         b.write(u32::from(d.unsigned_abs()), 8);
                         b.write_bit(d < 0);
                     }
-                    for _ in 1..4 {
-                        b.write_bit(false);
+                    let l = plan.lf[i];
+                    b.write_bit(l != 0);
+                    if l != 0 {
+                        b.write(u32::from(l.unsigned_abs()), 6);
+                        b.write_bit(l < 0);
                     }
+                    let r = plan.refs[i].filter(|_| !key);
+                    b.write_bit(r.is_some());
+                    if let Some(r) = r {
+                        b.write(u32::from(r), 2);
+                    }
+                    b.write_bit(plan.skip[i] && !key);
                 }
             }
             None => b.write_bit(false), // no segmentation
@@ -850,6 +861,11 @@ impl<P: EncPixel> FrameEncoder<P> {
                 ]
             }),
             seg_map: self.aq.as_ref().map_or(&[][..], |p| &p.map[..]),
+            seg_exact: self.aq.as_ref().is_some_and(|p| p.exact),
+            seg_lam: self.aq.as_ref().filter(|p| p.seg_lambda).map(|_| {
+                let base = rd_lambda(i32::from(h.y_dq[0][0]));
+                std::array::from_fn(|g| rd_lambda(i32::from(h.y_dq[g][0])) / base)
+            }),
             speed: fp.speed,
             refs_live,
             switchable: h.interp == geom::SWITCHABLE,

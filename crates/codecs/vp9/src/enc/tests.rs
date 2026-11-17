@@ -877,3 +877,56 @@ fn an_alt_ref_searches_altref_however_little_the_frames_before_used_it() {
         );
     }
 }
+
+#[test]
+fn the_previous_frames_common_vector_starts_the_search() {
+    // Three bands: a texture on the left that moves 48 samples a picture
+    // from the second picture on (found with the jump given), a static
+    // texture in the middle, and a texture on the right that starts to
+    // move, by as much, in the third. Its blocks' neighbours and the
+    // blocks where they stood took no vector, and 48 is past the diamond
+    // and the mesh: at a fixed quantizer in one pass the previous frame's
+    // most common vectors on LAST start each search on it
+    // (`tile::POP_STARTS`), and the right band takes 48.
+    let (w, h) = (384usize, 128usize);
+    let cw = w.div_ceil(2);
+    let still = texture(w, h, (1000, 700));
+    let band = |t: usize, right: usize| -> [Vec<u8>; 3] {
+        let left = texture(w, h, (48 * t, 0));
+        let moved = texture(w, h, (48 * right, 0));
+        let mut pic = still.clone();
+        for r in 0..h {
+            for c in 0..w {
+                pic[0][r * w + c] = if c < 160 {
+                    left[0][r * w + c]
+                } else if c < 224 {
+                    still[0][r * w + c]
+                } else {
+                    moved[0][r * w + c]
+                };
+            }
+        }
+        pic
+    };
+    let pics = [band(0, 0), band(1, 0), band(2, 1)];
+    let mut enc = FrameEncoder::new(w as u32, h as u32, 2);
+    let mut dec = Decoder::new();
+    for (t, pic) in pics.iter().enumerate() {
+        if t == 1 {
+            enc.set_global((48, 0));
+        }
+        enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+        let coded = enc.encode(fixed_params(t, 120, 5, false)).expect("encode");
+        dec.decode(&coded.data).expect("decode");
+    }
+    // The right band's blocks whose match lies inside the picture.
+    let (all, moved) = dec
+        .last_blocks()
+        .filter(|b| b.col >= 28 && b.col < 40)
+        .fold((0, 0), |(n, k), b| {
+            let v = b.bmv[3][0];
+            let on = b.refs[0] == 1 && v.col == 48 * 8 && v.row == 0;
+            (n + 1, k + usize::from(on))
+        });
+    assert!(moved * 4 >= all * 3, "{moved} of {all} blocks moved");
+}

@@ -268,7 +268,26 @@ pub struct Shared<'a, P> {
     /// search on it, and the search reaches that far past its usual
     /// range.
     pub ref_seeds: [Option<Mv>; 3],
+    /// At a fixed quantizer in one pass, the whole-sample vectors the
+    /// previous frame's blocks took most on each reference
+    /// ([`POP_STARTS`]): more starts of the search on it.
+    pub pop_mvs: [[Option<Mv>; POP_STARTS]; 3],
 }
+
+/// How many of the previous frame's most common whole-sample vectors on
+/// a reference (other than zero, each taken by two 8×8 blocks or more)
+/// start every block's search on it, at a fixed quantizer in one pass
+/// ([`Shared::pop_mvs`]). A diamond starts from the block's neighbours'
+/// vectors; where the picture moves as a whole, but the neighbours took
+/// intra, another reference or a vector off by a little, it stops in the
+/// valleys of a smooth or periodic picture. On the gradient of "Synthetic
+/// pans" in the README (which enters at the edges, and whose period the
+/// pictures in GOLDEN and ALTREF hold at other vectors), against
+/// FFmpeg's `-crf`, +3.0% → +0.4% at the same PSNR-Y, `testsrc2` +2.5% →
+/// +2.1%; on the README's three clips at `q=60` to `210`, −0.1, −0.1 and
+/// −0.7 points (four starts: the gradient +0.5%, the clips −0.0, −0.5
+/// and −0.4).
+pub const POP_STARTS: usize = 2;
 
 /// The context energy of a level (libvpx `vp9_pt_energy_class`): 0, 1, 2,
 /// 3 for 3 and 4, 4 for 5 to 10, and 5 past.
@@ -5928,7 +5947,7 @@ fn search_in<P: EncPixel>(
     let w = w.min((s.mi_cols - col) * 8);
     let h = h.min((s.mi_rows - row) * 8);
     // Starting points.
-    let mut cands = [Mv::ZERO; 8];
+    let mut cands = [Mv::ZERO; 8 + POP_STARTS];
     let mut nc = 1;
     // Where the reference's picture stands: a start, and the reach of the
     // search past its range.
@@ -5966,12 +5985,16 @@ fn search_in<P: EncPixel>(
         cands[nc] = m.mv[0];
         nc += 1;
     }
+    for m in s.pop_mvs[cur_ref].iter().flatten() {
+        cands[nc] = *m;
+        nc += 1;
+    }
     let mut best = (0i32, 0i32);
     let mut best_sad = u64::MAX;
     // Windows over the reference's edge are copied here.
     let mut edge = Vec::new();
     // (Neighbours often share a vector: each one's SAD is taken once.)
-    let mut seen = [((0i32, 0i32), None::<u64>); 8];
+    let mut seen = [((0i32, 0i32), None::<u64>); 8 + POP_STARTS];
     for (k, m) in cands[..nc].iter().enumerate() {
         let (r, c) = ((i32::from(m.row) + 4) >> 3, (i32::from(m.col) + 4) >> 3);
         let sad = match seen[..k].iter().find(|e| e.0 == (r, c)) {

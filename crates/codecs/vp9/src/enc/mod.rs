@@ -988,6 +988,11 @@ impl<P: EncPixel> FrameEncoder<P> {
             global: self.global.take(),
             gold_mv: self.gold_mv.take(),
             ref_seeds: std::mem::take(&mut self.ref_seeds),
+            pop_mvs: if fp.full_search && !fp.second_pass && !key {
+                popular_mvs(self.dec.prev_mvs())
+            } else {
+                [[None; tile::POP_STARTS]; 3]
+            },
         };
         // Each tile column on its own thread, into its own copy of the
         // picture (intra prediction reads nothing across tile columns).
@@ -2148,6 +2153,41 @@ fn pick_level<P: EncPixel>(
         .sum::<f64>()
         / 3.0;
     if r <= 1.0 - LF_MARGIN { best as u8 } else { l0 }
+}
+
+/// The whole-sample vectors (in eighths) most 8×8 blocks of the previous
+/// frame took on each reference, other than zero and at least twice, by
+/// count (ties by the vector) ([`tile::POP_STARTS`]).
+fn popular_mvs(prev: Option<&[frame::MvRef]>) -> [[Option<Mv>; tile::POP_STARTS]; 3] {
+    let mut out = [[None; tile::POP_STARTS]; 3];
+    let Some(prev) = prev else {
+        return out;
+    };
+    let mut counts: [std::collections::HashMap<(i16, i16), u32>; 3] = Default::default();
+    for m in prev {
+        let r = usize::from(m.refs[0]);
+        if (1..=3).contains(&r) {
+            let v = ((m.mv[0].row + 4) >> 3, (m.mv[0].col + 4) >> 3);
+            if v != (0, 0) {
+                *counts[r - 1].entry(v).or_insert(0) += 1;
+            }
+        }
+    }
+    for (o, c) in out.iter_mut().zip(&counts) {
+        let mut v: Vec<_> = c
+            .iter()
+            .filter(|e| *e.1 >= 2)
+            .map(|(k, n)| (*n, *k))
+            .collect();
+        v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        for (slot, (_, (row, col))) in o.iter_mut().zip(v) {
+            *slot = Some(Mv {
+                row: row * 8,
+                col: col * 8,
+            });
+        }
+    }
+    out
 }
 
 /// Speeds at and below which each inter block picks its filter.

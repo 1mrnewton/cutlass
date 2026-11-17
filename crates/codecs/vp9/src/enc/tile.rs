@@ -708,16 +708,18 @@ pub const REF_SEED_SPEED: u8 = 6;
 /// prediction (reference and vector), in the direction with more such
 /// pairs (both when as many): each half tries the best by SAD and vector
 /// rate of the whole block's and its two quarters' choices, with no search
-/// of its own ([`Tile::rect_cands`]), and, where one of those chose intra,
-/// the intra modes when it predicts poorly. On `testsrc2`, where half of
-/// the splits of 16×16 lose to a half, against FFmpeg's `-crf` at the same
-/// PSNR-Y: +12.8% → +12.0%; its trials are 2.7% of the blocks coded in
-/// trials (by area) on the README's clip of three scenes at a fixed
-/// quantizer (with the intra modes wherever a half predicts poorly,
-/// +11.9% for 3.6%; with two candidates, as many bits for a third more
-/// trials; halves after every split that won, with their own search and
-/// candidates, +11.1% for 1.25 times the time; after every split, won or
-/// not, at every size, +10.4%).
+/// of its own ([`Tile::rect_cands`]); where one of those chose intra, the
+/// intra modes when it predicts poorly; and where one of its quarters took
+/// 4×4, after a best that codes a residual, the next smaller transform. On
+/// `testsrc2`, where half of the splits of 16×16 lose to a half, against
+/// FFmpeg's `-crf` at the same PSNR-Y: +12.8% → +11.4%. (With the
+/// smaller transform tried as for any block, +12.0%, in 1.06 times the
+/// time at `q=80` on the README's clip of three scenes, where this takes
+/// 0.97 of that; with the intra modes wherever a half predicts poorly too,
+/// +11.9% for a third more trials; with two candidates, as many bits for a
+/// third more again; halves after every split that won, with their own
+/// search and candidates, +11.1% for 1.25 times the time; after every
+/// split, won or not, at every size, +10.4%.)
 pub const RECT_SPEED: std::ops::RangeInclusive<u8> = 4..=5;
 
 /// The dead zone's offsets at speeds 9 and 10 (0.5 rounds to nearest).
@@ -2040,6 +2042,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             && (s.speed < 6
                 || (self.six()
                     && (best.0 - self.choice_skip.1) / lam > SIX_TX_BITS * (bw_mi * bh_mi) as f64));
+        // A half tried after a split ([`RECT_SPEED`]): only where one of
+        // its two quarters took 4×4, after a best that codes a residual.
+        let half = !self.rect_seeds.is_empty()
+            && (self.choice_skip.0 || !self.rect_seeds[1..].iter().any(|b| b.tx == 0));
+        let (smaller, trial) = (smaller && !half, trial && !half);
         if smaller || (s.intra_frame && s.speed < 9) || trial {
             let b0 = cands[best.1];
             let tries = if s.speed < 4 { 2 } else { 1 };

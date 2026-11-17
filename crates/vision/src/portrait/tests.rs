@@ -100,8 +100,10 @@ fn the_cpu_matches_onnxruntime() {
 }
 
 #[test]
-#[ignore = "needs a Metal GPU"]
+#[ignore = "needs a GPU"]
 fn the_gpu_matches_onnxruntime() {
+    // Trusted as the editor trusts a GPU that passed the check.
+    crate::trust_gpu(crate::check_gpu().ok());
     if let Some((worst, mean)) = against_onnxruntime(Compute::Gpu) {
         real::say(&format!("modnet gpu: worst {worst}, mean {mean}"));
         assert!(worst < 2e-3 && mean < 1e-5, "worst {worst}, mean {mean}");

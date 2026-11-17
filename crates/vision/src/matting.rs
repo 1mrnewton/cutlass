@@ -65,10 +65,6 @@ const KERNELS: [usize; 3] = [1, 3, 7];
 const GRADIENT: usize = 16;
 /// What masks a token out of another window's attention.
 const MASKED: f32 = -100.0;
-/// What the model computes in on the GPU: half precision, a quarter faster
-/// on a real 1080p frame (188 ms against 250 ms on an M-series Mac) with
-/// mattes that differ by a few levels at the edges. The CPU keeps f32.
-const GPU_FLOAT: FloatDType = FloatDType::F16;
 
 #[derive(Module, Debug)]
 struct PatchEmbed {
@@ -756,11 +752,11 @@ impl Matting {
         Ok(Self::on(device, compute, model, side))
     }
 
+    /// Half precision on a GPU that has it: a quarter faster on a real
+    /// 1080p frame (188 ms against 250 ms on an M-series Mac), with mattes
+    /// that differ by a few levels at the edges.
     fn on(device: Device, compute: Compute, model: Net, side: u32) -> Self {
-        let float = match compute {
-            Compute::Gpu => GPU_FLOAT,
-            Compute::Cpu => FloatDType::F32,
-        };
+        let float = device::quick_float(&device, compute);
         let model = if float == FloatDType::F32 {
             model
         } else {

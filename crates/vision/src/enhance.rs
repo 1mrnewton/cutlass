@@ -141,12 +141,9 @@ impl Enhancer {
         Ok(Self::on(device, model, compute))
     }
 
-    /// Half precision on the GPU, full on the CPU, whose half is slower.
+    /// Half precision on a GPU that has it, full elsewhere.
     fn on(device: Device, model: Srvgg, compute: Compute) -> Self {
-        let precision = match compute {
-            Compute::Gpu => FloatDType::F16,
-            Compute::Cpu => FloatDType::F32,
-        };
+        let precision = device::quick_float(&device, compute);
         Self::at(device, model, precision)
     }
 
@@ -207,13 +204,11 @@ impl Enhancer {
                 message: format!("the enhancer returned {:?}", output.dims()),
             });
         }
-        let values =
-            output
-                .into_data()
-                .try_to_vec::<f32>()
-                .map_err(|error| VisionError::Model {
-                    message: format!("{error:?}"),
-                })?;
+        let values = crate::read_back(output)?
+            .try_to_vec::<f32>()
+            .map_err(|error| VisionError::Model {
+                message: format!("{error:?}"),
+            })?;
         let plane = read_w as usize * read_h as usize;
         let (skip_x, skip_y) = ((own.left - read.left) * SCALE, (own.top - read.top) * SCALE);
         for y in 0..own.height * SCALE {

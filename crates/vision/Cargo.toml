@@ -21,10 +21,16 @@ burn-store = "=0.22.1"
 # PNG: a photo's matte is one picture.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 
-# The Mac is the one GPU path proven to give correct masks. `persistence`
+# The GPU paths: Metal on the Mac, Vulkan (SPIR-V) on Windows and Linux. A
+# machine's GPU is used only once `check_gpu` passes on it. `persistence`
 # keeps compiled kernels on disk; it builds C through turso (see deny.toml).
 [target.'cfg(target_os = "macos")'.dependencies]
 burn = { version = "=0.22.1", default-features = false, features = ["metal", "persistence"] }
+cubecl-environment = { version = "=0.11.3", features = ["persistence"] }
+cubecl-runtime = "=0.11.3"
+
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+burn = { version = "=0.22.1", default-features = false, features = ["vulkan", "persistence"] }
 cubecl-environment = { version = "=0.11.3", features = ["persistence"] }
 cubecl-runtime = "=0.11.3"
 

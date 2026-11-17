@@ -53,7 +53,7 @@ multiple-versions = "warn"
 wildcards = "deny"
 deny = [
     # ring, rustls's crypto for HTTPS downloads, builds its C and assembly
-    # with cc. burn's kernel cache (cutlass-vision on macOS) stores compiled
+    # with cc. burn's kernel cache (cutlass-vision on the desktop) stores compiled
     # GPU kernels in turso, whose aegis and simsimd build C with cc. Nothing
     # else may.
     { crate = "cc", wrappers = ["ring", "aegis", "simsimd"] },

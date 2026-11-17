@@ -46,6 +46,7 @@ mod enhance_job;
 mod follow;
 mod frame;
 mod generated;
+mod gpu_check;
 mod interpolate;
 mod job;
 mod mask;
@@ -70,11 +71,12 @@ pub use depth::{
     DEPTH_MAX_SIDE, DEPTH_SIDE, DEPTH_WEIGHTS, DepthMap, DepthModel, convert_depth_anything,
 };
 pub use detect::{BODY_WEIGHTS, Detector, FACE_WEIGHTS, Found, HAND_WEIGHTS, Part};
-pub use device::{Compute, gpu_available, keep_kernels_in};
+pub use device::{Compute, gpu_available, gpu_trusted, keep_kernels_in, trust_gpu};
 pub use enhance::{ENHANCE_MAX_SIDE, ENHANCE_WEIGHTS, Enhanced, Enhancer, SCALE, convert_pytorch};
 pub use enhance_job::{CopyModels, EnhanceJobError, enhance_clip, enhanced_size, noise_for_level};
 pub use follow::{FOLLOW_MODEL, FOLLOW_SIDE, FOLLOW_WEIGHTS, FollowModel, convert_sam2};
 pub use frame::MAX_SIDE;
+pub use gpu_check::{GpuCheck, check_gpu};
 pub use interpolate::{
     INTERPOLATE_MAX_SIDE, INTERPOLATE_WEIGHTS, Interpolator, Prepared, convert_rife,
 };
@@ -167,6 +169,17 @@ impl fmt::Display for VisionError {
 }
 
 impl std::error::Error for VisionError {}
+
+/// `x`'s values read back from its device. A failure the device met while
+/// computing them (out of memory, a lost device) is an error here, where
+/// burn's own `into_data` panics.
+pub(crate) fn read_back<const D: usize>(
+    x: burn::tensor::Tensor<D>,
+) -> Result<burn::tensor::TensorData, VisionError> {
+    x.try_into_data().map_err(|error| VisionError::Model {
+        message: format!("the device could not finish: {error}"),
+    })
+}
 
 /// Refuses clicks the model cannot take, before they reach it.
 pub(crate) fn check_clicks(clicks: &[Click], width: u32, height: u32) -> Result<(), VisionError> {

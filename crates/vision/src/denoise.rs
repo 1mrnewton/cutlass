@@ -283,12 +283,9 @@ impl Denoiser {
         Ok(Self::on(device, model, compute))
     }
 
-    /// Half precision on the GPU, full on the CPU, whose half is slower.
+    /// Half precision on a GPU that has it, full elsewhere.
     fn on(device: Device, model: FastDvd, compute: Compute) -> Self {
-        let precision = match compute {
-            Compute::Gpu => FloatDType::F16,
-            Compute::Cpu => FloatDType::F32,
-        };
+        let precision = device::quick_float(&device, compute);
         Self::at(device, model, precision)
     }
 
@@ -592,13 +589,11 @@ impl Denoiser {
                 message: format!("the denoiser returned {:?}", output.dims()),
             });
         }
-        let values =
-            output
-                .into_data()
-                .try_to_vec::<f32>()
-                .map_err(|error| VisionError::Model {
-                    message: format!("{error:?}"),
-                })?;
+        let values = crate::read_back(output)?
+            .try_to_vec::<f32>()
+            .map_err(|error| VisionError::Model {
+                message: format!("{error:?}"),
+            })?;
         let plane = keep.width as usize * keep.height as usize;
         let skip_x = (tile.own.left - tile.read.left - keep.left) as usize;
         let skip_y = (tile.own.top - tile.read.top - keep.top) as usize;

@@ -390,13 +390,11 @@ impl Interpolator {
                 message: "the model has no steps".into(),
             })?;
         let blended = warped0 * mask.clone() + warped1 * (mask.neg() + 1.0);
-        let values =
-            blended
-                .into_data()
-                .try_to_vec::<f32>()
-                .map_err(|error| VisionError::Model {
-                    message: format!("{error:?}"),
-                })?;
+        let values = crate::read_back(blended)?
+            .try_to_vec::<f32>()
+            .map_err(|error| VisionError::Model {
+                message: format!("{error:?}"),
+            })?;
         let plane = pw * ph;
         let mut rgb = Vec::with_capacity(a.width as usize * a.height as usize * 3);
         for y in 0..a.height as usize {

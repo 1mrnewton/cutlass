@@ -181,8 +181,10 @@ fn the_cpu_follows_as_transformers_does() {
 }
 
 #[test]
-#[ignore = "needs a Metal GPU"]
+#[ignore = "needs a GPU"]
 fn the_gpu_follows_as_transformers_does() {
+    // Trusted as the editor trusts a GPU that passed the check.
+    crate::trust_gpu(crate::check_gpu().ok());
     check_runs(Compute::Gpu, &["a", "b", "c"]);
 }
 

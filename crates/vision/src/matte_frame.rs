@@ -114,7 +114,7 @@ pub(crate) fn resize(x: Tensor<4>, size: [usize; 2]) -> Tensor<4> {
 
 /// Reads a tensor back as `f32`s.
 pub(crate) fn values<const D: usize>(x: Tensor<D>) -> Result<Vec<f32>, VisionError> {
-    x.into_data()
+    crate::read_back(x)?
         .convert::<f32>()
         .try_into_vec::<f32>()
         .map_err(|error| VisionError::Model {

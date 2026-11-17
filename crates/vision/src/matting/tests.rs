@@ -108,8 +108,10 @@ fn the_cpu_matches_pytorch() {
 }
 
 #[test]
-#[ignore = "needs a Metal GPU"]
+#[ignore = "needs a GPU"]
 fn the_gpu_matches_pytorch() {
+    // Trusted as the editor trusts a GPU that passed the check.
+    crate::trust_gpu(crate::check_gpu().ok());
     // The GPU computes in half precision: a few edge pixels move by a few
     // hundredths (0.095 at most at 1024), and almost none change side.
     for side in [512, 1024] {

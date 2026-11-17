@@ -142,8 +142,10 @@ fn a_frame_the_model_cannot_take_is_refused_before_any_work() {
 }
 
 #[test]
-#[ignore = "needs a Metal GPU"]
+#[ignore = "needs a GPU"]
 fn a_warp_on_the_gpu_reads_what_it_reads_on_the_cpu() {
+    // Trusted as the editor trusts a GPU that passed the check.
+    crate::trust_gpu(crate::check_gpu().ok());
     // burn's Metal grid sample once read a permuted grid as if it were in
     // order, which moved every pixel.
     let cpu = Interpolator::untrained(Compute::Cpu).unwrap();
@@ -247,7 +249,7 @@ fn time_720p(compute: Compute) {
 }
 
 #[test]
-#[ignore = "needs a Metal GPU; a timing run, not a check"]
+#[ignore = "needs a GPU; a timing run, not a check"]
 fn interpolate_720p_on_the_gpu() {
     time_720p(Compute::Gpu);
 }
@@ -330,8 +332,10 @@ fn the_real_weights_make_what_pytorch_makes() {
 }
 
 #[test]
-#[ignore = "needs a Metal GPU"]
+#[ignore = "needs a GPU"]
 fn the_real_weights_on_the_gpu_make_what_pytorch_makes() {
+    // Trusted as the editor trusts a GPU that passed the check.
+    crate::trust_gpu(crate::check_gpu().ok());
     if let Some(worst) = worst_against_pytorch(Compute::Gpu) {
         assert!(worst <= 1, "{worst} levels from PyTorch");
     }

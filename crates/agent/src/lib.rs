@@ -51,7 +51,7 @@ pub use draft::{
 pub use forward::{Forward, Forwarded, ProjectSocket, Wake, YIELD};
 pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run, run_after};
 pub use mcp::{McpClient, McpError, McpTransport};
-pub use mcp_connection::{LIST_TOOLS, McpConnection, McpWire};
+pub use mcp_connection::{ANSWER_WITHIN, LIST_TOOLS, McpConnection, McpWire};
 pub use mcp_server::{MCP_PROTOCOL_VERSION, McpServer};
 pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,

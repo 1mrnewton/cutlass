@@ -52,6 +52,15 @@ pub fn run(path: Option<&Path>) -> Result<(), String> {
     )
 }
 
+/// The project folder as a path from the root, for one typed from the
+/// folder `cutlass mcp` was started in. The sandbox refuses a script that
+/// names the project folder, by its text: given `.` as that folder it
+/// refused every script with a dot in it, and given `film` any that said
+/// film, while the folder's real path went unchecked.
+fn project_root(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Ends the serving loop from outside it, as a closed stdin ends it from
 /// inside: the project is closed and its lock let go.
 struct Stop(Sender<Event>);
@@ -109,6 +118,7 @@ fn serve_with(
     let Some(path) = path else {
         return Err("name the project folder: cutlass mcp /path/to/project".to_owned());
     };
+    let path = &project_root(path);
     let (events, waiting) = channel();
     stopper(Stop(events.clone()));
     let socket = events.clone();
@@ -1573,6 +1583,38 @@ mod tests {
         assert!(!on.contains("running code is off"), "{on}");
         drop(client);
         host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_project_named_from_the_folder_it_is_in_is_served_by_its_full_path() {
+        use cutlass_agent::{Sandbox, SandboxError};
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(super::project_root(std::path::Path::new(".")), here);
+        assert_eq!(
+            super::project_root(std::path::Path::new("film")),
+            here.join("film")
+        );
+        let full = here.join("already").join("full");
+        assert_eq!(super::project_root(&full), full);
+        // The runner here is a program that is not there, so a script that
+        // gets past the checks fails to start, and one that does not is
+        // refused for the folder it names.
+        let runner = || std::path::PathBuf::from("/no/such/cutlass");
+        let script = "let half = 1.5; half * 2.0";
+        // As typed, `.` is the project folder and every dot names it.
+        let typed = crate::sandbox::local_sandbox(runner(), Some(std::path::Path::new(".")))
+            .run(script, "{}");
+        assert_eq!(typed, Err(SandboxError::ProjectPath));
+        // By its full path the script is let through to the runner, and a
+        // script that does name the folder is still refused.
+        let root = super::project_root(std::path::Path::new("."));
+        let mut sandbox = crate::sandbox::local_sandbox(runner(), Some(&root));
+        assert!(
+            matches!(sandbox.run(script, "{}"), Err(SandboxError::Executor(_))),
+            "the script reached the runner"
+        );
+        let naming = format!("let folder = \"{}\"; folder", root.display());
+        assert_eq!(sandbox.run(&naming, "{}"), Err(SandboxError::ProjectPath));
     }
 
     #[test]

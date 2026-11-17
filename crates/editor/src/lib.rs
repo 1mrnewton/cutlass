@@ -108,7 +108,7 @@ pub use library::{
 };
 pub use mask::{
     ClipFrame, MaskGesture, MaskHandle, MaskHandles, box_point, brush_art, brush_stroke,
-    mask_handles, mask_pick, pen_art, text_box,
+    mask_edit_requests, mask_handles, mask_pick, pen_art, text_box,
 };
 pub use media_place::{MediaPlace, extract_request, media_requests, sound_row};
 pub use pen::{FREEHAND_TOLERANCE, PEN_DRAG_MIN, PenPath, PenPress, freehand};

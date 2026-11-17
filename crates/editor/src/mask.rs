@@ -194,32 +194,17 @@ impl MaskGesture {
         handle: MaskHandle,
         (x, y): (f64, f64),
     ) -> Option<Self> {
-        let (index, color) = place;
-        let segment = draft
-            .tracks
-            .iter()
-            .flat_map(|track| &track.segments)
-            .find(|segment| segment.id == *segment_id)?;
-        let kind = if color { COLOR_MASK } else { MASK };
-        let listed = listed_masks(draft, segment, kind).into_iter().nth(index)?;
-        let start = listed.at(segment, &draft.keyframe_graph_list, time);
-        let key_record = listed.key_record().map(str::to_owned);
-        let names = MASK_KEYS.map(|name| mask_key(name, key_record.as_deref()));
-        let has_keys = segment
-            .common_keyframes
-            .iter()
-            .any(|group| names.contains(&group.property_type) && !group.keyframe_list.is_empty());
-        let offset = time.0.saturating_sub(segment.target.start.0);
+        let held = Held::read(draft, segment_id, place, time)?;
         Some(Self {
             segment_id: segment_id.clone(),
-            index,
-            color,
+            index: place.0,
+            color: place.1,
             frame,
-            start,
+            start: held.start,
             handle,
             grab: frame.clip(x, y),
-            keyed: has_keys.then_some(Micros(offset)),
-            key_record,
+            keyed: held.keyed,
+            key_record: held.key_record,
         })
     }
 
@@ -270,6 +255,82 @@ impl MaskGesture {
     /// record copied to `material_id`.
     #[must_use]
     pub fn requests(&self, mask: &Mask, material_id: &MaterialId) -> Vec<Request> {
+        let held = Held {
+            start: self.start,
+            keyed: self.keyed,
+            key_record: self.key_record.clone(),
+        };
+        held.requests(
+            &self.segment_id,
+            (self.index, self.color),
+            mask,
+            material_id,
+        )
+    }
+}
+
+/// A mask as it is at one time, and how its keys are stored.
+struct Held {
+    start: Mask,
+    /// The offset from the clip's start to key the mask at, when it has
+    /// keys.
+    keyed: Option<Micros>,
+    /// The names its keys go under.
+    key_record: Option<String>,
+}
+
+impl Held {
+    fn read(
+        draft: &Draft,
+        segment_id: &SegmentId,
+        (index, color): (usize, bool),
+        time: Micros,
+    ) -> Option<Self> {
+        let segment = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id == *segment_id)?;
+        let kind = if color { COLOR_MASK } else { MASK };
+        let listed = listed_masks(draft, segment, kind).into_iter().nth(index)?;
+        let start = listed.at(segment, &draft.keyframe_graph_list, time);
+        let key_record = listed.key_record().map(str::to_owned);
+        let names = MASK_KEYS.map(|name| mask_key(name, key_record.as_deref()));
+        let has_keys = segment
+            .common_keyframes
+            .iter()
+            .any(|group| names.contains(&group.property_type) && !group.keyframe_list.is_empty());
+        let offset = time.0.saturating_sub(segment.target.start.0);
+        Some(Self {
+            start,
+            keyed: has_keys.then_some(Micros(offset)),
+            key_record,
+        })
+    }
+
+    /// Keys for the keyed numbers when the mask has keys, and the mask
+    /// itself stored when it has none or a part keys leave out (its shape,
+    /// mode or invert) changed.
+    fn requests(
+        &self,
+        segment_id: &SegmentId,
+        (index, color): (usize, bool),
+        mask: &Mask,
+        material_id: &MaterialId,
+    ) -> Vec<Request> {
+        let mut requests = Vec::new();
+        let unkeyed = (mask.shape, mask.mode, mask.invert)
+            != (self.start.shape, self.start.mode, self.start.invert);
+        if self.keyed.is_none() || unkeyed {
+            requests.push(Request::EditMask {
+                segment_id: segment_id.clone(),
+                index,
+                material_id: material_id.clone(),
+                mask: *mask,
+                art: None,
+                color,
+            });
+        }
         if let Some(offset) = self.keyed {
             let values = [
                 mask.x,
@@ -280,8 +341,8 @@ impl MaskGesture {
                 mask.feather,
                 mask.round,
             ];
-            return vec![Request::KeyValues {
-                segment_id: self.segment_id.clone(),
+            requests.push(Request::KeyValues {
+                segment_id: segment_id.clone(),
                 offset,
                 values: MASK_KEYS
                     .iter()
@@ -290,17 +351,28 @@ impl MaskGesture {
                         (mask_key(name, self.key_record.as_deref()), f64::from(value))
                     })
                     .collect(),
-            }];
+            });
         }
-        vec![Request::EditMask {
-            segment_id: self.segment_id.clone(),
-            index: self.index,
-            material_id: material_id.clone(),
-            mask: *mask,
-            art: None,
-            color: self.color,
-        }]
+        requests
     }
+}
+
+/// The requests that make the mask at `place` (its index, and whether it
+/// is a colour mask) of `segment_id` into `mask` at timeline `time`, as a
+/// slider or a tap changes it: keyed at `time` when it has keys, stored
+/// otherwise, a shared record copied to `material_id`. `None` when the
+/// clip has no such mask.
+#[must_use]
+pub fn mask_edit_requests(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    place: (usize, bool),
+    time: Micros,
+    mask: &Mask,
+    material_id: &MaterialId,
+) -> Option<Vec<Request>> {
+    let held = Held::read(draft, segment_id, place, time)?;
+    Some(held.requests(segment_id, place, mask, material_id))
 }
 
 /// Canvas pixel `(x, y)` as a point in `mask`'s box, -1 to 1 each way

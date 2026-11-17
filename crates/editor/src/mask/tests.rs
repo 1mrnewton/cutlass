@@ -282,3 +282,59 @@ fn a_gesture_reads_the_mask_at_its_place() {
     let masks = segment_masks(session.draft(), &session.draft().tracks[0].segments[0]);
     assert!(close(f64::from(masks[1].mask.x), -0.4));
 }
+
+#[test]
+fn a_keyed_mask_keys_its_numbers_and_stores_what_keys_leave_out() {
+    let draft = draft_with(Mask::new(MaskShape::Circle));
+    let mut session = Session::open_project(draft);
+    apply(
+        &mut session,
+        vec![Request::KeyValues {
+            segment_id: "a".into(),
+            offset: Micros(0),
+            values: vec![(MASK_KEYS[0].to_owned(), 0.0)],
+        }],
+    );
+    let draft = session.draft().clone();
+    let edit = |mask: &Mask| {
+        mask_edit_requests(
+            &draft,
+            &"a".into(),
+            (0, false),
+            Micros(0),
+            mask,
+            &"copy".into(),
+        )
+        .unwrap()
+    };
+    let moved = Mask {
+        x: 0.25,
+        ..Mask::new(MaskShape::Circle)
+    };
+    assert!(matches!(&edit(&moved)[..], [Request::KeyValues { .. }]));
+    let flipped = Mask {
+        invert: true,
+        mode: cutlass_effects::MaskMode::Subtract,
+        ..moved
+    };
+    let requests = edit(&flipped);
+    assert!(matches!(
+        &requests[..],
+        [Request::EditMask { .. }, Request::KeyValues { .. }]
+    ));
+    apply(&mut session, requests);
+    let masks = segment_masks(session.draft(), &session.draft().tracks[0].segments[0]);
+    assert!(masks[0].mask.invert);
+    assert_eq!(masks[0].mask.mode, cutlass_effects::MaskMode::Subtract);
+    assert_eq!(
+        mask_edit_requests(
+            &draft,
+            &"a".into(),
+            (4, false),
+            Micros(0),
+            &moved,
+            &"copy".into()
+        ),
+        None
+    );
+}

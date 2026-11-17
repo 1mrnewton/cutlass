@@ -291,6 +291,9 @@ mod tests {
         ("remove_time_mark", &["add_time_mark"]),
         ("remove_beat", &["add_beat"]),
         ("arrange", &["set_free_layer"]),
+        ("edit_mask", &["set_mask", "add_mask"]),
+        ("remove_mask", &["set_mask", "add_mask"]),
+        ("move_mask", &["set_mask", "add_mask"]),
     ];
 
     fn requests(json: &str) -> Vec<Request> {

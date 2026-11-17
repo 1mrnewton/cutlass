@@ -257,8 +257,20 @@ set_lut: Put a LUT on a clip at strength 0 to 1; cube is the text of a 3D .cube 
 set_chroma: Key a color "#rrggbb" out of a clip on a video or sticker lane with strength and shadow 0 to 1; an empty color removes it.
 {"op":"set_chroma","segment_id":"a","material_id":"a-chroma","color":"#00ff00","strength":0.5,"shadow":0.2}
 
-set_mask: Mask a clip on a video or sticker lane, or null to remove; shape linear, mirror, circle, rectangle, heart or star; x and y -1 to 1 across the clip with y up (-2 to 2 allowed), width and height as parts of the clip's size (0 to 4), rotation -360 to 360 degrees counter-clockwise, feather and round 0 to 1, invert.
+set_mask: Set a clip's first mask on a video or sticker lane, or null to remove it; shape linear, mirror, circle, rectangle, heart or star; x and y -1 to 1 across the clip with y up (-2 to 2 allowed), width and height as parts of the clip's size (0 to 4), rotation -360 to 360 degrees counter-clockwise, feather and round 0 to 1, invert, and mode add, subtract or intersect (optional, add) for how it joins the masks before it.
 {"op":"set_mask","segment_id":"a","material_id":"a-mask","mask":{"shape":"circle","x":0.0,"y":0.0,"width":0.5,"height":0.5,"rotation":0.0,"feather":0.2,"round":0.0,"invert":false}}
+
+add_mask: Put a mask (fields as in set_mask) at the end of a clip's masks, up to eight; masks join in order, each adding to, taking from (subtract) or keeping only where it meets (intersect) what the ones before it keep; color true adds to the masks on the clip's color work instead.
+{"op":"add_mask","segment_id":"a","material_id":"a-mask-2","mask":{"shape":"star","x":0.3,"y":0.0,"width":0.2,"height":0.2,"rotation":0.0,"feather":0.0,"round":0.0,"invert":false,"mode":"subtract"}}
+
+edit_mask: Change the clip's mask at index (0 the first) to mask; material_id names the clip's own copy when another clip shares it; color as in add_mask.
+{"op":"edit_mask","segment_id":"a","index":1,"material_id":"a-mask-3","mask":{"shape":"star","x":0.3,"y":0.1,"width":0.25,"height":0.25,"rotation":15.0,"feather":0.1,"round":0.0,"invert":false,"mode":"subtract"}}
+
+remove_mask: Take the clip's mask at index off, with its keys; color as in add_mask.
+{"op":"remove_mask","segment_id":"a","index":1}
+
+move_mask: Move the clip's mask at from to place to; color as in add_mask.
+{"op":"move_mask","segment_id":"a","from":1,"to":0}
 
 set_selection: Cut a video clip down to an object selection, or null to remove; width and height of the frame in pixels, runs alternating counts of unselected and selected pixels row by row starting unselected (summing to width times height), frame the source time in microseconds, invert. Normally made by the select tool, not by hand.
 {"op":"set_selection","segment_id":"a","material_id":"a-selection","selection":{"width":4,"height":2,"runs":[1,2,2,2,1],"frame":0,"invert":false}}

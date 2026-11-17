@@ -48,7 +48,9 @@ mod interpolate;
 mod job;
 mod mask;
 mod matte;
+mod matte_frame;
 mod mobile_sam;
+mod portrait;
 mod reframe_job;
 mod relight_job;
 
@@ -74,7 +76,9 @@ pub use interpolate::{
 pub use job::{JobError, SelectJob};
 pub use mask::Mask;
 pub use matte::{Follower, Matte, Matter, Prompt};
+pub use matte_frame::MATTE_MAX_SIDE;
 pub use mobile_sam::{DECODER_WEIGHTS, ENCODER_WEIGHTS, MobileSam};
+pub use portrait::{PORTRAIT_MODEL, PORTRAIT_SIDE, PORTRAIT_WEIGHTS, Portrait, convert_modnet};
 pub use reframe_job::{REFRAME_SIDE, find_subjects, subject_of};
 pub use relight_job::{RELIGHT_SIDE, relight_clip};
 

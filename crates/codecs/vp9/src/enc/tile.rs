@@ -1820,6 +1820,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 if j < best.0 {
                     let mut chosen = b;
                     chosen.bmode = self.sub;
+                    if !self.drawn_key_rd() {
+                        // (No halves to try: keep the split as it stands.)
+                        self.choice[Self::slot(row, col, bsize)] = chosen;
+                        self.sub8[i8] = PARTITION_SPLIT;
+                        return j;
+                    }
                     best = (j, PARTITION_SPLIT);
                     won = Some(chosen);
                     self.save(row, col, (1, 1), before + 1);
@@ -1827,25 +1833,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 // (A drawn key frame's halves too, see
                 // [`Self::drawn_key_rd`].)
                 if self.drawn_key_rd() {
-                    for (p, sbs) in [
-                        (PARTITION_HORZ, geom::BLOCK_8X4),
-                        (PARTITION_VERT, geom::BLOCK_4X8),
-                    ] {
-                        self.restore(before);
-                        let c0 = self.cost;
-                        self.part_symbol(row, col, bsize, p);
-                        let b = Blk { bsize: sbs, ..b };
-                        let d = self.code_block(&b);
-                        self.part_after(row, col, bsize, p);
-                        let j = d + (self.cost - c0) as f64 * lam;
-                        if j < best.0 {
-                            let mut chosen = b;
-                            chosen.bmode = self.sub;
-                            best = (j, p);
-                            won = Some(chosen);
-                            self.save(row, col, (1, 1), before + 1);
-                        }
-                    }
+                    self.drawn_key_halves(row, col, bsize, before, lam, b, &mut best, &mut won);
                 }
                 self.restore(before + 1);
                 if let Some(chosen) = won {
@@ -3566,6 +3554,45 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     }
 
     /// The partition symbol of the square at `(row, col)`.
+    /// A drawn key frame's 8×8 block: its 8×4 and 4×8 halves after the
+    /// split ([`Self::drawn_key_rd`]). Kept out of line so the partition
+    /// search every other frame runs compiles as it did without it (inlined,
+    /// it cost the still scene 2.7% of its time with the same streams).
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn drawn_key_halves(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: u8,
+        before: usize,
+        lam: f64,
+        b: Blk,
+        best: &mut (f64, u8),
+        won: &mut Option<Blk>,
+    ) {
+        for (p, sbs) in [
+            (PARTITION_HORZ, geom::BLOCK_8X4),
+            (PARTITION_VERT, geom::BLOCK_4X8),
+        ] {
+            self.restore(before);
+            let c0 = self.cost;
+            self.part_symbol(row, col, bsize, p);
+            let b = Blk { bsize: sbs, ..b };
+            let d = self.code_block(&b);
+            self.part_after(row, col, bsize, p);
+            let j = d + (self.cost - c0) as f64 * lam;
+            if j < best.0 {
+                let mut chosen = b;
+                chosen.bmode = self.sub;
+                *best = (j, p);
+                *won = Some(chosen);
+                self.save(row, col, (1, 1), before + 1);
+            }
+        }
+    }
+
     fn part_symbol(&mut self, row: usize, col: usize, bsize: u8, p: u8) {
         let s = self.s;
         let n8 = geom::mi_width_log2(bsize) as usize;

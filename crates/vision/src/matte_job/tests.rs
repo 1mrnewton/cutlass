@@ -556,7 +556,7 @@ fn birefnet_mattes_a_real_clip() {
     } else {
         crate::Compute::Cpu
     };
-    let mut model = crate::Matting::load_at(&weights, compute, 768).unwrap();
+    let mut model = crate::Matting::load(&weights, compute).unwrap();
     assert_eq!(model.id(), ask.model());
     let start = std::time::Instant::now();
     let file = matte_clip(

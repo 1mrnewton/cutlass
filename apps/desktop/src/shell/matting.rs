@@ -33,9 +33,10 @@ pub(super) const AUTO_WEIGHTS: &str = cutlass_vision::MATTING_WEIGHTS;
 pub(super) const FOLLOW_FOLDER: &str = "follow";
 pub(super) const FOLLOW_WEIGHTS: &str = cutlass_vision::FOLLOW_WEIGHTS;
 
-/// The square Auto removal's model reads frames at: close to its trained
-/// 1024 at about half the time.
-pub(super) const AUTO_SIDE: u32 = 768;
+/// The square Auto removal's model reads frames at, as it was trained.
+/// 768 takes about half the time, but on a busy room it kept a blanket and
+/// part of a couch that 1024 takes off.
+pub(super) const AUTO_SIDE: u32 = cutlass_vision::MATTING_SIDE;
 
 /// The smallest and largest brush, as a share of the frame's short side.
 const BRUSH_SMALLEST: f64 = 0.005;

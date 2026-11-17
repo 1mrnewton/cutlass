@@ -1,0 +1,200 @@
+use std::path::PathBuf;
+
+use cutlass_effects::StrokeStyle;
+use cutlass_model::{Draft, MaterialVideo, Micros, Segment, TimeRange, Track};
+use cutlass_settings::Settings;
+use cutlass_store::matte_file;
+
+use super::*;
+
+/// A project with a movie clip `v` and a photo clip `p` on a 1920 by 1080
+/// canvas, the movie's file holding a few bytes.
+fn open(name: &str) -> (Shell, PathBuf) {
+    let temp = std::env::temp_dir().join(format!("cutlass-matting-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    let mut draft = Draft::empty("draft");
+    draft.fps = 10.0;
+    draft.duration = Micros(2_000_000);
+    for (id, kind) in [("m", "video"), ("still", "photo")] {
+        draft.materials.videos.push(MaterialVideo {
+            id: id.into(),
+            kind: kind.into(),
+            width: 1920,
+            height: 1080,
+            duration: Micros(2_000_000),
+            path: "walk.mp4".into(),
+            ..MaterialVideo::default()
+        });
+    }
+    let mut clip = Segment::new("v", "m", TimeRange::new(0, 2_000_000));
+    clip.source_range = Some(TimeRange::new(0, 2_000_000));
+    draft.tracks[0].segments.push(clip);
+    let mut overlay = Track::main("overlay");
+    overlay.kind = cutlass_model::TrackType::Video;
+    overlay
+        .segments
+        .push(Segment::new("p", "still", TimeRange::new(0, 1_000_000)));
+    draft.tracks.push(overlay);
+    cutlass_store::Folder::new(draft).save(&temp).unwrap();
+    std::fs::write(temp.join("walk.mp4"), b"a movie").unwrap();
+    let (decoders, encoders) = crate::register_codecs();
+    let mut shell = Shell::new(decoders, encoders, Settings::default());
+    shell.open_folder(&temp).unwrap();
+    (shell, temp)
+}
+
+/// Keep clip `v`'s matte as `matting` would have it made, as a finished
+/// job would.
+fn keep_matte(shell: &Shell, temp: &Path, matting: &Matting) {
+    let ask = matte_ask_with(
+        shell.draft().unwrap(),
+        Some(temp),
+        &"v".into(),
+        matting.clone(),
+    )
+    .unwrap();
+    let file = matte_file(temp, &ask.key(), &ask.range).unwrap();
+    std::fs::write(file, b"a matte movie").unwrap();
+}
+
+#[test]
+fn auto_removal_with_its_matte_takes_its_edge_and_outline_at_once_and_undo_returns() {
+    let (mut shell, temp) = open("auto");
+    keep_matte(&shell, &temp, &Matting::auto());
+    shell.select(Some("v".into()));
+    assert_eq!(shell.matting(), None);
+    assert!(!shell.matte_made());
+    shell.set_auto_removal(true).unwrap();
+    assert!(shell.job().is_none(), "nothing to make");
+    assert_eq!(shell.matting(), Some(Matting::auto()));
+    assert!(shell.matte_made());
+    shell.set_matting_edge(0.4, 0.2).unwrap();
+    shell
+        .set_matting_stroke(Some(Stroke::new(StrokeStyle::Glow)))
+        .unwrap();
+    let edged = shell.matting().unwrap();
+    assert_eq!((edged.feather, edged.clean_up), (0.4, 0.2));
+    assert_eq!(edged.stroke.unwrap().style, StrokeStyle::Glow);
+    assert!(
+        shell.job().is_none(),
+        "the edge and outline need no new matte"
+    );
+    shell.set_auto_removal(false).unwrap();
+    assert_eq!(shell.matting(), None);
+    shell.undo().unwrap();
+    assert_eq!(
+        shell.matting().unwrap().stroke.unwrap().style,
+        StrokeStyle::Glow
+    );
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn a_photo_nothing_selected_or_an_edge_with_no_removal_is_refused() {
+    let (mut shell, temp) = open("refused");
+    shell.select(Some("p".into()));
+    assert!(shell.set_auto_removal(true).is_err());
+    shell.select(None);
+    assert!(shell.set_auto_removal(true).is_err());
+    shell.select(Some("v".into()));
+    assert!(shell.set_matting_edge(0.5, 0.0).is_err());
+    assert!(shell.set_matting_stroke(None).is_err());
+    assert_eq!(shell.matting(), None);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn without_the_model_a_matte_that_is_needed_stores_nothing() {
+    let (mut shell, temp) = open("no-model");
+    shell.select(Some("v".into()));
+    if auto_model_here() {
+        // This machine has the model: the job starts instead.
+        let _ = std::fs::remove_dir_all(&temp);
+        return;
+    }
+    let before = shell.draft().unwrap().clone();
+    assert!(shell.set_auto_removal(true).is_err());
+    assert_eq!(shell.draft().unwrap(), &before);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn painted_strokes_become_one_pick_on_the_painted_frame() {
+    let (mut shell, temp) = open("paint");
+    shell.select(Some("v".into()));
+    shell.seek(Micros(500_000));
+    shell.start_painting().unwrap();
+    shell.set_brush_size(0.0);
+    // Across the canvas's middle, on a clip that fills it.
+    shell.paint_at(480.0, 540.0).unwrap();
+    shell.paint_at(960.0, 540.0).unwrap();
+    shell.paint_at(960.0, 540.0).unwrap();
+    shell.end_stroke();
+    shell.set_brush(true, false);
+    shell.paint_at(100.0, 100.0).unwrap();
+    shell.end_stroke();
+    let painting = shell.painting().unwrap();
+    assert_eq!(painting.brushes.len(), 2);
+    assert_eq!(painting.brushes[0].points, vec![[0.25, 0.5], [0.5, 0.5]]);
+    assert!(painting.brushes[0].keep && !painting.brushes[0].smart);
+    assert!(!painting.brushes[1].keep && painting.brushes[1].smart);
+    assert!((painting.brushes[0].radius - BRUSH_SMALLEST).abs() < 1e-12);
+    shell.undo_stroke();
+    assert_eq!(shell.painting().unwrap().brushes.len(), 1);
+
+    let expected = Matting {
+        mode: MattingMode::Custom,
+        picks: vec![Pick {
+            frame: shell.painting().unwrap().source,
+            clicks: Vec::new(),
+            brushes: shell.painting().unwrap().brushes.clone(),
+        }],
+        ..Matting::default()
+    };
+    keep_matte(&shell, &temp, &expected);
+    shell.apply_painting().unwrap();
+    assert!(shell.painting().is_none());
+    assert_eq!(shell.matting(), Some(expected));
+    assert!(shell.job().is_none(), "its matte was there");
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn painting_nothing_applies_nothing() {
+    let (mut shell, temp) = open("paint-nothing");
+    shell.select(Some("v".into()));
+    shell.start_painting().unwrap();
+    shell.apply_painting().unwrap();
+    assert!(shell.painting().is_none());
+    assert_eq!(shell.matting(), None);
+    assert!(shell.paint_at(1.0, 1.0).is_err(), "not painting");
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn picks_merge_by_frame_in_time_order() {
+    let at = |frame: i64, x: f64| Pick {
+        frame: Micros(frame),
+        clicks: vec![PickClick {
+            x,
+            y: 0.5,
+            keep: true,
+        }],
+        brushes: Vec::new(),
+    };
+    let mut picks = Vec::new();
+    merge_pick(&mut picks, at(300, 0.1));
+    merge_pick(&mut picks, at(100, 0.2));
+    merge_pick(&mut picks, at(300, 0.3));
+    let frames: Vec<i64> = picks.iter().map(|pick| pick.frame.0).collect();
+    assert_eq!(frames, vec![100, 300]);
+    assert_eq!(picks[1].clicks.len(), 2);
+}
+
+#[test]
+fn a_clip_point_is_a_unit_point_of_its_frame() {
+    assert_eq!(unit_of_clip((-1.0, 1.0)), (0.0, 0.0));
+    assert_eq!(unit_of_clip((1.0, -1.0)), (1.0, 1.0));
+    assert_eq!(unit_of_clip((0.0, 0.0)), (0.5, 0.5));
+    assert_eq!(unit_of_clip((3.0, -3.0)), (1.0, 1.0));
+}

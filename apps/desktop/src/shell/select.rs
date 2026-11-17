@@ -46,6 +46,14 @@ pub struct Picking {
     pub clicks: Vec<PickClick>,
 }
 
+impl Picking {
+    /// The source time of the frame being picked on.
+    #[must_use]
+    pub(crate) fn source(&self) -> Micros {
+        self.source
+    }
+}
+
 /// One click: where it is on the canvas, where that is in the clip's own
 /// picture (-1 to 1, y up), and whether it keeps or removes.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -69,6 +69,7 @@ mod proxy;
 pub use proxy::ProxyState;
 mod transition;
 pub use transition::TransitionDrop;
+mod matting;
 mod reframe;
 mod relight;
 mod render;
@@ -86,6 +87,7 @@ pub use speech_model::SPEECH_MODEL_QUESTION;
 pub use update::RUNNING_VERSION;
 
 pub use inspector::{KeyedSetting, LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
+pub use matting::{Painting, auto_model_here, follow_model_here};
 
 use crate::face::FaceTable;
 use crate::tokens;
@@ -889,6 +891,9 @@ pub struct Shell {
     detectors: Vec<cutlass_vision::Detector>,
     /// The object click-to-select is picking, while the preview takes clicks.
     picking: Option<select::Picking>,
+    /// Brush strokes being painted for Custom removal, while the preview
+    /// takes drags.
+    painting: Option<Painting>,
     /// A track being set up on the selected clip.
     tracking: Option<follow::Tracking>,
     /// A shape being drawn with the pen, while the preview takes presses.
@@ -1047,6 +1052,7 @@ impl Shell {
             vision: None,
             detectors: Vec::new(),
             picking: None,
+            painting: None,
             tracking: None,
             pen: None,
             heard: std::collections::HashMap::new(),

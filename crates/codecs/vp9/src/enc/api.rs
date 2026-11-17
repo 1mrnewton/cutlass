@@ -663,6 +663,9 @@ struct Core<P: EncPixel> {
     /// With the reference pool: where the content of ALTREF's picture
     /// stands (see `pos`), when known.
     alt_pos: Option<(isize, isize)>,
+    /// The slot of the golden frame, 1 or 2; the alt-ref's is the other
+    /// ([`OVERLAY_KEEPS_GOLDEN`]).
+    gold_slot: u8,
     /// Pictures shown so far.
     shown: u64,
     /// With the realtime pool ([`RT_POOL_SPEED`]): the profile of the
@@ -1160,6 +1163,7 @@ impl<P: EncPixel> Core<P> {
             shown: 0,
             pos: (0, 0),
             alt_pos: None,
+            gold_slot: 1,
             last_prof: None,
             refresh_at: 0,
             denoiser: (opts.noise_sensitivity > 0)
@@ -1408,8 +1412,8 @@ impl<P: EncPixel> Core<P> {
                 golden_slot: golden_slot.0,
                 also_refresh: 0,
                 last_slot: self.shown_mid.as_ref().map_or(0, |m| m.0),
-                altref_slot: 2,
-                hidden_slot: 2,
+                altref_slot: 3 - self.gold_slot,
+                hidden_slot: 3 - self.gold_slot,
                 noise: golden_slot.1,
             })?;
             self.rc.account(coded.data.len(), 0.0, 1, qindex);
@@ -1692,7 +1696,19 @@ impl<P: EncPixel> Core<P> {
         }
         // Layered alt-refs: ALTREF is the nearest one ahead, and after one
         // was shown, LAST is it.
-        let altref_slot = self.mids.last().map_or(2, |m| m.slot);
+        if key {
+            self.gold_slot = 1;
+        }
+        // The overlay of an alt-ref at a fixed quantizer in one pass takes
+        // the alt-ref's slot and becomes GOLDEN; the golden frame before it
+        // ALTREF ([`OVERLAY_KEEPS_GOLDEN`]).
+        let keep_gold = OVERLAY_KEEPS_GOLDEN
+            && overlay
+            && self.full_search()
+            && self.rc.pass2.is_none()
+            && self.pooled()
+            && self.opts.alt_ref_layers <= 1;
+        let altref_slot = self.mids.last().map_or(3 - self.gold_slot, |m| m.slot);
         let last_slot = self.shown_mid.as_ref().map_or(0, |m| m.0);
         // An inter frame that is no golden frame (nor a cut, nor a jump)
         // may be dropped while the buffer runs low: it spends its share of
@@ -1773,6 +1789,12 @@ impl<P: EncPixel> Core<P> {
         } else {
             0
         };
+        // (Golden in slot 2: refreshed beside LAST, as `FrameParams::golden`
+        // refreshes slot 1.)
+        let gold_in_two = golden && self.gold_slot == 2 && !keep_gold;
+        let also_refresh = also_refresh
+            | if keep_gold { 1 << altref_slot } else { 0 }
+            | if gold_in_two { 1 << 2 } else { 0 };
         match &mut self.denoiser {
             Some(d) => {
                 // (A key frame starts the denoiser afresh.)
@@ -1802,7 +1824,7 @@ impl<P: EncPixel> Core<P> {
             !key && !overlay && self.overlay_at.is_some() && !self.opts.error_resilient;
         let coded = self.enc.encode(FrameParams {
             key,
-            golden,
+            golden: golden && !keep_gold && !gold_in_two,
             hidden: false,
             qindex,
             speed: self.opts.speed,
@@ -1825,9 +1847,17 @@ impl<P: EncPixel> Core<P> {
         })?;
         let kind = if coded.key { 0 } else { kind };
         if let Some(t) = tight {
+            if keep_gold {
+                // ALTREF is now the golden frame before.
+                self.alt_pos = self
+                    .seeded()
+                    .then(|| self.gold_src.as_ref().map(|g| g.pos))
+                    .flatten();
+                self.gold_slot = altref_slot;
+            }
             if coded.key || golden {
                 self.gold_src = Some(Held {
-                    slot: 1,
+                    slot: self.gold_slot,
                     shown: self.shown,
                     pos: self.pos,
                     planes: t.clone(),
@@ -2064,10 +2094,10 @@ impl<P: EncPixel> Core<P> {
     /// predicts at its whole samples.
     fn pick_golden(&mut self, to: [&[P]; 3], at: (isize, isize)) -> (u8, f32) {
         if !self.pooled() {
-            return (1, 0.0);
+            return (self.gold_slot, 0.0);
         }
         let Some(g) = &self.gold_src else {
-            return (1, 0.0);
+            return (self.gold_slot, 0.0);
         };
         let (w, h) = (self.width as usize, self.height as usize);
         let ss = self.opts.ss();
@@ -2110,7 +2140,7 @@ impl<P: EncPixel> Core<P> {
             })
         };
         let base = errs[0];
-        let mut best = (1u8, base);
+        let mut best = (g.slot, base);
         let mut least = base.0;
         for (c, e) in cands.iter().zip(&errs).skip(1) {
             least = least.min(e.0);
@@ -2170,6 +2200,7 @@ impl<P: EncPixel> Core<P> {
         self.shown = 0;
         self.pos = (0, 0);
         self.alt_pos = None;
+        self.gold_slot = 1;
         self.refresh_at = 0;
         if let Some(d) = &mut self.denoiser {
             d.reset();
@@ -2538,6 +2569,14 @@ const FULL_SEARCH_SPEED: u8 = 5;
 
 /// See [`super::FrameParams::fast_arf`].
 const FAST_ARF_SPEED: u8 = 8;
+
+/// At a fixed quantizer in one pass, an alt-ref's overlay (its picture
+/// shown, a golden frame) is coded into the alt-ref's slot, not the golden
+/// frame's, and the two trade places: GOLDEN reads the overlay and ALTREF
+/// the golden frame before it, until the next alt-ref takes ALTREF's slot
+/// (libvpx's `vp9_preserve_existing_gf`). The overlay had overwritten the
+/// golden frame and left ALTREF a copy of GOLDEN's picture.
+const OVERLAY_KEEPS_GOLDEN: bool = true;
 
 /// Frames from one golden frame to the next (at most, in two passes).
 const GF_INTERVAL: u32 = 12;

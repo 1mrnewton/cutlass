@@ -3252,3 +3252,83 @@ fn a_pan_with_alt_refs_seeds_its_searches_and_decodes() {
         }
     }
 }
+
+#[test]
+fn an_overlay_keeps_the_golden_frame_before_it_as_altref() {
+    // At a fixed quantizer in one pass, an alt-ref's overlay is coded into
+    // the alt-ref's slot and becomes GOLDEN, and the golden frame before it
+    // stays, as ALTREF (`OVERLAY_KEEPS_GOLDEN`): the frame after the
+    // overlay reads ALTREF from slot 1 (and GOLDEN from 2, or from a
+    // picture of the pool). In a second pass the overlay refreshes slot 1
+    // as before, and ALTREF reads slot 2.
+    let run = |opts: super::Vp9Options, first: Option<(&[u64], u8)>| {
+        let mut encoder = Vp9Encoder::with_options(160, 96, opts).expect("encoder");
+        if let Some((bits, q)) = first {
+            encoder.set_second_pass(bits, q);
+        }
+        let mut packets = Vec::new();
+        for index in 0..40u32 {
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: moving(160, 96, index * 2),
+                        pts: i64::from(index),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        packets
+            .into_iter()
+            .map(|p| p.data)
+            .collect::<Vec<Vec<u8>>>()
+    };
+    let refs_after_overlay = |packets: &[Vec<u8>]| {
+        // Each frame's header read against the state of a decoder that has
+        // decoded the frames before it.
+        let mut dec = Decoder::new();
+        let mut headers = Vec::new();
+        for p in packets {
+            for f in crate::decode::split_superframe(p).expect("superframe") {
+                headers.push(header::parse(dec.persist(), f).expect("header").header);
+                dec.decode(f).expect("decode");
+            }
+        }
+        // The overlay: the first shown frame after the alt-ref that
+        // refreshes slot 1 or 2.
+        let hidden = headers
+            .iter()
+            .position(|h| !h.show_frame)
+            .expect("an alt-ref");
+        let overlay = (hidden + 1..headers.len())
+            .find(|&i| headers[i].show_frame && headers[i].refresh_flags & 0x06 != 0)
+            .expect("an overlay");
+        let after = &headers[overlay + 1];
+        assert_ne!(after.ref_index[1], after.ref_index[2]);
+        after.ref_index[2]
+    };
+    let base = super::Vp9Options {
+        threads: 1,
+        speed: 5,
+        ..super::Vp9Options::default()
+    };
+    let fixed = super::Vp9Options {
+        qindex: 120,
+        ..base
+    };
+    assert_eq!(refs_after_overlay(&run(fixed, None)), 1);
+    let first: Vec<u64> = run(super::Vp9Options { speed: 10, ..fixed }, None)
+        .iter()
+        .map(|p| p.len() as u64 * 8)
+        .collect();
+    let second = run(
+        super::Vp9Options {
+            bitrate: 300_000,
+            ..base
+        },
+        Some((&first, 120)),
+    );
+    assert_eq!(refs_after_overlay(&second), 2);
+}

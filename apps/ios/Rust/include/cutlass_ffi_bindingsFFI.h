@@ -294,6 +294,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_add_effect(uint64_t ptr,
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_add_filter(uint64_t ptr, RustBuffer filter_id, int64_t at_us, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ADD_MASK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ADD_MASK
+uint32_t uniffi_cutlass_ffi_bindings_fn_method_editor_add_mask(uint64_t ptr, RustBuffer clip_id, int8_t color, RustBuffer shape, int64_t at_us, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ADD_OVERLAY
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ADD_OVERLAY
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_add_overlay(uint64_t ptr, RustBuffer material_id, int64_t at_us, RustCallStatus *_Nonnull out_status
@@ -354,6 +359,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_clip_state(uint64_t ptr,
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_cuts(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_DRAW_MASK_OUTLINE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_DRAW_MASK_OUTLINE
+void uniffi_cutlass_ffi_bindings_fn_method_editor_draw_mask_outline(uint64_t ptr, RustBuffer clip_id, int8_t color, uint32_t index, int64_t at_us, RustBuffer corners, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_DRAW_STROKE
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_DRAW_STROKE
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_draw_stroke(uint64_t ptr, RustBuffer trace, int64_t at_us, RustBuffer color, double width, RustCallStatus *_Nonnull out_status
@@ -372,6 +382,11 @@ int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_duration_us(uint64_t ptr, R
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EASE_KEYFRAMES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EASE_KEYFRAMES
 void uniffi_cutlass_ffi_bindings_fn_method_editor_ease_keyframes(uint64_t ptr, RustBuffer clip_id, int64_t at_us, RustBuffer graph, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EDIT_MASK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EDIT_MASK
+void uniffi_cutlass_ffi_bindings_fn_method_editor_edit_mask(uint64_t ptr, RustBuffer clip_id, int8_t color, uint32_t index, int64_t at_us, RustBuffer mask, int8_t live, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EXPORT
@@ -449,9 +464,44 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_lanes(uint64_t ptr, Rust
 int8_t uniffi_cutlass_ffi_bindings_fn_method_editor_linkage_enabled(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MASK_BEGIN
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MASK_BEGIN
+int8_t uniffi_cutlass_ffi_bindings_fn_method_editor_mask_begin(uint64_t ptr, RustBuffer clip_id, int8_t color, uint32_t index, int64_t at_us, double x, double y, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MASK_DRAG
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MASK_DRAG
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_mask_drag(uint64_t ptr, double x, double y, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MASK_END
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MASK_END
+void uniffi_cutlass_ffi_bindings_fn_method_editor_mask_end(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MASK_HANDLES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MASK_HANDLES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_mask_handles(uint64_t ptr, RustBuffer clip_id, int8_t color, uint32_t index, int64_t at_us, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MASKS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MASKS
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_masks(uint64_t ptr, RustBuffer clip_id, int8_t color, int64_t at_us, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MOVE_CLIP
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MOVE_CLIP
 int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_move_clip(uint64_t ptr, RustBuffer clip_id, uint32_t row, int64_t start_us, int64_t snap_us, int64_t playhead_us, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MOVE_MASK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_MOVE_MASK
+void uniffi_cutlass_ffi_bindings_fn_method_editor_move_mask(uint64_t ptr, RustBuffer clip_id, int8_t color, uint32_t from, uint32_t to, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_PAINT_MASK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_PAINT_MASK
+void uniffi_cutlass_ffi_bindings_fn_method_editor_paint_mask(uint64_t ptr, RustBuffer clip_id, int8_t color, uint32_t index, int64_t at_us, RustBuffer trace, double size, int8_t erase, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_PAUSE
@@ -482,6 +532,11 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_redo(uint64_t ptr, RustCallSta
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_REMOVE
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_REMOVE
 void uniffi_cutlass_ffi_bindings_fn_method_editor_remove(uint64_t ptr, RustBuffer clip_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_REMOVE_MASK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_REMOVE_MASK
+void uniffi_cutlass_ffi_bindings_fn_method_editor_remove_mask(uint64_t ptr, RustBuffer clip_id, int8_t color, uint32_t index, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_REMOVE_TRANSITION
@@ -552,6 +607,11 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_set_font_folders(uint64_t ptr,
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_LINKAGE_ENABLED
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_LINKAGE_ENABLED
 void uniffi_cutlass_ffi_bindings_fn_method_editor_set_linkage_enabled(uint64_t ptr, int8_t on, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_MASK_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_MASK_TEXT
+void uniffi_cutlass_ffi_bindings_fn_method_editor_set_mask_text(uint64_t ptr, RustBuffer clip_id, int8_t color, uint32_t index, RustBuffer text, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_OPACITY
@@ -862,6 +922,12 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_graph_curves(RustCallStatus *_Non
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_list_projects(RustBuffer root, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_MASK_SHAPES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_MASK_SHAPES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_mask_shapes(RustCallStatus *_Nonnull out_status
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_NOTICE_TEXT
@@ -1325,6 +1391,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_list_projects(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_MASK_SHAPES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_MASK_SHAPES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_mask_shapes(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_NOTICE_TEXT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_NOTICE_TEXT
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_notice_text(void
@@ -1451,6 +1523,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_add_filter(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ADD_MASK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ADD_MASK
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_add_mask(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ADD_OVERLAY
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ADD_OVERLAY
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay(void
@@ -1523,6 +1601,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_cuts(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_DRAW_MASK_OUTLINE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_DRAW_MASK_OUTLINE
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_mask_outline(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_DRAW_STROKE
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_DRAW_STROKE
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_stroke(void
@@ -1544,6 +1628,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EASE_KEYFRAMES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EASE_KEYFRAMES
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_ease_keyframes(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EDIT_MASK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EDIT_MASK
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_edit_mask(void
     
 );
 #endif
@@ -1637,9 +1727,51 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_linkage_enabled(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MASK_BEGIN
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MASK_BEGIN
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_begin(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MASK_DRAG
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MASK_DRAG
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_drag(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MASK_END
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MASK_END
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_end(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MASK_HANDLES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MASK_HANDLES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_handles(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MASKS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MASKS
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_masks(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MOVE_CLIP
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MOVE_CLIP
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_move_clip(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MOVE_MASK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_MOVE_MASK
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_move_mask(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_PAINT_MASK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_PAINT_MASK
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_paint_mask(void
     
 );
 #endif
@@ -1676,6 +1808,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_redo(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_REMOVE
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_REMOVE
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_remove(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_REMOVE_MASK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_REMOVE_MASK
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_remove_mask(void
     
 );
 #endif
@@ -1760,6 +1898,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders(voi
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_LINKAGE_ENABLED
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_LINKAGE_ENABLED
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_linkage_enabled(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_MASK_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_MASK_TEXT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_mask_text(void
     
 );
 #endif

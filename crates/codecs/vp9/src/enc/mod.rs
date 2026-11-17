@@ -36,6 +36,7 @@ use crate::geom;
 use crate::header::{self, Parsed};
 use crate::lpf;
 use crate::prob::{self, FrameContext};
+use crate::tables::PARETO8;
 
 use self::tile::{Shared, Source, Tile};
 
@@ -370,6 +371,10 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// [`LF_FIXED_SCALE`].
     #[cfg(test)]
     lf_found: Option<u8>,
+    /// The coefficient updates on the counts alone, as past
+    /// [`MODEL_UPDATE_SPEED`].
+    #[cfg(test)]
+    count_only_updates: bool,
     /// [`pick_level`]'s band of luma rows, unfiltered and filtered.
     lf_band: Vec<P>,
 }
@@ -386,6 +391,10 @@ struct TileWork<P: EncPixel> {
     /// How many of them each superblock row ends at.
     row_ends: Vec<usize>,
     bufs: tile::TileBufs<P>,
+    /// The big tokens in `out` by class, under each third coefficient
+    /// probability, when the frame's coefficient updates weigh them
+    /// ([`MODEL_UPDATE_SPEED`]).
+    big: Vec<[u32; 9]>,
 }
 
 impl<P: EncPixel> TileWork<P> {
@@ -398,6 +407,7 @@ impl<P: EncPixel> TileWork<P> {
             out: Vec::new(),
             row_ends: Vec::new(),
             bufs: tile::TileBufs::default(),
+            big: Vec::new(),
         }
     }
 }
@@ -457,6 +467,8 @@ impl<P: EncPixel> FrameEncoder<P> {
             lf_pick: None,
             #[cfg(test)]
             lf_found: None,
+            #[cfg(test)]
+            count_only_updates: false,
             lf_band: Vec::new(),
         }
     }
@@ -1185,6 +1197,16 @@ impl<P: EncPixel> FrameEncoder<P> {
             coded: self.coded(key, fp),
             max_tx: if h.lossless { 0 } else { 3 },
         });
+        // Coefficient updates that weigh the big tokens
+        // ([`MODEL_UPDATE_SPEED`]): not where the tiles count nothing
+        // (error resilient or frame parallel).
+        let model_updates = fp.full_search
+            && !fp.second_pass
+            && fp.speed <= MODEL_UPDATE_SPEED
+            && !h.error_resilient
+            && !h.frame_parallel;
+        #[cfg(test)]
+        let model_updates = model_updates && !self.count_only_updates;
         let run = |t: &mut TileWork<P>,
                    col0: usize,
                    col1: usize,
@@ -1202,6 +1224,10 @@ impl<P: EncPixel> FrameEncoder<P> {
                 .reset(col0, col1 - col0, mi_rows, sb_rows * tsb, needs_grid);
             t.out.clear();
             t.row_ends.clear();
+            t.big.clear();
+            if model_updates {
+                t.big.resize(1728, [0; 9]);
+            }
             let [y, u, v] = &mut t.pix;
             let mut views = [
                 View {
@@ -1242,6 +1268,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                     sh,
                     &mut t.state,
                     &mut t.out,
+                    model_updates.then_some(&mut t.big[..]),
                     &mut rec,
                     (col0, col1),
                     seeds,
@@ -1546,7 +1573,19 @@ impl<P: EncPixel> FrameEncoder<P> {
         let (new, new_nc) = match &early {
             Some((new, new_nc, _)) => (*new, *new_nc),
             None => (
-                coef_updates(&old, &counts, if lossless { 0 } else { 3 }),
+                if model_updates {
+                    let mut big = vec![[0u32; 9]; 1728];
+                    for t in &work {
+                        for (a, b) in big.iter_mut().zip(&t.big) {
+                            for (x, y) in a.iter_mut().zip(b) {
+                                *x += y;
+                            }
+                        }
+                    }
+                    coef_updates_model(&old, &counts, &big, if lossless { 0 } else { 3 })
+                } else {
+                    coef_updates(&old, &counts, if lossless { 0 } else { 3 })
+                },
                 probs::updates(&old_nc, &counts, &self.coded(key, fp)),
             ),
         };
@@ -1881,6 +1920,11 @@ fn merge_lanes<P: EncPixel>(
             }
         }
         first.state.counts.add(&t.state.counts);
+        for (a, b) in first.big.iter_mut().zip(&t.big) {
+            for (x, y) in a.iter_mut().zip(b) {
+                *x += y;
+            }
+        }
     }
     let mut out = Vec::with_capacity(chunk_symbols(first, rest));
     let mut ends = Vec::with_capacity(sb_rows);
@@ -2045,6 +2089,26 @@ pub fn filter_level(qindex: u8, key: bool, bd: u8) -> u8 {
     }
     guess.clamp(0, 63) as u8
 }
+
+/// Speeds at and below which a frame at a fixed quantizer in one pass
+/// ([`FrameParams::full_search`]) decides its coefficient updates as
+/// libvpx's `update_coef_probs` does ([`coef_updates_model`]): each
+/// probability takes the value between its count's and the old one that
+/// saves the most, and the third of a context's, from which the big
+/// tokens' probabilities follow ([`PARETO8`]), is weighed with theirs.
+/// On the counts alone, a context whose nonzero tokens are all over one
+/// took a third probability of 1, and with it the big tokens' of very
+/// large values: in `testsrc2`'s first picture at quantizer 15 the
+/// timestamp's and the bars' 8×8 transforms coded the same levels as
+/// libvpx's in 20% more bits, the frame 14996 bytes against libvpx's
+/// 14422, now 14270 with the same reconstruction. Its first picture
+/// against FFmpeg's (BD-rate at the same PSNR-Y / U / V, the mean of five
+/// grids of `crf`): from +0.7 / −0.7 / −1.5% to −1.8 / −3.2 / −3.8%. Every
+/// frame takes it, not only key frames: the same pictures in fewer bits,
+/// `testsrc2`'s stream 0.4 points, the gradient's 1.1, the README's clips
+/// 0.2 to 0.3. The big tokens are counted as the tiles write them, on
+/// their threads.
+pub const MODEL_UPDATE_SPEED: u8 = 5;
 
 /// Speeds at and below which the loop filter level of each frame is
 /// searched ([`pick_level`]) rather than taken from the quantizer
@@ -2433,6 +2497,113 @@ fn coef_updates(old: &[u8; 1728], counts: &prob::Counts, max_tx: usize) -> [u8; 
         }
         // Updating a size costs a flag for every probability in it.
         if gain > (coded_probs * flag(false) + 256) as i64 {
+            for (i, p) in changed {
+                new[i] = p;
+            }
+        }
+    }
+    new
+}
+
+/// The header bits of probability `new` coded against `old` (no code:
+/// `u8::MAX`), by `old * 256 + new`.
+static UPDATE_BITS: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(|| {
+    let mut t = vec![u8::MAX; 256 * 256];
+    for old in 1..=255u8 {
+        for v in 0..=254u8 {
+            let new = prob::inv_remap(v, old);
+            let at = usize::from(old) * 256 + usize::from(new);
+            t[at] = t[at].min(subexp_bits(v) as u8);
+        }
+    }
+    t
+});
+
+/// The coefficient probabilities after libvpx's `update_coef_probs`
+/// (two loops, step 1): each of a context's three probabilities takes
+/// the value between its count's and the old one that saves the most
+/// bits with its update's, and the third is weighed with the big tokens'
+/// probabilities it brings ([`PARETO8`]) on their counts (`big`, by class
+/// under each third probability) — libvpx's
+/// `vp9_prob_diff_update_savings_search_model`.
+#[cold]
+#[inline(never)]
+fn coef_updates_model(
+    old: &[u8; 1728],
+    counts: &prob::Counts,
+    big: &[[u32; 9]],
+    max_tx: usize,
+) -> [u8; 1728] {
+    let mut new = *old;
+    let flag = |b: bool| i64::from(tile::bit_cost(b, 252));
+    let branch = |c: [u32; 2], p: u8| {
+        i64::from(c[0]) * i64::from(tile::bit_cost(false, p))
+            + i64::from(c[1]) * i64::from(tile::bit_cost(true, p))
+    };
+    let bits = &*UPDATE_BITS;
+    for tx in 0..=max_tx {
+        let mut savings = 0i64;
+        let mut changed = Vec::new();
+        for plane in 0..2 {
+            for r in 0..2 {
+                for band in 0..6 {
+                    for ctx in 0..6 {
+                        if !coded(band, ctx) {
+                            continue;
+                        }
+                        let c = &counts.coef[tx][plane][r][band][ctx];
+                        let eob = counts.eob[tx][plane][r][band][ctx];
+                        let pairs = [
+                            [c[3], eob.saturating_sub(c[3])],
+                            [c[0], c[1] + c[2]],
+                            [c[1], c[2]],
+                        ];
+                        for (node, ct) in pairs.into_iter().enumerate() {
+                            let i = ((((tx * 2 + plane) * 2 + r) * 6 + band) * 6 + ctx) * 3 + node;
+                            let total = u64::from(ct[0]) + u64::from(ct[1]);
+                            if total == 0 {
+                                // (Nothing to save: no update.)
+                                savings -= flag(false);
+                                continue;
+                            }
+                            let tail = (node == 2).then(|| tile::big_branches(&big[i]));
+                            let cost = |p: u8| {
+                                branch(ct, p)
+                                    + tail.as_ref().map_or(0, |t| {
+                                        let pp = &PARETO8[usize::from(p.max(1)) - 1];
+                                        t.iter().zip(pp).map(|(&c, &q)| branch(c, q)).sum()
+                                    })
+                            };
+                            let o = old[i];
+                            let start =
+                                ((256 * u64::from(ct[0]) + total / 2) / total).clamp(1, 255) as u8;
+                            let old_cost = cost(o);
+                            let (mut best, mut best_p) = (0i64, o);
+                            let mut p = start;
+                            while p != o {
+                                let b = bits[usize::from(o) * 256 + usize::from(p)];
+                                if b != u8::MAX {
+                                    let s = old_cost
+                                        - cost(p)
+                                        - (i64::from(b) * 256 + flag(true) - flag(false));
+                                    if s > best {
+                                        (best, best_p) = (s, p);
+                                    }
+                                }
+                                p = if p > o { p - 1 } else { p + 1 };
+                            }
+                            if best_p != o {
+                                savings += best - flag(false);
+                                changed.push((i, best_p));
+                            } else {
+                                savings -= flag(false);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !changed.is_empty() && savings >= 0 {
             for (i, p) in changed {
                 new[i] = p;
             }

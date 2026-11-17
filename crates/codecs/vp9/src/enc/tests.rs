@@ -1007,6 +1007,49 @@ fn a_drawn_key_frame_codes_8x4_and_4x8_intra_blocks() {
 }
 
 #[test]
+fn a_fixed_quantizer_weighs_the_big_tokens_in_its_coefficient_updates() {
+    // At a fixed quantizer in one pass up to `MODEL_UPDATE_SPEED`, a
+    // context's third probability is updated for the big tokens' bits
+    // too, whose probabilities follow from it (`coef_updates_model`). A
+    // fine quantizer on a sharp texture codes most of its levels over
+    // one: the same frames, decoded as the encoder reconstructed them,
+    // in fewer bytes than with updates on the counts alone.
+    let (w, h) = (128usize, 128usize);
+    let cw = w.div_ceil(2);
+    let pics: Vec<[Vec<u8>; 3]> = (0..2).map(|t| texture(w, h, (3 * t, 2 * t))).collect();
+    let coded = |count_only: bool, speed: u8| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 2);
+        enc.count_only_updates = count_only;
+        let mut dec = Decoder::new();
+        let mut bytes = 0;
+        let mut shown_all = Vec::new();
+        for (t, pic) in pics.iter().enumerate() {
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            let coded = enc
+                .encode(fixed_params(t, 20, speed, false))
+                .expect("encode");
+            bytes += coded.data.len();
+            let shown = dec.decode(&coded.data).expect("decode").expect("shown");
+            let rec = enc.last().expect("recon");
+            let (data, stride) = rec.buf.plane(0);
+            for r in 0..h {
+                for c in 0..w {
+                    assert_eq!(shown.y[r * w + c], data[r * stride + c], "frame {t}");
+                }
+            }
+            shown_all.push(shown.y);
+        }
+        (bytes, shown_all)
+    };
+    let (model, model_shown) = coded(false, 5);
+    let (counts, counts_shown) = coded(true, 5);
+    assert_eq!(model_shown, counts_shown);
+    assert!(model < counts, "{model} against {counts}");
+    // Past the speed, the updates are on the counts either way.
+    assert_eq!(coded(false, 6).0, coded(true, 6).0);
+}
+
+#[test]
 fn a_coarse_fixed_quantizer_still_searches_the_filter_level() {
     // From about quantizer 208 the level from the quantizer is 63, which
     // the masks cannot be rebased from: at a fixed quantizer in one pass

@@ -2524,6 +2524,95 @@ What is left: `testsrc2` at −3.9% / −8.1% / −12.2% against FFmpeg's
 `-crf`, −1.1% / −6.6% / −11.0% with nine points; the gradient at −3.0%
 (nine points −3.3%). The first picture alone is 0.6% over libvpx's.
 
+**The big tokens' probabilities** (17 November 2026, after a drawn
+picture's key frame). The first picture's 0.6% over libvpx's was at its
+finest quantizers. At quantizer 15 with no loop filter on either side,
+ours took 14996 bytes and libvpx's 14422 at the same PSNR-Y; the squares
+of noise cost the same, the timestamp, the bars and the ramp 7% more.
+Traced block by block, the blocks were mostly alike, and where they were
+the same (a timestamp 8×8 block in D207 with an 8×8 transform, 64 levels
+the same but for two or three of them by one) ours took 543 bits and
+libvpx's 447: its tokens past the first few cost 9.5 bits against 6. The
+difference was the frame's coefficient probabilities. A context's third
+probability (one against more) also picks, through the Pareto table, the
+probabilities of every bigger token (`PARETO8`). The updates were decided
+on the counts alone, each probability set to its count's if that saved
+bits on its own node: a context whose nonzero tokens were all over one
+took a third probability of 1, and with it big tokens' probabilities made
+for very large values, which every level from 2 to 34 paid for (libvpx
+29 there).
+
+Up to speed 5 at a fixed quantizer in one pass (`MODEL_UPDATE_SPEED`),
+the updates are now decided as libvpx's `update_coef_probs` decides them
+(`coef_updates_model`): each probability takes the value between its
+count's and the old one that saves the most with its update's bits, and
+the third is weighed with the bits of the big tokens it brings
+(`vp9_prob_diff_update_savings_search_model`), on their counts by class,
+which the tiles keep as they write them (`Tile`'s `big`). The pictures
+are the same, in fewer bits: the frame above 14270 bytes. Every such
+frame takes it, key or not.
+
+The first picture of three of `testsrc2` against libvpx's (FFmpeg's
+`-crf`; BD-rate at the same PSNR-Y / U / V, the mean of five grids of
+`crf`, `10` to `60` by 10 and offset by 1 to 4): +0.7 / −0.7 / −1.5%
+before, −1.8 / −3.2 / −3.8% now (each grid −1.1 to −2.1% in PSNR-Y).
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets nine points against FFmpeg's five):
+
+| | `testsrc2` | Gradient |
+| --- | --- | --- |
+| Before | −3.9 / −8.1 / −12.2% (−1.1 / −6.6 / −11.0%) | −3.0% (−3.3%) |
+| Now | −4.3 / −8.4 / −12.5% (−1.4 / −6.9 / −11.3%) | −4.1% (−4.5%) |
+
+(bytes of the IVF; PSNR-Y the same as before):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 317090, 52.83 dB | 315624 | 13165, 53.86 dB | 13117 |
+| 25 | 237356, 49.03 dB | 236397 | 9654, 52.44 dB | 9614 |
+| 35 | 140793, 43.81 dB | 140360 | 7380, 50.00 dB | 7267 |
+| 45 | 56499, 39.17 dB | 56367 | 6000, 47.04 dB | 5922 |
+| 55 | 18634, 36.15 dB | 18596 | 5344, 43.96 dB | 5287 |
+
+On the README's three clips at `q=60` to `210`, the same pictures in
+0.1 to 0.6% fewer bytes: −0.2, −0.3 and −0.3% at the same PSNR-Y, U and
+V. The search adds about 0.2 ms to a frame of the three scenes, after its
+tiles; the count is on the tiles' threads (scanning their symbols for the
+big tokens after each row cost as much again).
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` and the build
+before, rounds interleaved, the mean over each one's points of the median
+of three rounds (Cutlass at `q=60` to `210`):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 7.14 s | 6.04 s (0.85) | 6.04 s (0.85) |
+| Still scene | 4.10 s | 3.62 s (0.88) | 3.61 s (0.88) |
+| Grainy pan | 2.73 s | 2.35 s (0.86) | 2.40 s (0.88) |
+
+(In two earlier runs of an earlier form of the count the differences
+went either way by up to 2 points: noise.)
+
+Checks: of the identity check's 41 configurations, seven at a fixed
+quantizer up to speed 5 change (the synthetic 4:2:0, 4:4:4 and noisy
+4:2:0 sources at `q=60`, speeds 2 and 5; the still scene at `q=120`),
+the other 34 do not (every one at a bitrate, in two passes, or at speeds
+6 to 10). FFmpeg's `vp9` (threaded and on one thread), libvpx and this
+decoder agree on 11 new streams (44 of 44 decodes: `testsrc2` at
+`crf=15` and `55` and its first three pictures at `q=68`, the gradient at
+`crf=25`, the synthetic 4:4:4 source at `q=60` at speed 2, the noisy
+4:2:0 one at speed 5, the grainy pan in 10 bits at `q=90`, the still
+scene lossless and at `q=210`, the three scenes at `q=60`, the grainy pan
+at `q=120`). New test: at a fixed quantizer at speed 5 a sharp texture's
+frames decode as the encoder reconstructed them, the same as with the
+updates on the counts alone, in fewer bytes; at speed 6 in the same
+(fails without the change).
+
+What is left: `testsrc2` at −4.3% / −8.4% / −12.5% against FFmpeg's
+`-crf`, −1.4% / −6.9% / −11.3% with nine points; the gradient at −4.1%
+(nine points −4.5%). The first picture alone is 1.8% under libvpx's.
+
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and
 against the defaults (BD-rate; FFmpeg's time a stream with `-row-mt 1`,

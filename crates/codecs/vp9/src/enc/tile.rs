@@ -1220,6 +1220,10 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     /// below ([`Tile::put_seeds`]).
     spill: Vec<(usize, Mv)>,
     w: &'t mut Out,
+    /// The big tokens written, by class (`TWO` to `CAT6`), under each
+    /// third coefficient probability (by its [`coef_flat`] index), when
+    /// the frame's updates weigh them (`super::MODEL_UPDATE_SPEED`).
+    big: Option<&'t mut [[u32; 9]]>,
     rec: &'t mut Recon<'r, 'v, P>,
     col0: usize,
     col1: usize,
@@ -1316,6 +1320,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         s: &'s Shared<'s, P>,
         f: &'t mut State,
         w: &'t mut Out,
+        big: Option<&'t mut [[u32; 9]]>,
         rec: &'t mut Recon<'r, 'v, P>,
         (col0, col1): (usize, usize),
         mut seeds: Vec<Mv>,
@@ -1358,6 +1363,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             lanes,
             spill: Vec::new(),
             w,
+            big,
             rec,
             col0,
             col1,
@@ -5580,6 +5586,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                         e
                     } else {
                         let p2 = coef_flat(ti, pi, ri, band, ctx, 2);
+                        if let Some(big) = self.big.as_deref_mut() {
+                            count_big(big, p2, a);
+                        }
                         write_big(&mut BigOut { out: self.w, p2 }, pp, a, s.h.bit_depth)
                     };
                 }
@@ -5689,6 +5698,40 @@ pub fn prob_of(id: u16, coef: &[u8; 1728], nc: &probs::Flat) -> u32 {
         let f = usize::from((id & 0x3fff) >> 3);
         u32::from(PARETO8[usize::from(coef[f].max(1)) - 1][usize::from(id & 7)])
     }
+}
+
+/// Counts a big token of level `a` (2 or more) by its class, `TWO` to
+/// `CAT6`, under the third probability at flattened index `p2`.
+#[inline(never)]
+fn count_big(big: &mut [[u32; 9]], p2: u16, a: u32) {
+    let class = match a {
+        0..=4 => a.saturating_sub(2) as usize,
+        5..=6 => 3,
+        7..=10 => 4,
+        11..=18 => 5,
+        19..=34 => 6,
+        35..=66 => 7,
+        _ => 8,
+    };
+    if let Some(c) = big.get_mut(usize::from(p2)) {
+        c[class] += 1;
+    }
+}
+
+/// The branches of the big tokens' nodes (3 to 10, [`PARETO8`]'s
+/// columns) from their counts by class ([`Tile`]'s `big`): node `3 + k`'s
+/// zeros and ones at `k`.
+pub fn big_branches(n: &[u32; 9]) -> [[u32; 2]; 8] {
+    [
+        [n[0] + n[1] + n[2], n[3..].iter().sum()],
+        [n[0], n[1] + n[2]],
+        [n[1], n[2]],
+        [n[3] + n[4], n[5..].iter().sum()],
+        [n[3], n[4]],
+        [n[5] + n[6], n[7] + n[8]],
+        [n[5], n[6]],
+        [n[7], n[8]],
+    ]
 }
 
 /// [`prob_of`] of every symbol id, by id (0 between the ranges ids take):

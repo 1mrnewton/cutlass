@@ -1331,6 +1331,18 @@ impl Shell {
         Some(Home::at(root).ok()?.assistant_chat_file(project))
     }
 
+    /// What the open project calls itself to the assistant's kept
+    /// conversation: its id and when it was made. A project made where a
+    /// deleted one was has the same folder and the same id, and was made
+    /// at another time. Empty with no project open.
+    #[must_use]
+    pub fn assistant_chat_project(&self) -> String {
+        self.folder
+            .as_ref()
+            .map(|folder| format!("{}@{}", folder.draft.id, folder.draft.create_time))
+            .unwrap_or_default()
+    }
+
     /// The assistant's notes; empty when there are none.
     #[must_use]
     pub fn assistant_notes(&self) -> String {
@@ -12598,6 +12610,29 @@ mod tests {
             );
             last = next;
         }
+    }
+
+    #[test]
+    fn a_project_made_where_another_was_calls_itself_something_else() {
+        let root = Temp::new();
+        let mut desktop = shell();
+        assert_eq!(desktop.assistant_chat_project(), "");
+        let first = Shell::create_project(&root.path).unwrap();
+        desktop.open_folder(&first).unwrap();
+        let before = desktop.assistant_chat_project();
+        assert!(!before.is_empty());
+        // Open again: it is the same project.
+        desktop.close_project().unwrap();
+        desktop.open_folder(&first).unwrap();
+        assert_eq!(desktop.assistant_chat_project(), before);
+        // Delete it and make a new one: the same folder, the same id.
+        desktop.close_project().unwrap();
+        std::fs::remove_dir_all(&first).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let second = Shell::create_project(&root.path).unwrap();
+        assert_eq!(second, first);
+        desktop.open_folder(&second).unwrap();
+        assert_ne!(desktop.assistant_chat_project(), before);
     }
 
     #[test]

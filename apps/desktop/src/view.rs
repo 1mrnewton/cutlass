@@ -452,7 +452,8 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         view.dialogs.studio_clip(parent);
     }
     show_imported(shell, view);
-    view.assistant.follow(shell.assistant_chat_file());
+    view.assistant
+        .follow_for(shell.assistant_chat_file(), &shell.assistant_chat_project());
     if view.assistant.poll(shell) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(50));

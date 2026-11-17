@@ -121,6 +121,9 @@ pub struct Assistant {
     pending: Option<Pending>,
     /// Where this conversation is kept; `None` keeps it nowhere.
     chat_file: Option<PathBuf>,
+    /// What the project this conversation is about calls itself, kept
+    /// with the conversation; empty when the host names none.
+    chat_project: String,
     /// The file this conversation would be kept in, had it read: one that
     /// did not, and could not be set aside, is asked for on every frame
     /// and looked at once.
@@ -560,7 +563,17 @@ impl Assistant {
     /// leaves what is on screen. A turn running holds on to the file it
     /// started with.
     pub fn follow(&mut self, file: Option<PathBuf>) {
-        if self.busy() || file == self.chat_file || (file.is_some() && file == self.unkept) {
+        self.follow_for(file, "");
+    }
+
+    /// [`Self::follow`], for the project that calls itself `project`. The
+    /// file is named by where the project is, and a new project made
+    /// where a deleted one was is at the same place: a conversation kept
+    /// there for another project is set aside, not shown, and not sent to
+    /// this one's model.
+    pub fn follow_for(&mut self, file: Option<PathBuf>, project: &str) {
+        let same = file == self.chat_file && (file.is_none() || project == self.chat_project);
+        if self.busy() || same || (file.is_some() && file == self.unkept) {
             return;
         }
         self.unkept = None;
@@ -572,11 +585,34 @@ impl Assistant {
         let Some(file) = file else {
             return;
         };
-        match cutlass_agent::load_chat(&file) {
+        project.clone_into(&mut self.chat_project);
+        match cutlass_agent::load_chat_of(&file, project) {
             Ok(history) => {
                 self.history = history;
                 self.entries = shown(&self.history);
                 self.chat_file = Some(file);
+            }
+            // The conversation of a project that was here before this
+            // one. It says nothing of this project, so it is moved out of
+            // the way without a word, and this one starts empty.
+            Err(cutlass_agent::ChatMiss::Another) => {
+                self.history.clear();
+                self.entries.clear();
+                let aside = file.with_extension(EARLIER_ENDING);
+                match std::fs::rename(&file, &aside) {
+                    Ok(()) => {
+                        cutlass_logger::info!(
+                            "assistant chat: an earlier project's conversation is kept as {}",
+                            aside.display()
+                        );
+                        self.chat_file = Some(file);
+                    }
+                    Err(error) => {
+                        cutlass_logger::warn!("assistant chat: {}: {error}", file.display());
+                        self.chat_file = None;
+                        self.unkept = Some(file);
+                    }
+                }
             }
             // The file is there and does not read: a newer build wrote it,
             // or it is damaged. The next turn would write a new
@@ -614,7 +650,7 @@ impl Assistant {
         let Some(file) = &self.chat_file else {
             return;
         };
-        if let Err(error) = cutlass_agent::save_chat(file, &self.history) {
+        if let Err(error) = cutlass_agent::save_chat_of(file, &self.chat_project, &self.history) {
             cutlass_logger::warn!("assistant chat: {error}");
         }
     }
@@ -930,6 +966,10 @@ const PENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// was used when it was read.
 const OLD_RESULT_LIMIT: usize = 2000;
 
+/// The ending the conversation of an earlier project at the same place is
+/// kept under.
+const EARLIER_ENDING: &str = "earlier";
+
 /// The ending a conversation file that does not read is kept under.
 const UNREAD_ENDING: &str = "unread";
 
@@ -1163,6 +1203,51 @@ mod tests {
         assistant.clear();
         assert!(!first.exists());
         assert!(!second.exists());
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_project_made_where_another_was_does_not_get_its_conversation() {
+        let (mut shell, path) = shell_with_project("earlier");
+        let file = path.join("chats").join("a.json");
+        let aside = path.join("chats").join("a.earlier");
+        let hello = |assistant: &mut Assistant, shell: &mut Shell, words: &str| {
+            assistant.start(
+                LocalModel::scripted(vec![completion("Hello.", Vec::new())]),
+                8,
+                words,
+            );
+            finish(assistant, shell);
+        };
+        // The first project's conversation is kept under its name.
+        let mut assistant = Assistant::default();
+        assistant.follow_for(Some(file.clone()), "project-2@1700");
+        hello(&mut assistant, &mut shell, "about the first project");
+        assert_eq!(assistant.history.len(), 2);
+        // It is read back for that project, as before.
+        let mut again = Assistant::default();
+        again.follow_for(Some(file.clone()), "project-2@1700");
+        assert_eq!(again.history.len(), 2);
+        // A project made later in the same folder starts with nothing
+        // shown and nothing to send, and the first one's words are put
+        // aside, whole.
+        let mut later = Assistant::default();
+        later.follow_for(Some(file.clone()), "project-2@1900");
+        assert!(later.history.is_empty() && later.entries.is_empty());
+        assert!(!file.exists());
+        assert_eq!(cutlass_agent::load_chat(&aside).unwrap(), assistant.history);
+        // What it says is kept as its own.
+        hello(&mut later, &mut shell, "about the second project");
+        assert_eq!(
+            cutlass_agent::load_chat_of(&file, "project-2@1900")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            cutlass_agent::load_chat_of(&file, "project-2@1700"),
+            Err(cutlass_agent::ChatMiss::Another)
+        );
         let _ = std::fs::remove_dir_all(&path);
     }
 

@@ -432,6 +432,26 @@ pub fn apply_masks(
     width: u32,
     to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
 ) {
+    apply_cover(rgba, width, to_clip, |u, v| stack_coverage(masks, u, v));
+}
+
+/// Multiply premultiplied RGBA by what `masks`, shapes and drawn pictures,
+/// keep, as [`apply_masks`].
+pub fn apply_drawn(
+    masks: &[DrawnMask],
+    rgba: &mut [u8],
+    width: u32,
+    to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
+) {
+    apply_cover(rgba, width, to_clip, |u, v| drawn_coverage(masks, u, v));
+}
+
+fn apply_cover(
+    rgba: &mut [u8],
+    width: u32,
+    to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
+    cover: impl Fn(f32, f32) -> f32,
+) {
     let width = width as usize;
     if width == 0 {
         return;
@@ -442,7 +462,7 @@ pub fn apply_masks(
         }
         #[allow(clippy::cast_precision_loss)]
         let (x, y) = ((index % width) as f32 + 0.5, (index / width) as f32 + 0.5);
-        let keep = to_clip(x, y).map_or(0.0, |(u, v)| stack_coverage(masks, u, v));
+        let keep = to_clip(x, y).map_or(0.0, |(u, v)| cover(u, v));
         if keep >= 1.0 {
             continue;
         }
@@ -477,6 +497,32 @@ pub fn limit_masks(
     width: u32,
     to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
 ) {
+    limit_cover(before, after, width, to_clip, |u, v| {
+        stack_coverage(masks, u, v)
+    });
+}
+
+/// Keep `after` where `masks`, shapes and drawn pictures, keep and
+/// `before` where they do not, as [`limit_masks`].
+pub fn limit_drawn(
+    masks: &[DrawnMask],
+    before: &[u8],
+    after: &mut [u8],
+    width: u32,
+    to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
+) {
+    limit_cover(before, after, width, to_clip, |u, v| {
+        drawn_coverage(masks, u, v)
+    });
+}
+
+fn limit_cover(
+    before: &[u8],
+    after: &mut [u8],
+    width: u32,
+    to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
+    cover: impl Fn(f32, f32) -> f32,
+) {
     let width = width as usize;
     if width == 0 || before.len() != after.len() {
         return;
@@ -493,7 +539,7 @@ pub fn limit_masks(
         #[allow(clippy::cast_precision_loss)]
         let (x, y) = ((index % width) as f32 + 0.5, (index / width) as f32 + 0.5);
         let keep = to_clip(x, y)
-            .map_or(0.0, |(u, v)| stack_coverage(masks, u, v))
+            .map_or(0.0, |(u, v)| cover(u, v))
             .clamp(0.0, 1.0);
         if keep >= 1.0 {
             continue;

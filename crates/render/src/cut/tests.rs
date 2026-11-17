@@ -1,4 +1,7 @@
-use cutlass_effects::{CanvasMask, Mask, MaskShape, Selection};
+use cutlass_effects::{
+    ArtPicture, CanvasMask, CanvasMasks, DrawnMask, Mask, MaskMode, MaskShape, Selection,
+    apply_drawn,
+};
 use cutlass_gpu::Placement;
 use cutlass_model::Micros;
 
@@ -91,7 +94,8 @@ fn a_clip_mask_cuts_as_the_cpu_does() {
         let mut expected = scene();
         mask.apply(&mut expected, SIZE.0, to_clip(frame));
         assert_ne!(expected, scene(), "{shape:?} cuts something");
-        let got = draw(&renderer, Layer::Cut(&CanvasMask { mask, frame })).expect("draw");
+        let masks = CanvasMask { mask, frame }.into();
+        let got = draw(&renderer, Layer::Cut(&masks)).expect("draw");
         within(&format!("{shape:?}"), &got, &expected);
     }
 }
@@ -197,7 +201,8 @@ fn a_cut_on_a_shrunk_canvas_lands_where_it_does_on_the_full_one() {
             ..Mask::new(MaskShape::Linear)
         },
         frame: full_frame(SIZE),
-    };
+    }
+    .into();
     let half = crate::preview_size(SIZE, 0.5);
     let canvas = renderer.canvas(half.0, half.1).expect("canvas");
     let bytes = scene();
@@ -227,4 +232,111 @@ fn a_cut_on_a_shrunk_canvas_lands_where_it_does_on_the_full_one() {
     }
     // One side is kept and the other cleared.
     assert_ne!(got[3] > 0, got[((half.0 - 1) * 4 + 3) as usize] > 0);
+}
+
+/// A soft round blot, `side` pixels square, reaching `reach` past its box.
+fn blot(side: u32, reach: f32) -> ArtPicture {
+    let alpha: Vec<u8> = (0..side * side)
+        .map(|index| {
+            let (x, y) = ((index % side) as f32, (index / side) as f32);
+            let middle = side as f32 / 2.0;
+            let far = ((x - middle).powi(2) + (y - middle * 0.8).powi(2)).sqrt() / middle;
+            ((1.0 - far).clamp(0.0, 1.0) * 255.0) as u8
+        })
+        .collect();
+    ArtPicture {
+        width: side,
+        height: side,
+        alpha: alpha.into(),
+        reach,
+    }
+}
+
+/// Shapes and drawn pictures in each mode, as stacks of one to four.
+fn stacks() -> Vec<Vec<DrawnMask>> {
+    let circle = DrawnMask::shape(Mask {
+        x: -0.3,
+        feather: 0.2,
+        ..Mask::new(MaskShape::Circle)
+    });
+    let star = |mode| {
+        DrawnMask::shape(Mask {
+            x: 0.25,
+            y: 0.1,
+            rotation: 12.0,
+            mode,
+            ..Mask::new(MaskShape::Star)
+        })
+    };
+    let drawn = |mode, invert| DrawnMask {
+        mask: Mask {
+            x: 0.1,
+            width: 0.6,
+            height: 0.7,
+            rotation: -20.0,
+            mode,
+            invert,
+            ..Mask::new(MaskShape::Pen)
+        },
+        art: Some(blot(23, 1.25)),
+    };
+    let rectangle = DrawnMask::shape(Mask {
+        width: 0.8,
+        height: 0.3,
+        round: 0.5,
+        mode: MaskMode::Intersect,
+        ..Mask::new(MaskShape::Rectangle)
+    });
+    vec![
+        vec![drawn(MaskMode::Add, false)],
+        vec![circle.clone(), star(MaskMode::Add)],
+        vec![circle.clone(), star(MaskMode::Subtract)],
+        vec![circle.clone(), star(MaskMode::Intersect)],
+        vec![star(MaskMode::Subtract), drawn(MaskMode::Add, true)],
+        vec![
+            circle.clone(),
+            drawn(MaskMode::Add, false),
+            star(MaskMode::Subtract),
+            rectangle,
+        ],
+        // A drawn mask with no picture yet keeps nothing.
+        vec![circle, DrawnMask::shape(Mask::new(MaskShape::Brush))],
+    ]
+}
+
+#[test]
+fn a_stack_of_masks_cuts_as_the_cpu_does() {
+    let Some(renderer) = renderer() else { return };
+    let frame = full_frame(SIZE);
+    for (index, masks) in stacks().into_iter().enumerate() {
+        let mut expected = scene();
+        apply_drawn(&masks, &mut expected, SIZE.0, to_clip(frame));
+        assert_ne!(expected, scene(), "stack {index} cuts something");
+        let stack = CanvasMasks { masks, frame };
+        let got = draw(&renderer, Layer::Cut(&stack)).expect("draw");
+        within(&format!("stack {index}"), &got, &expected);
+    }
+}
+
+#[test]
+fn a_drawn_mask_larger_than_the_device_is_refused() {
+    let Some(renderer) = renderer() else { return };
+    let side = 1 << 17;
+    let stack = CanvasMasks {
+        masks: vec![DrawnMask {
+            mask: Mask::new(MaskShape::Pen),
+            art: Some(ArtPicture {
+                width: side,
+                height: 1,
+                alpha: vec![255; side as usize].into(),
+                reach: 1.0,
+            }),
+        }],
+        frame: full_frame(SIZE),
+    };
+    let result = draw(&renderer, Layer::Cut(&stack));
+    assert!(
+        matches!(result, Err(RenderError::Size { .. })),
+        "{result:?}"
+    );
 }

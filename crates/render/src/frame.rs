@@ -314,7 +314,7 @@ mod tests {
                 layers: vec![
                     picture_layer(width, height, grey.clone()),
                     GpuLayer {
-                        source: GpuSource::Effect(vec![invert], Some(mask)),
+                        source: GpuSource::Effect(vec![invert], Some(mask.into())),
                         placement: Placement::canvas(width, height),
                         backdrop: None,
                     },

@@ -316,8 +316,10 @@ fn gpu_layers(
                 .filter(|mark| mark.bound == Some((layer.key.1, layer.key.2)))
                 .map(|mark| {
                     effect(RecipeMark {
+                        key: mark.key,
                         steps: mark.steps.clone(),
-                        ..*mark
+                        bound: mark.bound,
+                        mask: mark.mask.clone(),
                     })
                 }),
         );
@@ -2174,7 +2176,7 @@ mod recipe_tests {
         else {
             panic!("no masked effect layer");
         };
-        assert_eq!(mask.mask, shape);
+        assert_eq!(mask.masks, [cutlass_effects::DrawnMask::shape(shape)]);
         // The canvas is 4 by 2; its middle is the shape's middle, and a
         // corner is outside a circle half the canvas across.
         assert!(mask.coverage_at(2.0, 1.0) > 0.99);

@@ -272,6 +272,91 @@ fn a_clips_mask_and_selection_match() {
 }
 
 #[test]
+fn a_clips_masks_and_colour_masks_joined_by_their_modes_match() {
+    let Some(renderer) = renderer() else { return };
+    let x = cutlass_model::mask_key(cutlass_model::MASK_KEYS[0], Some("hole"));
+    let draft = apply(
+        scene(),
+        &[
+            Request::AddMask {
+                segment_id: clip(),
+                material_id: "band".into(),
+                mask: Mask {
+                    width: 0.9,
+                    height: 0.4,
+                    feather: 0.2,
+                    ..Mask::new(MaskShape::Rectangle)
+                },
+                color: false,
+            },
+            Request::AddMask {
+                segment_id: clip(),
+                material_id: "hole".into(),
+                mask: Mask {
+                    x: 0.4,
+                    width: 0.25,
+                    height: 0.25,
+                    mode: cutlass_effects::MaskMode::Subtract,
+                    ..Mask::new(MaskShape::Star)
+                },
+                color: false,
+            },
+            Request::AddMask {
+                segment_id: clip(),
+                material_id: "meet".into(),
+                mask: Mask {
+                    rotation: 30.0,
+                    mode: cutlass_effects::MaskMode::Intersect,
+                    ..Mask::new(MaskShape::Mirror)
+                },
+                color: false,
+            },
+            Request::KeyValues {
+                segment_id: clip(),
+                offset: Micros(0),
+                values: vec![(x.clone(), -0.3)],
+            },
+            Request::KeyValues {
+                segment_id: clip(),
+                offset: Micros(1_000_000),
+                values: vec![(x, 0.5)],
+            },
+            adjust("exposure", 0.7, "bright"),
+            Request::AddMask {
+                segment_id: clip(),
+                material_id: "lit".into(),
+                mask: Mask::new(MaskShape::Circle),
+                color: true,
+            },
+            Request::AddMask {
+                segment_id: clip(),
+                material_id: "unlit".into(),
+                mask: Mask {
+                    x: 0.2,
+                    width: 0.2,
+                    height: 0.6,
+                    mode: cutlass_effects::MaskMode::Subtract,
+                    ..Mask::new(MaskShape::Rectangle)
+                },
+                color: true,
+            },
+        ],
+    );
+    for time in [0, 500_000] {
+        let (gpu, cpu, sources) = both(&renderer, &draft, time);
+        agree(&format!("masks at {time}"), &gpu, &cpu);
+        let cut = sources.iter().find_map(|source| match source {
+            GpuSource::Nested(child) => child.layers.iter().find_map(|layer| match &layer.source {
+                GpuSource::Cut(masks) => Some(masks.masks.len()),
+                _ => None,
+            }),
+            _ => None,
+        });
+        assert_eq!(cut, Some(3), "{sources:?}");
+    }
+}
+
+#[test]
 fn an_adjustment_layer_matches_over_the_clips_below_it() {
     let Some(renderer) = renderer() else { return };
     let layer = SegmentId::new("layer");

@@ -82,6 +82,22 @@ fn open_depth(
     Some(source)
 }
 
+/// Open the matte video that cuts clip `id`, when it has one, decoding
+/// ahead like the clip.
+fn open_matte(
+    media: &ReaderFactory,
+    draft: &Draft,
+    id: &SegmentId,
+    root: Option<&Path>,
+    patient: bool,
+) -> Option<VideoSource> {
+    let (path, from) = crate::matte::matte_video(draft, root, id)?;
+    let mut source = open_segment_from(media, draft, id, ClockKind::Export, 1, path, from).ok()?;
+    let _ = source.read_ahead(media, READ_AHEAD);
+    source.set_patient(patient);
+    Some(source)
+}
+
 /// A shape drawn once and shown on every frame after: the shape as it was
 /// drawn, the density it was asked for, the density it was drawn at, and
 /// the picture.
@@ -104,6 +120,9 @@ pub struct OpenClips {
     /// Relit clips' depth videos for this revision; `None` is a clip
     /// whose depth is not made yet.
     relights: HashMap<SegmentId, Option<VideoSource>>,
+    /// Cut-out clips' matte videos for this revision; `None` is a clip
+    /// whose matte is not made yet.
+    mattes: HashMap<SegmentId, Option<VideoSource>>,
     nests: HashMap<SegmentId, OpenClips>,
     images: HashMap<String, CpuBytes>,
     /// Title rasters by segment, with the density each was drawn at. A
@@ -136,6 +155,7 @@ impl OpenClips {
             root: None,
             sources: HashMap::new(),
             relights: HashMap::new(),
+            mattes: HashMap::new(),
             nests: HashMap::new(),
             images: HashMap::new(),
             texts: HashMap::new(),
@@ -156,6 +176,7 @@ impl OpenClips {
             .sources
             .values()
             .chain(self.relights.values().flatten())
+            .chain(self.mattes.values().flatten())
         {
             source.set_patient(patient);
         }
@@ -172,6 +193,7 @@ impl OpenClips {
             .sources
             .values()
             .chain(self.relights.values().flatten())
+            .chain(self.mattes.values().flatten())
         {
             stale |= source.take_stale();
         }
@@ -185,6 +207,7 @@ impl OpenClips {
     pub fn clear(&mut self) {
         self.sources.clear();
         self.relights.clear();
+        self.mattes.clear();
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
@@ -247,6 +270,33 @@ impl OpenClips {
             self.relights.insert(segment.id.clone(), depth);
         }
         Some(lit)
+    }
+
+    /// `segment`'s Remove BG settings, opening its matte video the first
+    /// time it is drawn this revision. `None` when it has none.
+    fn matting(
+        &mut self,
+        media: &ReaderFactory,
+        draft: &Draft,
+        segment: &Segment,
+    ) -> Option<cutlass_effects::Matting> {
+        let matting = cutlass_effects::segment_matting(draft, segment)?;
+        if !self.mattes.contains_key(&segment.id) {
+            let matte = open_matte(
+                media,
+                draft,
+                &segment.id,
+                self.root.as_deref(),
+                self.patient,
+            );
+            self.mattes.insert(segment.id.clone(), matte);
+        }
+        Some(matting)
+    }
+
+    /// The matte video opened for clip `id`.
+    fn matte(&self, id: &SegmentId) -> Option<&VideoSource> {
+        self.mattes.get(id).and_then(Option::as_ref)
     }
 
     /// The depth video opened for clip `id`.
@@ -359,6 +409,7 @@ impl OpenClips {
         }
         self.sources.clear();
         self.relights.clear();
+        self.mattes.clear();
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
@@ -426,6 +477,8 @@ pub(crate) struct Placed<'a> {
     steady: Option<cutlass_motion::Correction>,
     /// The clip's depth video and the light over it at this frame.
     relight: Option<(&'a VideoSource, cutlass_effects::Lighting)>,
+    /// The clip's matte video and its Remove BG settings.
+    matte: Option<(&'a VideoSource, cutlass_effects::Matting)>,
 }
 
 pub(crate) fn picture_transform(
@@ -584,13 +637,14 @@ pub(crate) fn video_layers<'a>(
             let backdrop = backdrop_for(draft, segment, media, clips, width, height, time);
             let steady = crate::steady::steady_at(clips, draft, segment, time);
             let light = clips.light(media, draft, segment, time);
+            let matting = clips.matting(media, draft, segment);
             chosen.push((
                 segment.render_index,
                 track_index,
                 segment_index,
                 segment.id.clone(),
                 transform,
-                (crop, crop_scale, steady, light),
+                (crop, crop_scale, steady, light, matting),
                 backdrop,
             ));
         }
@@ -602,7 +656,7 @@ pub(crate) fn video_layers<'a>(
         segment_index,
         id,
         transform,
-        (crop, crop_scale, steady, light),
+        (crop, crop_scale, steady, light, matting),
         backdrop,
     ) in chosen
     {
@@ -610,6 +664,7 @@ pub(crate) fn video_layers<'a>(
             continue;
         };
         let relight = clips.depth(&id).zip(light);
+        let matte = clips.matte(&id).zip(matting);
         layers.push(VideoLayer {
             render_index,
             track_index,
@@ -624,6 +679,7 @@ pub(crate) fn video_layers<'a>(
                 backdrop,
                 steady,
                 relight,
+                matte,
             },
         });
     }
@@ -670,8 +726,10 @@ pub(crate) fn video_picture(
     let backdrop = backdrop_for(draft, segment, media, clips, width, height, time);
     let steady = crate::steady::steady_at(clips, draft, segment, time);
     let light = clips.light(media, draft, segment, time);
+    let matting = clips.matting(media, draft, segment);
     let source = clips.sources.get(&segment.id)?;
     let relight = clips.depth(&segment.id).zip(light);
+    let matte = clips.matte(&segment.id).zip(matting);
     let placed = Placed {
         source,
         width,
@@ -682,6 +740,7 @@ pub(crate) fn video_picture(
         backdrop,
         steady,
         relight,
+        matte,
     };
     match placed.sample(time) {
         Sample::Ready(Picture::Cpu(bytes)) => Some(bytes),
@@ -791,6 +850,7 @@ impl PictureSource for Placed<'_> {
         match picture {
             Picture::Cpu(bytes) => {
                 let (bytes, display) = self.relit(bytes, time);
+                let (bytes, display) = self.cut_out(bytes, display, time);
                 finish_picture(
                     (self.width, self.height),
                     bytes,
@@ -830,6 +890,40 @@ impl Placed<'_> {
         )
     }
 
+    /// `picture`, turned by `display`, cut down to the clip's matte at
+    /// `time` and turned upright, when the clip has one and it is decoded.
+    fn cut_out(
+        &self,
+        picture: CpuBytes,
+        display: DisplayQuarter,
+        time: Micros,
+    ) -> (CpuBytes, DisplayQuarter) {
+        let Some(matte) = self.decoded_matte(time) else {
+            return (picture, display);
+        };
+        let Some((_, matting)) = &self.matte else {
+            return (picture, display);
+        };
+        let Some(upright) = orient(picture.clone(), display) else {
+            return (picture, display);
+        };
+        (
+            crate::matte::cut_out(upright, &matte, matting),
+            DisplayQuarter::Zero,
+        )
+    }
+
+    /// The clip's matte at `time`, upright, when it has one and it is
+    /// decoded.
+    fn decoded_matte(&self, time: Micros) -> Option<CpuBytes> {
+        let (matte, _) = self.matte.as_ref()?;
+        let Sample::Ready(Picture::Cpu(grey)) = matte.sample(time) else {
+            return None;
+        };
+        let grey = orient(grey, matte.display())?;
+        (grey.width() > 0 && grey.height() > 0).then_some(grey)
+    }
+
     /// This clip as GPU layers: a color backdrop, if any, then the decoded
     /// picture with the maps that place it, over a blurred copy of it when
     /// the backdrop is a blur.
@@ -842,6 +936,11 @@ impl Placed<'_> {
     /// relit clip whose depth is decoded is drawn upright on its own
     /// canvas and lit there.
     pub(crate) fn gpu(&self, time: Micros) -> Option<Vec<GpuLayer>> {
+        // A cut-out clip is drawn on the CPU, which cuts, feathers and
+        // outlines it; until its matte decodes it draws uncut either way.
+        if self.decoded_matte(time).is_some() {
+            return None;
+        }
         let (backdrop, blur) = match &self.backdrop {
             Backdrop::None => (None, None),
             Backdrop::Color(pixel) => (

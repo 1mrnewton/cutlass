@@ -103,14 +103,14 @@ mod tests {
     }
 
     #[test]
-    fn the_window_drops_the_farthest_picture_and_a_miss_is_immediate() {
+    fn the_window_drops_the_farthest_picture_and_covers_start_to_before_end() {
         let mut window = FrameWindow::new(2).expect("window");
         assert!(FrameWindow::<u8>::new(0).is_err());
         assert!(FrameWindow::<u8>::new(MAX_WINDOW + 1).is_err());
-        let decodes = 0_u32;
         assert!(window.get(0).is_none());
-        assert_eq!(decodes, 0, "a miss does not decode");
         window.insert(0, 10, 1_u8);
+        assert_eq!(window.get(9), Some(&1));
+        assert!(window.get(10).is_none(), "the end is not covered");
         window.insert(10, 20, 2);
         window.insert(100, 110, 3);
         assert_eq!(window.len(), 2);
@@ -120,6 +120,10 @@ mod tests {
         window.insert(10, 20, 9);
         assert_eq!(window.get(15), Some(&9));
         assert_eq!(window.len(), 2);
-        assert_eq!(decodes, 0);
+
+        // A picture with no length still covers its own start.
+        window.insert(200, 200, 4);
+        assert_eq!(window.get(200), Some(&4));
+        assert!(window.get(201).is_none());
     }
 }

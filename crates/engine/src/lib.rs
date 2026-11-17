@@ -2,9 +2,8 @@
 //!
 //! The shell registers container and decoder implementations. This crate
 //! opens them, maps timeline time, caches pictures, and mixes audio.
-//! A filmstrip and a waveform are smaller caches for the timeline.
-//! Asking for one before it is filled is not ready and does not decode.
-//! Nested playback is not in this crate.
+//! Timeline thumbnails and waveforms are read on their own threads, and a
+//! lookup never decodes. Nested playback is not in this crate.
 
 #![forbid(unsafe_code)]
 
@@ -12,15 +11,12 @@ mod ahead;
 mod cache;
 mod clock;
 mod error;
-mod filmstrip;
 mod map;
 mod mix;
-mod preload;
 mod reader;
 mod scene;
 mod source;
 mod thumbs;
-mod waveform;
 mod waves;
 
 pub use ahead::BEHIND;
@@ -28,7 +24,6 @@ pub use cache::{FrameWindow, MAX_WINDOW};
 pub use clock::{ClockKind, MediaClock};
 pub use cutlass_container::DisplayQuarter;
 pub use error::EngineError;
-pub use filmstrip::{MAX_EDGE, MAX_STRIP, StripCell};
 pub use map::{
     MapError, MapSpeed, TimelineMap, contributes_sound, is_graphic, map_timeline, mean_speed,
     media_path, micros_to_ticks, original_sound_is_separate, placement_of, speed_at,
@@ -50,7 +45,6 @@ pub use thumbs::{
     MAX_FRAME_ROWS, MAX_FRAMES, MAX_THUMB_BYTES, MAX_THUMBS, THUMB_HEIGHT, Thumb, ThumbCache,
     ThumbKey, Thumbnails, frames_of,
 };
-pub use waveform::{MAX_BUCKETS, Peak, Waveform};
 pub use waves::{BUCKETS_PER_SECOND, Peaks, Waveforms};
 
 #[cfg(test)]

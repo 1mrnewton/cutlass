@@ -232,23 +232,39 @@ impl Shell {
         self.agent_export = Some(AgentExport { id, path, done });
     }
 
+    /// An export job landed for `path`: written, or why not. When it is
+    /// the one the assistant asked for and still waits on, this is what a
+    /// poll of it answers from now on.
+    pub(super) fn agent_export_landed(
+        &mut self,
+        path: &std::path::Path,
+        written: Result<&(), &super::ShellError>,
+        left_out: Option<&crate::shell::LeftOut>,
+    ) {
+        let Some(export) = self.agent_export.as_mut() else {
+            return;
+        };
+        if export.done.is_some() || export.path != path {
+            return;
+        }
+        export.done = Some(match written {
+            Ok(()) => Ok(super::offscreen::wrote(&export.path, left_out)),
+            Err(error) => Err(error.to_string()),
+        });
+    }
+
     /// The assistant's last export and what a poll of it answers: `None`
     /// while it writes, the file once written, or why it failed.
     pub(crate) fn agent_export_now(&mut self) -> Option<(String, Result<Option<String>, String>)> {
         self.poll_job();
         let writing = self.job().is_some_and(|job| job.label == "Export");
-        let written = self.exported.clone();
-        let notice = self.notice.clone();
-        let left_out = self.export_left_out().cloned();
         let export = self.agent_export.as_mut()?;
+        // A job that landed has answered already. One that is neither
+        // writing nor landed was stopped, or its project closed under it.
+        // What the window says now is about some other export, and is not
+        // this one's answer.
         if export.done.is_none() && !writing {
-            export.done = Some(if written.as_deref() == Some(export.path.as_path()) {
-                Ok(super::offscreen::wrote(&export.path, left_out.as_ref()))
-            } else if notice.is_empty() {
-                Err("the export stopped before it finished".to_owned())
-            } else {
-                Err(notice)
-            });
+            export.done = Some(Err("the export stopped before it finished".to_owned()));
         }
         let state = match &export.done {
             None => Ok(None),
@@ -952,6 +968,55 @@ mod tests {
             .outcome;
         assert!(refused.is_error && refused.content.contains(".png"));
         assert!(!photo.exists());
+
+        // The assistant starts another movie and does not ask after it.
+        // It finishes, and then the user exports a file of their own: a
+        // poll still answers for the assistant's file, where it answered
+        // with whatever the window said of the last export.
+        let second = temp.path.join("second.mp4");
+        let started = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", second.display())),
+                &[],
+            )
+            .outcome;
+        assert_eq!(started.content, "job=export-3", "{}", started.content);
+        crate::shell::tests::land_job(&mut desktop);
+        assert_eq!(&std::fs::read(&second).unwrap()[4..8], b"ftyp");
+        let own = temp.path.join("the users own.mp4");
+        desktop
+            .export(crate::shell::ExportRequest {
+                path: own.clone(),
+                codec: CodecId::H264,
+                ..crate::shell::ExportRequest::default()
+            })
+            .unwrap();
+        crate::shell::tests::land_job(&mut desktop);
+        assert_eq!(desktop.exported(), Some(own.as_path()));
+        let polled = desktop
+            .run_agent_tool(&call("export.poll", "export-3"), &[])
+            .outcome;
+        assert!(!polled.is_error, "{}", polled.content);
+        assert_eq!(
+            polled.content,
+            format!("finished: wrote {}", second.display())
+        );
+        // An export that was stopped says so, in its own words.
+        let third = temp.path.join("third.mp4");
+        let started = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", third.display())),
+                &[],
+            )
+            .outcome;
+        assert_eq!(started.content, "job=export-4", "{}", started.content);
+        desktop.cancel_job();
+        crate::shell::tests::land_job(&mut desktop);
+        let stopped = desktop
+            .run_agent_tool(&call("export.poll", "export-4"), &[])
+            .outcome;
+        assert!(stopped.is_error, "{}", stopped.content);
+        assert_eq!(stopped.content, "the export stopped before it finished");
     }
 
     #[test]

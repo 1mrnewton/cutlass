@@ -8100,7 +8100,12 @@ impl Shell {
                 .map(|_| ());
             }
             Box::new(move |shell: &mut Shell| {
-                written.map_err(export_failure)?;
+                let written = written.map_err(export_failure);
+                // An export the assistant asked for is answered from what
+                // became of this job, not from whatever the window shows
+                // when the assistant next asks.
+                shell.agent_export_landed(&first, written.as_ref(), left_out.as_ref());
+                written?;
                 shell.set_notice(format!("Exported {name}"));
                 shell.exported = Some(first);
                 shell.export_left_out = left_out;

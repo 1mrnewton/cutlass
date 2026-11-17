@@ -854,14 +854,14 @@ mod tests {
             .run_agent_tool(
                 &call(
                     "settings.set",
-                    r#"{"expected_generation":0,"changes":{"step_cap":40}}"#,
+                    r#"{"expected_generation":0,"changes":{"step_cap":16}}"#,
                 ),
                 &[],
             )
             .outcome;
         assert!(!set.is_error, "{}", set.content);
-        assert_eq!(desktop.settings().step_cap, 40);
-        assert_eq!(cutlass_settings::load(&file).unwrap().settings.step_cap, 40);
+        assert_eq!(desktop.settings().step_cap, 16);
+        assert_eq!(cutlass_settings::load(&file).unwrap().settings.step_cap, 16);
         // Turning on the cloud model waits for the user's allow.
         let cloud = desktop.run_agent_tool(
             &call(

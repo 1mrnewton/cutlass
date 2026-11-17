@@ -5,8 +5,9 @@ use cutlass_codec::ContainerId;
 use cutlass_container::{Demux, OpenError, Probe, ProbeResult};
 use cutlass_effects::{MATTING, Matting, MattingMode, PickClick};
 use cutlass_engine::decoded_picture;
+use cutlass_export::write_pictures;
 use cutlass_isobmff::IsoBmffFile;
-use cutlass_model::{Draft, MaterialVideo, Micros, RawMaterial, Segment, TimeRange};
+use cutlass_model::{Draft, FrameRate, MaterialVideo, Micros, RawMaterial, Segment, TimeRange};
 use cutlass_store::find_matte;
 
 use super::*;
@@ -236,6 +237,84 @@ fn auto_removal_writes_a_grey_matte_video_its_stretch_finds() {
         assert!(row[2] > 230, "{row:?}");
         assert!(row[W as usize - 3] < 25, "{row:?}");
     }
+}
+
+/// Keeps a share of each frame's columns that tells which movie frame it
+/// was: frame `k` keeps `k` tenths.
+struct Numbered;
+
+impl Matter for Numbered {
+    fn id(&self) -> &str {
+        "numbered"
+    }
+
+    fn matte(&mut self, image: &Image<'_>) -> Result<Matte, VisionError> {
+        let kept = image.width * frame_of(image.rgb) as u32 / 10;
+        let alpha = (0..image.width * image.height)
+            .map(|i| if i % image.width < kept { 255 } else { 0 })
+            .collect();
+        Ok(Matte::new(image.width, image.height, alpha).unwrap())
+    }
+}
+
+#[test]
+fn a_movies_matte_has_a_picture_for_each_of_its_own_frames_at_its_time() {
+    // The project runs at 4 a second and the clip starts between the
+    // file's frames: the matte still follows the file's 10 a second.
+    let (temp, mut draft) = project(&Matting::auto());
+    draft.fps = 4.0;
+    draft.tracks[0].segments[0].source_range = Some(TimeRange::new(250_000, 400_000));
+    let ask = ask(&temp, &draft);
+    let file = matte_clip(
+        &readers(),
+        &encoders(),
+        &mut Numbered,
+        &ask,
+        &temp.0,
+        &mut |_| true,
+    )
+    .unwrap();
+    // Frames 2 to 6 show in 0.25 s to 0.65 s: the matte runs from frame 2's
+    // start to frame 6's end.
+    let held = TimeRange::new(200_000, 500_000);
+    assert_eq!(
+        find_matte(&temp.0, &ask.key(), &ask.range),
+        Some((file.clone(), held))
+    );
+    let mut media = readers().open(&file).unwrap();
+    assert_eq!(media.info().duration, Some(Micros(500_000)));
+    for (k, frame) in (2..=6).enumerate() {
+        let start = k as i64 * 100_000;
+        for at in [start, start + 99_999] {
+            let held = media
+                .decode_at(Micros(at), &TimeRange::new(0, 500_000))
+                .unwrap();
+            assert_eq!(held.start, Micros(start), "at {at}");
+            let Ok(cutlass_picture::Picture::Cpu(picture)) = decoded_picture(&held.frame) else {
+                panic!("not in memory");
+            };
+            let row: Vec<u8> = picture.rgba()[..W as usize * 4]
+                .chunks(4)
+                .map(|p| p[0])
+                .collect();
+            let kept = row.iter().filter(|grey| **grey > 128).count();
+            let want = W as usize * frame / 10;
+            assert!(
+                kept.abs_diff(want) <= 1,
+                "frame {frame} at {at}: {kept} kept, {row:?}"
+            );
+        }
+    }
+}
+
+/// A matte made at the project's rate is not the one a movie uses now.
+#[test]
+fn a_movies_matte_is_kept_whatever_the_projects_rate() {
+    let (temp, mut draft) = project(&Matting::auto());
+    let at_ten = ask(&temp, &draft).key();
+    draft.fps = 30.0;
+    assert_eq!(ask(&temp, &draft).key(), at_ten);
+    assert_eq!(at_ten.rate, 0.0);
 }
 
 /// Movies and still pictures.
@@ -589,10 +668,12 @@ fn packed_mattes_unpack_to_the_same_bytes() {
 }
 
 #[test]
-fn picks_land_on_the_nearest_frame_and_two_on_one_keep_the_later() {
+fn picks_land_on_the_frame_showing_then_and_two_on_one_keep_the_later() {
     let (temp, draft) = project(&picked(&[(200_000, 0.1), (240_000, 0.2), (900_000, 0.3)]));
     let ask = ask(&temp, &draft);
-    let frames = picked_frames(&ask.matting.picks, &ask, 4);
+    let times = [200_000, 300_000, 400_000, 500_000].map(Micros);
+    assert_eq!(ask.range.start, times[0]);
+    let frames = picked_frames(&ask.matting.picks, &times);
     let at: Vec<usize> = frames.iter().map(|(k, _)| *k).collect();
     assert_eq!(at, vec![0, 3]);
     let kept = &frames[0].1.pick.clicks[0];

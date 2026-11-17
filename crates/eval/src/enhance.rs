@@ -428,6 +428,23 @@ impl EnhanceFrames {
         Self::open_with(readers, ask, true)
     }
 
+    /// The file's own frames that show in `ask`'s stretch, each at its own
+    /// time, and when the last stops showing: what a Remove BG matte
+    /// follows. A still picture is refused.
+    pub fn open_own(
+        readers: &ReaderFactory,
+        ask: &EnhanceAsk,
+    ) -> Result<(Self, Micros), EnhanceError> {
+        let mut frames = Self::open(readers, ask)?;
+        let (times, end) = own_times(&mut frames.media, &ask.range)?;
+        frames.blends = (0..times.len())
+            .map(|from| Blend { from, at: 0.0 })
+            .collect();
+        frames.samples = frames.blends.iter().map(|blend| vec![*blend]).collect();
+        frames.times = times;
+        Ok((frames, end))
+    }
+
     fn open_with(
         readers: &ReaderFactory,
         ask: &EnhanceAsk,
@@ -499,6 +516,12 @@ impl EnhanceFrames {
         &self.samples
     }
 
+    /// When each frame read starts, in the file's own time.
+    #[must_use]
+    pub fn times(&self) -> &[Micros] {
+        &self.times
+    }
+
     /// Whether there are none.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -522,6 +545,41 @@ impl EnhanceFrames {
         };
         upright_rgba(&picture, self.display).ok_or_else(|| unreadable("could not be turned"))
     }
+}
+
+/// When each of the file's own frames that show in `range` starts, the
+/// first at or before its start, and when the last stops showing.
+fn own_times(media: &mut Media, range: &TimeRange) -> Result<(Vec<Micros>, Micros), EnhanceError> {
+    let end = range.start.0.saturating_add(range.duration.0);
+    let mut times: Vec<Micros> = Vec::new();
+    let mut last_end = range.start;
+    let mut at = range.start;
+    for _ in 0..MAX_FILE_FRAMES {
+        let held = media
+            .decode_at(at, range)
+            .map_err(|error| EnhanceError::Frame {
+                reason: format!(
+                    "the clip's frame at {} µs could not be decoded: {error}",
+                    at.0
+                ),
+            })?;
+        // The file ended: the last frame came back again.
+        if times.last().is_some_and(|last| held.start.0 <= last.0) {
+            break;
+        }
+        times.push(held.start);
+        last_end = held.end;
+        if held.end.0 >= end || held.end.0 <= at.0 {
+            break;
+        }
+        at = held.end;
+    }
+    if times.is_empty() {
+        return Err(EnhanceError::Frame {
+            reason: "the clip has no frames".into(),
+        });
+    }
+    Ok((times, last_end))
 }
 
 /// When each of the file's own frames in `range` starts, and the one after

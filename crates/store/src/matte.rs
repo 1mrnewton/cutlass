@@ -26,7 +26,8 @@ pub struct MatteKey {
     pub source: PathBuf,
     /// The model that found the subject, so a better model makes new ones.
     pub model: String,
-    /// Pictures per second in the matte video.
+    /// Pictures per second in the matte video, 0 for one with a picture
+    /// for each of its file's own frames.
     pub rate: f64,
     /// What Custom removal's picks are worth, empty for Auto removal.
     pub picks: String,

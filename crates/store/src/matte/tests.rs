@@ -107,10 +107,16 @@ fn only_the_mattes_kept_and_other_files_stay() {
     for file in [&used, &old, &half, &other] {
         fs::write(file, b"x").unwrap();
     }
-    assert_eq!(remove_mattes_but(&temp.0, std::slice::from_ref(&used)).unwrap(), 2);
+    assert_eq!(
+        remove_mattes_but(&temp.0, std::slice::from_ref(&used)).unwrap(),
+        2
+    );
     assert!(used.is_file() && other.is_file());
     assert!(!old.exists() && !half.exists());
-    assert_eq!(remove_mattes_but(&temp.0, std::slice::from_ref(&used)).unwrap(), 0);
+    assert_eq!(
+        remove_mattes_but(&temp.0, std::slice::from_ref(&used)).unwrap(),
+        0
+    );
     let empty = Temp::new();
     assert_eq!(
         remove_mattes_but(&empty.0, &[]).unwrap(),

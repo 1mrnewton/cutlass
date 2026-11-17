@@ -35,7 +35,10 @@ pub struct MatteAsk {
     pub source: PathBuf,
     /// The stretch the clip shows, in the file's own time.
     pub range: TimeRange,
-    /// Pictures per second of the file's time in the matte video.
+    /// Pictures per second the stretch is read at: a still's one picture
+    /// lasts one. A movie's matte has a picture for each of the file's own
+    /// frames instead, at its time, so it fits the clip's picture at any
+    /// speed, backwards and between the project's frames.
     pub rate: f64,
     /// The clip's settings when the job was asked for.
     pub matting: Matting,
@@ -60,7 +63,7 @@ impl MatteAsk {
         MatteKey {
             source: self.source.clone(),
             model: self.model().into(),
-            rate: self.rate,
+            rate: if self.still { self.rate } else { 0.0 },
             picks: self.matting.picks_key(),
         }
     }

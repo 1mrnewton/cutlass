@@ -18,6 +18,11 @@
 //! A photo's matte is one picture, a grey PNG where the video would be: it
 //! cuts the photo wherever the clip is trimmed.
 //!
+//! A movie's matte has a picture for each of the file's own frames in the
+//! stretch, at that frame's time, so whichever frame the clip shows (sped
+//! up, backwards, between the project's frames) its matte is the one made
+//! from it.
+//!
 //! The matte is the frame's size, its short side at most [`MATTE_SIDE`].
 //! The job needs no session and writes no draft, so a shell runs it off the
 //! main thread. A stopped or failed job leaves no matte behind.
@@ -26,8 +31,8 @@ use std::path::{Path, PathBuf};
 
 use cutlass_effects::{Brush, Pick};
 use cutlass_eval::{EnhanceError, EnhanceFrames, MatteAsk, ReaderFactory};
-use cutlass_export::{ExportError, PictureMovie, video_bitrate, write_pictures};
-use cutlass_model::FrameRate;
+use cutlass_export::{ExportError, PictureMovie, video_bitrate, write_pictures_at};
+use cutlass_model::{Micros, TimeRange};
 use cutlass_store::matte_file;
 use image::codecs::png::PngEncoder;
 use image::imageops::{self, FilterType};
@@ -60,7 +65,7 @@ pub fn matte_clip(
     project: &Path,
     progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<PathBuf, EnhanceJobError> {
-    let mut frames = open_frames(readers, ask)?;
+    let (mut frames, stretch) = open_frames(readers, ask)?;
     let count = frames.len();
     let mut last: Option<Vec<u8>> = None;
     let mut make = |k: usize| -> Result<Matte, EnhanceJobError> {
@@ -81,7 +86,7 @@ pub fn matte_clip(
         Ok(matte)
     };
     let total = count as f32;
-    write_mattes(encoders, ask, project, count, &mut make, &mut |done| {
+    write_mattes(encoders, ask, project, &stretch, &mut make, &mut |done| {
         progress(done as f32 / total)
     })
 }
@@ -97,9 +102,9 @@ pub fn follow_clip(
     project: &Path,
     progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<PathBuf, EnhanceJobError> {
-    let mut frames = open_frames(readers, ask)?;
+    let (mut frames, stretch) = open_frames(readers, ask)?;
     let count = frames.len();
-    let picks = picked_frames(&ask.matting.picks, ask, count);
+    let picks = picked_frames(&ask.matting.picks, &stretch.times);
     let Some(&(first, _)) = picks.first() else {
         return Err(EnhanceJobError::Clip(EnhanceError::Clip {
             reason: "Custom removal has nothing picked yet".into(),
@@ -166,7 +171,7 @@ pub fn follow_clip(
             .map(|(_, prompt)| prompt);
         prompted_step(follower, &image, prompt, k)
     };
-    write_mattes(encoders, ask, project, count, &mut make, &mut |done| {
+    write_mattes(encoders, ask, project, &stretch, &mut make, &mut |done| {
         // The frames before the first pick were counted on the way back.
         if done as usize <= first {
             true
@@ -345,17 +350,18 @@ fn distance_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
 }
 
-/// Each pick's frame index in a stretch of `count` frames, nearest its
-/// source time, in order; two picks on one frame keep the later.
-fn picked_frames(picks: &[Pick], ask: &MatteAsk, count: usize) -> Vec<(usize, PickPrompt)> {
+/// Each pick's frame index among frames starting at `times`: the one
+/// showing at its source time. In order; two picks on one frame keep the
+/// later.
+fn picked_frames(picks: &[Pick], times: &[Micros]) -> Vec<(usize, PickPrompt)> {
     let mut out: Vec<(usize, PickPrompt)> = Vec::new();
-    if count == 0 {
+    if times.is_empty() {
         return out;
     }
     for pick in picks {
-        let since = (pick.frame.0 - ask.range.start.0).max(0) as f64 / 1e6;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let k = ((since * ask.rate).round() as usize).min(count - 1);
+        let k = times
+            .partition_point(|start| start.0 <= pick.frame.0)
+            .saturating_sub(1);
         let prompt = PickPrompt { pick: pick.clone() };
         match out.last_mut() {
             Some((last, kept)) if *last == k => *kept = prompt,
@@ -365,13 +371,24 @@ fn picked_frames(picks: &[Pick], ask: &MatteAsk, count: usize) -> Vec<(usize, Pi
     out
 }
 
-fn open_frames(readers: &ReaderFactory, ask: &MatteAsk) -> Result<EnhanceFrames, EnhanceJobError> {
-    let open = if ask.still {
-        EnhanceFrames::open_picture
+/// When the frames a job reads start, in the file's own time, and when the
+/// last stops showing.
+struct Stretch {
+    times: Vec<Micros>,
+    end: Micros,
+}
+
+fn open_frames(
+    readers: &ReaderFactory,
+    ask: &MatteAsk,
+) -> Result<(EnhanceFrames, Stretch), EnhanceJobError> {
+    let opened = if ask.still {
+        let end = Micros(ask.range.start.0.saturating_add(ask.range.duration.0));
+        EnhanceFrames::open_picture(readers, &ask.frames()).map(|frames| (frames, end))
     } else {
-        EnhanceFrames::open
+        EnhanceFrames::open_own(readers, &ask.frames())
     };
-    let frames = open(readers, &ask.frames()).map_err(|error| {
+    let (frames, end) = opened.map_err(|error| {
         EnhanceJobError::Clip(match error {
             EnhanceError::Clip { reason } => EnhanceError::Clip {
                 reason: reason.replace("enhanced", "cut out"),
@@ -384,7 +401,11 @@ fn open_frames(readers: &ReaderFactory, ask: &MatteAsk) -> Result<EnhanceFrames,
             reason: "the clip has no frames to cut out".into(),
         }));
     }
-    Ok(frames)
+    let stretch = Stretch {
+        times: frames.times().to_vec(),
+        end,
+    };
+    Ok((frames, stretch))
 }
 
 fn read_rgb(frames: &mut EnhanceFrames, k: usize) -> Result<(Vec<u8>, u32, u32), EnhanceJobError> {
@@ -436,20 +457,18 @@ pub fn matte_size(width: u32, height: u32) -> (u32, u32) {
     ((w & !1).max(2), (h & !1).max(2))
 }
 
-/// Write `count` mattes from `make` as `ask`'s matte video.
+/// Write a matte from `make` for each frame of `stretch` as `ask`'s matte
+/// video, each at its frame's time. The video starts where the first frame
+/// does, at or before the stretch, and reaches at least its end.
 fn write_mattes(
     encoders: &cutlass_encode::EncodeFactory,
     ask: &MatteAsk,
     project: &Path,
-    count: usize,
+    stretch: &Stretch,
     make: &mut dyn FnMut(usize) -> Result<Matte, EnhanceJobError>,
     progress: &mut dyn FnMut(u64) -> bool,
 ) -> Result<PathBuf, EnhanceJobError> {
-    let rate = FrameRate::from_stored_fps(ask.rate).ok_or_else(|| {
-        EnhanceJobError::Clip(EnhanceError::Clip {
-            reason: format!("{} frames a second is not a frame rate", ask.rate),
-        })
-    })?;
+    let count = stretch.times.len();
     let first = make(0)?;
     if first.width < 2 || first.height < 2 {
         return Err(EnhanceJobError::Clip(EnhanceError::Frame {
@@ -462,21 +481,28 @@ fn write_mattes(
         progress(1);
         return Ok(file);
     }
+    let (start, times) = matte_times(stretch, &ask.range)?;
     let movie = PictureMovie {
         width,
         height,
-        frame_rate: rate,
+        // Not read: each picture is at its frame's time.
+        frame_rate: cutlass_model::FrameRate {
+            numerator: 1,
+            denominator: 1,
+        },
         // Twice a picture's rate: soft edges are what the matte is for.
         bitrate: video_bitrate(width.min(height)).saturating_mul(2),
         frames: count as u64,
     };
-    let file = matte_file(project, &ask.key(), &ask.range)
+    let reach = times.last().map_or(0, |end| end.0);
+    let file = matte_file(project, &ask.key(), &TimeRange::new(start.0, reach))
         .map_err(|error| EnhanceJobError::Store(error.to_string()))?;
     let mut first = Some(first);
     let mut failed = None;
-    let written = write_pictures(
+    let written = write_pictures_at(
         encoders,
         &movie,
+        &times,
         &file,
         &mut |index| {
             let made = usize::try_from(index)
@@ -508,6 +534,36 @@ fn write_mattes(
             Err(failed.unwrap_or(EnhanceJobError::Movie(error)))
         }
     }
+}
+
+/// Where a matte video of `stretch` starts in the file's time, and each
+/// picture's time from there with the end last: the last frame lasts at
+/// least to the end of `range`, so the video covers what the clip shows.
+fn matte_times(
+    stretch: &Stretch,
+    range: &TimeRange,
+) -> Result<(Micros, Vec<Micros>), EnhanceJobError> {
+    let uneven = || {
+        EnhanceJobError::Clip(EnhanceError::Frame {
+            reason: "the clip's frames do not come in order".into(),
+        })
+    };
+    let start = *stretch.times.first().ok_or_else(uneven)?;
+    let end = stretch
+        .end
+        .0
+        .max(range.start.0.saturating_add(range.duration.0));
+    let times: Vec<Micros> = stretch
+        .times
+        .iter()
+        .map(|time| time.0)
+        .chain([end])
+        .map(|time| Micros(time - start.0))
+        .collect();
+    if times.windows(2).any(|pair| pair[1].0 <= pair[0].0) {
+        return Err(uneven());
+    }
+    Ok((start, times))
 }
 
 /// A photo's `matte` at `size`, a grey PNG where `ask`'s matte video would

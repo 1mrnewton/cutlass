@@ -18,6 +18,7 @@ use cutlass_picture::CpuBytes;
 use cutlass_store::{MatteKey, find_matte};
 
 use crate::enhance::{EnhanceAsk, EnhanceError, clip_stretch};
+use crate::gpu::{GpuLayer, GpuSource, SelectionCut};
 
 /// The model Auto removal's mattes are made with, and the size it reads
 /// at. A matte made by another is not used.
@@ -145,6 +146,63 @@ pub(crate) fn cut_out(picture: CpuBytes, matte: &CpuBytes, matting: &Matting) ->
         over(&mut rgba, &under);
     }
     CpuBytes::new(w, h, rgba).unwrap_or(picture)
+}
+
+/// The GPU passes that cut a clip's upright picture, `size`, to `matte`
+/// as [`cut_out`] does on the CPU: the cut, over the picture, and the
+/// outline to draw beneath the cut picture. A matte with no edge work is
+/// stretched by the GPU; one that is cleaned, feathered or outlined is
+/// stretched and worked here first, as the CPU does. `None` for a matte or
+/// a picture of no size.
+pub(crate) fn matte_passes(
+    matte: &CpuBytes,
+    matting: &Matting,
+    size: (u32, u32),
+) -> Option<(GpuLayer, Option<GpuLayer>)> {
+    let (w, h) = size;
+    let (mw, mh) = (matte.width(), matte.height());
+    if w == 0 || h == 0 || mw == 0 || mh == 0 {
+        return None;
+    }
+    let plain = matting.clean_up == 0.0 && matting.feather == 0.0 && matting.stroke.is_none();
+    let (alpha, aw, ah) = if plain {
+        let red: Vec<u8> = matte
+            .rgba()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| px[0])
+            .collect();
+        (red.len() == mw as usize * mh as usize).then_some(())?;
+        (red, mw, mh)
+    } else {
+        let mut alpha = stretched_grey(matte, w, h)?;
+        cutlass_effects::matting::refine(&mut alpha, w, h, matting.clean_up, matting.feather);
+        (alpha, w, h)
+    };
+    let under = match &matting.stroke {
+        Some(stroke) => {
+            let rgba = cutlass_effects::matting::stroke_layer(&alpha, w, h, stroke);
+            Some(GpuLayer::canvas(CpuBytes::new(w, h, rgba).ok()?))
+        }
+        None => None,
+    };
+    // Each canvas pixel centre to the matte point it shows, -1 to 1 with y
+    // up: the matte covers the canvas exactly.
+    #[allow(clippy::cast_precision_loss)]
+    let frame = [2.0 / w as f32, 0.0, -1.0, 0.0, -2.0 / h as f32, 1.0];
+    let cut = GpuLayer::cut(
+        GpuSource::Select(SelectionCut {
+            width: aw,
+            height: ah,
+            alpha,
+            invert: false,
+            frame,
+        }),
+        w,
+        h,
+    );
+    Some((cut, under))
 }
 
 /// `under` drawn beneath `top`, both premultiplied RGBA of one size.

@@ -931,16 +931,11 @@ impl Placed<'_> {
     /// `None` when the GPU path does not reproduce the CPU path: a picture
     /// that is not 8-bit 4:2:0, one whose matrix is not BT.709, BT.601 or
     /// BT.2020, one whose tags the color crate does not map, a crop
-    /// quad that is not a parallelogram, an image backdrop, or a relit
-    /// clip's blur. The caller then uses the CPU picture. A
-    /// relit clip whose depth is decoded is drawn upright on its own
-    /// canvas and lit there.
+    /// quad that is not a parallelogram, an image backdrop, or the blur of
+    /// a relit or cut-out clip. The caller then uses the CPU picture. A
+    /// relit clip whose depth is decoded, or a cut-out clip whose matte is,
+    /// is drawn upright on its own canvas, lit and cut there.
     pub(crate) fn gpu(&self, time: Micros) -> Option<Vec<GpuLayer>> {
-        // A cut-out clip is drawn on the CPU, which cuts, feathers and
-        // outlines it; until its matte decodes it draws uncut either way.
-        if self.decoded_matte(time).is_some() {
-            return None;
-        }
         let (backdrop, blur) = match &self.backdrop {
             Backdrop::None => (None, None),
             Backdrop::Color(pixel) => (
@@ -984,12 +979,29 @@ impl Placed<'_> {
             tone,
         };
         let mut layers: Vec<GpuLayer> = backdrop.into_iter().collect();
-        if let Some((depth, lighting)) = self.lit_depth(time) {
-            // A blurred backdrop is a copy of the lit picture: the CPU's.
+        let lit = self.lit_depth(time);
+        let matte = self.decoded_matte(time);
+        if lit.is_some() || matte.is_some() {
+            // A blurred backdrop is a copy of the lit or cut picture: the
+            // CPU's.
             if blur.is_some() {
                 return None;
             }
-            layers.push(relit_layer(source, depth, lighting, placement));
+            let mut passes = Vec::new();
+            if let Some((depth, lighting)) = lit {
+                passes.push(GpuLayer {
+                    source: GpuSource::Relight { depth, lighting },
+                    placement: Placement::canvas(oriented.0, oriented.1),
+                    backdrop: None,
+                });
+            }
+            let mut under = None;
+            if let (Some(matte), Some((_, matting))) = (matte, &self.matte) {
+                let (cut, stroke) = crate::matte::matte_passes(&matte, matting, oriented)?;
+                passes.push(cut);
+                under = stroke;
+            }
+            layers.push(upright_layer(source, passes, under, placement));
             return Some(layers);
         }
         let backdrop = match blur {
@@ -1027,13 +1039,15 @@ impl Placed<'_> {
     }
 }
 
-/// A relit clip as one layer: its decoded picture drawn upright on a
-/// canvas of its own oriented size, lit there from `depth`, then that
-/// canvas placed as `placement` places the picture, with no turn left.
-fn relit_layer(
+/// A relit or cut-out clip as one layer: its decoded picture drawn upright
+/// on a canvas of its own oriented size with `passes` over it (lit from
+/// its depth, cut to its matte), `under` beneath that (the matte's
+/// outline), then that canvas placed as `placement` places the picture,
+/// with no turn left.
+fn upright_layer(
     source: GpuSource,
-    depth: CpuBytes,
-    lighting: cutlass_effects::Lighting,
+    passes: Vec<GpuLayer>,
+    under: Option<GpuLayer>,
     placement: Placement,
 ) -> GpuLayer {
     let oriented = placement.oriented;
@@ -1045,22 +1059,32 @@ fn relit_layer(
         to_texture: placement.to_texture,
         opacity: 1.0,
     };
-    let child = crate::gpu::FrameLayers {
+    let picture = GpuLayer {
+        source,
+        placement: upright,
+        backdrop: None,
+    };
+    let mut child = crate::gpu::FrameLayers {
         width: oriented.0,
         height: oriented.1,
-        layers: vec![
-            GpuLayer {
-                source,
-                placement: upright,
-                backdrop: None,
-            },
-            GpuLayer {
-                source: GpuSource::Relight { depth, lighting },
-                placement: Placement::canvas(oriented.0, oriented.1),
-                backdrop: None,
-            },
-        ],
+        layers: std::iter::once(picture).chain(passes).collect(),
     };
+    // The outline is drawn first on a canvas of its own, the cut picture
+    // over it, so the cut does not take the outline with it.
+    if let Some(under) = under {
+        child = crate::gpu::FrameLayers {
+            width: oriented.0,
+            height: oriented.1,
+            layers: vec![
+                under,
+                GpuLayer {
+                    source: GpuSource::Nested(Box::new(child)),
+                    placement: Placement::canvas(oriented.0, oriented.1),
+                    backdrop: None,
+                },
+            ],
+        };
+    }
     GpuLayer {
         source: GpuSource::Nested(Box::new(child)),
         placement: Placement {

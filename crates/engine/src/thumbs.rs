@@ -22,6 +22,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use cutlass_codec::access::{ColorMatrix, ColorRange, PixelFormat};
 use cutlass_model::{Micros, TimeRange};
@@ -45,6 +46,11 @@ pub const MAX_THUMB_BYTES: usize = 96 << 20;
 /// How far apart two asks of one file may be and still share a seek: the
 /// decoder steps on rather than seeks within this.
 const RUN_REACH: i64 = 2_000_000;
+
+/// How long a thumbnail that failed is left alone before an ask tries it
+/// again, so a file still being copied in gets its pictures once it is
+/// whole, and a broken one is not decoded every frame.
+const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// Files the worker keeps open between asks.
 const OPEN_FILES: usize = 4;
@@ -97,7 +103,10 @@ struct State {
     times: HashMap<PathBuf, BTreeSet<i64>>,
     order: VecDeque<ThumbKey>,
     wanted: VecDeque<ThumbKey>,
-    failed: HashSet<ThumbKey>,
+    /// When each ask last failed.
+    failed: HashMap<ThumbKey, Instant>,
+    /// The ask the worker is decoding now.
+    decoding: Option<ThumbKey>,
     /// Each opened file's picture size, upright.
     shapes: HashMap<PathBuf, (u32, u32)>,
     /// Bytes of the stored thumbnails.
@@ -178,14 +187,23 @@ impl Thumbnails {
             .cloned()
     }
 
-    /// Ask for `keys`, most wanted first. The asks replace the earlier ones;
-    /// a key already stored, or one that failed, is not asked again.
+    /// Ask for `keys`, most wanted first. The asks replace the earlier ones.
+    /// A key already stored or being decoded is not asked again; one that
+    /// failed is asked again once [`RETRY_AFTER`] has passed.
     pub fn want(&self, keys: impl IntoIterator<Item = ThumbKey>) {
+        let now = Instant::now();
         let mut state = self.shared.lock();
+        state
+            .failed
+            .retain(|_, when| now.duration_since(*when) < RETRY_AFTER);
         let mut seen = HashSet::new();
         let wanted: VecDeque<ThumbKey> = keys
             .into_iter()
-            .filter(|key| !state.stored.contains_key(key) && !state.failed.contains(key))
+            .filter(|key| {
+                !state.stored.contains_key(key)
+                    && !state.failed.contains_key(key)
+                    && state.decoding.as_ref() != Some(key)
+            })
             .filter(|key| seen.insert(key.clone()))
             .collect();
         state.wanted = wanted;
@@ -240,6 +258,10 @@ fn work(
                 if !held.paused
                     && let Some(key) = next_ask(&mut held.wanted, held.last.as_ref())
                 {
+                    if held.stored.contains_key(&key) {
+                        continue;
+                    }
+                    held.decoding = Some(key.clone());
                     break key;
                 }
                 state = shared
@@ -259,6 +281,7 @@ fn work(
             cache.keep(&key, thumb);
         }
         let mut state = shared.lock();
+        state.decoding = None;
         if decoded {
             if let Some((path, media)) = open.front() {
                 let info = media.info();
@@ -279,38 +302,45 @@ fn work(
                 .or_insert((thumb.width, thumb.height));
         }
         match made {
-            Ok(thumb) => {
-                state.bytes = state.bytes.saturating_add(thumb.rgba.len());
-                if let Some(old) = state.stored.insert(key.clone(), Arc::new(thumb)) {
-                    state.bytes = state.bytes.saturating_sub(old.rgba.len());
-                }
-                state
-                    .times
-                    .entry(key.path.clone())
-                    .or_default()
-                    .insert(key.time.0);
-                state.order.push_back(key);
-                while state.order.len() > MAX_THUMBS || state.bytes > MAX_THUMB_BYTES {
-                    let Some(oldest) = state.order.pop_front() else {
-                        break;
-                    };
-                    if let Some(old) = state.stored.remove(&oldest) {
-                        state.bytes = state.bytes.saturating_sub(old.rgba.len());
-                    }
-                    if let Some(times) = state.times.get_mut(&oldest.path) {
-                        times.remove(&oldest.time.0);
-                        if times.is_empty() {
-                            state.times.remove(&oldest.path);
-                        }
-                    }
-                }
-            }
+            Ok(thumb) => state.store(key, thumb),
             Err(_) => {
-                state.failed.insert(key);
+                state.failed.insert(key, Instant::now());
             }
         }
         drop(state);
         ready();
+    }
+}
+
+impl State {
+    /// Keep `thumb` as the newest, dropping the oldest past [`MAX_THUMBS`]
+    /// or [`MAX_THUMB_BYTES`]. A key stored again moves to the newest, so
+    /// the order names each stored key once.
+    fn store(&mut self, key: ThumbKey, thumb: Thumb) {
+        self.bytes = self.bytes.saturating_add(thumb.rgba.len());
+        if let Some(old) = self.stored.insert(key.clone(), Arc::new(thumb)) {
+            self.bytes = self.bytes.saturating_sub(old.rgba.len());
+            self.order.retain(|kept| kept != &key);
+        }
+        self.times
+            .entry(key.path.clone())
+            .or_default()
+            .insert(key.time.0);
+        self.order.push_back(key);
+        while self.order.len() > MAX_THUMBS || self.bytes > MAX_THUMB_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(old) = self.stored.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(old.rgba.len());
+            }
+            if let Some(times) = self.times.get_mut(&oldest.path) {
+                times.remove(&oldest.time.0);
+                if times.is_empty() {
+                    self.times.remove(&oldest.path);
+                }
+            }
+        }
     }
 }
 
@@ -679,11 +709,11 @@ mod tests {
 
     /// Wait until the worker has no ask left and has answered `count`.
     fn settle(thumbnails: &Thumbnails, answered: &Arc<Mutex<usize>>, count: usize) {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let until = Instant::now() + Duration::from_secs(10);
         while (*answered.lock().unwrap() < count || thumbnails.pending() > 0)
-            && std::time::Instant::now() < until
+            && Instant::now() < until
         {
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(1));
         }
         assert!(
             *answered.lock().unwrap() >= count,
@@ -941,6 +971,49 @@ mod tests {
     }
 
     #[test]
+    fn the_ask_being_decoded_is_not_asked_again_and_a_restore_is_kept_once() {
+        let thumbs = Thumbnails::start(ReaderFactory::new(), || {});
+        thumbs.set_paused(true);
+        let (busy, other) = (key("/a.mp4", 0), key("/a.mp4", 1_000_000));
+        thumbs.shared.lock().decoding = Some(busy.clone());
+        thumbs.want([busy.clone(), other.clone()]);
+        assert_eq!(thumbs.shared.lock().wanted, [other]);
+        // Storing the same key twice leaves one entry in the order, so the
+        // eviction does not drop it while it is still the newest.
+        let mut state = thumbs.shared.lock();
+        state.store(busy.clone(), gray(1, 2, 2));
+        state.store(key("/a.mp4", 2_000_000), gray(2, 2, 2));
+        state.store(busy.clone(), gray(3, 2, 2));
+        assert_eq!(state.order.len(), 2);
+        assert_eq!(state.order.back(), Some(&busy));
+        assert_eq!(state.bytes, 2 * 16);
+    }
+
+    #[test]
+    fn a_failed_thumbnail_is_asked_again_after_the_wait() {
+        let thumbs = Thumbnails::start(ReaderFactory::new(), || {});
+        thumbs.set_paused(true);
+        let missing = key("/nowhere/missing.mp4", 0);
+        thumbs
+            .shared
+            .lock()
+            .failed
+            .insert(missing.clone(), Instant::now());
+        thumbs.want([missing.clone()]);
+        assert_eq!(thumbs.pending(), 0);
+        let long_ago = Instant::now()
+            .checked_sub(RETRY_AFTER + Duration::from_secs(1))
+            .expect("clock");
+        thumbs
+            .shared
+            .lock()
+            .failed
+            .insert(missing.clone(), long_ago);
+        thumbs.want([missing]);
+        assert_eq!(thumbs.pending(), 1);
+    }
+
+    #[test]
     fn a_missing_file_fails_once_and_is_not_asked_again() {
         let (sender, receiver) = std::sync::mpsc::channel();
         let thumbs = Thumbnails::start(ReaderFactory::new(), move || {
@@ -952,7 +1025,7 @@ mod tests {
         };
         thumbs.want([key.clone(), key.clone()]);
         receiver
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(5))
             .expect("the worker answered");
         assert!(thumbs.get(&key).is_none());
         thumbs.want([key]);
@@ -968,7 +1041,7 @@ mod tests {
             time: Micros(0),
         };
         thumbs.want([key]);
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(50));
         assert_eq!(thumbs.pending(), 1);
     }
 }

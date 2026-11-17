@@ -59,6 +59,7 @@ mod enhance;
 mod hear;
 mod inspector;
 mod listen;
+mod masks;
 mod offscreen;
 #[cfg(test)]
 pub(crate) use offscreen::tests::{
@@ -86,6 +87,7 @@ pub use speech_model::SPEECH_MODEL_QUESTION;
 pub use update::RUNNING_VERSION;
 
 pub use inspector::{KeyedSetting, LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
+pub use masks::{MaskFocus, MaskRow};
 
 use crate::face::FaceTable;
 use crate::tokens;
@@ -773,6 +775,8 @@ pub struct Shell {
     readers: ReaderFactory,
     transport: Transport,
     preview_cache: RefCell<FrameCache>,
+    /// The mask the Mask page has in hand.
+    mask_focus: MaskFocus,
     /// Stretches of the timeline drawn ahead, which the preview plays.
     renders: render::Renders,
     proxies: proxy::Proxies,
@@ -983,6 +987,7 @@ impl Shell {
             ),
             transport: Transport::new(),
             preview_cache: RefCell::new(FrameCache::new()),
+            mask_focus: MaskFocus::default(),
             renders: render::Renders::new(Self::home().renders()),
             proxies: proxy::Proxies::new(proxy::home_folder()),
             lanes_cache: RefCell::new(None),
@@ -4451,6 +4456,7 @@ impl Shell {
         self.selected_transition = None;
         self.selected_keys.clear();
         self.selection.clear();
+        self.mask_focus.index = 0;
         if let Some(id) = id {
             self.selection = self.group_mates(&id);
             self.selection.push(id);
@@ -6490,81 +6496,24 @@ impl Shell {
         self.apply_requests(&requests)
     }
 
-    /// Put `mask` on the selected picture, in its own frame, or take its
-    /// mask off.
-    /// With mask keys, the mask is keyed at the playhead too, and taking
-    /// the mask off takes its keys off.
+    /// Make the clip mask in hand on the selected picture `mask`, in the
+    /// picture's own frame, or take it off; with no mask yet, `mask` is its
+    /// first. With keys on a part of it, a changed part is keyed at the
+    /// playhead too, and taking the mask off takes its keys off.
     pub fn set_mask(&mut self, mask: Option<cutlass_effects::Mask>) -> Result<(), ShellError> {
-        let segment_id = self.picture_segment("a mask belongs on a picture")?;
-        self.refuse_locked(&segment_id)?;
-        let material_id = MaterialId::new(self.fresh("mask"));
-        let mut requests = vec![Request::SetMask {
-            segment_id: segment_id.clone(),
-            material_id,
-            mask,
-        }];
-        match mask {
-            Some(mask) => {
-                // Each keyed part that changed is keyed here; the others
-                // are only stored.
-                let values = inspector::mask_values(&mask);
-                let was = self
-                    .inspection()
-                    .and_then(|inspection| inspection.mask)
-                    .map(|mask| inspector::mask_values(&mask));
-                for (part, range) in KeyedSetting::MASK_PARTS {
-                    let changed = was.is_none_or(|was| was[range.clone()] != values[range.clone()]);
-                    if changed {
-                        requests.extend(self.key_setting_here(part, values[range].to_vec()));
-                    }
-                }
-            }
-            None if self.setting_keyed(KeyedSetting::Mask) => {
-                let draft = self.session_draft()?;
-                if let Some((segment, _)) = placed(draft, &segment_id) {
-                    let keyframes = segment
-                        .common_keyframes
-                        .iter()
-                        .filter(|group| {
-                            !cutlass_model::MASK_KEYS.contains(&group.property_type.as_str())
-                        })
-                        .cloned()
-                        .collect();
-                    requests.push(Request::SetKeyframes {
-                        segment_id,
-                        keyframes,
-                    });
-                }
-            }
-            None => {}
-        }
-        self.apply_requests(&requests)
+        self.mask_focus.color = false;
+        self.set_focused_mask(mask)
     }
 
     /// Keep the selected picture's colour work, or the selected adjustment
-    /// layer or effect, inside `mask`, or take that limit off.
+    /// layer or effect, inside `mask`, the colour mask in hand, or take
+    /// that limit off.
     pub fn set_color_mask(
         &mut self,
         mask: Option<cutlass_effects::Mask>,
     ) -> Result<(), ShellError> {
-        let segment_id = match self.selected() {
-            Some(segment_id)
-                if matches!(
-                    placed(self.session_draft()?, segment_id),
-                    Some((_, TrackType::Effect))
-                ) =>
-            {
-                segment_id.clone()
-            }
-            _ => self.adjust_segment()?,
-        };
-        self.refuse_locked(&segment_id)?;
-        let material_id = MaterialId::new(self.fresh("color-mask"));
-        self.apply(Request::SetColorMask {
-            segment_id,
-            material_id,
-            mask,
-        })
+        self.mask_focus.color = true;
+        self.set_focused_mask(mask)
     }
 
     /// Set the strength of the selected picture's LUT, from 0 to 1.

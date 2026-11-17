@@ -13,6 +13,7 @@ mod session;
 pub use cutlass_model::{
     Draft, LinkageSettings, Micros, SegmentId, TrackAttribute, TrackId, linkage_from_biz,
 };
+pub use edit::masks::MAX_MASKS;
 pub use edit::{
     BOLD_WIDTH, CANVAS_SHAPES, CAPTION_KIND, CanvasShape, ClipAttributes, EditError, ITALIC_DEGREE,
     MAX_CAPTION_STAGGER_MS, MAX_TIMELINE, NEW_TEXT_SIZE, TextPattern, canvas_for,

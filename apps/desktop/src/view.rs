@@ -4817,9 +4817,9 @@ fn paint_layer(shell: &mut Shell, ui: &mut Ui, frame: Rect, placed: Rect, size: 
     let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
     let colour = |keep: bool| {
         if keep {
-            tokens::EXPORT.gamma_multiply(0.45)
+            tokens::EXPORT.gamma_multiply(0.35)
         } else {
-            tokens::CLOSE.gamma_multiply(0.45)
+            tokens::CLOSE.gamma_multiply(0.35)
         }
     };
     for trail in painting.trails.iter().chain(painting.live_trail.as_ref()) {
@@ -4831,8 +4831,13 @@ fn paint_layer(shell: &mut Shell, ui: &mut Ui, frame: Rect, placed: Rect, size: 
             .iter()
             .map(|&p| screen_point(placed, size, p))
             .collect();
-        for &at in &points {
-            painter.circle_filled(at, radius, fill);
+        // Round ends only: a dab at every point would stack the colour
+        // until the picture under it is hidden.
+        if let [first, .., last] = points.as_slice() {
+            painter.circle_filled(*first, radius, fill);
+            painter.circle_filled(*last, radius, fill);
+        } else if let [only] = points.as_slice() {
+            painter.circle_filled(*only, radius, fill);
         }
         painter.add(egui::Shape::line(
             points,
@@ -19836,6 +19841,204 @@ mod tests {
         assert!(!kinds.audio);
         assert!(kinds.text && kinds.overlay);
         assert!(harness.state().1.linkage_kinds.is_none());
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Remove BG driven through the window's own widgets on a real clip, by
+    /// the real renderer: the Auto removal switch makes the matte, the
+    /// Stroke switch and a tile outline it, and the Smart brush marks a pick
+    /// on the preview that Apply follows through the clip. Slow, so run by hand
+    /// with `--ignored`; with `CUTLASS_RENDER_DIR` set the window pictures
+    /// are kept there.
+    #[test]
+    #[ignore = "reads a real clip and runs the real models"]
+    fn remove_bg_works_in_the_drawn_window() {
+        use egui_kittest::kittest::Queryable;
+        let local =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let clip = local.join("7150172-hd_720_1280_50fps.mp4");
+        if !clip.is_file() || !crate::shell::auto_model_here() || !crate::shell::follow_model_here()
+        {
+            return;
+        }
+        let temp = std::env::temp_dir().join(format!("cutlass-remove-bg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.fps = 25.0;
+        (draft.canvas_config.width, draft.canvas_config.height) = (720, 1280);
+        let mut movie = cutlass_model::MaterialVideo::new("movie");
+        (movie.width, movie.height) = (720, 1280);
+        movie.duration = Micros(7_820_000);
+        movie.path = "party.mp4".into();
+        draft.materials.videos.push(movie);
+        let mut segment = cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 1_000_000),
+        );
+        segment.source_range = Some(cutlass_model::TimeRange::new(2_000_000, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        std::fs::copy(&clip, temp.join("party.mp4")).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        shell.seek(Micros(500_000));
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Filters;
+        view.inspector.focus(inspector::Focus {
+            tab: 0,
+            page: 1,
+            section: Some("auto-removal"),
+        });
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1600.0, 1000.0))
+            .wgpu()
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, view),
+            );
+        harness.run_steps(8);
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            harness.run_steps(8);
+            let image = window_image(harness);
+            if let Some(dir) = &keep {
+                std::fs::create_dir_all(dir).unwrap();
+                image.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+        };
+        let wait_for_job = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(900);
+            while harness.state().0.job().is_some() && std::time::Instant::now() < until {
+                harness.run_steps(1);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let switch = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            harness
+                .get_by_role_and_label(egui::accesskit::Role::CheckBox, name)
+                .click();
+        };
+        picture(&mut harness, "remove-bg-0-off");
+
+        // Auto removal: the switch starts the job; its matte cuts the clip.
+        switch(&harness, "Auto removal");
+        harness.run_steps(2);
+        assert!(harness.state().0.matte_progress().is_some());
+        picture(&mut harness, "remove-bg-1-working");
+        wait_for_job(&mut harness);
+        assert!(
+            harness.state().0.matte_made(),
+            "{}",
+            harness.state().0.notice()
+        );
+        picture(&mut harness, "remove-bg-2-auto");
+
+        // Stroke: the switch draws Paper; a tile picks Glow.
+        switch(&harness, "Stroke");
+        harness.run_steps(4);
+        let stroke = || harness.state().0.matting().and_then(|m| m.stroke);
+        assert_eq!(
+            stroke().map(|s| s.style),
+            Some(cutlass_effects::StrokeStyle::Paper)
+        );
+        harness.get_by_label("Glow").click();
+        harness.run_steps(4);
+        assert_eq!(
+            harness
+                .state()
+                .0
+                .matting()
+                .and_then(|m| m.stroke)
+                .map(|s| s.style),
+            Some(cutlass_effects::StrokeStyle::Glow)
+        );
+        assert!(
+            harness.state().0.job().is_none(),
+            "an outline needs no new matte"
+        );
+        picture(&mut harness, "remove-bg-3-glow");
+
+        // Custom removal: Auto off, then the Smart brush is drawn down the
+        // front girl on the preview, and Apply finds her and follows her
+        // through the clip.
+        switch(&harness, "Auto removal");
+        harness.run_steps(4);
+        assert_eq!(harness.state().0.matting(), None);
+        // Down the inspector to Custom removal, by the wheel.
+        harness.event(egui::Event::PointerMoved(Pos2::new(1400.0, 400.0)));
+        for _ in 0..4 {
+            harness.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -300.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+                source: egui::MouseWheelSource::Wheel,
+            });
+            harness.run_steps(2);
+        }
+        picture(&mut harness, "remove-bg-3b-custom-open");
+        harness.get_by_label("Smart brush").click();
+        harness.run_steps(4);
+        assert!(
+            harness.state().0.painting().is_some(),
+            "{}",
+            harness.state().0.notice()
+        );
+        harness.state_mut().0.set_brush_size(1.0);
+        let canvas = harness
+            .state()
+            .1
+            .preview_canvas
+            .expect("the preview is drawn");
+        let at = |x: f32, y: f32| canvas.min + canvas.size() * Vec2::new(x / 720.0, y / 1280.0);
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let path = [
+            (315.0, 560.0),
+            (300.0, 760.0),
+            (300.0, 960.0),
+            (290.0, 1180.0),
+        ];
+        harness.event(egui::Event::PointerMoved(at(path[0].0, path[0].1)));
+        harness.run_steps(1);
+        harness.event(press(at(path[0].0, path[0].1), true));
+        harness.run_steps(1);
+        for &(x, y) in &path[1..] {
+            for step in 1..=6 {
+                let from = at(x, y - 200.0);
+                let to = at(x, y);
+                harness.event(egui::Event::PointerMoved(
+                    from + (to - from) * (step as f32 / 6.0),
+                ));
+                harness.run_steps(1);
+            }
+        }
+        let end = at(path[3].0, path[3].1);
+        harness.event(press(end, false));
+        harness.run_steps(2);
+        let painting = harness.state().0.painting().unwrap();
+        assert_eq!(painting.brushes.len(), 1, "{painting:?}");
+        picture(&mut harness, "remove-bg-4-painted");
+        harness.get_by_label("Apply").click();
+        harness.run_steps(2);
+        assert!(harness.state().0.painting().is_none());
+        wait_for_job(&mut harness);
+        let matting = harness.state().0.matting().expect("Custom removal is on");
+        assert_eq!(matting.mode, cutlass_effects::MattingMode::Custom);
+        assert!(
+            harness.state().0.matte_made(),
+            "{}",
+            harness.state().0.notice()
+        );
+        picture(&mut harness, "remove-bg-5-custom");
         drop(harness);
         let _ = std::fs::remove_dir_all(&temp);
     }

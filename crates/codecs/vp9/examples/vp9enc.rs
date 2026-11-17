@@ -18,7 +18,11 @@
 //! region of interest map: `roi_q=N` (the middle half N quantizer
 //! indices finer), `roi_ref=0..3` (its one reference), `roi_skip=1` (the
 //! top eighth of the rows skipped); with `twopass=1`, `corpus=N` (the
-//! corpus's complexity; the clip's own is printed).
+//! corpus's complexity; the clip's own is printed); `occupancy=MS` (the
+//! rate buffer's level at the start, FFmpeg's `-rc_init_occupancy`),
+//! `min_gf=N` (`-min-gf-interval`), `tpl=1` (`-enable-tpl`) and
+//! `force_keyframes=N,N,...` (key frames at those picture numbers,
+//! FFmpeg's `-force_key_frames` in pictures).
 //! With `bits=10` or `12` the input has little-endian 16-bit samples
 //! (FFmpeg's `yuv420p10le` and the like).
 //! `alpha=FILE` codes alpha (FFmpeg's `-pix_fmt yuva420p`): FILE holds one
@@ -59,11 +63,19 @@ fn main() -> Result<(), String> {
     // eighth of its rows skipped (segment 2) with `roi_skip=1`.
     let mut roi: (Option<i16>, Option<u8>, bool) = (None, None, false);
     let mut alpha_path = None;
+    // FFmpeg's `-force_key_frames`, as picture numbers.
+    let mut force: Vec<usize> = Vec::new();
     for a in &args[5..] {
         let (k, v) = a.split_once('=').ok_or("option")?;
         if k == "alpha" {
             alpha_path = Some(v.to_string());
             opts.alpha = true;
+            continue;
+        }
+        if k == "force_keyframes" {
+            for f in v.split(',') {
+                force.push(f.parse().map_err(|_| "force_keyframes=N,N,...")?);
+            }
             continue;
         }
         if k == "render" {
@@ -139,6 +151,9 @@ fn main() -> Result<(), String> {
             "noise" => opts.noise_sensitivity = n as u8,
             "layers" => opts.temporal_layers = n as u8,
             "corpus" => opts.corpus_complexity = n,
+            "occupancy" => opts.rc_init_occupancy_ms = n,
+            "min_gf" => opts.min_gf_interval = n,
+            "tpl" => opts.enable_tpl = n != 0,
             "keep_layers" => keep_layers = n as u8,
             "roi_q" => roi.0 = Some(n as i16),
             "roi_ref" => roi.1 = Some(n as u8),
@@ -225,6 +240,9 @@ fn main() -> Result<(), String> {
         let (mut bits, mut n) = (Vec::new(), 0u32);
         while (n as usize) < frames && input.read_exact(&mut buf).is_ok() {
             let clock = (i64::from(n), 1, fps);
+            if force.contains(&(n as usize)) {
+                first.force_keyframe();
+            }
             for (data, _, _) in push(&mut first, &buf, &mut wide, (w, h, cw, ch), fps, clock)? {
                 bits.push(data.len() as u64 * 8);
             }
@@ -265,6 +283,9 @@ fn main() -> Result<(), String> {
         });
         for buf in rx {
             let clock = (n as i64, 1, fps);
+            if force.contains(&n) {
+                enc.force_keyframe();
+            }
             if let Some(file) = alpha_in.as_mut() {
                 file.read_exact(&mut alpha_buf)
                     .map_err(|e| format!("alpha: {e}"))?;

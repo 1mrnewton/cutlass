@@ -3006,14 +3006,15 @@ brackets). "Added" is new in this round; each has a test in
 | `-b:v` | `rc_target_bitrate`, VBR | `bitrate` (`rate=`) |
 | `-crf N -b:v 0` | `end-usage=q`, `cq-level` | `qindex` = `Vp9Encoder::qindex_of_level(N)` (`crf=`, `q=`) |
 | `-crf N -b:v R` | `end-usage=cq` | `cq_level` (`crf=` with `rate=`, `cq=`): added |
-| `-minrate` = `-maxrate` = `-b:v`, `-bufsize` | `end-usage=cbr`, `rc_buf_sz` | `cbr_buffer_ms` (`cbr=`) |
+| `-minrate` = `-maxrate` = `-b:v`, `-bufsize` | `end-usage=cbr`, `rc_buf_sz` | `cbr_buffer_ms` (`cbr=`): the buffer sizes the first key frame and the start, as libvpx's; see "Options measured" |
+| `-rc_init_occupancy` | `rc_buf_initial_sz` | `rc_init_occupancy_ms` (`occupancy=`, in ms, added): the buffer's starting level; unset, three quarters of `-bufsize` (FFmpeg's default) |
 | `-qmin`, `-qmax` | `min-q`, `max-q` | `min_q`, `max_q` as indices (`min_q=`, `max_q=`: added to `vp9enc`): every frame's quantizer within them in every rate mode; see "Options measured" |
 | `-undershoot-pct`, `-overshoot-pct` | `undershoot-pct`, `overshoot-pct` | `undershoot_pct`, `overshoot_pct`: dead bands on what is paid back (added) |
 | `-max-intra-rate` | `max-intra-rate` | `max_intra_pct` (added) |
 | `-drop-threshold` | `drop-frame` | `drop_frame_pct` (`drop=`, added): one pass at a bitrate; see "Options measured" |
 | `-g` | `kf-max-dist` | `keyint` |
 | `-keyint_min` | `kf-min-dist` | `keyint_min`: a cut that far from the last key frame is one (added); intervals are fixed as with `-keyint_min` = `-g` |
-| `-force_key_frames` | `VPX_EFLAG_FORCE_KF` | `Vp9Encoder::force_keyframe` (the engine's `force_keyframe`) |
+| `-force_key_frames` | `VPX_EFLAG_FORCE_KF` | `Vp9Encoder::force_keyframe` (the engine's `force_keyframe`; `force_keyframes=N,N,...` in pictures, added): the picture pushed next is the key frame, with the lookahead too, and no alt-ref spans it |
 | `-pass 1` / `-pass 2` | `g_pass`, stats | `Vp9Encoder::first_pass_qindex`, `set_second_pass` (`twopass=1`) |
 | `-deadline` best / good / realtime, `-cpu-used` (`-speed`, `-quality`) | | `speed` 0–10 (`speed=`); see the speeds below |
 | `-lag-in-frames` (`-rc_lookahead`) | `g_lag_in_frames` | `lag` (`lag=`) |
@@ -3022,7 +3023,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-arnr-maxframes` | `arnr-maxframes` | `arnr_max_frames` (`arnr_frames=`, added) |
 | `-arnr-strength` | `arnr-strength` | `arnr_strength` (`arnr_strength=`, added) |
 | `-arnr-type` | `arnr-type` | n/a: libvpx's VP9 encoder ignores it too (VP8 only) |
-| `-min-gf-interval` | `min-gf-interval` | internal (golden every 12; 6 to 12 by motion in two passes), not an option |
+| `-min-gf-interval` | `min-gf-interval` | `min_gf_interval` (`min_gf=`, added): the shortest golden group, and the longest at least that (libvpx raises `max-gf-interval` to it); unset, golden every 12, 6 to 12 by motion in two passes |
 | `-tune psnr` | `tune` | the default |
 | `-tune ssim` | `tune=ssim` | `tune: Tune::Ssim` (`ssim=1`, added); see "Options measured" |
 | `-tune-content screen` | `tune-content` | `tune_content: TuneContent::Screen` (`screen=1`, added); see "Options measured" |
@@ -3052,6 +3053,67 @@ brackets). "Added" is new in this round; each has a test in
 | regions of interest (side data) | ROI map | `Vp9Encoder::set_roi_map` with a `RoiMap` (`roi_q=`, `roi_ref=`, `roi_skip=` in `vp9enc`, added): a segment a block, each with a quantizer and loop filter delta, a reference and skip |
 
 ### Options measured
+
+**Rate buffer** (`cbr_buffer_ms`, `rc_init_occupancy_ms`; FFmpeg's
+`-bufsize`, `-rc_init_occupancy`). At a constant bitrate the buffer
+starts at `rc_init_occupancy_ms` (unset, three quarters of the buffer,
+as FFmpeg sets libvpx's `rc_buf_initial_sz`), and the first key frame
+is planned at half that level (libvpx's
+`calc_iframe_target_size_one_pass_cbr`), at the step a key frame of four
+times an inter frame's bits would take. What the start left under the
+buffer's optimal level (five sixths of it) and what a key frame took
+past a frame's share are paid back at libvpx's pace, at most a quarter
+of a frame's share a frame (`calc_pframe_target_size_one_pass_cbr` at
+its default `undershoot-pct`/`overshoot-pct` of 50); what the frames
+took past their budgets is paid back within half the buffer, as before,
+and savings past a full buffer are lost. Before, the first key frame
+was a guess 1.5 times the inter step whatever the buffer (7.1 kB at
+every size below). The three scenes (60 frames) at 1000 kb/s, FFmpeg
+`-minrate`=`-maxrate`=`-b:v`, key frame, rate, PSNR-Y:
+
+| | FFmpeg 6.1 / libvpx 1.14 | Before | Now |
+| --- | --- | --- | --- |
+| `-bufsize 250k` / `cbr=250` | 5.3 kB, 1066 kb/s, 36.89 dB | 7.1, 1001, 36.57 | 10.7, 983, 36.28 |
+| `-bufsize 1000k` / `cbr=1000` | 22.1, 1033, 37.70 | 7.1, 1003, 36.82 | 27.5, 972, 36.58 |
+| `-bufsize 4000k` / `cbr=4000` | 49.8, 1170, 37.99 | 7.1, 1030, 36.98 | 50.9, 965, 36.34 |
+| `-rc_init_occupancy 100k` / `occupancy=100` | 1.8, 852, 35.51 | n/a | 5.6, 764, 35.59 |
+| `-rc_init_occupancy 1000k` / `occupancy=1000` | 26.9, 1132, 38.06 | n/a | 31.7, 1081, 37.13 |
+
+Both now start at a key frame the buffer pays for and come in under the
+rate from a low start. At speeds 6 and 9 with a 1 s buffer (0.5/1 to
+3/4 Mb/s, four threads), BD-rate against the build before at the same
+PSNR-Y / FFmpeg's average: speed 6 −1.1 / −1.9% on the three scenes,
+−54.3 / −46.5% on the still scene with two jumps, −38.0 / −36.7% on the
+grainy pan; speed 9 +6.0 / +3.9%, −38.5 / −26.0%, −33.7 / −21.0% (the
+build before swung its quantizer by up to 100 indices a frame on the
+two clips that gain); rates within −3% to +3% of the target (before −0.4
+to +4%), in 0.86 to 0.93 of the time.
+
+**Minimum golden interval** (`min_gf_interval`, `-min-gf-interval`). The
+shortest golden group (alt-ref target to alt-ref target), and the longest
+the more of it and 12, as libvpx raises its `max-gf-interval` to it. One
+pass places golden frames every that many pictures; two passes by
+motion within the two. Two passes at 1.5 Mb/s on the three scenes (60
+frames; hidden alt-refs, kB / PSNR-Y):
+
+| | FFmpeg 6.1 / libvpx 1.14 | Ours |
+| --- | --- | --- |
+| unset | 10 alt-refs (key frames 0, 30), 371 / 41.32 | 7 alt-refs, 370 / 41.56 |
+| `-min-gf-interval 4` / `min_gf=4` | the same | 7, 369 / 41.50 |
+| `-min-gf-interval 16` / `min_gf=16` | 2 (at 1, 31), 332 / 40.64 | 2 (at 1, 31), 395 / 41.84 |
+
+Both make one alt-ref a scene of 30 pictures with 16. libvpx comes in
+under the rate with it (1330 kb/s), ours over (1579): the alt-ref of a
+long group takes more than the model of 12-picture groups planned.
+
+**Forced key frames** (`Vp9Encoder::force_keyframe`,
+`-force_key_frames`; `force_keyframes=N,N,...` in `vp9enc`). The
+picture pushed after the call is a key frame, with the lookahead too
+(it waited for its turn; before, the call made the picture coded next a
+key frame, a lookahead's length early), and no alt-ref is coded across
+it. FFmpeg's `-crf 32 -force_key_frames 0.5,1.5` and `crf=32
+force_keyframes=15,45`: key frames at 0, 15 and 45 in both (850 kB /
+44.24 dB and 607 kB / 43.30 dB).
 
 **Quantizer limits** (`min_q`, `max_q`; FFmpeg's `-qmin`, `-qmax` times
 4). Every frame's quantizer index, hidden alt-refs too, is held within

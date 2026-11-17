@@ -318,6 +318,35 @@ pub struct Vp9Options {
     /// bitrate and its easy clips leave bits to its hard ones. 0: each
     /// clip at the bitrate.
     pub corpus_complexity: u32,
+    /// With a bitrate: the rate buffer's level when the stream starts, in
+    /// milliseconds of the bitrate (libvpx's `rc_buffer_initial_size`,
+    /// FFmpeg's `-rc_init_occupancy` over the bitrate). At a constant
+    /// bitrate the first key frame is planned at half of it (libvpx's
+    /// `calc_iframe_target_size_one_pass_cbr`), and the frames after it
+    /// spend less while the buffer is under its optimal level (five
+    /// sixths of `cbr_buffer_ms`), more while it is over; with
+    /// [`Vp9Options::drop_frame_pct`] it is where the buffer frames are
+    /// dropped by starts. 0: three quarters of `cbr_buffer_ms` (FFmpeg's
+    /// default occupancy), or at a variable bitrate libvpx's 4 of its 6
+    /// seconds. At most the buffer's size.
+    pub rc_init_occupancy_ms: u32,
+    /// The fewest pictures from one golden frame (or alt-ref target) to
+    /// the next (libvpx's `min-gf-interval`, FFmpeg's `-min-gf-interval`).
+    /// The most is then this or 12, whichever is more, as libvpx raises
+    /// its `max-gf-interval` to it. 0: the encoder's own (12 in one pass;
+    /// 6 to 12 by motion in two passes).
+    pub min_gf_interval: u32,
+    /// libvpx's temporal dependency model (`enable-tpl`, FFmpeg's
+    /// `-enable-tpl`), for an alt-ref coded with the lookahead: how much of
+    /// each superblock of the alt-ref the pictures of its golden group
+    /// take on (their intra and inter costs on the source, propagated
+    /// along their motion from the last picture back), which scales the
+    /// superblock's RD lambda (libvpx's `get_rdmult_delta`: from half to
+    /// 1.5 times), and the alt-ref's quantizer step by the square root of
+    /// the share of its cost the group does not take on (the frame-level
+    /// part; libvpx 1.14's VP9 encoder has the lambda only). Off by
+    /// default (libvpx's is on); see the README's "Options measured".
+    pub enable_tpl: bool,
     /// Alpha (FFmpeg's `libvpx-vp9` with `-pix_fmt yuva420p`): a second
     /// encoder codes each picture's alpha plane as the luma of an 8-bit
     /// 4:2:0 picture whose chroma is 128, one alpha packet for each packet
@@ -470,6 +499,9 @@ impl Vp9Options {
         if self.drop_frame_pct > 100 {
             return bad("vp9 drop-frame threshold past 100");
         }
+        if self.min_gf_interval > MAX_GF_INTERVAL {
+            return bad("vp9 min golden interval past 64");
+        }
         if self.alpha && self.bit_depth != 8 {
             return bad("vp9 alpha above 8 bits");
         }
@@ -497,6 +529,28 @@ impl Vp9Options {
             corpus_complexity: 0,
             ..*self
         }
+    }
+
+    /// The fewest and most pictures from one golden frame to the next:
+    /// the encoder's own, or [`Vp9Options::min_gf_interval`] and at least
+    /// that.
+    fn gf_range(&self) -> (u32, u32) {
+        match self.min_gf_interval {
+            0 => (GF_MIN_INTERVAL, GF_INTERVAL),
+            m => (m, m.max(GF_INTERVAL)),
+        }
+    }
+
+    /// The rate buffer's level at the start, in bits
+    /// ([`Vp9Options::rc_init_occupancy_ms`]).
+    fn initial_buffer(&self) -> f64 {
+        let size = Rate::buffer_size(self);
+        let ms = match (self.rc_init_occupancy_ms, self.cbr_buffer_ms) {
+            (0, 0) => return size * 4.0 / 6.0,
+            (0, cbr) => f64::from(cbr) * 0.75,
+            (ms, _) => f64::from(ms),
+        };
+        (f64::from(self.bitrate) * ms / 1000.0).min(size)
     }
 
     /// Whether variance AQ is on.
@@ -553,6 +607,9 @@ impl Default for Vp9Options {
             noise_sensitivity: 0,
             temporal_layers: 1,
             corpus_complexity: 0,
+            rc_init_occupancy_ms: 0,
+            min_gf_interval: 0,
+            enable_tpl: false,
             alpha: false,
         }
     }
@@ -631,7 +688,11 @@ struct Core<P: EncPixel> {
     opts: Vp9Options,
     enc: FrameEncoder<P>,
     since_key: u32,
+    /// The picture coded next is a key frame.
     force_key: bool,
+    /// The picture pushed next is a key frame ([`Vp9Encoder::force_keyframe`]
+    /// with the lookahead: [`Queued::force`]).
+    force_next: bool,
     rc: Rate,
     cancel: Arc<AtomicBool>,
     /// Pictures waiting for the lookahead, oldest first.
@@ -723,6 +784,9 @@ struct Queued<P> {
     /// ... and which of its 16×16 blocks it does not hold there
     /// ([`super::arf::still_blocks`]).
     changed: Vec<bool>,
+    /// It was pushed after [`Vp9Encoder::force_keyframe`]: it is a key
+    /// frame.
+    force: bool,
 }
 
 /// The pictures a push codes: data, key frame, and the picture's `pts`,
@@ -920,9 +984,18 @@ impl Vp9Encoder {
         c.round().min(f64::from(u32::MAX)) as u32
     }
 
-    /// Makes the next frame a key frame.
+    /// Makes the picture pushed next a key frame (FFmpeg's
+    /// `-force_key_frames`, libvpx's `VPX_EFLAG_FORCE_KF`): with the
+    /// lookahead, the picture comes out as a key frame when its turn comes,
+    /// and no alt-ref spans it.
     pub fn force_keyframe(&mut self) {
-        on_lane!(self, c => c.force_key = true);
+        on_lane!(self, c => {
+            if c.opts.lag() == 0 {
+                c.force_key = true;
+            } else {
+                c.force_next = true;
+            }
+        });
     }
 
     /// Codes one 8-bit picture: `planes` are Y, U, V with their strides
@@ -1158,6 +1231,7 @@ impl<P: EncPixel> Core<P> {
             enc: opts.frame_encoder(width, height),
             since_key: 0,
             force_key: true,
+            force_next: false,
             rc: Rate::new(opts, u64::from(width) * u64::from(height)),
             cancel: Arc::new(AtomicBool::new(false)),
             queue: std::collections::VecDeque::new(),
@@ -1165,7 +1239,7 @@ impl<P: EncPixel> Core<P> {
             mids: Vec::new(),
             shown_mid: None,
             mid_layer: 1,
-            gold: (0, GF_INTERVAL),
+            gold: (0, opts.gf_range().1),
             last_luma: Vec::new(),
             pool: Vec::new(),
             gold_src: None,
@@ -1183,7 +1257,12 @@ impl<P: EncPixel> Core<P> {
     }
 
     fn set_second_pass(&mut self, first_bits: &[u64], first_q: u8) {
-        self.rc.pass2 = Some(Pass2::new(first_bits, first_q, self.opts.keyint));
+        self.rc.pass2 = Some(Pass2::new(
+            first_bits,
+            first_q,
+            self.opts.keyint,
+            self.opts.gf_range().1,
+        ));
         if self.opts.corpus_complexity > 0 {
             let c = self.complexity(first_bits, first_q);
             self.rc.budget = (c / f64::from(self.opts.corpus_complexity))
@@ -1306,6 +1385,7 @@ impl<P: EncPixel> Core<P> {
             exact,
             still,
             changed,
+            force: std::mem::take(&mut self.force_next),
             cut,
             planes: tight,
             seconds,
@@ -1333,6 +1413,9 @@ impl<P: EncPixel> Core<P> {
                 what: "empty lookahead",
             });
         };
+        if f.force {
+            self.force_key = true;
+        }
         let (w, h) = (self.width as usize, self.height as usize);
         let cw = self.opts.chroma_dims(w, h).0;
         // A drawn picture ([`DRAWN_SHARE`]): it repeats much of the one
@@ -1370,12 +1453,14 @@ impl<P: EncPixel> Core<P> {
                 && self.queue.get(k - 1).is_some_and(|q| q.still >= DRAWN_SHARE))
             && idx == self.gold.0 + 1
             // (One pass: only after a golden place, not after a cut.)
-            && (self.rc.pass2.is_some() || idx % GF_INTERVAL == 1)
+            && (self.rc.pass2.is_some() || idx % self.opts.gf_range().1 == 1)
             && !cut
             && self.overlay_at.is_none()
             && k >= 2
             && k <= self.queue.len()
             && target < self.opts.keyint
+            // (Nor across a key frame forced on a picture to come.)
+            && !self.queue.iter().take(k).any(|q| q.force)
             && super::arf::reachable(
                 &f.planes[0],
                 &self.queue[k - 1].planes[0],
@@ -2230,13 +2315,14 @@ impl<P: EncPixel> Core<P> {
     fn reset(&mut self) {
         self.enc = self.opts.frame_encoder(self.width, self.height);
         self.force_key = true;
+        self.force_next = false;
         self.since_key = 0;
         self.rc = Rate::new(self.opts, u64::from(self.width) * u64::from(self.height));
         self.queue.clear();
         self.overlay_at = None;
         self.mids.clear();
         self.shown_mid = None;
-        self.gold = (0, GF_INTERVAL);
+        self.gold = (0, self.opts.gf_range().1);
         self.pool.clear();
         self.gold_src = None;
         self.shown = 0;
@@ -2258,7 +2344,9 @@ impl<P: EncPixel> Core<P> {
     /// stay near (libvpx's two passes end a golden group sooner as the
     /// motion grows, too).
     fn next_golden(&self, at: u32, (y, stride): (&[P], usize)) -> u32 {
-        let fixed = (at / GF_INTERVAL + 1) * GF_INTERVAL;
+        // ([`Vp9Options::min_gf_interval`] sets them.)
+        let (least, most) = self.opts.gf_range();
+        let fixed = (at / most + 1) * most;
         let Some(next) = self.queue.front() else {
             return fixed;
         };
@@ -2277,9 +2365,9 @@ impl<P: EncPixel> Core<P> {
         };
         let m = super::arf::motion(&tight, &next.planes[0], w, h);
         if m == 0 {
-            return at + GF_INTERVAL;
+            return at + most;
         }
-        at + (GF_REACH / m).clamp(GF_MIN_INTERVAL, GF_INTERVAL)
+        at + (GF_REACH / m).clamp(least, most)
     }
 }
 
@@ -2679,6 +2767,9 @@ const DRAWN_STEP_SCALE: [f64; 2] = [0.3, 0.6];
 /// The shortest golden interval of [`GF_REACH`].
 const GF_MIN_INTERVAL: u32 = 6;
 
+/// The most [`Vp9Options::min_gf_interval`].
+const MAX_GF_INTERVAL: u32 = 64;
+
 /// The quantizer step of each frame type (key, golden, inter) over the
 /// inter frames'.
 const STEP_SCALE: [f64; 3] = [0.35, 0.55, 1.0];
@@ -2703,9 +2794,15 @@ const Q_GOLDEN_SCALE: f64 = 0.5;
 const Q_ARF_STRENGTH: u32 = 1;
 const Q_ARF_FRAMES: u8 = 5;
 
-/// At a constant bitrate, the first key frame's step over the one the
-/// bitrate guesses for inter frames.
-const CBR_FIRST_SCALE: f64 = 1.5;
+/// At a constant bitrate, the first key frame's bits at a step over an
+/// inter frame's guess ([`FIRST_K`]): libvpx plans it at half the buffer's
+/// initial level.
+const KEY_K: f64 = 4.0;
+
+/// At a constant bitrate, the most a frame's budget moves by the buffer's
+/// distance from its optimal level, as a share of the budget (libvpx's
+/// `under_shoot_pct` and `over_shoot_pct` at their default, 50, over two).
+const CBR_PACE: f64 = 0.25;
 
 /// At a constant bitrate, how many quantizer indices a golden or key frame
 /// is at most finer than the inter frames. On a 720p pan at 2 Mb/s, half-
@@ -2765,6 +2862,8 @@ struct Pass2 {
     /// the step scale of the scene coded now (see [`SCENE_BETA`]).
     key_ratio: f64,
     scale: f64,
+    /// The first pass's golden interval.
+    gf: usize,
 }
 
 /// The share of a golden picture's first-pass bits its overlay keeps
@@ -2812,8 +2911,9 @@ const SCENE_END_BITS: f64 = 2.5;
 const END_FRAMES: f64 = 10.0;
 
 impl Pass2 {
-    fn new(bits: &[u64], q: u8, keyint: u32) -> Self {
+    fn new(bits: &[u64], q: u8, keyint: u32, gf: u32) -> Self {
         let keyint = keyint.max(1) as usize;
+        let gf = gf.max(1) as usize;
         let b: Vec<f64> = bits.iter().map(|&b| b as f64).collect();
         // The first pass codes a golden frame every `GF_INTERVAL` at its
         // finer step. For when the second pass places its golden frames
@@ -2823,7 +2923,7 @@ impl Pass2 {
         // nearest first-pass golden frame took over its neighbours.
         let is_gold = |i: usize| {
             let at = i % keyint;
-            at != 0 && at.is_multiple_of(GF_INTERVAL as usize)
+            at != 0 && at.is_multiple_of(gf)
         };
         let inter: Vec<f64> = (0..b.len())
             .map(|i| {
@@ -2856,7 +2956,7 @@ impl Pass2 {
                 if at == 0 {
                     return (b[i], 1);
                 }
-                if at.is_multiple_of(GF_INTERVAL as usize) {
+                if at.is_multiple_of(gf) {
                     return (b[i], 2);
                 }
                 let mut near: Vec<f64> = (i.saturating_sub(3)..(i + 4).min(b.len()))
@@ -2887,6 +2987,7 @@ impl Pass2 {
             bits: b,
             key_ratio: 0.0,
             scale: 1.0,
+            gf,
         }
     }
 
@@ -2908,7 +3009,7 @@ impl Pass2 {
     /// frames), and at a first-pass golden place also twice the one
     /// before (golden frames take more anyway).
     fn scene_end(&self, at: usize) -> usize {
-        let gold = |j: usize| j.is_multiple_of(GF_INTERVAL as usize);
+        let gold = |j: usize| j.is_multiple_of(self.gf);
         (at + 2..self.first.len())
             .find(|&j| {
                 if self.first[j].1 == 1 {
@@ -2920,7 +3021,7 @@ impl Pass2 {
                     .collect();
                 near.sort_by(f64::total_cmp);
                 let median = near.get(near.len() / 2).copied().unwrap_or(0.0);
-                let prev = (j.saturating_sub(GF_INTERVAL as usize)..j)
+                let prev = (j.saturating_sub(self.gf)..j)
                     .rev()
                     .find(|&x| gold(x))
                     .map_or(0.0, |x| self.bits[x]);
@@ -3031,6 +3132,10 @@ struct Rate {
     /// share of the bitrate (its complexity over the corpus's); 1
     /// otherwise.
     budget: f64,
+    /// At a constant bitrate: the bits under the buffer's optimal level
+    /// (over it, negative) that its start and the key frames planned, paid
+    /// back at libvpx's pace ([`CBR_PACE`]).
+    planned: f64,
 }
 
 /// With temporal layers, the share of a frame's budget each layer's
@@ -3116,14 +3221,20 @@ impl Rate {
             key_extra: (0.0, 0.0),
             probed: None,
             arf_next: false,
-            // (libvpx's buffer starts at 4 of its 6 seconds.)
-            buffer: Self::buffer_size(&opts) * 4.0 / 6.0,
+            // (libvpx's buffer starts at 4 of its 6 seconds; FFmpeg's at
+            // three quarters of `-bufsize`.)
+            buffer: opts.initial_buffer(),
             decimation: (0, 0),
             layer: None,
             drawn: false,
             layer_model: [None; 3],
             layer_q: [None; 3],
             budget: 1.0,
+            planned: if opts.cbr_buffer_ms > 0 {
+                Self::buffer_size(&opts) * 5.0 / 6.0 - opts.initial_buffer()
+            } else {
+                0.0
+            },
         }
     }
 
@@ -3229,7 +3340,7 @@ impl Rate {
             };
             step_of(p.q, bd) * (k * b / cap).powf(1.0 / EXP)
         } else {
-            let m = self.model[0].unwrap_or(4.0 * FIRST_K * self.pixels);
+            let m = self.model[0].unwrap_or(KEY_K * FIRST_K * self.pixels);
             (m / cap).powf(1.0 / EXP)
         };
         q_of_step(step, bd)
@@ -3344,15 +3455,16 @@ impl Rate {
             let target = f64::from(self.opts.bitrate) * seconds.max(1e-3) * SHARE[2];
             let step = (FIRST_K * self.pixels / target.max(1.0)).powf(1.0 / EXP);
             self.last_q = q_of_step(step, self.opts.bit_depth).clamp(floor[2], self.opts.max_q);
-            // At a constant bitrate the first key frame takes a coarser
-            // step, not a finer one: the buffer cannot hold the ten frames'
-            // worth a fine one costs.
-            let scale = if self.opts.cbr_buffer_ms > 0 {
-                CBR_FIRST_SCALE
-            } else {
-                STEP_SCALE[kind]
-            };
-            return q_of_step(step * scale, self.opts.bit_depth)
+            if self.opts.cbr_buffer_ms > 0 && kind == 0 {
+                // At a constant bitrate the first key frame is planned at
+                // half the buffer's level (libvpx's
+                // `calc_iframe_target_size_one_pass_cbr`): the step at which
+                // a key frame, [`KEY_K`] times an inter frame, takes that.
+                let key = (self.buffer / 2.0).max(1.0);
+                let step = (KEY_K * FIRST_K * self.pixels / key).powf(1.0 / EXP);
+                return q_of_step(step, self.opts.bit_depth).clamp(floor[0], self.opts.max_q);
+            }
+            return q_of_step(step * STEP_SCALE[kind], self.opts.bit_depth)
                 .clamp(floor[kind], self.opts.max_q);
         }
         let m = match (self.model[kind], self.model[0]) {
@@ -3414,7 +3526,7 @@ impl Rate {
             let golden = self.model[1]
                 .or(self.model[0].map(|k| k * 0.5))
                 .unwrap_or(m * 3.0);
-            let w = 1.0 / f64::from(GF_INTERVAL);
+            let w = 1.0 / f64::from(self.opts.gf_range().1);
             // The golden frames to come at the step they take: at
             // [`GOLDEN_KEY_SPEED`], with no lookahead and so no alt-refs,
             // a key frame's.
@@ -3446,12 +3558,30 @@ impl Rate {
             return q;
         }
         let share = if cbr { SHARE_CBR[kind] } else { SHARE[kind] };
-        let debt = if banded {
-            band(self.debt, self.per_frame * f64::from(self.frames))
+        let target = if cbr {
+            // The buffer's distance under its optimal level (five sixths of
+            // its size; over it, negative): what the buffer's start and the
+            // key frames planned ([`Rate::planned`]) left falls due at
+            // libvpx's pace, at most a quarter of a frame's share a frame
+            // (`calc_pframe_target_size_one_pass_cbr`); the rest, what the
+            // frames took past their budgets, within half the buffer.
+            let optimal = Self::buffer_size(&self.opts) * 5.0 / 6.0;
+            let deficit = optimal - self.buffer - self.planned;
+            let deficit = if banded {
+                band(deficit, self.per_frame * f64::from(self.frames))
+            } else {
+                deficit
+            };
+            let pace = self.planned.clamp(-self.pace(), self.pace());
+            (self.per_frame * share - pace - deficit / horizon).max(self.per_frame * 0.2)
         } else {
-            self.debt
+            let debt = if banded {
+                band(self.debt, self.per_frame * f64::from(self.frames))
+            } else {
+                self.debt
+            };
+            (self.per_frame * share - debt / horizon).max(self.per_frame * 0.2)
         };
-        let target = (self.per_frame * share - debt / horizon).max(self.per_frame * 0.2);
         let step = (m / target).powf(1.0 / EXP);
         let q = q_of_step(step, self.opts.bit_depth).clamp(floor[kind], self.opts.max_q);
         // Inter frames move the quantizer at most a few steps a frame (more
@@ -3474,6 +3604,11 @@ impl Rate {
             self.last_q = q;
         }
         q
+    }
+
+    /// At a constant bitrate, the most of [`Rate::planned`] a frame pays.
+    fn pace(&self) -> f64 {
+        self.per_frame * CBR_PACE
     }
 
     /// Whether the first picture waits for [`Core::probe`].
@@ -3592,6 +3727,14 @@ impl Rate {
             self.key_extra = ((bits - self.per_frame).max(0.0), 0.0);
         } else if seconds > 0.0 {
             self.key_extra.1 += 1.0;
+        }
+        if self.opts.cbr_buffer_ms > 0 && seconds > 0.0 {
+            // A shown frame pays its part of what was planned; a key frame
+            // plans what it took past a frame's share.
+            self.planned -= self.planned.clamp(-self.pace(), self.pace());
+            if kind == 0 {
+                self.planned += (bits - self.per_frame).max(0.0);
+            }
         }
         if kind > 2 {
             // A layered alt-ref, or its showing: no model of their own.

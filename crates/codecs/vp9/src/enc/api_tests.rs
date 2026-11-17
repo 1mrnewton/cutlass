@@ -3629,3 +3629,165 @@ fn every_frame_stays_within_min_q_and_max_q_in_every_rate_mode() {
         check("fixed", &encode_with(fixed, (w, h), 30, clip));
     }
 }
+
+#[test]
+fn the_initial_buffer_level_sizes_the_first_key_frame_and_the_start() {
+    // At a constant bitrate the first key frame is planned at half the
+    // buffer's initial level (`rc_init_occupancy_ms`), and a buffer that
+    // starts low spends less until it fills.
+    let (w, h) = (160u32, 96u32);
+    let run = |occupancy: u32| {
+        let opts = super::Vp9Options {
+            bitrate: 100_000,
+            cbr_buffer_ms: 1000,
+            rc_init_occupancy_ms: occupancy,
+            threads: 2,
+            speed: 9,
+            ..super::Vp9Options::default()
+        };
+        let p = encode_with(opts, (w, h), 20, |i| moving(w, h, i * 2));
+        assert_decodes(&p, (w, h), 20);
+        (p[0].data.len(), packet_bytes(&p))
+    };
+    let (low, high) = (run(100), run(1000));
+    assert!(low.0 * 3 / 2 < high.0, "key {} against {}", low.0, high.0);
+    assert!(low.1 < high.1, "{} against {}", low.1, high.1);
+    // Unset, three quarters of the buffer (FFmpeg's default occupancy).
+    let unset = run(0);
+    assert_eq!(unset, run(750));
+}
+
+#[test]
+fn a_bigger_buffer_takes_a_bigger_first_key_frame() {
+    // libvpx's buffer (`-bufsize`) sizes the first key frame through the
+    // initial level (three quarters of it unless set).
+    let (w, h) = (160u32, 96u32);
+    let key = |cbr_buffer_ms: u32| {
+        let opts = super::Vp9Options {
+            bitrate: 100_000,
+            cbr_buffer_ms,
+            threads: 2,
+            speed: 9,
+            ..super::Vp9Options::default()
+        };
+        encode_with(opts, (w, h), 3, |i| moving(w, h, i * 2))[0]
+            .data
+            .len()
+    };
+    let (small, mid, big) = (key(250), key(1000), key(4000));
+    assert!(small < mid && mid < big, "{small}, {mid}, {big}");
+    assert!(small * 3 / 2 < big, "{small} against {big}");
+}
+
+#[test]
+fn golden_groups_are_at_least_min_gf_interval_long() {
+    // With the lookahead, each alt-ref targets the end of a golden group:
+    // with `min_gf_interval` 16 they come at least 16 pictures apart (12
+    // without), in one pass and in two.
+    let (w, h) = (96u32, 64u32);
+    let clip = |i: u32| moving(w, h, i / 20);
+    let hidden_at = |packets: &[Packet]| {
+        let mut at = Vec::new();
+        for p in packets {
+            let frames = crate::decode::split_superframe(&p.data).expect("superframe");
+            if frames.len() > 1 {
+                at.push(p.pts);
+            }
+        }
+        at
+    };
+    for two in [false, true] {
+        for min in [0u32, 16] {
+            let opts = super::Vp9Options {
+                min_gf_interval: min,
+                threads: 1,
+                speed: 6,
+                ..super::Vp9Options::default()
+            };
+            let packets = if two {
+                two_pass(
+                    super::Vp9Options {
+                        bitrate: 200_000,
+                        ..opts
+                    },
+                    (w, h),
+                    60,
+                    &clip,
+                )
+            } else {
+                encode_with(
+                    super::Vp9Options {
+                        qindex: 120,
+                        ..opts
+                    },
+                    (w, h),
+                    60,
+                    clip,
+                )
+            };
+            assert_decodes(&packets, (w, h), 60);
+            let at = hidden_at(&packets);
+            assert!(at.len() >= 2, "two {two} min {min}: {at:?}");
+            if min > 0 {
+                assert!(at.windows(2).all(|p| p[1] - p[0] >= 16), "{at:?}");
+            }
+            if !two {
+                // One pass: after each golden place, every 12 (16).
+                let every = if min > 0 { 16 } else { 12 };
+                assert!(at.iter().all(|p| (p - 1) % every == 0), "{at:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_forced_key_frame_lands_on_the_picture_pushed_after_it() {
+    // With the lookahead, `force_keyframe` before a push makes that
+    // picture the key frame (FFmpeg's `-force_key_frames`), whenever it
+    // comes out, and no alt-ref spans it; without, the same.
+    let (w, h) = (96u32, 64u32);
+    for lag in [Some(0), None] {
+        let opts = super::Vp9Options {
+            qindex: 120,
+            lag,
+            threads: 1,
+            speed: 6,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let mut packets = Vec::new();
+        for i in 0..40u32 {
+            if i == 7 || i == 25 {
+                encoder.force_keyframe();
+            }
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: moving(w, h, i / 3),
+                        pts: i64::from(i),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        let keys: Vec<i64> = packets
+            .iter()
+            .filter(|p| p.keyframe)
+            .map(|p| p.pts)
+            .collect();
+        assert_eq!(keys, vec![0, 7, 25], "lag {lag:?}");
+        let mut dec = Decoder::new();
+        for p in &packets {
+            for f in crate::decode::split_superframe(&p.data).expect("superframe") {
+                let hd = header::parse(dec.persist(), f).expect("header").header;
+                // (No hidden alt-ref is a key frame, and a key frame
+                // shows.)
+                assert_eq!(hd.key_frame, p.keyframe && hd.show_frame, "pts {}", p.pts);
+                dec.decode(f).expect("decode");
+            }
+        }
+        assert_decodes(&packets, (w, h), 40);
+    }
+}

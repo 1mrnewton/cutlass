@@ -10,15 +10,20 @@
 //! one. A call with the wrong token is answered with an error and nothing
 //! runs.
 //!
+//! Any program on the machine can connect, and the token is in the call
+//! it sends, so what is read before the token is known is bounded: a call
+//! is at most [`CALL_LIMIT`] bytes, and at most [`CALLER_LIMIT`] callers
+//! are connected at once.
+//!
 //! A call waits in a queue until the app gets to it. A caller that stops
 //! waiting meanwhile, by hanging up or by running out of time, was told
 //! the call failed or never heard of it, so the call is dropped from the
 //! queue and does not run later behind the caller's back.
 
 use std::hash::{BuildHasher, Hasher};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -30,6 +35,15 @@ use crate::{ToolCall, ToolOutcome, ToolSink};
 
 /// How long a forwarded call waits for the app before it gives up.
 const ANSWER_WAIT: Duration = Duration::from_secs(600);
+
+/// The longest call a caller may send, in bytes. A combo of thousands of
+/// requests is far below it; a caller with no token cannot make the app
+/// hold more than this for it.
+const CALL_LIMIT: usize = 16 * 1024 * 1024;
+
+/// The most callers connected at once. Each is a `cutlass mcp` started by
+/// an MCP client, and a handful is many.
+const CALLER_LIMIT: usize = 16;
 
 /// How often a waiting call looks whether its caller is still there.
 const CALLER_LOOK: Duration = Duration::from_millis(100);
@@ -91,6 +105,7 @@ impl ProjectSocket {
         let stop = Arc::new(AtomicBool::new(false));
         let watch = Arc::clone(&stop);
         let expected = token.clone();
+        let seated = Arc::new(AtomicUsize::new(0));
         thread::Builder::new()
             .name("project socket".to_owned())
             .spawn(move || {
@@ -98,15 +113,24 @@ impl ProjectSocket {
                     if watch.load(Ordering::Acquire) {
                         break;
                     }
-                    let Ok(stream) = stream else {
+                    let Ok(mut stream) = stream else {
                         continue;
                     };
+                    // A seat is held until the caller's thread ends.
+                    let seat = Seat(Arc::clone(&seated));
+                    if seated.fetch_add(1, Ordering::AcqRel) >= CALLER_LIMIT {
+                        let _ = answer_line(&mut stream, &refused(TOO_MANY_CALLERS));
+                        continue;
+                    }
                     let sender = sender.clone();
                     let wake = Arc::clone(&wake);
                     let token = expected.clone();
                     let _ = thread::Builder::new()
                         .name("project caller".to_owned())
-                        .spawn(move || serve_caller(stream, &token, &sender, &wake, answer_wait));
+                        .spawn(move || {
+                            let _seat = seat;
+                            serve_caller(stream, &token, &sender, &wake, answer_wait);
+                        });
                 }
             })?;
         Ok(Self {
@@ -160,9 +184,16 @@ fn serve_caller(
     let Ok(mut writer) = stream.try_clone() else {
         return;
     };
-    for line in BufReader::new(stream).lines() {
-        let Ok(line) = line else {
-            return;
+    let mut reader = BufReader::new(stream);
+    loop {
+        let line = match read_line(&mut reader, CALL_LIMIT) {
+            Line::Text(line) => line,
+            Line::End => return,
+            Line::TooLong => {
+                // The rest of it is not read: the caller is let go.
+                let _ = answer_line(&mut writer, &refused(CALL_TOO_LONG));
+                return;
+            }
         };
         if line.trim().is_empty() {
             continue;
@@ -197,17 +228,74 @@ fn serve_caller(
                 }
             }
         };
-        let mut line = json!({"content": outcome.content, "is_error": outcome.is_error});
-        if let Some(picture) = &outcome.picture {
-            line["picture"] = json!(picture);
-        }
-        if writeln!(writer, "{line}")
-            .and_then(|()| writer.flush())
-            .is_err()
-        {
+        if answer_line(&mut writer, &outcome).is_err() {
             return;
         }
     }
+}
+
+/// What a caller past [`CALLER_LIMIT`] is told.
+const TOO_MANY_CALLERS: &str =
+    "too many callers are connected to the app that holds this project; close one and call again";
+
+/// What a caller whose call is past [`CALL_LIMIT`] is told.
+const CALL_TOO_LONG: &str = "a forwarded call is too long to read";
+
+/// One caller's place among the [`CALLER_LIMIT`], given back when dropped.
+struct Seat(Arc<AtomicUsize>);
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// A refusal that ran nothing.
+fn refused(content: &str) -> ToolOutcome {
+    ToolOutcome {
+        content: content.to_owned(),
+        is_error: true,
+        picture: None,
+    }
+}
+
+/// Write `outcome` to a caller as one line.
+fn answer_line(writer: &mut TcpStream, outcome: &ToolOutcome) -> std::io::Result<()> {
+    let mut line = json!({"content": outcome.content, "is_error": outcome.is_error});
+    if let Some(picture) = &outcome.picture {
+        line["picture"] = json!(picture);
+    }
+    writeln!(writer, "{line}").and_then(|()| writer.flush())
+}
+
+/// The next line a caller sent.
+enum Line {
+    /// A line of text, without its line break.
+    Text(String),
+    /// The caller hung up, or sent bytes that are not text.
+    End,
+    /// The line is longer than the limit; its rest is unread.
+    TooLong,
+}
+
+/// Read one line of at most `limit` bytes, so a caller that never sends a
+/// line break cannot make the app hold what it sends without end.
+fn read_line(reader: &mut BufReader<TcpStream>, limit: usize) -> Line {
+    let mut bytes = Vec::new();
+    let most = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    match reader.by_ref().take(most).read_until(b'\n', &mut bytes) {
+        Err(_) | Ok(0) => return Line::End,
+        Ok(_) => {}
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    } else if bytes.len() > limit {
+        return Line::TooLong;
+    }
+    String::from_utf8(bytes).map_or(Line::End, Line::Text)
 }
 
 /// What a caller is told when the app did not answer its call.
@@ -458,10 +546,8 @@ mod tests {
     }
 
     /// A socket, and a count of the calls that woke its app.
-    fn counted_socket(
-        answer_wait: Duration,
-    ) -> (ProjectSocket, Arc<std::sync::atomic::AtomicUsize>) {
-        let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    fn counted_socket(answer_wait: Duration) -> (ProjectSocket, Arc<AtomicUsize>) {
+        let woken = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&woken);
         let socket = ProjectSocket::open_waiting(
             Arc::new(move || {
@@ -548,6 +634,71 @@ mod tests {
         let outcome = caller.join().unwrap();
         assert_eq!(outcome.content, "done");
         assert!(!outcome.is_error);
+    }
+
+    /// The one line a caller is answered with, or nothing once the app
+    /// hung up.
+    fn answer_to(caller: &TcpStream) -> String {
+        let mut line = String::new();
+        let _ = BufReader::new(caller.try_clone().unwrap()).read_line(&mut line);
+        line
+    }
+
+    #[test]
+    fn a_call_with_no_end_is_cut_off_before_its_token_is_known() {
+        let (socket, woken) = counted_socket(ANSWER_WAIT);
+        let address: SocketAddr = socket.address().parse().unwrap();
+        let mut caller = TcpStream::connect(address).unwrap();
+        // One byte more than a call may have, and no line break.
+        let flood = vec![b'a'; CALL_LIMIT + 1];
+        caller.write_all(&flood).unwrap();
+        let answer = answer_to(&caller);
+        assert!(answer.contains(CALL_TOO_LONG), "{answer}");
+        assert!(answer.contains("\"is_error\":true"), "{answer}");
+        // The app let the caller go, and nothing reached its queue.
+        assert_eq!(answer_to(&caller), "");
+        assert_eq!(woken.load(Ordering::Acquire), 0);
+        assert!(socket.take().is_empty());
+        // A call of the longest length still reads: a line break is not
+        // counted, and neither is the wrong token's refusal a hang-up.
+        let mut caller = TcpStream::connect(address).unwrap();
+        let mut long = vec![b' '; CALL_LIMIT];
+        long.push(b'\n');
+        caller.write_all(&long).unwrap();
+        caller
+            .write_all(call_line("not the token", "draft.apply").as_bytes())
+            .unwrap();
+        let answer = answer_to(&caller);
+        assert!(answer.contains("token"), "{answer}");
+    }
+
+    #[test]
+    fn only_so_many_callers_are_connected_at_once() {
+        let (socket, woken) = counted_socket(ANSWER_WAIT);
+        let address: SocketAddr = socket.address().parse().unwrap();
+        let mut seated: Vec<TcpStream> = (0..CALLER_LIMIT)
+            .map(|_| TcpStream::connect(address).unwrap())
+            .collect();
+        // The next one is told why and let go.
+        let late = TcpStream::connect(address).unwrap();
+        let answer = answer_to(&late);
+        assert!(answer.contains(TOO_MANY_CALLERS), "{answer}");
+        assert_eq!(answer_to(&late), "");
+        // Those seated are served as before.
+        seated[0]
+            .write_all(call_line("not the token", "draft.apply").as_bytes())
+            .unwrap();
+        assert!(answer_to(&seated[0]).contains("token"));
+        // A seat that is left is free for the next caller.
+        drop(seated.pop());
+        until("the seat was not given back", || {
+            let mut next = TcpStream::connect(address).unwrap();
+            next.write_all(call_line("not the token", "draft.apply").as_bytes())
+                .unwrap();
+            answer_to(&next).contains("token")
+        });
+        assert_eq!(woken.load(Ordering::Acquire), 0);
+        assert!(socket.take().is_empty());
     }
 
     #[test]

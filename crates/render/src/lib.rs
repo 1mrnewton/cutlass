@@ -756,6 +756,14 @@ impl Renderer {
     pub fn read(&self, canvas: &Canvas) -> Result<Vec<u8>, RenderError> {
         canvas.read(&self.device, &self.queue)
     }
+
+    /// Bytes of the working textures kept from the last frame for the
+    /// next: the pictures its layers, effects and blurs drew into.
+    /// Canvases are the caller's and are not counted.
+    #[must_use]
+    pub fn texture_bytes(&self) -> u64 {
+        self.pool.texture_bytes()
+    }
 }
 
 /// `placement`, laid out on a full-size canvas, for a canvas `scale` times
@@ -941,6 +949,47 @@ mod tests {
             .unwrap();
         assert_eq!(renderer.read(&one).unwrap(), small);
         assert!(renderer.pool.created() > first);
+    }
+
+    /// The working textures a frame used are counted, kept at that, and
+    /// let go when a frame no longer needs them.
+    #[test]
+    fn texture_bytes_count_the_last_frames_textures() {
+        let Some(renderer) = renderer() else { return };
+        assert_eq!(renderer.texture_bytes(), 0);
+        let (width, height) = (8u32, 4u32);
+        let canvas = renderer.canvas(width, height).unwrap();
+        let red: Vec<u8> = [255, 0, 0, 255].repeat((width * height) as usize);
+        let picture = Rgba {
+            width,
+            height,
+            bytes: &red,
+        };
+        let plain = [Layer::Rgba(picture, Placement::canvas(width, height))];
+        renderer.draw(&canvas, &plain).unwrap();
+        let alone = renderer.texture_bytes();
+        // The picture's own upload, at least.
+        assert!(alone >= u64::from(width * height * 4), "{alone}");
+
+        let invert = [cutlass_effects::Step {
+            block: cutlass_effects::Block::Invert,
+            values: [0.0; cutlass_effects::MAX_VALUES],
+        }];
+        let with_effect = [
+            Layer::Rgba(picture, Placement::canvas(width, height)),
+            Layer::Effect(&invert, None),
+        ];
+        renderer.draw(&canvas, &with_effect).unwrap();
+        let effect = renderer.texture_bytes();
+        // Two working pictures for the effect's steps.
+        assert!(
+            effect >= alone + 2 * u64::from(width * height * 4),
+            "{effect} vs {alone}"
+        );
+        renderer.draw(&canvas, &with_effect).unwrap();
+        assert_eq!(renderer.texture_bytes(), effect, "a frame like the last");
+        renderer.draw(&canvas, &plain).unwrap();
+        assert_eq!(renderer.texture_bytes(), alone, "the effect's are let go");
     }
 
     #[test]

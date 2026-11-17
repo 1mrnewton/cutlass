@@ -1468,37 +1468,69 @@ const IMPORT_SLACK_US: i64 = 100_000;
 /// or a sound is longer than its file, before the combo runs: the session
 /// stores what it is given, and a clip of media that is not there fails
 /// only later, at the first frame. An import with no path is a material
-/// the caller builds by hand and is left alone.
+/// the caller builds by hand and is left alone. A material linked to a
+/// file again, and a reversed copy named for a clip, are files the same
+/// way and are checked the same way.
 fn check_imports(media: &mut impl Media, requests: &[Request]) -> Result<(), ToolError> {
     for (index, request) in requests.iter().enumerate() {
-        if let Request::LinkMedia { path, .. } = request {
-            full_path(path, &format!("request {index} link_media"))?;
+        match request {
+            Request::Import { medium } => {
+                let (path, duration) = match medium {
+                    cutlass_session::ImportedMedium::Video(video) => {
+                        (&video.path, video.duration.0)
+                    }
+                    cutlass_session::ImportedMedium::Audio(audio) => {
+                        (&audio.path, audio.duration.0)
+                    }
+                };
+                if !path.trim().is_empty() {
+                    check_file(media, index, "import", path, Some(duration))?;
+                }
+            }
+            // A material pointed at a file is played from it as an import
+            // is, so the file is held to the same.
+            Request::LinkMedia { path, duration, .. } => {
+                check_file(media, index, "link_media", path, Some(duration.0))?;
+            }
+            // A reversed copy is a file to play; no path plays the clip's
+            // own file backwards.
+            Request::SetReverse { path, .. } if !path.trim().is_empty() => {
+                check_file(media, index, "set_reverse", path, None)?;
+            }
+            _ => {}
         }
-        let Request::Import { medium } = request else {
-            continue;
-        };
-        let (path, duration) = match medium {
-            cutlass_session::ImportedMedium::Video(video) => (&video.path, video.duration.0),
-            cutlass_session::ImportedMedium::Audio(audio) => (&audio.path, audio.duration.0),
-        };
-        if path.trim().is_empty() {
-            continue;
-        }
-        full_path(path, &format!("request {index} import"))?;
-        let info = media.probe(path).map_err(|error| {
-            ToolError::BadArguments(format!(
-                "request {index} import: the file cannot be read ({error}); give its full \
-                 path, and media.probe it for its type, duration and size"
-            ))
-        })?;
-        let timed = matches!(info.kind.as_str(), "video" | "music");
-        if timed && info.duration_us > 0 && duration > info.duration_us + IMPORT_SLACK_US {
-            return Err(ToolError::BadArguments(format!(
-                "request {index} import: the file is {} long, not {duration}; media.probe \
-                 gives its duration",
-                info.duration_us
-            )));
-        }
+    }
+    Ok(())
+}
+
+/// Refuse request `index`, of kind `what`, when the file at `path` is not
+/// given from the root, cannot be read, or is a movie or a sound shorter
+/// than the `duration` the request says it has.
+fn check_file(
+    media: &mut impl Media,
+    index: usize,
+    what: &str,
+    path: &str,
+    duration: Option<i64>,
+) -> Result<(), ToolError> {
+    full_path(path, &format!("request {index} {what}"))?;
+    let info = media.probe(path).map_err(|error| {
+        ToolError::BadArguments(format!(
+            "request {index} {what}: the file cannot be read ({error}); give its full \
+             path, and media.probe it for its type, duration and size"
+        ))
+    })?;
+    let timed = matches!(info.kind.as_str(), "video" | "music");
+    if let Some(duration) = duration
+        && timed
+        && info.duration_us > 0
+        && duration > info.duration_us + IMPORT_SLACK_US
+    {
+        return Err(ToolError::BadArguments(format!(
+            "request {index} {what}: the file is {} long, not {duration}; media.probe \
+             gives its duration",
+            info.duration_us
+        )));
     }
     Ok(())
 }
@@ -3034,6 +3066,59 @@ mod tests {
         assert!(!import("", 5_000_000, true).is_error);
         let real = import("/media/real.mp4", 8_000_000, false);
         assert_eq!(real.content, "revision=1 committed=true");
+        // A material linked to a file again is held to the same, and so is
+        // a reversed copy named for a clip.
+        let mut dry = |request: serde_json::Value| {
+            registry.run_tool(&ToolCall {
+                id: "f".to_owned(),
+                name: "draft.apply".to_owned(),
+                arguments: serde_json::json!({
+                    "expected_revision": 1,
+                    "dry_run": true,
+                    "requests": [request],
+                })
+                .to_string(),
+            })
+        };
+        let link = |path: &str, duration: i64| {
+            serde_json::json!({"op": "link_media", "material_id": "m", "path": path,
+                "width": 1920, "height": 1080, "duration": duration})
+        };
+        let ghost = dry(link("/media/ghost.mp4", 8_000_000));
+        assert!(ghost.is_error);
+        assert!(
+            ghost
+                .content
+                .contains("request 0 link_media: the file cannot be read"),
+            "{}",
+            ghost.content
+        );
+        let long = dry(link("/media/real.mp4", 60_000_000));
+        assert!(long.is_error);
+        assert!(long.content.contains("8000000 long"), "{}", long.content);
+        let near = dry(link("real.mp4", 8_000_000));
+        assert!(near.content.contains("not a full path"), "{}", near.content);
+        let linked = dry(link("/media/real.mp4", 8_000_000));
+        assert!(!linked.is_error, "{}", linked.content);
+        let reverse = |path: &str| {
+            serde_json::json!({"op": "set_reverse", "segment_id": "no clip", "reverse": true,
+                "path": path})
+        };
+        let ghost = dry(reverse("/media/ghost.mp4"));
+        assert!(
+            ghost
+                .content
+                .contains("request 0 set_reverse: the file cannot be read"),
+            "{}",
+            ghost.content
+        );
+        // With no copy named there is no file to look at: the request goes
+        // on to the session, which has no such clip.
+        let own = dry(reverse(""));
+        assert!(own.is_error);
+        assert!(!own.content.contains("cannot be read"), "{}", own.content);
+        let copy = dry(reverse("/media/real.mp4"));
+        assert!(!copy.content.contains("cannot be read"), "{}", copy.content);
     }
 
     #[test]

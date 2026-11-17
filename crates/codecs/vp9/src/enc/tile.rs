@@ -298,7 +298,9 @@ pub struct Shared<'a, P> {
     /// +0.3 / −0.1 / −4.7% → −1.7 / −4.2 / −8.7% (nine points +2.7% →
     /// +1.3%; the sub-blocks alone −0.9%, the halves alone −0.5%), in
     /// 1.11 times the time on the README's three scenes (a third of
-    /// which is `testsrc2`).
+    /// which is `testsrc2`). The 16×16 blocks that changed try their
+    /// halves too ([`STILL_HALVES_LEVEL`]), and the blocks over them
+    /// [`STILL_INTRA_CANDS`] intra modes.
     pub still: Option<(&'a [bool], usize)>,
     /// At a fixed quantizer in one pass, the whole-sample vectors the
     /// previous frame's blocks took most on each reference
@@ -767,6 +769,40 @@ const KEY_RD_CANDS: usize = 6;
 
 /// See [`KEY_RD_SPEED`].
 const KEY_RD_4X4: usize = 3;
+
+/// In an inter frame of a still drawn picture ([`Shared::still`]), the
+/// blocks of this level (16×16) that changed try their halves as well,
+/// with a search of their own, as the larger blocks over what changed and
+/// what did not do. `testsrc2`'s squares of noise, redrawn every picture,
+/// sit a row off the grid of 16×16 blocks (at `y = 225` and every 16
+/// rows on), and take most of its bits. With [`STILL_INTRA_CANDS`],
+/// against FFmpeg's `-crf` at speed 5 (BD-rate at the same PSNR-Y / U /
+/// V, nine points, ours at `crf=15` to `55` by 5 against FFmpeg's by 10):
+/// +0.3 / −3.6 / −8.4% → −1.0 / −6.0 / −11.0% (five points −2.2 / −5.5 /
+/// −9.1% → −3.4 / −7.2 / −11.6%); the halves alone −0.5%, at every level
+/// over what changed −0.8% for half again the time. In 1.10 times the
+/// time on the README's three scenes at a fixed quantizer (with four
+/// intra modes, −1.4% in 1.18 times; with the halves only after the 16×16
+/// block's split won, and four intra modes, −0.6% in 1.10 times; halves
+/// with no search of their own, from the whole block's and its quarters'
+/// choices, +0.5%).
+const STILL_HALVES_LEVEL: usize = 1;
+
+/// In an inter frame of a still drawn picture at speed 5 in one pass, a
+/// block over a 16×16 block that changed tries this many intra modes, the
+/// best by SATD (elsewhere one). See [`STILL_HALVES_LEVEL`]: alone, 0.3
+/// points; with four, 0.7 points for 4% of the time.
+const STILL_INTRA_CANDS: usize = 2;
+
+#[cfg(test)]
+thread_local! {
+    /// The most intra modes a block of an inter frame has tried on this
+    /// thread.
+    pub static INTER_INTRA_MOST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many 16×16 blocks of inter frames have tried their halves
+    /// before their split on this thread.
+    pub static INTER_16X16_HALVES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Up to this speed the search on a reference starts also where its
 /// picture stands from this one ([`Shared::ref_seeds`]) and reaches that
@@ -1822,7 +1858,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.save(row, col, (n, n), before + 1);
         }
         // Halves, across and down.
-        if whole && (s.speed < 4 || s.drawn_key || self.still_cover(row, col, n) == (true, true)) {
+        if whole
+            && (s.speed < 4 || s.drawn_key || {
+                let (changed, kept) = self.still_cover(row, col, n);
+                changed && (kept || level == STILL_HALVES_LEVEL)
+            })
+        {
             best = self.try_halves(row, col, level, before, best);
         }
         // No split when the whole block needs no residual and its error is
@@ -1983,6 +2024,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let hbs = n / 2;
         let bsize = SQUARE[level];
         let node = Self::node(row, col, level);
+        #[cfg(test)]
+        if level == 1 && !s.intra_frame {
+            INTER_16X16_HALVES.with(|c| c.set(c.get() + 1));
+        }
         for (p, k, offs) in [
             (PARTITION_HORZ, 0usize, [(0, 0), (hbs, 0)]),
             (PARTITION_VERT, 1, [(0, 0), (0, hbs)]),
@@ -2629,6 +2674,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             // (At speed 5, one: the second's trials took 4% of the time
             // on the README's grainy pan at 4 Mb/s, for the same BD-rates
             // within the noise.)
+            5 if !s.intra_frame
+                && !s.second_pass
+                && self.still_cover(base.row, base.col, base.bw.max(base.bh)).0 =>
+            {
+                STILL_INTRA_CANDS
+            }
             5 | 6 if !s.intra_frame && !s.second_pass => 1,
             5 if !s.intra_frame => 2,
             5 => 3,
@@ -2644,6 +2695,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         } else {
             f64::INFINITY
         };
+        #[cfg(test)]
+        let from = out.len();
         for &(_, m) in scored.iter().take(k).filter(|t| t.0 as f64 <= first) {
             out.push(Blk {
                 mode: m,
@@ -2651,6 +2704,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 refs: [INTRA_FRAME; 2],
                 ..*base
             });
+        }
+        #[cfg(test)]
+        if !s.intra_frame {
+            let n = out.len() - from;
+            INTER_INTRA_MOST.with(|c| c.set(c.get().max(n)));
         }
     }
 

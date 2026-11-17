@@ -2351,14 +2351,108 @@ median of the rounds (Cutlass at `q=60` to `210`):
 | Still scene | 4.24 s | 3.70 s (0.87) | 3.76 s (0.89) | 3.98 s (0.94) |
 | Grainy pan | 2.89 s | 2.50 s (0.86) | 2.53 s (0.88) | 2.72 s (0.94) |
 
-Checks: of the identity check's 41 configurations, three at a fixed
-quantizer change (the synthetic 4:4:4 source at `q=60`, speeds 2 and 5,
-and the noisy 4:2:0 one at speed 2), the other 38 do not. FFmpeg's `vp9`
+Checks: of the identity check's 41 configurations, five at a fixed
+quantizer change (the synthetic 4:2:0 and 4:4:4 sources at `q=60`,
+speeds 2 and 5, and the noisy 4:2:0 one at speed 2), the other 36 do
+not. FFmpeg's `vp9`
 (threaded and on one thread), libvpx and this decoder agree on 10 new
 streams (40 of 40 decodes). New test: noise and the same noise through
 the smooth filter half a sample across, drawn, codes the filter per
 block and takes the smooth one; not drawn, the frame keeps one filter
 (fails without the change).
+
+**The squares of noise in still pictures** (17 November 2026, after the
+filter). The squares of noise are the 16×16 blocks of a still drawn
+picture that changed from the picture before (`tile::Shared::still`),
+where blocks under 8×8 and the halves of the larger blocks over what
+changed and what did not are tried already. They sit a row off the grid
+of 16×16 blocks (at `y = 225` and every 16 rows on), and a 16×16 block
+that changed covers one cell of the map of changes, so its halves were
+never tried; and an inter frame's block tries one intra mode at speed 5.
+Gated on the blocks that changed (BD-rate on `testsrc2` against FFmpeg's
+`-crf`, five points [nine]; time on the three scenes at `q=120` on one
+core):
+
+| Tried where a 16×16 block changed | PSNR-Y | Time |
+| --- | --- | --- |
+| Nothing more (the filter, before) | −2.2% [+0.3%] | 1 |
+| Two intra modes | −2.6% [−0.0%] | |
+| Four intra modes | −3.0% [−0.3%] | 1.04 |
+| Halves at every size over what changed | −3.4% [−0.8%] | 1.17 |
+| Halves of 16×16 blocks (and 32×32, 64×64 over both, as before) | −2.9% [−0.5%] | 1.12 |
+| Those halves, two intra modes (now) | −3.4% [−1.0%] | 1.14 |
+| Those halves, four intra modes | −4.1% [−1.4%] | 1.19 |
+| Halves only after a 16×16 split won, four intra modes | −3.5% [−0.6%] | 1.07 |
+| Halves from the whole block's and quarters' choices, no search, four intra modes | −2.9% [−0.4%] | |
+
+Across only (16×8) or down only (8×16) the halves of 16×16 blocks did
++0.1% and −0.2% [nine points]. With four threads over `q=60` to `210`,
+FFmpeg's three scenes at 7.29 s: the build before at 0.79 of it, two
+intra modes with the halves at 0.86 (as the halves after a split with
+four), four at 0.93, over the 0.9 this encoder keeps to. A 16×16 block
+that changed now tries its halves before its split, with a search of
+their own (`STILL_HALVES_LEVEL`), and a block over one tries two intra
+modes (`STILL_INTRA_CANDS`).
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets nine points against FFmpeg's five):
+
+| | `testsrc2` | Gradient |
+| --- | --- | --- |
+| Before | −2.2 / −5.5 / −9.1% (+0.3 / −3.6 / −8.4%) | −2.4% (−3.2%) |
+| Now | −3.4 / −7.2 / −11.6% (−1.0 / −6.0 / −11.0%) | −2.4% (−3.2%) |
+
+Against FFmpeg's own nine points, −3.2 / −8.1 / −13.0%; every one of the
+nine is under FFmpeg's curve (by 0.6% at `crf=50` and `55` to 5.5% at
+`45`). The gradient is not still (it pans) and writes the same streams.
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now |
+| --- | --- | --- |
+| 15 | 319068, 52.71 dB | 316954, 52.78 dB |
+| 25 | 238127, 48.91 dB | 237311, 48.99 dB |
+| 35 | 140854, 43.68 dB | 140443, 43.75 dB |
+| 45 | 55956, 39.06 dB | 56028, 39.13 dB |
+| 55 | 18402, 35.95 dB | 18371, 35.96 dB |
+
+On the README's three clips at `q=60` to `210` against the build before
+(BD-rate Y / U / V / FFmpeg's average / 6:1:1): the three scenes −0.4 /
+−0.7 / −0.8 / −0.5 / −0.5; the still scene and the pan write the same
+streams (nothing in them is still and drawn at once). Against the build
+before the filter: the three scenes −0.9 / −1.1 / −1.2 / −1.0 / −0.9,
+the still scene +0.1 / −0.2 / −0.2 / −0.0 / +0.0, the pan the same.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` and the build
+before the filter, three rounds interleaved, the mean over each one's
+points of the median of the rounds (Cutlass at `q=60` to `210`; the pan
+writes the same streams in both, its 4% the noise of the measure):
+
+| | FFmpeg | Before the filter | Now |
+| --- | --- | --- | --- |
+| Three scenes | 7.04 s | 5.47 s (0.78) | 6.09 s (0.87) |
+| Still scene | 4.11 s | 3.55 s (0.86) | 3.64 s (0.89) |
+| Grainy pan | 2.91 s | 2.54 s (0.87) | 2.45 s (0.84) |
+
+Checks: of the identity check's 41 configurations, five at a fixed
+quantizer change from the build before the filter (the synthetic 4:2:0
+and 4:4:4 sources at `q=60`, speeds 2 and 5, the noisy 4:2:0 one at
+speed 2), the other 36 do not (every one at a bitrate, in two passes, or
+at speeds 6 to 10). FFmpeg's `vp9` (threaded and on one thread), libvpx
+and this decoder agree on 10 new streams (40 of 40 decodes: `testsrc2`
+at `crf=25`, `35`, `50`, at `crf=45` on one thread and at `crf=30` at
+speed 4, the gradient at `crf=35`, the three scenes at `q=120` and
+`180`, the still scene at `q=150`, the synthetic 4:2:0 source at
+`q=60`). New tests: a still drawn picture's 16×16 blocks that changed
+try their halves before their split, and a block over them two intra
+modes; elsewhere none and one (each fails without its change).
+
+What is left: `testsrc2` at −3.4% / −7.2% / −11.6% against FFmpeg's
+`-crf`, −1.0% / −6.0% / −11.0% with nine points; the gradient at −2.4%
+(nine points −3.2%). The first picture alone is still 3.2% over
+libvpx's: libvpx's lower lambda and its 8×4 and 4×8 intra blocks take
+it to 0.6%, but not the stream, and the lambda costs the README's clips
+1.5 to 3 points of PSNR-U and V.
 
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and

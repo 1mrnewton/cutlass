@@ -1218,3 +1218,76 @@ fn a_drawn_picture_at_a_fixed_quantizer_picks_each_blocks_filter() {
     assert!(smooth > 0, "no block took the smooth filter");
     assert!(!run(false).0);
 }
+
+/// Two pictures for the tests of a still drawn picture's changed 16×16
+/// blocks: a texture, then the same with each 16×16 block of a band
+/// redrawn as noise, its upper eight rows apart from its lower eight;
+/// and the map of the blocks that changed.
+fn noise_band(w: usize, h: usize) -> ([Vec<u8>; 3], [Vec<u8>; 3], Vec<bool>) {
+    let a = texture(w, h, (0, 0));
+    let mut b = a.clone();
+    let mut k = 0x2545_f491u32;
+    for r in 16..48 {
+        for c in 0..w {
+            k ^= k << 13;
+            k ^= k >> 17;
+            k ^= k << 5;
+            let base = if (r / 8) % 2 == 0 { 60 } else { 150 };
+            b[0][r * w + c] = (base + (k >> 24) % 48) as u8;
+        }
+    }
+    let changed = (0..h / 16)
+        .flat_map(|br| (0..w / 16).map(move |_| (1..3).contains(&br)))
+        .collect();
+    (a, b, changed)
+}
+
+#[test]
+fn a_still_drawn_picture_tries_halves_of_the_16x16_blocks_that_changed() {
+    // An inter frame of a drawn picture that stands still
+    // (`FrameEncoder::set_still`) tries the halves of the 16×16 blocks
+    // that changed before their split (`STILL_HALVES_LEVEL`), with a
+    // search of their own; at speed 5 otherwise only after a split that
+    // won, from its quarters' choices (`RECT_SPEED`).
+    let (w, h) = (128usize, 64usize);
+    let cw = w.div_ceil(2);
+    let (a, b, changed) = noise_band(w, h);
+    let tried = |still: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 1);
+        for (t, pic) in [&a, &b].into_iter().enumerate() {
+            enc.set_drawn(true);
+            enc.set_still((still && t > 0).then(|| changed.clone()));
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            super::tile::INTER_16X16_HALVES.with(|c| c.set(0));
+            enc.encode(fixed_params(t, 120, 5, false)).expect("encode");
+        }
+        super::tile::INTER_16X16_HALVES.with(|c| c.get())
+    };
+    // (The band's 16×16 blocks: two rows of eight.)
+    assert_eq!(tried(true), 16);
+    assert_eq!(tried(false), 0);
+}
+
+#[test]
+fn a_still_drawn_picture_tries_more_intra_modes_where_it_changed() {
+    // An inter frame of a drawn picture that stands still
+    // (`FrameEncoder::set_still`) tries `STILL_INTRA_CANDS` intra modes in
+    // the blocks over 16×16 blocks that changed; at speed 5 otherwise one.
+    let (w, h) = (128usize, 64usize);
+    let cw = w.div_ceil(2);
+    let (a, b, changed) = noise_band(w, h);
+    let most = |still: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 1);
+        for (t, pic) in [&a, &b].into_iter().enumerate() {
+            enc.set_drawn(true);
+            enc.set_still((still && t > 0).then(|| changed.clone()));
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            super::tile::INTER_INTRA_MOST.with(|c| c.set(0));
+            enc.encode(fixed_params(t, 120, 5, false)).expect("encode");
+        }
+        super::tile::INTER_INTRA_MOST.with(|c| c.get())
+    };
+    let (on, off) = (most(true), most(false));
+    assert_eq!(off, 1);
+    assert!(on > off, "{on}");
+}

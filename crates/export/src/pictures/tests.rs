@@ -207,3 +207,71 @@ fn a_shape_h264_cannot_hold_is_refused_before_any_picture() {
     );
     assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 0);
 }
+
+#[test]
+fn pictures_handed_with_times_start_and_end_at_those_times() {
+    let temp = Temp::new("timed");
+    let path = temp.0.join("matte.mp4");
+    let times = [0, 100_000, 150_000, 316_667].map(Micros);
+    write_pictures_at(
+        &encoders(),
+        &movie(3),
+        &times,
+        &path,
+        &mut |k| Ok(grey(k)),
+        &mut |_, _| true,
+    )
+    .unwrap();
+    let readers = readers();
+    let mut media = readers.open(&path).unwrap();
+    assert_eq!(media.info().duration, Some(Micros(316_667)));
+    let range = TimeRange::new(0, 316_667);
+    for (at, k) in [
+        (0, 0),
+        (99_999, 0),
+        (100_000, 1),
+        (149_999, 1),
+        (150_000, 2),
+        (316_666, 2),
+    ] {
+        let held = media.decode_at(Micros(at), &range).unwrap();
+        assert_eq!(held.start, times[k], "at {at}");
+        assert_eq!(held.end, times[k + 1], "at {at}");
+        let Ok(cutlass_picture::Picture::Cpu(picture)) = decoded_picture(&held.frame) else {
+            panic!("the frame at {at} is not in memory");
+        };
+        let want = i32::from(grey(k as u64)[0]);
+        let got = i32::from(picture.rgba()[4 * (24 * 64 + 32)]);
+        assert!((got - want).abs() <= 3, "at {at}: {got} for {want}");
+    }
+}
+
+#[test]
+fn times_that_do_not_fit_the_pictures_are_refused_before_any_picture() {
+    let temp = Temp::new("timed-refused");
+    let path = temp.0.join("matte.mp4");
+    let mut asked = 0;
+    for times in [
+        vec![0, 100_000],
+        vec![0, 100_000, 200_000, 300_000, 400_000],
+        vec![5, 100_000, 200_000, 300_000],
+        vec![0, 100_000, 100_000, 300_000],
+        vec![0, 200_000, 100_000, 300_000],
+    ] {
+        let times: Vec<Micros> = times.into_iter().map(Micros).collect();
+        let refused = write_pictures_at(
+            &encoders(),
+            &movie(3),
+            &times,
+            &path,
+            &mut |k| {
+                asked += 1;
+                Ok(grey(k))
+            },
+            &mut |_, _| true,
+        );
+        assert_eq!(refused, Err(ExportError::FrameRate), "{times:?}");
+    }
+    assert_eq!(asked, 0);
+    assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 0);
+}

@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use burn::module::{Module, Param};
+use burn::module::{Module, ModuleMapper, Param};
 use burn::nn::conv::{Conv2d, Conv2dConfig, DeformConv2d, DeformConv2dConfig};
 use burn::nn::{
     BatchNorm, BatchNormConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, PaddingConfig2d,
@@ -22,7 +22,7 @@ use burn::nn::{
 use burn::tensor::activation::{gelu, relu, sigmoid, softmax};
 use burn::tensor::module::interpolate;
 use burn::tensor::ops::{InterpolateMode, InterpolateOptions, PadMode};
-use burn::tensor::{Device, Int, Tensor, TensorData};
+use burn::tensor::{Device, FloatDType, Int, Tensor, TensorData};
 use burn_store::{BurnpackStore, ModuleSnapshot, PyTorchToBurnAdapter, SafetensorsStore};
 
 use crate::device::{self, Compute};
@@ -65,6 +65,10 @@ const KERNELS: [usize; 3] = [1, 3, 7];
 const GRADIENT: usize = 16;
 /// What masks a token out of another window's attention.
 const MASKED: f32 = -100.0;
+/// What the model computes in on the GPU: half precision, a quarter faster
+/// on a real 1080p frame (188 ms against 250 ms on an M-series Mac) with
+/// mattes that differ by a few levels at the edges. The CPU keeps f32.
+const GPU_FLOAT: FloatDType = FloatDType::F16;
 
 #[derive(Module, Debug)]
 struct PatchEmbed {
@@ -555,6 +559,7 @@ impl Swin {
 /// The bias index and shift masks, kept for each grid size read.
 struct Grids {
     kept: Mutex<Vec<((usize, usize), Grid)>>,
+    float: FloatDType,
 }
 
 impl Grids {
@@ -573,7 +578,8 @@ impl Grids {
         let mask = Tensor::<4>::from_data(
             TensorData::new(shift_mask(hp, wp), [windows, 1, area, area]),
             &device,
-        );
+        )
+        .cast(self.float);
         let grid = Grid { index, mask };
         kept.push(((h, w), grid.clone()));
         Ok(grid)
@@ -703,9 +709,20 @@ impl Net {
     }
 }
 
+/// Casts every weight to one float type.
+struct CastTo(FloatDType);
+
+impl ModuleMapper for CastTo {
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
+        let float = self.0;
+        param.map(|tensor| tensor.cast(float))
+    }
+}
+
 /// BiRefNet_lite, loaded on one device.
 pub struct Matting {
     device: Device,
+    float: FloatDType,
     model: Net,
     grids: Grids,
     side: u32,
@@ -726,7 +743,7 @@ impl Matting {
         let device = device::device(compute)?;
         let mut model = Net::new(&device);
         load_weights(&mut model, &weights.join(MATTING_WEIGHTS))?;
-        Ok(Self::on(device, model, side))
+        Ok(Self::on(device, compute, model, side))
     }
 
     /// The model with random weights: the same work as the real one, for
@@ -736,15 +753,26 @@ impl Matting {
         check_side(side)?;
         let device = device::device(compute)?;
         let model = Net::new(&device);
-        Ok(Self::on(device, model, side))
+        Ok(Self::on(device, compute, model, side))
     }
 
-    fn on(device: Device, model: Net, side: u32) -> Self {
+    fn on(device: Device, compute: Compute, model: Net, side: u32) -> Self {
+        let float = match compute {
+            Compute::Gpu => GPU_FLOAT,
+            Compute::Cpu => FloatDType::F32,
+        };
+        let model = if float == FloatDType::F32 {
+            model
+        } else {
+            model.map(&mut CastTo(float))
+        };
         Self {
             device,
+            float,
             model,
             grids: Grids {
                 kept: Mutex::new(Vec::new()),
+                float,
             },
             side,
             id: format!("birefnet-lite-{side}"),
@@ -760,8 +788,10 @@ impl Matting {
     /// The share of each pixel kept, `[1, 1, side, side]`.
     fn kept(&self, image: &Image<'_>) -> Result<Tensor<4>, VisionError> {
         matte_frame::check(image)?;
-        let frame = matte_frame::input(image, (self.side, self.side), MEAN, SPREAD, &self.device)?;
-        Ok(sigmoid(self.model.forward(frame, &self.grids)?))
+        let frame = matte_frame::input(image, (self.side, self.side), MEAN, SPREAD, &self.device)?
+            .cast(self.float);
+        let kept = sigmoid(self.model.forward(frame, &self.grids)?);
+        Ok(kept.cast(FloatDType::F32))
     }
 }
 

@@ -110,11 +110,13 @@ fn the_cpu_matches_pytorch() {
 #[test]
 #[ignore = "needs a Metal GPU"]
 fn the_gpu_matches_pytorch() {
+    // The GPU computes in half precision: a few edge pixels move by a few
+    // hundredths (0.095 at most at 1024), and almost none change side.
     for side in [512, 1024] {
-        if let Some((worst, mean, _)) = against_pytorch(Compute::Gpu, side) {
+        if let Some((worst, mean, flipped)) = against_pytorch(Compute::Gpu, side) {
             assert!(
-                worst < 1e-3 && mean < 1e-5,
-                "{side}: worst {worst}, mean {mean}"
+                worst < 0.2 && mean < 1e-4 && flipped < 1e-4,
+                "{side}: worst {worst}, mean {mean}, flipped {flipped}"
             );
         }
     }

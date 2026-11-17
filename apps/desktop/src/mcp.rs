@@ -385,6 +385,16 @@ impl Host {
             let Place::Own(own) = &mut self.place else {
                 return;
             };
+            // Its caller gave up while the calls ahead of it ran, a long
+            // export among them, and takes it not to have run. A window
+            // that stopped waiting for the project is not handed it.
+            if forwarded.caller_left() {
+                cutlass_logger::info!(
+                    "mcp: dropped {} from a caller that stopped waiting",
+                    forwarded.call.name
+                );
+                continue;
+            }
             if forwarded.call.name != cutlass_agent::YIELD {
                 let started = Instant::now();
                 let outcome = own.run(&forwarded.call);

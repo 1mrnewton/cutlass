@@ -268,8 +268,10 @@ impl Own {
         })
     }
 
-    /// Run `call`, then save what it changed and take up a settings change.
+    /// Run `call` on the settings as they are now, then save what it
+    /// changed and take up a settings change it made.
     fn run(&mut self, call: &ToolCall) -> ToolOutcome {
+        self.read_settings_again();
         let outcome = self.registry.run_tool(call);
         match self.settle() {
             Ok(()) => outcome,
@@ -277,24 +279,54 @@ impl Own {
         }
     }
 
+    /// Take up the settings file when it was written since this host read
+    /// it: the user changed something in the Cutlass window, or another
+    /// host did. A host that kept the settings it started with went on
+    /// calling a server, or running code, the user had since turned off,
+    /// and its own `settings.set` was refused from then on, as the
+    /// generation it held was no longer the file's. A file that is gone or
+    /// does not read leaves the settings held as they are.
+    fn read_settings_again(&mut self) {
+        let path = self.registry.settings.path().to_path_buf();
+        let Ok(loaded) = cutlass_settings::load(&path) else {
+            return;
+        };
+        if loaded.generation == self.registry.settings.generation() {
+            return;
+        }
+        cutlass_logger::info!(
+            "mcp: the settings changed outside this host; now at generation {}",
+            loaded.generation
+        );
+        self.registry.settings = SettingsTool::held(path, loaded.generation, loaded.settings);
+        self.set_up();
+    }
+
+    /// Set the servers, sandbox and skills up again when the settings held
+    /// are not the ones they were set up from.
+    fn set_up(&mut self) {
+        let generation = self.registry.settings.generation();
+        if generation == self.settings {
+            return;
+        }
+        self.settings = generation;
+        let settings = self.registry.settings.settings().clone();
+        self.registry
+            .mcp
+            .transport_mut()
+            .configure(&settings.mcp_servers);
+        self.registry.sandbox = Switched::from_settings(
+            &settings,
+            crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(&self.path)),
+        );
+        self.registry.skills = SkillLibrary::bundled().with_folders(&settings.skill_folders);
+    }
+
     /// Save the folder when the draft moved, and set the servers, sandbox
     /// and skills up again when the settings did, so a change made through
     /// `settings.set` holds from the next call on.
     fn settle(&mut self) -> Result<(), String> {
-        let generation = self.registry.settings.generation();
-        if generation != self.settings {
-            self.settings = generation;
-            let settings = self.registry.settings.settings().clone();
-            self.registry
-                .mcp
-                .transport_mut()
-                .configure(&settings.mcp_servers);
-            self.registry.sandbox = Switched::from_settings(
-                &settings,
-                crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(&self.path)),
-            );
-            self.registry.skills = SkillLibrary::bundled().with_folders(&settings.skill_folders);
-        }
+        self.set_up();
         let session = self.registry.draft.session();
         if session.revision() != self.saved {
             let mut shell = self.shell.borrow_mut();
@@ -1539,6 +1571,57 @@ mod tests {
         // test program and not `cutlass`, so it has no answer).
         let on = said(&heard.answer(5, || {}));
         assert!(!on.contains("running code is off"), "{on}");
+        drop(client);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_setting_changed_in_the_window_holds_here_from_the_next_call() {
+        let project = Project::new("settings-outside");
+        // The settings are a file of this test's own, not the user's.
+        let settings = project.0.join("settings-home").join("settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let (client, heard, host) = typed_host_with(&project.0, &settings);
+        client
+            .send(call_line(1, "settings_get", json!({})))
+            .unwrap();
+        let read: Value = serde_json::from_str(&said(&heard.answer(1, || {}))).unwrap();
+        let generation = read["generation"].as_u64().unwrap();
+        assert_eq!(read["settings"]["sandbox"]["local"], true);
+        // The user turns running code off in the Cutlass window, which
+        // writes the file this host read when it started.
+        let mut changed = cutlass_settings::Settings::default();
+        changed.sandbox.local = false;
+        let written = cutlass_settings::save(&settings, generation, &changed).unwrap();
+        assert_ne!(written, generation);
+        // The very next call is refused: no script runs on what was read
+        // at the start.
+        client
+            .send(call_line(2, "sandbox_run", json!({"source": "1 + 1"})))
+            .unwrap();
+        let off = heard.answer(2, || {});
+        assert_eq!(off["result"]["isError"], true, "{}", said(&off));
+        assert!(said(&off).contains("running code is off"), "{}", said(&off));
+        // It reads the file's generation now, so its own change is taken
+        // and not refused for ever as written on an old one.
+        client
+            .send(call_line(3, "settings_get", json!({})))
+            .unwrap();
+        let read: Value = serde_json::from_str(&said(&heard.answer(3, || {}))).unwrap();
+        assert_eq!(read["generation"].as_u64(), Some(written));
+        assert_eq!(read["settings"]["sandbox"]["local"], false);
+        client
+            .send(call_line(
+                4,
+                "settings_set",
+                json!({"expected_generation": written, "changes": {"step_cap": 40}}),
+            ))
+            .unwrap();
+        let set = heard.answer(4, || {});
+        assert_eq!(set["result"]["isError"], false, "{}", said(&set));
+        let kept = cutlass_settings::load(&settings).unwrap().settings;
+        assert_eq!(kept.step_cap, 40);
+        assert!(!kept.sandbox.local, "the window's change is kept");
         drop(client);
         host.join().unwrap().unwrap();
     }

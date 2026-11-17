@@ -108,6 +108,17 @@ fn load_follower(dir: &Path, compute: Compute) -> Result<Box<dyn Follower + Send
     Ok(Box::new(model))
 }
 
+/// One Custom removal pick as the page lists it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PickRow {
+    /// The source time of the picked frame.
+    pub frame: Micros,
+    /// Where the timeline shows that frame, when it does.
+    pub at: Option<Micros>,
+    pub clicks: usize,
+    pub strokes: usize,
+}
+
 /// Brush strokes being painted on one frame of a clip, before they are
 /// applied.
 #[derive(Clone, Debug, PartialEq)]
@@ -617,6 +628,60 @@ impl Shell {
         self.add_pick(picking.segment_id.clone(), pick, vec![off])?;
         self.picking = None;
         Ok(())
+    }
+
+    /// The selected clip's Custom removal picks in the order they are in
+    /// the clip: the frame each is on, where the timeline shows it (`None`
+    /// when a trim or speed change left it out), and how much is on it.
+    #[must_use]
+    pub fn picks_listed(&self) -> Vec<PickRow> {
+        let (Some(draft), Some(segment_id)) = (self.draft(), self.selected()) else {
+            return Vec::new();
+        };
+        let Some((segment, _)) = super::placed(draft, segment_id) else {
+            return Vec::new();
+        };
+        let Some(matting) =
+            segment_matting(draft, segment).filter(|matting| matting.mode == MattingMode::Custom)
+        else {
+            return Vec::new();
+        };
+        let map = cutlass_engine::placement_of(draft, segment).ok();
+        matting
+            .picks
+            .iter()
+            .map(|pick| PickRow {
+                frame: pick.frame,
+                at: map
+                    .as_ref()
+                    .and_then(|map| cutlass_engine::timeline_for_source(map, pick.frame)),
+                clicks: pick.clicks.len(),
+                strokes: pick.brushes.len(),
+            })
+            .collect()
+    }
+
+    /// Take the selected clip's pick on source frame `frame` out, as one
+    /// undo step. Its matte is made again from the picks left; with none
+    /// left, Custom removal comes off.
+    pub fn remove_pick(&mut self, frame: Micros) -> Result<(), ShellError> {
+        let segment_id = self.matting_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let Some(mut matting) = self
+            .matting()
+            .filter(|matting| matting.mode == MattingMode::Custom)
+        else {
+            return Err(ShellError::Unavailable(
+                "the clip has no Custom removal".to_owned(),
+            ));
+        };
+        let before = matting.picks.len();
+        matting.picks.retain(|pick| pick.frame != frame);
+        if matting.picks.len() == before {
+            return Err(ShellError::Unavailable("no pick on that frame".to_owned()));
+        }
+        let matting = (!matting.picks.is_empty()).then_some(matting);
+        self.put_matting(segment_id, matting)
     }
 
     /// The strokes being painted, while Paint by hand is on.

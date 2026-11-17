@@ -559,3 +559,62 @@ fn bad_weights_are_refused_and_kept_for_a_look() {
     assert!(download.exists(), "a refused download is left to look at");
     let _ = std::fs::remove_dir_all(&folder);
 }
+
+#[test]
+fn picks_are_listed_where_the_timeline_shows_them_and_one_can_be_taken_out() {
+    let (mut shell, temp) = open("picks");
+    shell.select(Some("v".into()));
+    let pick = |frame: i64, clicks: usize| Pick {
+        frame: Micros(frame),
+        clicks: vec![
+            PickClick {
+                x: 0.5,
+                y: 0.5,
+                keep: true,
+            };
+            clicks
+        ],
+        brushes: Vec::new(),
+    };
+    let both = Matting {
+        mode: MattingMode::Custom,
+        picks: vec![pick(500_000, 2), pick(1_500_000, 1)],
+        ..Matting::default()
+    };
+    let later = Matting {
+        picks: vec![pick(1_500_000, 1)],
+        ..both.clone()
+    };
+    // Both mattes are kept already, so no model is needed.
+    keep_matte(&shell, &temp, &both);
+    keep_matte(&shell, &temp, &later);
+    shell.put_matting("v".into(), Some(both.clone())).unwrap();
+    assert_eq!(
+        shell.picks_listed(),
+        vec![
+            PickRow {
+                frame: Micros(500_000),
+                at: Some(Micros(500_000)),
+                clicks: 2,
+                strokes: 0,
+            },
+            PickRow {
+                frame: Micros(1_500_000),
+                at: Some(Micros(1_500_000)),
+                clicks: 1,
+                strokes: 0,
+            },
+        ]
+    );
+
+    shell.remove_pick(Micros(500_000)).unwrap();
+    assert_eq!(shell.matting(), Some(later));
+    assert!(shell.remove_pick(Micros(500_000)).is_err(), "already gone");
+    shell.remove_pick(Micros(1_500_000)).unwrap();
+    assert_eq!(shell.matting(), None, "no pick left: Custom removal is off");
+    assert!(shell.picks_listed().is_empty());
+    shell.undo().unwrap();
+    shell.undo().unwrap();
+    assert_eq!(shell.matting(), Some(both), "each removal is one undo step");
+    let _ = std::fs::remove_dir_all(&temp);
+}

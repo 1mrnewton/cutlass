@@ -303,7 +303,8 @@ fn custom_removal(
         if picking {
             note(
                 ui,
-                "Click the object on the preview. Shift-click to take a part out.",
+                "Click the object on the preview a few times, across all of it: one click \
+                 can find only the part under it. Shift-click to take a part out.",
             );
         } else if !shell.vision_model_ready() {
             note(ui, "The selection model is not on this machine yet.");
@@ -311,10 +312,8 @@ fn custom_removal(
         if !follows {
             download_row(shell, ui, true);
         }
-        if let Some(custom) = custom {
-            let frames = custom.picks.len();
-            let plural = if frames == 1 { "" } else { "s" };
-            note(ui, &format!("Picked on {frames} frame{plural}."));
+        if custom.is_some() {
+            pick_rows(shell, ui);
             matte_state(shell, ui);
         }
         ui.horizontal(|ui| {
@@ -356,6 +355,61 @@ fn custom_removal(
             edge_sliders(shell, ui, state, custom);
         }
     });
+}
+
+/// Each Custom removal pick: where it is, what is on it, a button that
+/// moves the playhead to it and one that takes it out.
+fn pick_rows(shell: &mut Shell, ui: &mut Ui) {
+    let rows = shell.picks_listed();
+    let free = shell.job().is_none() && shell.picking().is_none() && shell.painting().is_none();
+    for (index, row) in rows.iter().enumerate() {
+        let what = match (row.clicks, row.strokes) {
+            (clicks, 0) => plural(clicks, "click"),
+            (0, strokes) => plural(strokes, "stroke"),
+            (clicks, strokes) => {
+                format!("{}, {}", plural(clicks, "click"), plural(strokes, "stroke"))
+            }
+        };
+        ui.horizontal(|ui| {
+            row_label(ui, if index == 0 { "Picks" } else { "" });
+            let at = row
+                .at
+                .map_or_else(|| "off the clip".to_owned(), |at| shell.timecode_at(at));
+            ui.label(
+                RichText::new(format!("{at} · {what}"))
+                    .size(12.0)
+                    .color(tokens::MUTED),
+            );
+            if let Some(at) = row.at
+                && ui
+                    .add(ui::Button::new("Go to").text_size(12.0))
+                    .on_hover_text("Move the playhead to this pick.")
+                    .clicked()
+            {
+                shell.seek(at);
+            }
+            if ui
+                .add_enabled(free, ui::Button::new("Remove").text_size(12.0))
+                .on_hover_text("Take this pick out and make the matte again.")
+                .on_disabled_hover_text("Wait for the job, or finish picking or painting.")
+                .clicked()
+            {
+                let frame = row.frame;
+                send(shell, move |shell| shell.remove_pick(frame));
+            }
+        });
+    }
+    if !rows.is_empty() {
+        ui.add_space(ROW_GAP);
+    }
+}
+
+fn plural(count: usize, word: &str) -> String {
+    if count == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{count} {word}s")
+    }
 }
 
 /// Paint by hand: brushes that keep or take out, plain or edge-finding,

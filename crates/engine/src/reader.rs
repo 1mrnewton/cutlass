@@ -212,6 +212,10 @@ struct Pipe {
     drained: bool,
     /// The last picture packet's duration, for pictures a drain releases.
     last_duration: i64,
+    /// Recent picture packets' timestamps and durations. A decoder that
+    /// holds a picture back releases it on a later packet: the picture
+    /// keeps its own packet's duration, which differs on an uneven clock.
+    lengths: VecDeque<(i64, i64)>,
     /// Audio buffers a packet returned after the first, not handed out yet.
     heard: VecDeque<AudioOutput>,
     /// Stream ticks before the stream's time zero, from its edit list.
@@ -234,6 +238,7 @@ impl Pipe {
             ready: VecDeque::new(),
             drained: false,
             last_duration: 0,
+            lengths: VecDeque::new(),
             heard: VecDeque::new(),
             lead,
             gapless: None,
@@ -287,11 +292,40 @@ impl Pipe {
     fn reset(&mut self) {
         self.decoder.reset();
         self.ready.clear();
+        self.lengths.clear();
         self.heard.clear();
         self.drained = false;
         self.fresh = true;
     }
+
+    /// Note a picture packet's timestamp and duration.
+    fn note_length(&mut self, pts: Option<i64>, duration: i64) {
+        self.last_duration = duration;
+        if let Some(pts) = pts {
+            if self.lengths.len() == KEPT_LENGTHS {
+                self.lengths.pop_front();
+            }
+            self.lengths.push_back((pts, duration));
+        }
+    }
+
+    /// The duration of the packet stamped `pts`, or `fallback` when none
+    /// noted is.
+    fn length_of(&self, pts: Option<i64>, fallback: i64) -> i64 {
+        pts.and_then(|pts| {
+            self.lengths
+                .iter()
+                .rev()
+                .find(|(stamped, _)| *stamped == pts)
+                .map(|(_, duration)| *duration)
+        })
+        .unwrap_or(fallback)
+    }
 }
+
+/// How many picture packets' durations a pipe keeps: more than any decoder
+/// holds back.
+const KEPT_LENGTHS: usize = 64;
 
 /// One decoded picture and the stream ticks it starts at, when known.
 struct Ready {
@@ -720,11 +754,12 @@ impl Media {
                     Err(CodecError::Unsupported { .. }) => Vec::new(),
                     Err(error) => return Err(EngineError::Codec(error)),
                 };
-                let duration = pipe.last_duration;
+                let last = pipe.last_duration;
                 for (frame, pts) in outputs
                     .into_iter()
                     .filter_map(|output| coded_output(output, timescale))
                 {
+                    let duration = pipe.length_of(pts, last);
                     pipe.ready.push_back(Ready {
                         frame,
                         pts,
@@ -749,11 +784,13 @@ impl Media {
             };
             let packet_pts = packet.timestamp().presentation_or_decode();
             let duration = packet.timestamp().duration().unwrap_or(0);
-            pipe.last_duration = duration;
+            pipe.note_length(packet_pts, duration);
             for (frame, pts) in push_picture(pipe.decoder.as_mut(), &access, timescale)? {
+                let pts = pts.or(packet_pts);
+                let duration = pipe.length_of(pts, duration);
                 pipe.ready.push_back(Ready {
                     frame,
-                    pts: pts.or(packet_pts),
+                    pts,
                     duration,
                 });
             }

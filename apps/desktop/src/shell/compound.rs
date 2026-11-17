@@ -92,8 +92,11 @@ impl Shell {
             self.save()?;
         }
         let session = self.session.take().ok_or(ShellError::NoProject)?;
-        let mut opened = Session::open(inside.clone());
+        // The inside counts from its own start: a revision read from the
+        // project, or from an earlier visit, is not one of its revisions.
+        let mut opened = Session::open(inside.clone()).starting_at(super::opening_revision());
         opened.set_linkage(session.linkage());
+        let opened_at = opened.revision();
         self.outer.push(Outer {
             session,
             segment_id,
@@ -103,7 +106,7 @@ impl Shell {
             saved: self.saved,
         });
         self.session = Some(opened);
-        self.saved = Some((0, Instant::now()));
+        self.saved = Some((opened_at, Instant::now()));
         self.swapped(cutlass_model::Micros(0));
         Ok(())
     }
@@ -212,10 +215,15 @@ mod tests {
         assert!(desktop.compound_selected());
         let compound = desktop.selected().cloned().unwrap();
 
+        let outside = desktop.revision().unwrap();
         desktop.open_compound().unwrap();
         assert_eq!(desktop.compound_depth(), 1);
         assert_eq!(ids(&desktop), ["a", "b"]);
         assert_eq!(desktop.playhead(), Micros(0));
+        // The inside counts its own revisions: one read from the project
+        // is not one of them, and nothing is unsaved on the way in.
+        assert_ne!(desktop.revision(), Some(outside));
+        assert!(!desktop.unsaved());
         // Remove b inside; the window undoes inside edits on their own.
         desktop.select(Some(SegmentId::new("b")));
         desktop.remove_selected().unwrap();

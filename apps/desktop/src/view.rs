@@ -11950,8 +11950,11 @@ mod tests {
             cutlass_model::TimeRange::new(0, 3_000_000),
         ));
         cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        // The model's answer is written before the project opens, so the
+        // project is put at the revision that answer names.
+        let opened_at = 5_000;
         let split = serde_json::json!({
-            "expected_revision": 0,
+            "expected_revision": opened_at,
             "requests": [{ "op": "split", "segment_id": "a", "at": 1_000_000, "right_id": "b" }],
         });
         let (port, server) = local_model(vec![
@@ -11969,6 +11972,8 @@ mod tests {
         let (decoders, encoders) = crate::register_codecs();
         let mut shell = Shell::new(decoders, encoders, settings);
         shell.open_folder(&temp).unwrap();
+        let session = shell.session().unwrap().clone().starting_at(opened_at);
+        shell.adopt_session(session).unwrap();
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
@@ -12069,7 +12074,7 @@ mod tests {
                 id: "s".to_owned(),
                 name: "draft.apply".to_owned(),
                 arguments: serde_json::json!({
-                    "expected_revision": 0,
+                    "expected_revision": shell.revision().unwrap(),
                     "requests": [{ "op": "split", "segment_id": "a",
                                    "at": 1_000_000, "right_id": "b" }],
                 })

@@ -1734,7 +1734,7 @@ impl Shell {
                 self.face.name()
             );
         }
-        let mut session = Session::open_project(draft);
+        let mut session = Session::open_project(draft).starting_at(opening_revision());
         session.set_linkage(linkage);
         self.outer.clear();
         self.saved = Some((session.revision(), Instant::now()));
@@ -8917,6 +8917,42 @@ fn write_replaced(path: &Path, bytes: &[u8]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// The lowest revision a session opens at. Every start has ten digits, so
+/// one is not mistaken for a small count.
+const OPENING_FLOOR: u64 = 1_000_000_000;
+
+/// How many starts there are from [`OPENING_FLOOR`] up.
+const OPENING_SPAN: u64 = 1_000_000_000;
+
+/// Where a newly opened session's revisions start: a different number each
+/// time, in this process and in another one that opens the same project.
+///
+/// A session that always started at 0 let a revision read from one open
+/// match another: a `cutlass mcp` client that had made one edit wrote
+/// unseen over a window that took the project and made one edit of its
+/// own, and so did a turn that outlived a project switch. The number comes
+/// from the process's random hash keys, as the project socket's token
+/// does, and stays far below what JSON holds exactly.
+pub(crate) fn opening_revision() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        hasher.write_u128(now);
+        hasher.write_u32(std::process::id());
+        let start = OPENING_FLOOR + hasher.finish() % OPENING_SPAN;
+        // Never the start of the session opened just before.
+        if LAST.swap(start, Ordering::Relaxed) != start {
+            return start;
+        }
+    }
+}
+
 fn opening_pixel_size(rate: FrameRate) -> f64 {
     last_accuracy_step(rate).unwrap_or(0.006)
 }
@@ -12470,6 +12506,57 @@ mod tests {
             desktop.draft().unwrap().tracks[0].segments[0].target.start,
             Micros(0)
         );
+    }
+
+    #[test]
+    fn each_open_of_a_project_counts_its_revisions_from_a_start_of_its_own() {
+        let root = Temp::new();
+        let path = Shell::create_project(&root.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&path).unwrap();
+        let first = desktop.revision().unwrap();
+        assert!(first >= super::OPENING_FLOOR, "{first}");
+        desktop.set_project_name("one edit").unwrap();
+        let edited = desktop.revision().unwrap();
+        assert_eq!(edited, first + 1);
+        // Open again: what was read before the close is not a revision of
+        // this open, at the start or after as many edits.
+        desktop.close_project().unwrap();
+        desktop.open_folder(&path).unwrap();
+        let second = desktop.revision().unwrap();
+        assert!(second >= super::OPENING_FLOOR, "{second}");
+        assert_ne!(second, first);
+        // A write that names the old revision is refused and changes nothing.
+        let stale = desktop.run_agent_tool(
+            &cutlass_agent::ToolCall {
+                id: "stale".to_owned(),
+                name: "draft.apply".to_owned(),
+                arguments: serde_json::json!({
+                    "expected_revision": first,
+                    "requests": [{ "op": "set_project_name", "name": "unseen" }],
+                })
+                .to_string(),
+            },
+            &[],
+        );
+        assert!(stale.outcome.is_error, "{}", stale.outcome.content);
+        assert!(
+            stale.outcome.content.contains("does not match"),
+            "{}",
+            stale.outcome.content
+        );
+        assert_eq!(desktop.draft().unwrap().name, "one edit");
+        assert_eq!(desktop.revision(), Some(second));
+        // Many opens, and no two starts in a row the same.
+        let mut last = super::opening_revision();
+        for _ in 0..1_000 {
+            let next = super::opening_revision();
+            assert_ne!(next, last);
+            assert!(
+                (super::OPENING_FLOOR..super::OPENING_FLOOR + super::OPENING_SPAN).contains(&next)
+            );
+            last = next;
+        }
     }
 
     #[test]

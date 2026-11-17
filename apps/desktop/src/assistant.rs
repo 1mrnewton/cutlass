@@ -972,6 +972,12 @@ mod tests {
         }]
     }
 
+    /// The revision the open project is at. Each open starts at a number
+    /// of its own, so a test reads it and does not assume 0.
+    fn at(shell: &Shell) -> u64 {
+        shell.session().unwrap().revision()
+    }
+
     fn clips(shell: &Shell) -> usize {
         shell.draft().unwrap().tracks[0].segments.len()
     }
@@ -983,8 +989,8 @@ mod tests {
         // Nothing to take back before any turn.
         assert!(!assistant.can_undo_turn(&shell));
         let model = LocalModel::scripted(vec![
-            completion("", split(0, "a", 1_000_000, "b")),
-            completion("", split(1, "b", 2_000_000, "c")),
+            completion("", split(at(&shell), "a", 1_000_000, "b")),
+            completion("", split(at(&shell) + 1, "b", 2_000_000, "c")),
             completion("Cut in three.", Vec::new()),
         ]);
         assistant.start(model, 8, "cut it in three");
@@ -1017,7 +1023,7 @@ mod tests {
         let (mut shell, path) = shell_with_project("undo-moved");
         let mut assistant = Assistant::default();
         let model = LocalModel::scripted(vec![
-            completion("", split(0, "a", 1_000_000, "b")),
+            completion("", split(at(&shell), "a", 1_000_000, "b")),
             completion("Split.", Vec::new()),
         ]);
         assistant.start(model, 8, "split it");
@@ -1074,14 +1080,17 @@ mod tests {
         let (mut other, other_path) = shell_with_project("undo-there");
         let mut assistant = Assistant::default();
         let model = LocalModel::scripted(vec![
-            completion("", split(0, "a", 1_000_000, "b")),
+            completion("", split(at(&shell), "a", 1_000_000, "b")),
             completion("Split.", Vec::new()),
         ]);
         assistant.start(model, 8, "split it");
         finish(&mut assistant, &mut shell);
         // The other project is at the same revision after one edit of its
-        // own, and is not the one the turn edited.
-        let moved = other.run_agent_tool(&split(0, "a", 2_000_000, "z")[0], &[]);
+        // own, and is not the one the turn edited. Two opens never share
+        // their revisions, so it is put at the first one's.
+        let same = other.session().unwrap().clone().starting_at(at(&shell) - 1);
+        other.adopt_session(same).unwrap();
+        let moved = other.run_agent_tool(&split(at(&other), "a", 2_000_000, "z")[0], &[]);
         assert!(!moved.outcome.is_error, "{}", moved.outcome.content);
         assert_eq!(
             other.session().unwrap().revision(),
@@ -1107,7 +1116,7 @@ mod tests {
                     "function": {
                         "name": "draft_apply",
                         "arguments": serde_json::json!({
-                            "expected_revision": 0,
+                            "expected_revision": at(&shell),
                             "requests": [{ "op": "split", "segment_id": "a",
                                            "at": 1_000_000, "right_id": "b" }],
                         }).to_string(),
@@ -1668,7 +1677,7 @@ mod tests {
     fn a_real_local_model_looks_at_a_frame_and_says_what_it_sees() {
         let (mut shell, path) = shell_with_project("real-look");
         let red = serde_json::json!({
-            "expected_revision": 0,
+            "expected_revision": at(&shell),
             "requests": [{ "op": "set_canvas_background", "color": "#ff0000" }],
         });
         let set = shell.run_agent_tool(

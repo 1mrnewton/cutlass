@@ -759,8 +759,36 @@ mod tests {
     #[test]
     fn a_client_reads_edits_and_the_edit_is_saved() {
         let project = Project::new("edit");
+        let (client, heard, host) = typed_host(&project.0);
+        let line = |message: Value| format!("{message}\n").into_bytes();
+        client
+            .send(line(
+                json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            ))
+            .unwrap();
+        client
+            .send(line(
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            ))
+            .unwrap();
+        client
+            .send(line(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})))
+            .unwrap();
+        assert_eq!(
+            heard.answer(1, || {})["result"]["serverInfo"]["name"],
+            "cutlass"
+        );
+        assert!(
+            heard.answer(2, || {})["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .len()
+                > 10
+        );
+        // The client reads the revision, then sends it with its write.
+        let opened_at = read_revision(&client, &heard, 3, || {});
         let place = json!({
-            "expected_revision": 0,
+            "expected_revision": opened_at,
             "requests": [{
                 "op": "import",
                 "medium": {"video": {"id": "media", "type": "video", "duration": 1_000_000}},
@@ -775,39 +803,21 @@ mod tests {
                 .unwrap(),
             }],
         });
-        let input = lines(&[
-            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
-            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
-            json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
-                "params":{"name":"draft_query","arguments":{"input":"project"}}}),
-            json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
-                "params":{"name":"draft_apply","arguments":place}}),
-            json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
-                "params":{"name":"player_play","arguments":{}}}),
-        ]);
-        let mut output = Vec::new();
-        serve(
-            Some(&project.0),
-            std::io::Cursor::new(input.into_bytes()),
-            &mut output,
-        )
-        .unwrap();
-        let answers: Vec<Value> = String::from_utf8(output)
+        client.send(call_line(4, "draft_apply", place)).unwrap();
+        assert_eq!(
+            said(&heard.answer(4, || {})),
+            format!("revision={} committed=true", opened_at + 1)
+        );
+        client.send(call_line(5, "player_play", json!({}))).unwrap();
+        assert_eq!(heard.answer(5, || {})["result"]["isError"], true);
+        // A notification is not answered: five messages got an answer.
+        let answered = String::from_utf8(heard.0.lock().unwrap().clone())
             .unwrap()
             .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(answers.len(), 5);
-        assert_eq!(answers[0]["result"]["serverInfo"]["name"], "cutlass");
-        assert!(answers[1]["result"]["tools"].as_array().unwrap().len() > 10);
-        let read = answers[2]["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(read.contains("revision=0"), "{read}");
-        assert_eq!(
-            answers[3]["result"]["content"][0]["text"],
-            "revision=1 committed=true"
-        );
-        assert_eq!(answers[4]["result"]["isError"], true);
+            .count();
+        assert_eq!(answered, 5);
+        drop(client);
+        host.join().unwrap().unwrap();
         let opened = cutlass_store::open(&project.0).unwrap();
         assert_eq!(opened.folder.draft.tracks[0].segments.len(), 1);
         // The lock was let go when stdin closed.
@@ -1063,8 +1073,9 @@ mod tests {
             crate::shell::Shell::new(decoders, encoders, cutlass_settings::Settings::default());
         desktop.open_folder(&project.0).unwrap();
         desktop.listen(std::sync::Arc::new(|| {}));
+        let opened_at = desktop.revision().unwrap();
         let place = json!({
-            "expected_revision": 0,
+            "expected_revision": opened_at,
             "requests": [{
                 "op": "import",
                 "medium": {"video": {"id": "media", "type": "video", "duration": 1_000_000}},
@@ -1108,7 +1119,7 @@ mod tests {
         assert_eq!(answers.len(), 2);
         assert_eq!(
             answers[1]["result"]["content"][0]["text"],
-            "revision=1 committed=true"
+            format!("revision={} committed=true", opened_at + 1)
         );
         // The window holds the edit, as one undo step.
         assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
@@ -1226,6 +1237,29 @@ mod tests {
             .to_owned()
     }
 
+    /// The revision an answer that starts `revision=N` names.
+    fn revision_of(text: &str) -> u64 {
+        text.strip_prefix("revision=")
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|number| number.parse().ok())
+            .unwrap_or_else(|| panic!("no revision in {text}"))
+    }
+
+    /// The project's revision, read as message `id` from the host `lines`
+    /// types to. A project opens at a number of its own each time, so a
+    /// client reads it and does not assume 0.
+    fn read_revision(
+        lines: &std::sync::mpsc::Sender<Vec<u8>>,
+        heard: &Heard,
+        id: i64,
+        tick: impl FnMut(),
+    ) -> u64 {
+        lines
+            .send(call_line(id, "draft_query", json!({"input": "project"})))
+            .unwrap();
+        revision_of(&said(&heard.answer(id, tick)))
+    }
+
     fn rename(revision: u64, name: &str) -> Value {
         json!({"expected_revision": revision,
             "requests": [{"op": "set_project_name", "name": name}]})
@@ -1247,10 +1281,14 @@ mod tests {
                 move |stop| stops.send(stop).unwrap(),
             )
         });
+        let opened_at = read_revision(&lines, &heard, 1, || {});
         lines
-            .send(call_line(1, "draft_apply", rename(0, "kept")))
+            .send(call_line(2, "draft_apply", rename(opened_at, "kept")))
             .unwrap();
-        assert_eq!(said(&heard.answer(1, || {})), "revision=1 committed=true");
+        assert_eq!(
+            said(&heard.answer(2, || {})),
+            format!("revision={} committed=true", opened_at + 1)
+        );
         // What a signal does. The client still holds stdin open: `lines`
         // is alive until the test ends.
         stop.recv().unwrap().stop();
@@ -1275,16 +1313,13 @@ mod tests {
     fn a_second_client_attaches_to_the_host_that_holds_the_project() {
         let project = Project::new("second");
         let (first, heard, host) = typed_host(&project.0);
-        first
-            .send(call_line(1, "draft_query", json!({"input": "project"})))
-            .unwrap();
-        assert!(said(&heard.answer(1, || {})).contains("revision=0"));
+        let opened_at = read_revision(&first, &heard, 1, || {});
         // The second finds the project held, and its edit lands on the
         // first's session: one writer, one undo stack.
         let input = lines(&[
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
-                "params":{"name":"draft_apply","arguments":rename(0, "from the second")}}),
+                "params":{"name":"draft_apply","arguments":rename(opened_at, "from the second")}}),
         ]);
         let mut output = Vec::new();
         serve(
@@ -1294,14 +1329,25 @@ mod tests {
         )
         .unwrap();
         let second = answers(output);
-        assert_eq!(said(&second[1]), "revision=1 committed=true");
+        let edited_at = opened_at + 1;
+        assert_eq!(
+            said(&second[1]),
+            format!("revision={edited_at} committed=true")
+        );
         first
             .send(call_line(2, "draft_query", json!({"input": "project"})))
             .unwrap();
         let read = said(&heard.answer(2, || {}));
-        assert!(read.contains("revision=1 name=from the second"), "{read}");
+        assert!(
+            read.contains(&format!("revision={edited_at} name=from the second")),
+            "{read}"
+        );
         first
-            .send(call_line(3, "draft_undo", json!({"input": "1"})))
+            .send(call_line(
+                3,
+                "draft_undo",
+                json!({"input": edited_at.to_string()}),
+            ))
             .unwrap();
         assert_eq!(heard.answer(3, || {})["result"]["isError"], false);
         drop(first);
@@ -1316,14 +1362,19 @@ mod tests {
     fn the_window_takes_the_project_from_a_host_with_no_window_which_then_forwards() {
         let project = Project::new("handover");
         let (client, heard, host) = typed_host(&project.0);
+        let opened_at = read_revision(&client, &heard, 10, || {});
         client
             .send(call_line(
                 1,
                 "draft_apply",
-                rename(0, "edited with no window"),
+                rename(opened_at, "edited with no window"),
             ))
             .unwrap();
-        assert_eq!(said(&heard.answer(1, || {})), "revision=1 committed=true");
+        let held = opened_at + 1;
+        assert_eq!(
+            said(&heard.answer(1, || {})),
+            format!("revision={held} committed=true")
+        );
         // The window opens the same project: the host saves, lets go, and
         // the window reads what it saved.
         let (decoders, encoders) = crate::register_codecs();
@@ -1339,15 +1390,33 @@ mod tests {
         let read = said(&heard.answer(2, || {
             desktop.serve_forwarded();
         }));
-        assert!(
-            read.contains("revision=0 name=edited with no window"),
-            "{read}"
-        );
+        assert!(read.contains("name=edited with no window"), "{read}");
+        let in_window = revision_of(&read);
+        assert_eq!(Some(in_window), desktop.revision());
+        // The window made one edit of its own, as the client had. The
+        // revision the client holds from the host is not the window's, so
+        // its write on it is refused and the window's draft stays.
+        desktop.set_project_name("named in the window").unwrap();
+        assert_ne!(desktop.revision(), Some(held));
+        client
+            .send(call_line(
+                11,
+                "draft_apply",
+                rename(held, "written on a revision it never read"),
+            ))
+            .unwrap();
+        let stale = heard.answer(11, || {
+            desktop.serve_forwarded();
+        });
+        assert_eq!(stale["result"]["isError"], true, "{stale}");
+        assert!(said(&stale).contains("does not match"), "{stale}");
+        assert_eq!(desktop.draft().unwrap().name, "named in the window");
+        desktop.undo().unwrap();
         client
             .send(call_line(
                 3,
                 "draft_apply",
-                rename(0, "edited in the window"),
+                rename(desktop.revision().unwrap(), "edited in the window"),
             ))
             .unwrap();
         heard.answer(3, || {
@@ -1388,8 +1457,13 @@ mod tests {
         desktop.open_folder(&project.0).unwrap();
         desktop.listen(std::sync::Arc::new(|| {}));
         let (client, heard, host) = typed_host(&project.0);
+        let in_window = desktop.revision().unwrap();
         client
-            .send(call_line(1, "draft_apply", rename(0, "in the window")))
+            .send(call_line(
+                1,
+                "draft_apply",
+                rename(in_window, "in the window"),
+            ))
             .unwrap();
         heard.answer(1, || {
             desktop.serve_forwarded();
@@ -1408,7 +1482,9 @@ mod tests {
             .send(call_line(3, "draft_query", json!({"input": "project"})))
             .unwrap();
         let read = said(&heard.answer(3, || {}));
-        assert!(read.contains("revision=0 name=in the window"), "{read}");
+        assert!(read.contains("name=in the window"), "{read}");
+        // The project is opened anew here, at a revision of its own.
+        assert_ne!(revision_of(&read), in_window + 1);
         drop(client);
         host.join().unwrap().unwrap();
         assert!(cutlass_store::hold(&project.0).is_ok());
@@ -1510,10 +1586,18 @@ mod tests {
         .unwrap();
         let answers = answers(output);
         let started = answers[1]["result"]["content"][0]["text"].as_str().unwrap();
-        assert_eq!(started, "job=track-1 revision=0");
+        // The job is started on the revision the project opened at, and
+        // its path lands as the next one.
+        let opened_at = started
+            .strip_prefix("job=track-1 ")
+            .map(revision_of)
+            .unwrap_or_else(|| panic!("{started}"));
         let polled = answers[2]["result"]["content"][0]["text"].as_str().unwrap();
         eprintln!("{polled}");
-        assert!(polled.starts_with("revision=1 frames="), "{polled}");
+        assert!(
+            polled.starts_with(&format!("revision={} frames=", opened_at + 1)),
+            "{polled}"
+        );
         let opened = cutlass_store::open(&project.0).unwrap();
         let draft = &opened.folder.draft;
         assert_eq!(draft.materials.video_trackings.len(), 1);

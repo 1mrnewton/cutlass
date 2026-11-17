@@ -499,10 +499,18 @@ impl Player for Headless {
     /// No screen is needed to draw one frame: it is drawn as a still
     /// export is, on the device opened with no window.
     fn look(&mut self, time_us: Option<i64>) -> Result<cutlass_agent::Frame, String> {
-        self.0
-            .borrow_mut()
-            .look(time_us)
-            .map_err(|error| error.to_string())
+        let mut shell = self.0.borrow_mut();
+        settle(&mut shell);
+        shell.look(time_us).map_err(|error| error.to_string())
+    }
+}
+
+/// Run every job the project is waiting on to its end, as the window would
+/// over its frames: a clip with Remove BG is cut only once its matte is
+/// made, so a frame or a file drawn before would show it uncut.
+fn settle(shell: &mut Shell) {
+    while shell.poll_job() {
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -575,6 +583,7 @@ impl Export for Headless {
             cutlass_codec::CodecId::H264
         };
         let mut shell = self.0.borrow_mut();
+        settle(&mut shell);
         shell
             .export(ExportRequest {
                 path: path.clone(),

@@ -268,6 +268,17 @@ pub struct Shared<'a, P> {
     /// search on it, and the search reaches that far past its usual
     /// range.
     pub ref_seeds: [Option<Mv>; 3],
+    /// A key frame of drawn pictures at a fixed quantizer in one pass
+    /// ([`super::FrameEncoder::set_drawn`]), whose blocks the frames after
+    /// it keep for as long as the picture stands: its blocks try their
+    /// halves after the whole block at every size (as speeds 0 to 3), and
+    /// its trials are quantized by RD ([`DZ_TRIAL_SPEED`]). With its finer
+    /// step (the encoder's `DRAWN_STEP_SCALE`), against FFmpeg's `-crf`
+    /// (BD-rate at the same PSNR-Y / U / V): `testsrc2` +0.7 / +0.5 /
+    /// −4.6% → +1.0 / +0.9 / −3.9%, the gradient of "Synthetic pans" in the
+    /// README +0.1% → −0.3% (within what five points move between builds
+    /// that differ in little, both ways).
+    pub drawn_key: bool,
     /// At a fixed quantizer in one pass, the whole-sample vectors the
     /// previous frame's blocks took most on each reference
     /// ([`POP_STARTS`]): more starts of the search on it.
@@ -1782,7 +1793,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.save(row, col, (n, n), before + 1);
         }
         // Halves, across and down.
-        if whole && s.speed < 4 {
+        if whole && (s.speed < 4 || s.drawn_key) {
             best = self.try_halves(row, col, level, before, best);
         }
         // No split when the whole block needs no residual and its error is
@@ -4158,7 +4169,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 }
                 rd_eob = Some(e);
             } else {
-                let one = self.trial && s.speed >= DZ_TRIAL_SPEED;
+                let one = self.trial && s.speed >= DZ_TRIAL_SPEED && !s.drawn_key;
                 let (eob, rd) = self.rd_levels(plane, tx, kind, x, y, intra, one, &mut levels);
                 self.rd = rd;
                 rd_eob = Some(eob);

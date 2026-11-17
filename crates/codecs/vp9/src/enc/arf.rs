@@ -292,6 +292,49 @@ pub fn phase_error<P: EncPixel>(
     (luma as f32 / (blocks.max(1) * 256) as f32, chroma)
 }
 
+/// The share of the 16×16 blocks of `to` (luma, `w`×`h`) that `from` holds
+/// exactly, sample for sample, at the whole-sample vector `v` (across,
+/// down: `to[p]` is `from[p + v]`, as [`shift`]'s). A camera's pictures
+/// never repeat so (their noise differs from one to the next); drawn ones
+/// (graphics, animation, screen content) do wherever they stand still or
+/// move as a whole: from one picture to the next 0.66 of `testsrc2` on
+/// average and 0.92 of the gradient of "Synthetic pans" in the README;
+/// none of the README's grainy pan, and of its other two clips, none but
+/// in their drawn pictures (`testsrc2` in the three scenes, 0.93; a
+/// drawn pan at the end of the still scene, 0.97 where [`shift`] finds
+/// its vector).
+pub fn exact_share<P: EncPixel>(
+    from: &[P],
+    to: &[P],
+    w: usize,
+    h: usize,
+    v: (isize, isize),
+) -> f32 {
+    let (bw, bh) = (w / 16, h / 16);
+    if bw == 0 || bh == 0 || from.len() < w * h || to.len() < w * h {
+        return 0.0;
+    }
+    let mut n = 0usize;
+    for by in 0..bh {
+        let sy = by as isize * 16 + v.1;
+        if sy < 0 || sy as usize + 16 > h {
+            continue;
+        }
+        for bx in 0..bw {
+            let sx = bx as isize * 16 + v.0;
+            if sx < 0 || sx as usize + 16 > w {
+                continue;
+            }
+            let a = &to[by * 16 * w + bx * 16..];
+            let b = &from[sy as usize * w + sx as usize..];
+            if P::sad(a, w, b, w, 16, 16) == 0 {
+                n += 1;
+            }
+        }
+    }
+    n as f32 / (bw * bh) as f32
+}
+
 /// The whole-sample vector `to` moved by from `from` (luma, `w`×`h`), each
 /// component the median of those of a sample of 16×16 blocks of detail
 /// that moved (as [`motion`]), searched near `guess` (the vector the

@@ -346,6 +346,9 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// area that frame predicted from it (in 1/1024), and how many frames
     /// in a row it has been left out of the search.
     ref_use: [(usize, u32, u8); 3],
+    /// Whether the picture coded next is drawn
+    /// ([`FrameEncoder::set_drawn`]).
+    drawn: bool,
     /// What every frame signals.
     stream: Stream,
     /// The threads the encoder was made for.
@@ -439,6 +442,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             ssim: Vec::new(),
             next_layer: None,
             layer: None,
+            drawn: false,
             ref_use: [(0, 1024, 0); 3],
             stream: Stream::default(),
             threads: threads.max(1),
@@ -508,6 +512,14 @@ impl<P: EncPixel> FrameEncoder<P> {
             row: (y * 8).clamp(-8 * 1023, 8 * 1023) as i16,
             col: (x * 8).clamp(-8 * 1023, 8 * 1023) as i16,
         });
+    }
+
+    /// Whether the pictures coded from now on are drawn (graphics,
+    /// animation, screen content: see the encoder's `DRAWN_SHARE`). At a
+    /// fixed quantizer in one pass, a key frame of them searches more
+    /// ([`tile::Shared::drawn_key`]).
+    pub fn set_drawn(&mut self, drawn: bool) {
+        self.drawn = drawn;
     }
 
     pub fn set_global(&mut self, (x, y): (isize, isize)) {
@@ -988,6 +1000,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             global: self.global.take(),
             gold_mv: self.gold_mv.take(),
             ref_seeds: std::mem::take(&mut self.ref_seeds),
+            drawn_key: self.drawn && key && fp.full_search && !fp.second_pass,
             pop_mvs: if fp.full_search && !fp.second_pass && !key {
                 popular_mvs(self.dec.prev_mvs())
             } else {

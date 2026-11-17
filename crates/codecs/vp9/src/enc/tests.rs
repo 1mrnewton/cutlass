@@ -930,3 +930,43 @@ fn the_previous_frames_common_vector_starts_the_search() {
         });
     assert!(moved * 4 >= all * 3, "{moved} of {all} blocks moved");
 }
+
+#[test]
+fn a_drawn_key_frame_tries_halves_at_every_size() {
+    // A key frame of drawn pictures (`FrameEncoder::set_drawn`) at a fixed
+    // quantizer in one pass tries the halves of its blocks at every size
+    // (`tile::Shared::drawn_key`); otherwise, at speed 5, only a 64×64
+    // block's. A texture of 4×4 cells in bands of 8 rows, each band's cells
+    // alike: halves across follow the bands.
+    let (w, h) = (128usize, 128usize);
+    let cw = w.div_ceil(2);
+    let mut pic = texture(w, h, (0, 0));
+    for r in 0..h {
+        if (r / 8) % 2 == 1 {
+            for c in 0..w {
+                pic[0][r * w + c] = 128;
+            }
+        }
+    }
+    let rects = |drawn: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 2);
+        enc.set_drawn(drawn);
+        enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+        let coded = enc.encode(fixed_params(0, 120, 5, false)).expect("encode");
+        let mut dec = Decoder::new();
+        dec.decode(&coded.data).expect("decode");
+        dec.last_blocks()
+            .filter(|b| {
+                matches!(
+                    b.bsize,
+                    crate::geom::BLOCK_8X16
+                        | crate::geom::BLOCK_16X8
+                        | crate::geom::BLOCK_16X32
+                        | crate::geom::BLOCK_32X16
+                )
+            })
+            .count()
+    };
+    assert!(rects(true) > 0);
+    assert_eq!(rects(false), 0);
+}

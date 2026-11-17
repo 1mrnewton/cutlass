@@ -3332,3 +3332,81 @@ fn an_overlay_keeps_the_golden_frame_before_it_as_altref() {
     );
     assert_eq!(refs_after_overlay(&second), 2);
 }
+
+#[test]
+fn a_drawn_pictures_key_frame_is_finer_and_its_alt_refs_coarser() {
+    // A drawn picture moved by whole samples repeats the one before it
+    // exactly: at a fixed quantizer in one pass its key frame takes a
+    // finer step and its alt-refs a coarser one (`DRAWN_SHARE`,
+    // `DRAWN_STEP_SCALE`). With a camera's noise (most samples a level
+    // off, each picture its own) nothing repeats, and the key frame
+    // takes the usual step.
+    let (w, h) = (160u32, 96u32);
+    let pic = |t: u32, noise: bool| {
+        let (cw, ch) = (w / 2, h / 2);
+        let mut y = Vec::new();
+        for row in 0..h {
+            for col in 0..w {
+                let base = ((col + 2 * t) * 9 + row * 3) % 200 + 20;
+                let k = (col.wrapping_mul(73_856_093)
+                    ^ row.wrapping_mul(19_349_663)
+                    ^ t.wrapping_mul(83_492_791))
+                .wrapping_mul(2_654_435_761)
+                    >> 29;
+                let n = if noise { k % 3 } else { 1 };
+                y.push(u8::try_from(base + n).unwrap_or(0));
+            }
+        }
+        let u = vec![110u8; (cw * ch) as usize];
+        let v = vec![140u8; (cw * ch) as usize];
+        VideoFrame::yuv420p(
+            w,
+            h,
+            Plane::tight(w, h, y).expect("y"),
+            Plane::tight(cw, ch, u).expect("u"),
+            Plane::tight(cw, ch, v).expect("v"),
+        )
+        .expect("frame")
+    };
+    let steps = |noise: bool| {
+        let opts = super::Vp9Options {
+            qindex: 120,
+            speed: 5,
+            threads: 1,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let mut packets = Vec::new();
+        for t in 0..40u32 {
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: pic(t, noise),
+                        pts: i64::from(t),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        let mut dec = Decoder::new();
+        let (mut key, mut arf) = (None, None);
+        for p in &packets {
+            for f in crate::decode::split_superframe(&p.data).expect("superframe") {
+                let hd = header::parse(dec.persist(), f).expect("header").header;
+                if hd.key_frame {
+                    key = key.or(Some(hd.base_qindex));
+                } else if !hd.show_frame {
+                    arf = arf.or(Some(hd.base_qindex));
+                }
+                dec.decode(f).expect("decode");
+            }
+        }
+        (key.expect("a key frame"), arf.unwrap_or(0))
+    };
+    let at = |scale: f64| super::q_of_step(super::step_of(120, 8) * scale, 8);
+    let (drawn, camera) = (steps(false), steps(true));
+    assert_eq!(drawn, (at(0.3), at(0.6)), "drawn");
+    assert_eq!(camera.0, at(0.35), "camera");
+}

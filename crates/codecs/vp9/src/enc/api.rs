@@ -714,6 +714,9 @@ struct Queued<P> {
     /// Two passes: how far its content moved from the picture before it
     /// ([`super::arf::shift`]).
     step: (isize, isize),
+    /// At a fixed quantizer in one pass, the share of its 16×16 blocks the
+    /// picture before holds exactly ([`super::arf::exact_share`]).
+    exact: f32,
 }
 
 /// The pictures a push codes: data, key frame, and the picture's `pts`,
@@ -1276,8 +1279,22 @@ impl<P: EncPixel> Core<P> {
         } else {
             (0, 0)
         };
+        // At a fixed quantizer in one pass: how much of it the picture
+        // before holds exactly ([`DRAWN_SHARE`]).
+        let exact = if self.full_search() && self.rc.pass2.is_none() {
+            match self.queue.back() {
+                Some(before) => super::arf::exact_share(&before.planes[0], &tight[0], w, h, step),
+                None if self.last_luma.len() == w * h => {
+                    super::arf::exact_share(&self.last_luma, &tight[0], w, h, step)
+                }
+                None => 0.0,
+            }
+        } else {
+            0.0
+        };
         self.queue.push_back(Queued {
             step,
+            exact,
             cut,
             planes: tight,
             seconds,
@@ -1307,6 +1324,11 @@ impl<P: EncPixel> Core<P> {
         };
         let (w, h) = (self.width as usize, self.height as usize);
         let cw = self.opts.chroma_dims(w, h).0;
+        // A drawn picture ([`DRAWN_SHARE`]): it repeats much of the one
+        // before it, or the next repeats much of it.
+        let drawn = f.exact.max(self.queue.front().map_or(0.0, |q| q.exact)) >= DRAWN_SHARE;
+        self.rc.drawn = drawn;
+        self.enc.set_drawn(drawn);
         if self.shown == 0 && self.rc.wants_probe() {
             self.probe(&f)?;
         }
@@ -2595,6 +2617,32 @@ const PROBE_FRAMES: usize = 17;
 /// BD-rate on the clip with a still picture.
 const GF_REACH: u32 = 64;
 
+/// At a fixed quantizer in one pass, a picture of which this share or more
+/// of the 16×16 blocks repeat the picture before exactly, at the vector
+/// the whole picture moved by (or of which the next picture repeats as
+/// much), is drawn ([`super::arf::exact_share`]: graphics, animation,
+/// screen content; a camera's noise never repeats). What it repeats, its
+/// frames predict whole, and what its key frame codes stays as long as
+/// the picture does: that key frame is coded finer and searched more
+/// ([`DRAWN_STEP_SCALE`], [`super::FrameEncoder::set_drawn`]), and its
+/// golden frames and alt-refs, which have no noise to average away,
+/// coarser. libvpx's two passes size a key frame's boost from its share of
+/// blocks that stand still, and search more in pictures they find drawn
+/// (`FC_GRAPHICS_ANIMATION`).
+const DRAWN_SHARE: f32 = 0.5;
+
+/// The quantizer step of a drawn picture's key frame, and of its golden
+/// frames and alt-refs, over the inter frames' ([`DRAWN_SHARE`];
+/// otherwise [`STEP_SCALE`]'s and [`Q_GOLDEN_SCALE`]). Against FFmpeg's
+/// `-crf` (BD-rate at the same PSNR-Y / U / V): `testsrc2` +2.1 / +2.2 /
+/// −3.2% → +0.7 / +0.5 / −4.6%, the gradient of "Synthetic pans" in the
+/// README +0.4% → +0.1%; with the key frame's fuller search, +1.0 / +0.9
+/// / −3.9% and −0.3%. (The key frame alone at 0.3, every other frame of
+/// the build before as it was: `testsrc2` +1.6 / +0.9 / −3.7%, the
+/// gradient +0.6%; golden frames and alt-refs alone at 0.6: +2.0 / +2.5 /
+/// −3.3% and −0.3%; key frames at 0.25: +2.2 / +0.7 / −4.1% and +1.0%.)
+const DRAWN_STEP_SCALE: [f64; 2] = [0.3, 0.6];
+
 /// The shortest golden interval of [`GF_REACH`].
 const GF_MIN_INTERVAL: u32 = 6;
 
@@ -2942,6 +2990,8 @@ struct Rate {
     /// With temporal layers, the layer of the inter frame coded next, and
     /// each layer's model and last quantizer ([`LAYER_SHARE`]).
     layer: Option<usize>,
+    /// The frame coded next is of a drawn picture ([`DRAWN_SHARE`]).
+    drawn: bool,
     layer_model: [Option<f64>; 3],
     layer_q: [Option<u8>; 3],
     /// Two passes with [`Vp9Options::corpus_complexity`]: the clip's
@@ -3037,6 +3087,7 @@ impl Rate {
             buffer: Self::buffer_size(&opts) * 4.0 / 6.0,
             decimation: (0, 0),
             layer: None,
+            drawn: false,
             layer_model: [None; 3],
             layer_q: [None; 3],
             budget: 1.0,
@@ -3167,7 +3218,9 @@ impl Rate {
             if q == 0 {
                 return 0;
             }
-            let scale = if kind == 1 && self.opts.speed <= Q_TUNED_SPEED {
+            let scale = if kind < 2 && self.drawn {
+                DRAWN_STEP_SCALE[kind]
+            } else if kind == 1 && self.opts.speed <= Q_TUNED_SPEED {
                 Q_GOLDEN_SCALE
             } else {
                 STEP_SCALE[kind]

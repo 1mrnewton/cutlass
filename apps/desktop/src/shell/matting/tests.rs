@@ -232,3 +232,93 @@ fn a_missing_model_is_refused_with_a_reason() {
     assert!(!reason.is_empty());
     let _ = std::fs::remove_dir_all(&empty);
 }
+
+/// The whole of Auto removal on a real clip, as the window does it: the
+/// switch starts the job with BiRefNet_lite, the job lands its matte, and
+/// the preview shows the children with the room gone, then with an edge
+/// and an outline. Slow, so run by hand with `--ignored`; set
+/// `CUTLASS_MATTE_OUT` to a folder to keep the frames.
+#[test]
+#[ignore = "reads a real clip and runs the real model"]
+fn auto_removal_cuts_a_real_clip_in_the_preview() {
+    let local = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    let clip = local.join("7150172-hd_720_1280_50fps.mp4");
+    if !clip.is_file() || !auto_model_here() {
+        return;
+    }
+    let temp = std::env::temp_dir().join(format!("cutlass-matting-real-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    let mut draft = Draft::empty("draft");
+    draft.fps = 25.0;
+    (draft.canvas_config.width, draft.canvas_config.height) = (720, 1280);
+    draft.materials.videos.push(MaterialVideo {
+        id: "m".into(),
+        kind: "video".into(),
+        width: 720,
+        height: 1280,
+        duration: Micros(7_820_000),
+        path: "party.mp4".into(),
+        ..MaterialVideo::default()
+    });
+    let mut segment = Segment::new("v", "m", TimeRange::new(0, 1_000_000));
+    segment.source_range = Some(TimeRange::new(2_000_000, 1_000_000));
+    draft.tracks[0].segments.push(segment);
+    cutlass_store::Folder::new(draft).save(&temp).unwrap();
+    std::fs::copy(&clip, temp.join("party.mp4")).unwrap();
+    let (decoders, encoders) = crate::register_codecs();
+    let mut shell = Shell::new(decoders, encoders, Settings::default());
+    shell.open_folder(&temp).unwrap();
+    shell.select(Some("v".into()));
+    shell.seek(Micros(500_000));
+    let grey = |picture: &crate::shell::Picture, x: u32, y: u32| {
+        let at = ((y * picture.width + x) * 4) as usize;
+        let px = &picture.rgba[at..at + 4];
+        (u32::from(px[0]) + u32::from(px[1]) + u32::from(px[2])) / 3
+    };
+    let keep = |picture: &crate::shell::Picture, name: &str| {
+        if let Some(out) = std::env::var_os("CUTLASS_MATTE_OUT") {
+            image::RgbaImage::from_raw(picture.width, picture.height, picture.rgba.clone())
+                .unwrap()
+                .save(PathBuf::from(out).join(name))
+                .unwrap();
+        }
+    };
+    // The wall above the children, and the front girl's face.
+    let (wall, face) = ((360, 60), (315, 645));
+    let before = shell.preview_bytes().unwrap();
+    keep(&before, "preview-before.png");
+    assert!(grey(&before, wall.0, wall.1) > 150, "the wall is light");
+
+    shell.set_auto_removal(true).unwrap();
+    assert!(
+        shell.matte_progress().is_some(),
+        "the switch starts the job"
+    );
+    let start = std::time::Instant::now();
+    while shell.poll_job() && start.elapsed().as_secs() < 600 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let took = start.elapsed();
+    assert!(shell.matte_made(), "{:?}", shell.notice());
+    let cut = shell.preview_bytes().unwrap();
+    keep(&cut, "preview-cut.png");
+    assert!(grey(&cut, wall.0, wall.1) < 20, "the wall is gone");
+    assert!(
+        grey(&cut, face.0, face.1).abs_diff(grey(&before, face.0, face.1)) < 12,
+        "the face stays"
+    );
+
+    shell.set_matting_edge(0.3, 0.2).unwrap();
+    shell
+        .set_matting_stroke(Some(Stroke::new(StrokeStyle::Paper)))
+        .unwrap();
+    assert!(
+        shell.job().is_none(),
+        "the edge and outline need no new matte"
+    );
+    let outlined = shell.preview_bytes().unwrap();
+    keep(&outlined, "preview-outlined.png");
+    assert_ne!(outlined.rgba, cut.rgba);
+    eprintln!("the matte job took {took:.2?}");
+    let _ = std::fs::remove_dir_all(&temp);
+}

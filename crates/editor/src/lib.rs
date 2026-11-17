@@ -28,6 +28,7 @@ mod inspector;
 mod keys;
 mod lane;
 mod library;
+mod mask;
 mod media_place;
 mod pen;
 mod project_choices;
@@ -104,6 +105,10 @@ pub use library::{
     LIBRARY_TOP, LibraryFile, LibraryShelf, LibrarySort, NEW_FOLDER_NAME, add_folder,
     delete_folder, folder_trail, hide_file, library_cut, library_files, library_folders,
     next_folder_name, parent_of, picked_files, place, rename_folder,
+};
+pub use mask::{
+    ClipFrame, MaskGesture, MaskHandle, MaskHandles, box_point, brush_art, brush_stroke,
+    mask_handles, mask_pick, pen_art, text_box,
 };
 pub use media_place::{MediaPlace, extract_request, media_requests, sound_row};
 pub use pen::{FREEHAND_TOLERANCE, PEN_DRAG_MIN, PenPath, PenPress, freehand};

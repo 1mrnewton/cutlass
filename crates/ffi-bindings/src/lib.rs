@@ -1152,6 +1152,7 @@ pub enum ToolKind {
     Draw,
     VideoEffects,
     ShapeStyle,
+    Mask,
 }
 
 /// A tool as a bar shows it. `ready` says it works on the phone today;
@@ -1257,6 +1258,7 @@ fn tool_kind(id: cutlass_ffi::ToolId) -> ToolKind {
         T::Draw => ToolKind::Draw,
         T::VideoEffects => ToolKind::VideoEffects,
         T::ShapeStyle => ToolKind::ShapeStyle,
+        T::Mask => ToolKind::Mask,
     }
 }
 

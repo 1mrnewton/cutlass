@@ -115,6 +115,19 @@ pub fn clip_point(
     Some(media::clip_frame(draft, segment, time, canvas)?.apply(x, y))
 }
 
+/// The map from a canvas pixel to `segment`'s own picture (-1 to 1 each
+/// way, y up) at `time`, as `(a·x + b·y + c, d·x + e·y + f)`: the frame a
+/// mask is measured in. `None` when the clip is not drawn then.
+#[must_use]
+pub fn clip_frame(
+    draft: &cutlass_model::Draft,
+    segment: &cutlass_model::Segment,
+    time: Micros,
+    canvas: (u32, u32),
+) -> Option<[f64; 6]> {
+    Some(media::clip_frame(draft, segment, time, canvas)?.0)
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{Draft, Micros, Segment, TimeRange};

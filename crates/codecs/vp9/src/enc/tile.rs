@@ -1763,8 +1763,18 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 && !none_skip.0
                 && (best.0 - none_skip.1) / lam < cheap.0 * pixels
                 && none_skip.1 < cheap.1 * pixels * step * step;
-            if still || small_skip || cheap || none_skip.1 < (pixels * step * step / div).max(noise)
-            {
+            let limit = (pixels * step * step / div).max(noise);
+            // With a full search, the error of a block that needs no
+            // residual is also read at its worst 8×8 ([`Tile::peak_sse`]).
+            let stop = still
+                || small_skip
+                || cheap
+                || (none_skip.1 < limit
+                    && (!s.full_search || !none_skip.0 || {
+                        self.restore(before + 1);
+                        self.peak_sse(row, col, n) * pixels / 64.0 < limit
+                    }));
+            if stop {
                 self.restore(before + 1);
                 self.part[Self::node(row, col, level)] = PARTITION_NONE;
                 return best.0;
@@ -3576,6 +3586,35 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 P::sse(&src[y * sst + x..], sst, v.at(y, x), stride, vw * 4, vh * 4);
         }
         total[0] as f64 + total[1] as f64 * self.chroma_dist()
+    }
+
+    /// The largest luma error (SSE) of the 8×8 parts of the square of `n`
+    /// 8×8 at `(row, col)` inside the picture, as it is reconstructed now.
+    ///
+    /// With [`super::FrameParams::full_search`], a whole block that needs
+    /// no residual ends the partition search only where this too, over
+    /// the block, is under the quantizer's noise: its error summed hid a
+    /// small object (a moving square, a figure of the clock, a row of
+    /// noise) in a block that predicted the rest exactly, which then went
+    /// uncoded. On `testsrc2` at speed 5 against FFmpeg's `-crf`, at the
+    /// same PSNR-Y / U / V: +11.4 / +9.9 / +6.9% → +10.0 / +9.1 / +3.2%
+    /// (with chroma's error in it as the trials weigh it, +10.1 / +5.6 /
+    /// −0.7%, but 1.6 to 2.5 points of PSNR-Y lost on the README's clips
+    /// at fixed quantizers; without the stop at all, +9.8 / +4.7 / −1.5%
+    /// for 1.46 times the time).
+    fn peak_sse(&mut self, row: usize, col: usize, n: usize) -> f64 {
+        let s = self.s;
+        let (src, sst) = (s.src.planes[0], s.src.strides[0]);
+        let v = &mut self.rec.views()[0];
+        let stride = v.stride;
+        let mut peak = 0;
+        for r in row..(row + n).min(s.mi_rows) {
+            for c in col..(col + n).min(s.mi_cols) {
+                let (x, y) = (c * 8, r * 8);
+                peak = peak.max(P::sse(&src[y * sst + x..], sst, v.at(y, x), stride, 8, 8));
+            }
+        }
+        peak as f64
     }
 
     /// How much chroma's error weighs against luma's in the trials'

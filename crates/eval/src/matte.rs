@@ -87,10 +87,22 @@ pub fn matte_ask(
     root: Option<&Path>,
     segment_id: &SegmentId,
 ) -> Result<MatteAsk, EnhanceError> {
-    let (source, range, rate, segment) = clip_stretch(draft, root, segment_id, "cut out")?;
+    let (_, _, _, segment) = clip_stretch(draft, root, segment_id, "cut out")?;
     let matting = segment_matting(draft, segment).ok_or_else(|| EnhanceError::Clip {
         reason: "the clip has no Remove BG".into(),
     })?;
+    matte_ask_with(draft, root, segment_id, matting)
+}
+
+/// What cutting clip `segment_id` out with `matting` would read, before
+/// the clip has it: so a shell can tell whether a new matte is needed.
+pub fn matte_ask_with(
+    draft: &Draft,
+    root: Option<&Path>,
+    segment_id: &SegmentId,
+    matting: Matting,
+) -> Result<MatteAsk, EnhanceError> {
+    let (source, range, rate, _) = clip_stretch(draft, root, segment_id, "cut out")?;
     if !matting.ready() {
         return Err(EnhanceError::Clip {
             reason: "Custom removal has nothing picked yet".into(),

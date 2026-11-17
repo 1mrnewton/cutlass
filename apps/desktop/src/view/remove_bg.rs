@@ -39,7 +39,18 @@ pub(super) fn remove_bg_page(
 /// removal is on.
 fn matte_state(shell: &mut Shell, ui: &mut Ui) {
     if let Some(done) = shell.matte_progress() {
-        note(ui, &format!("Removing the background {:.1}%", done * 100.0));
+        // The pace so far: on a computer with no GPU path a matte takes
+        // seconds a frame, and the wait should say so.
+        let left = shell.job().and_then(|job| job.left);
+        let line = match left {
+            Some(left) => format!(
+                "Removing the background {:.0}%, about {} left",
+                done * 100.0,
+                super::spoken_duration(left)
+            ),
+            None => format!("Removing the background {:.0}%", done * 100.0),
+        };
+        note(ui, &line);
     } else if !shell.matte_made() {
         note(ui, "The clip shows uncut until its matte is made.");
         ui.horizontal(|ui| {

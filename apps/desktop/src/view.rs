@@ -637,7 +637,7 @@ fn job_strip(shell: &mut Shell, ui: &Ui, full: Rect) {
 }
 
 /// A wait as people say it: seconds under two minutes, then minutes.
-fn spoken_duration(left: std::time::Duration) -> String {
+pub(crate) fn spoken_duration(left: std::time::Duration) -> String {
     let seconds = left.as_secs().max(1);
     if seconds < 120 {
         format!("{seconds} s")

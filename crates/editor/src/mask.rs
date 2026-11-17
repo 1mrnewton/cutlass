@@ -208,6 +208,12 @@ impl MaskGesture {
         })
     }
 
+    /// Whether the drag is on a colour mask.
+    #[must_use]
+    pub fn color(&self) -> bool {
+        self.color
+    }
+
     /// The mask as it was when the drag began.
     #[must_use]
     pub fn start(&self) -> &Mask {

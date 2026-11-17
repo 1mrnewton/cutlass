@@ -214,12 +214,18 @@ fn a_clip_point_is_a_unit_point_of_its_frame() {
 #[test]
 fn auto_removal_names_its_mattes_by_the_model_that_makes_them() {
     // A matte is found by the model's name, so eval's name for Auto
-    // removal's model has to be the one the loaded model gives.
+    // removal's model has to be the one the loaded model gives, at the
+    // side it is loaded at.
     assert_eq!(
         cutlass_eval::MATTE_AUTO_MODEL,
-        cutlass_vision::MATTING_MODEL
+        format!("birefnet-lite-{AUTO_SIDE}")
     );
     assert_eq!(AUTO_WEIGHTS, cutlass_vision::MATTING_WEIGHTS);
+    assert_eq!(
+        cutlass_eval::MATTE_FOLLOW_MODEL,
+        cutlass_vision::FOLLOW_MODEL
+    );
+    assert_eq!(FOLLOW_WEIGHTS, cutlass_vision::FOLLOW_WEIGHTS);
 }
 
 #[test]
@@ -228,6 +234,10 @@ fn a_missing_model_is_refused_with_a_reason() {
     let _ = std::fs::create_dir_all(&empty);
     let Err(reason) = load_matter(&empty, Compute::Cpu) else {
         panic!("an empty folder has no model");
+    };
+    assert!(!reason.is_empty());
+    let Err(reason) = load_follower(&empty, Compute::Cpu) else {
+        panic!("an empty folder has no follower");
     };
     assert!(!reason.is_empty());
     let _ = std::fs::remove_dir_all(&empty);

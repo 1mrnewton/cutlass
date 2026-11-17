@@ -31,7 +31,11 @@ pub(super) const AUTO_WEIGHTS: &str = cutlass_vision::MATTING_WEIGHTS;
 /// The folder in `Models` holding Custom removal's follower, and its
 /// weights.
 pub(super) const FOLLOW_FOLDER: &str = "follow";
-pub(super) const FOLLOW_WEIGHTS: &str = "sam2.1_hiera_tiny.bpk";
+pub(super) const FOLLOW_WEIGHTS: &str = cutlass_vision::FOLLOW_WEIGHTS;
+
+/// The square Auto removal's model reads frames at: close to its trained
+/// 1024 at about half the time.
+pub(super) const AUTO_SIDE: u32 = 768;
 
 /// The smallest and largest brush, as a share of the frame's short side.
 const BRUSH_SMALLEST: f64 = 0.005;
@@ -39,14 +43,16 @@ const BRUSH_LARGEST: f64 = 0.1;
 
 /// Auto removal's model, BiRefNet_lite, loaded from `dir`.
 fn load_matter(dir: &Path, compute: Compute) -> Result<Box<dyn Matter + Send>, String> {
-    let model = cutlass_vision::Matting::load(dir, compute).map_err(|error| error.to_string())?;
+    let model = cutlass_vision::Matting::load_at(dir, compute, AUTO_SIDE)
+        .map_err(|error| error.to_string())?;
     Ok(Box::new(model))
 }
 
-/// Custom removal's follower, loaded from `dir`.
+/// Custom removal's follower, SAM 2.1 tiny, loaded from `dir`.
 fn load_follower(dir: &Path, compute: Compute) -> Result<Box<dyn Follower + Send>, String> {
-    let _ = (dir, compute);
-    Err("Custom removal's model is not in this build yet".to_owned())
+    let model =
+        cutlass_vision::FollowModel::load(dir, compute).map_err(|error| error.to_string())?;
+    Ok(Box::new(model))
 }
 
 /// Brush strokes being painted on one frame of a clip, before they are

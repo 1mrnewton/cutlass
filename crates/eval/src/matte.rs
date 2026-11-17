@@ -21,7 +21,7 @@ use crate::enhance::{EnhanceAsk, EnhanceError, clip_stretch};
 
 /// The model Auto removal's mattes are made with, and the size it reads
 /// at. A matte made by another is not used.
-pub const MATTE_AUTO_MODEL: &str = "birefnet-lite-1024";
+pub const MATTE_AUTO_MODEL: &str = "birefnet-lite-768";
 
 /// The model Custom removal's mattes are made with.
 pub const MATTE_FOLLOW_MODEL: &str = "sam2.1-hiera-tiny-1024";

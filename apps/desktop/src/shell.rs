@@ -279,8 +279,10 @@ pub struct Picture {
     pub rgba: Vec<u8>,
 }
 
-/// Each lane with its clips, in drawing order.
+/// Each lane with its clips, in drawing order. An effect riding on a clip
+/// is drawn on that clip, so its own row leaves it out.
 fn build_lanes(draft: &Draft) -> Vec<LaneView> {
+    let mut riding = cutlass_editor::effects_by_clip(draft);
     cutlass_editor::lanes_for(draft, true)
         .into_iter()
         .filter_map(|lane| {
@@ -288,7 +290,9 @@ fn build_lanes(draft: &Draft) -> Vec<LaneView> {
             let clips = track
                 .segments
                 .iter()
+                .filter(|segment| !cutlass_editor::rides_on_clip(draft, segment))
                 .map(|segment| ClipSpan {
+                    effects: riding.remove(&segment.id).unwrap_or_default(),
                     id: segment.id.clone(),
                     name: clip_name(draft, segment),
                     start: segment.target.start,
@@ -361,6 +365,8 @@ pub struct ClipSpan {
     /// The speed curve the clip runs on: `x` the share of the clip, `y`
     /// the speed there.
     pub speed_curve: Option<Vec<(f64, f64)>>,
+    /// The effects that run over this clip alone, drawn on it.
+    pub effects: Vec<cutlass_editor::ClipEffect>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -12916,6 +12922,59 @@ mod tests {
         desktop.undo().unwrap();
         assert_eq!(effects(&desktop).len(), 1);
         assert!(desktop.add_effect("effect:recipe/none").is_err());
+    }
+
+    #[test]
+    fn an_effect_dropped_on_a_clip_is_drawn_on_that_clip_and_not_on_a_row() {
+        let temp = Temp::new();
+        touching_cut(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let card = cutlass_editor::effect_cards()[0].id.clone();
+        let rows_before = desktop.lanes().len();
+        let main_row = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop
+            .drop_effect(&card, lane_time(&desktop, 1_500_000.0), main_row)
+            .unwrap();
+        let effect = desktop.selected().cloned().unwrap();
+        let lanes = desktop.lanes();
+        assert_eq!(lanes.len(), rows_before, "no row opens for it");
+        assert!(lanes.iter().all(|lane| lane.kind != TrackType::Effect));
+        let on = |id: &str| -> Vec<SegmentId> {
+            lanes
+                .iter()
+                .flat_map(|lane| &lane.clips)
+                .find(|clip| clip.id.as_str() == id)
+                .map(|clip| clip.effects.iter().map(|e| e.segment_id.clone()).collect())
+                .unwrap()
+        };
+        assert_eq!(on("right"), vec![effect.clone()]);
+        assert!(on("left").is_empty());
+        // A second drop on the same clip rides on it too, on the same
+        // hidden row, and the clip lists both.
+        desktop
+            .drop_effect(&card, lane_time(&desktop, 1_200_000.0), main_row)
+            .unwrap();
+        let lanes = desktop.lanes();
+        assert_eq!(lanes.len(), rows_before);
+        let listed: usize = lanes
+            .iter()
+            .flat_map(|lane| &lane.clips)
+            .map(|clip| clip.effects.len())
+            .sum();
+        assert_eq!(listed, 2);
+        // One added at the playhead runs over every picture and has a row.
+        desktop.seek(Micros(0));
+        desktop.add_effect(&card).unwrap();
+        let lanes = desktop.lanes();
+        assert_eq!(lanes.len(), rows_before + 1);
+        let row = lanes
+            .iter()
+            .find(|lane| lane.kind == TrackType::Effect)
+            .unwrap();
+        assert_eq!(row.clips.len(), 1);
+        assert!(row.clips.iter().all(|clip| clip.id != effect));
     }
 
     #[test]

@@ -8811,6 +8811,12 @@ fn paint_clip(
             finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, spot, None);
         }
     }
+    if !ghost {
+        let top = parts
+            .header
+            .map_or(clip_rect.top(), |header| header.bottom());
+        paint_clip_effects(shell, ui, clip, clip_rect, top, (visible, body));
+    }
     drag_clip_edge(
         shell,
         ui,
@@ -8833,6 +8839,91 @@ fn paint_clip(
     paint_clip_beats(shell, ui, clip, lanes_left, row);
     if shell.is_selected(&clip.id) {
         paint_clip_keys(shell, ui, clip, clip_rect, row);
+    }
+}
+
+/// The effects running over `clip` alone, as a band of chips across the
+/// clip from `top`, one chip each and `Effect: name` when there is one,
+/// drawn inside `shown`. A click on a chip inside `reach`, clear of the
+/// trim edges, picks that effect, so the inspector and Delete act on it.
+fn paint_clip_effects(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    clip: &crate::shell::ClipSpan,
+    clip_rect: Rect,
+    top: f32,
+    (shown, reach): (Rect, Rect),
+) {
+    if clip.effects.is_empty() {
+        return;
+    }
+    let bottom = (top + tokens::CLIP_EFFECT_BAND).min(clip_rect.bottom());
+    if bottom - top < 8.0 {
+        return;
+    }
+    let band = Rect::from_min_max(
+        Pos2::new(clip_rect.left(), top),
+        Pos2::new(clip_rect.right(), bottom),
+    )
+    .shrink2(Vec2::new(2.0, 1.0));
+    #[allow(clippy::cast_precision_loss)]
+    let width = band.width() / clip.effects.len() as f32;
+    let fill = lane_color(&cutlass_model::TrackType::Effect);
+    for (place, effect) in clip.effects.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let left = band.left() + width * place as f32;
+        let chip = Rect::from_min_max(
+            Pos2::new(left, band.top()),
+            Pos2::new(left + width, band.bottom()),
+        )
+        .shrink2(Vec2::new(if place == 0 { 0.0 } else { 1.0 }, 0.0));
+        let painter = ui
+            .painter()
+            .with_clip_rect(shown.intersect(chip.expand(1.0)));
+        painter.rect_filled(chip, CornerRadius::same(3), fill);
+        let picked = shell.is_selected(&effect.segment_id);
+        if picked {
+            painter.rect_stroke(
+                chip,
+                CornerRadius::same(3),
+                egui::Stroke::new(1.5, Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let icon = Rect::from_min_size(
+            Pos2::new(chip.left() + 4.0, chip.center().y - 5.5),
+            Vec2::splat(11.0),
+        );
+        let _ = icons::paint(&painter, icon, "effects", tokens::CLIP_TEXT);
+        let label = if clip.effects.len() == 1 {
+            format!("Effect: {}", effect.name)
+        } else {
+            effect.name.clone()
+        };
+        painter.with_clip_rect(chip.shrink(1.0)).text(
+            Pos2::new(icon.right() + 4.0, chip.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(10.5),
+            tokens::CLIP_TEXT,
+        );
+        let hit = chip.intersect(reach);
+        if hit.width() <= 0.0 || hit.height() <= 0.0 {
+            continue;
+        }
+        let response = ui.interact(
+            hit,
+            ui.scope_id()
+                .with(("clip-effect", effect.segment_id.as_str())),
+            Sense::click(),
+        );
+        if response.hovered() {
+            ui.set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked() {
+            shell.select(Some(effect.segment_id.clone()));
+        }
+        response.on_hover_text(effect.name.clone());
     }
 }
 

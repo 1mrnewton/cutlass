@@ -1003,7 +1003,12 @@ impl<P: EncPixel> FrameEncoder<P> {
             },
             filter_on,
             lambda: sad_per_bit(ac, self.bd),
-            rd_lambda: rd_lambda(i32::from(h.y_dq[0][0])),
+            rd_lambda: rd_lambda(i32::from(h.y_dq[0][0]))
+                * if self.drawn && key && fp.full_search && !fp.second_pass {
+                    drawn_key_lambda(fp.speed)
+                } else {
+                    1.0
+                },
             src: Source {
                 planes: [&self.src[0], &self.src[1], &self.src[2]],
                 strides: self.strides,
@@ -1990,6 +1995,27 @@ fn ssim_scales<P: EncPixel>(
         }
     }
 }
+
+/// A drawn picture's key frame at a fixed quantizer in one pass, up to
+/// [`tile::KEY_RD_SPEED`] ([`tile::Shared::drawn_key`]): its RD lambda
+/// over [`rd_lambda`]'s. Ours is about 1.6 times libvpx's on a key frame
+/// (`vp9_compute_rd_mult`: `dc² · (4.35 + qindex / 1000)` over SSE scaled
+/// by 2048 and its trellis' plane weights), and FFmpeg's `-crf` (at
+/// `-cpu-used 1`) spends more of the first picture of `testsrc2` on its
+/// fine lines; at 0.6 (with [`tile::Shared::drawn_key`]'s 8×4 and 4×8
+/// halves) its BD-rate against libvpx's first picture goes from +3.2 to
+/// about +0.6%. Not on the key frames of camera pictures: there the
+/// lower lambda cost 1.5 to 3 points of U and V on the README's clips.
+fn drawn_key_lambda(speed: u8) -> f32 {
+    if speed <= tile::KEY_RD_SPEED {
+        DRAWN_KEY_LAMBDA
+    } else {
+        1.0
+    }
+}
+
+/// See [`drawn_key_lambda`].
+const DRAWN_KEY_LAMBDA: f32 = 0.6;
 
 fn rd_lambda(dc: i32) -> f32 {
     0.00358 * (dc * dc) as f32

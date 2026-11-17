@@ -972,6 +972,41 @@ fn a_drawn_key_frame_tries_halves_at_every_size() {
 }
 
 #[test]
+fn a_drawn_key_frame_codes_8x4_and_4x8_intra_blocks() {
+    // A key frame of drawn pictures at a fixed quantizer in one pass
+    // (`tile::Tile::drawn_key_rd`) tries an 8×8 block's 8×4 and 4×8
+    // halves, each with one mode, besides its four 4×4s; otherwise it
+    // never codes them. Its reconstruction is the decoder's.
+    use crate::dsp::pixel::Pixel;
+    let (w, h) = (128usize, 128usize);
+    let cw = w.div_ceil(2);
+    let pic = texture(w, h, (0, 0));
+    let halves = |drawn: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 2);
+        enc.set_drawn(drawn);
+        enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+        let coded = enc.encode(fixed_params(0, 120, 5, false)).expect("encode");
+        let mut dec = Decoder::new();
+        let shown = dec.decode(&coded.data).expect("decode").expect("shown");
+        let rec = enc.last().expect("recon");
+        let (data, stride) = rec.buf.plane(0);
+        let recon: Vec<u8> = (0..h)
+            .flat_map(|r| {
+                data[r * stride..r * stride + w]
+                    .iter()
+                    .map(|v| v.get() as u8)
+            })
+            .collect();
+        assert_eq!(shown.y, recon, "drawn {drawn}");
+        dec.last_blocks()
+            .filter(|b| matches!(b.bsize, crate::geom::BLOCK_8X4 | crate::geom::BLOCK_4X8))
+            .count()
+    };
+    assert!(halves(true) > 0);
+    assert_eq!(halves(false), 0);
+}
+
+#[test]
 fn a_coarse_fixed_quantizer_still_searches_the_filter_level() {
     // From about quantizer 208 the level from the quantizer is 63, which
     // the masks cannot be rebased from: at a fixed quantizer in one pass

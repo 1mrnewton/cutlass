@@ -283,7 +283,9 @@ pub struct Shared<'a, P> {
     /// (BD-rate at the same PSNR-Y / U / V): `testsrc2` +0.7 / +0.5 /
     /// −4.6% → +1.0 / +0.9 / −3.9%, the gradient of "Synthetic pans" in the
     /// README +0.1% → −0.3% (within what five points move between builds
-    /// that differ in little, both ways).
+    /// that differ in little, both ways). Up to [`KEY_RD_SPEED`], its 8×8
+    /// blocks try 8×4 and 4×8 halves too ([`Tile::drawn_key_rd`]), at a
+    /// lower lambda (the encoder's `DRAWN_KEY_LAMBDA`).
     pub drawn_key: bool,
     /// An inter frame of drawn pictures that stand still, at a fixed
     /// quantizer in one pass ([`super::FrameEncoder::set_drawn`]): which
@@ -1587,6 +1589,14 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         s.intra_frame && s.full_search && !s.second_pass && s.speed <= KEY_RD_SPEED
     }
 
+    /// A drawn picture's key frame ([`Shared::drawn_key`]) up to
+    /// [`KEY_RD_SPEED`]: its 8×8 blocks try 8×4 and 4×8 halves too, as
+    /// libvpx's (`rd_pick_intra_sub_8x8_y_mode`), each half with one mode
+    /// by RD (an 8×4's over both its 4×4s).
+    fn drawn_key_rd(&self) -> bool {
+        self.s.drawn_key && self.key_rd()
+    }
+
     fn six(&self) -> bool {
         self.s.speed == 6 && !self.s.second_pass
     }
@@ -1806,14 +1816,43 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let d = self.code_block(&b);
                 self.part_after(row, col, bsize, PARTITION_SPLIT);
                 let j = d + (self.cost - c0) as f64 * lam;
+                let mut won = None;
                 if j < best.0 {
                     let mut chosen = b;
                     chosen.bmode = self.sub;
-                    self.choice[Self::slot(row, col, bsize)] = chosen;
-                    self.sub8[i8] = PARTITION_SPLIT;
-                    return j;
+                    best = (j, PARTITION_SPLIT);
+                    won = Some(chosen);
+                    self.save(row, col, (1, 1), before + 1);
+                }
+                // (A drawn key frame's halves too, see
+                // [`Self::drawn_key_rd`].)
+                if self.drawn_key_rd() {
+                    for (p, sbs) in [
+                        (PARTITION_HORZ, geom::BLOCK_8X4),
+                        (PARTITION_VERT, geom::BLOCK_4X8),
+                    ] {
+                        self.restore(before);
+                        let c0 = self.cost;
+                        self.part_symbol(row, col, bsize, p);
+                        let b = Blk { bsize: sbs, ..b };
+                        let d = self.code_block(&b);
+                        self.part_after(row, col, bsize, p);
+                        let j = d + (self.cost - c0) as f64 * lam;
+                        if j < best.0 {
+                            let mut chosen = b;
+                            chosen.bmode = self.sub;
+                            best = (j, p);
+                            won = Some(chosen);
+                            self.save(row, col, (1, 1), before + 1);
+                        }
+                    }
                 }
                 self.restore(before + 1);
+                if let Some(chosen) = won {
+                    self.choice[Self::slot(row, col, bsize)] = chosen;
+                    self.sub8[i8] = best.1;
+                    return best.0;
+                }
             }
             // Inter frames: the best whole block's reference over 4×4,
             // 8×4 or 4×8 sub-blocks, each with its own vector.
@@ -3992,6 +4031,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         have_above: bool,
         have_right: bool,
         ctx: (u8, u8),
+        pair: bool,
     ) -> u8 {
         let s = self.s;
         let modes = self.ranked_4x4(x, y, have_left, have_above, have_right);
@@ -4008,9 +4048,18 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             };
             let (levels, _) = self.quantize(0, 0, kind, x, y, true);
             self.pool.push(levels);
+            let mut d = self.rd.coded;
+            if pair {
+                // (An 8×4's: the 4×4 right of it too, in the same mode.)
+                self.rec
+                    .predict_intra(0, m, 0, x + 4, y, true, have_above, false);
+                let (levels, _) = self.quantize(0, 0, kind, x + 4, y, true);
+                self.pool.push(levels);
+                d += self.rd.coded;
+            }
             let mut c = Cost(0);
             tree_to(&mut c, &prob::INTRA_TREE, probs, m);
-            let j = self.rd.coded + lam * c.0 as f32;
+            let j = d + lam * c.0 as f32;
             if j < best.0 {
                 best = (j, m);
             }
@@ -4112,7 +4161,16 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                             b.uv
                         } else if b.bsize < BLOCK_8X8 {
                             let k = r * 2 + c;
-                            if b.bmode[k] == AUTO && self.trial && self.key_rd() {
+                            // An 8×4's and a 4×8's second 4×4 of each half
+                            // takes the first's mode.
+                            let lead = match b.bsize {
+                                geom::BLOCK_8X4 => k & 2,
+                                geom::BLOCK_4X8 => k & 1,
+                                _ => k,
+                            };
+                            if b.bmode[k] == AUTO && lead != k {
+                                self.sub[k] = self.sub[lead];
+                            } else if b.bmode[k] == AUTO && self.trial && self.key_rd() {
                                 // ([`KEY_RD_SPEED`]: by RD, in the context of
                                 // the modes above and left of it.)
                                 let a = if r > 0 {
@@ -4138,6 +4196,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                                     r > 0 || b.row > 0,
                                     c + step < n4w,
                                     (a, l),
+                                    b.bsize == geom::BLOCK_8X4,
                                 );
                             } else if b.bmode[k] == AUTO {
                                 // The 4×4's mode from its own edges, by SATD.
@@ -4964,7 +5023,14 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 Some(l) if l.refs[0] == INTRA_FRAME => l.bmode[k + 1],
                 _ => geom::DC,
             };
-            for k in 0..4 {
+            // (An 8×4 codes the modes of its 4×4s 0 and 2, a 4×8 of 0
+            // and 1.)
+            let ks: &[usize] = match b.bsize {
+                geom::BLOCK_8X4 => &[0, 2],
+                geom::BLOCK_4X8 => &[0, 1],
+                _ => &[0, 1, 2, 3],
+            };
+            for &k in ks {
                 let a = if k < 2 { ab(k) } else { b.bmode[k - 2] };
                 let l = if k % 2 == 0 { lb(k) } else { b.bmode[k - 1] };
                 self.put_tree(

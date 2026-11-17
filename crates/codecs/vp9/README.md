@@ -2454,6 +2454,71 @@ libvpx's: libvpx's lower lambda and its 8×4 and 4×8 intra blocks take
 it to 0.6%, but not the stream, and the lambda costs the README's clips
 1.5 to 3 points of PSNR-U and V.
 
+**A drawn picture's key frame** (17 November 2026, after the squares of
+noise). The first picture's 3.2% over libvpx's, again: a key frame of a
+drawn picture (`tile::Shared::drawn_key`: the encoder finds it drawn from
+the picture queued after it) at a fixed quantizer in one pass, up to
+speed 5 (`KEY_RD_SPEED`), now codes with 0.6 times the lambda
+(`DRAWN_KEY_LAMBDA`), and its 8×8 blocks try 8×4 and 4×8 halves besides
+their four 4×4s, each half with one mode (an 8×4's by RD over both its
+4×4s; `Tile::drawn_key_rd`). On every key frame, as tried before, the
+lambda cost the README's clips 1.5 to 3 points of PSNR-U and V; their
+key frames are not drawn, and they now write the same streams.
+
+The first picture of three of `testsrc2`, `crf=10` to `60`, against
+libvpx's (FFmpeg's `-crf`; BD-rate at the same PSNR-Y / U / V): +3.2 /
+−0.2 / −1.6% before, +0.6 / −1.1 / −1.2% now.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets nine points against FFmpeg's five):
+
+| | `testsrc2` | Gradient |
+| --- | --- | --- |
+| Before | −3.4 / −7.2 / −11.6% (−1.0 / −6.0 / −11.0%) | −2.4% (−3.2%) |
+| Now | −3.9 / −8.1 / −12.2% (−1.1 / −6.6 / −11.0%) | −3.0% (−3.3%) |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 316954, 52.78 dB | 317090, 52.83 dB | 12638, 53.72 dB | 13165, 53.86 dB |
+| 25 | 237311, 48.99 dB | 237356, 49.03 dB | 9381, 52.17 dB | 9654, 52.44 dB |
+| 35 | 140443, 43.75 dB | 140793, 43.81 dB | 7219, 49.74 dB | 7380, 50.00 dB |
+| 45 | 56028, 39.13 dB | 56499, 39.17 dB | 5933, 46.66 dB | 6000, 47.04 dB |
+| 55 | 18371, 35.96 dB | 18634, 36.15 dB | 5358, 43.69 dB | 5344, 43.96 dB |
+
+On the README's three clips at `q=60` to `210`: the same streams as the
+build before. Time, four threads, against FFmpeg's `-crf 24` to `48`
+and the build before, three rounds interleaved, the mean over each
+one's points of the median of the rounds (Cutlass at `q=60` to `210`;
+all three write the same streams in both, so the differences are the
+noise of the measure; the still scene measured twice):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 8.20 s | 6.84 s (0.83) | 6.78 s (0.83) |
+| Still scene | 4.42 s, 4.19 s | 3.95 s (0.89), 3.64 s (0.87) | 4.06 s (0.92), 3.75 s (0.90) |
+| Grainy pan | 3.33 s | 2.72 s (0.82) | 2.75 s (0.83) |
+
+(On one core, the still scene at `q=120`, four runs each, the two builds
+took 2.94 to 3.25 s and 2.87 to 3.60 s.)
+
+Checks: of the identity check's 41 configurations, four at a fixed
+quantizer change (the synthetic 4:2:0 and 4:4:4 sources at `q=60`,
+speeds 2 and 5), the other 37 do not (every one at a bitrate, in two
+passes, or at speeds 6 to 10). FFmpeg's `vp9` (threaded and on one
+thread), libvpx and this decoder agree on 10 new streams (40 of 40
+decodes: `testsrc2` at `crf=25`, `35`, `50`, at `crf=45` on one thread
+and at `crf=15` at speed 2, the gradient at `crf=35`, the synthetic
+4:2:0 source at `q=60` at speeds 2 and 5, the 4:4:4 one at `q=60`, the
+three scenes at `q=120`). New test: a drawn key frame codes 8×4 and 4×8
+intra blocks, its reconstruction the decoder's; not drawn, none (fails
+without the change).
+
+What is left: `testsrc2` at −3.9% / −8.1% / −12.2% against FFmpeg's
+`-crf`, −1.1% / −6.6% / −11.0% with nine points; the gradient at −3.0%
+(nine points −3.3%). The first picture alone is 0.6% over libvpx's.
+
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and
 against the defaults (BD-rate; FFmpeg's time a stream with `-row-mt 1`,

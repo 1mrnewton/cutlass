@@ -39,7 +39,7 @@ pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize
 pub use chat::{
     ChatModel, ChatTransport, LoopbackHttp, SYSTEM_PROMPT, parse_reply, prompt_context,
 };
-pub use chat_file::{load_chat, save_chat};
+pub use chat_file::{ChatMiss, load_chat, load_chat_of, save_chat, save_chat_of};
 pub use delegate::{
     CHILD_TOOLS, DELEGATE, Delegating, definitions_with_delegate, delegate_definition,
 };

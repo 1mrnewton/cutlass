@@ -660,6 +660,9 @@ struct Core<P: EncPixel> {
     /// Where the content of the picture coded last stands
     /// ([`super::arf::shift`] summed over the pictures).
     pos: (isize, isize),
+    /// With the reference pool: where the content of ALTREF's picture
+    /// stands (see `pos`), when known.
+    alt_pos: Option<(isize, isize)>,
     /// Pictures shown so far.
     shown: u64,
     /// With the realtime pool ([`RT_POOL_SPEED`]): the profile of the
@@ -1156,6 +1159,7 @@ impl<P: EncPixel> Core<P> {
             gold_src: None,
             shown: 0,
             pos: (0, 0),
+            alt_pos: None,
             last_prof: None,
             refresh_at: 0,
             denoiser: (opts.noise_sensitivity > 0)
@@ -1370,6 +1374,15 @@ impl<P: EncPixel> Core<P> {
                     (p.0 + q.step.0, p.1 + q.step.1)
                 });
             let golden_slot = self.pick_golden([&src[0], &src[1], &src[2]], at);
+            // Its search on LAST and on ALTREF (the alt-ref before) starts
+            // where their pictures stand from it ([`super::tile::REF_SEED_SPEED`]).
+            if self.seeded() {
+                self.enc
+                    .set_ref_seed(0, (at.0 - self.pos.0, at.1 - self.pos.1));
+                if let Some(a) = self.alt_pos {
+                    self.enc.set_ref_seed(2, (at.0 - a.0, at.1 - a.1));
+                }
+            }
             self.enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
             self.rc.alt_ref(k);
             let qindex = self.rc.qindex(1, f.seconds, false);
@@ -1400,6 +1413,7 @@ impl<P: EncPixel> Core<P> {
                 noise: golden_slot.1,
             })?;
             self.rc.account(coded.data.len(), 0.0, 1, qindex);
+            self.alt_pos = self.seeded().then_some(at);
             self.overlay_at = Some(target);
             self.mid_layer = 1;
             hidden.push(coded.data);
@@ -1720,6 +1734,7 @@ impl<P: EncPixel> Core<P> {
             self.pool.clear();
             self.gold_src = None;
             self.pos = (0, 0);
+            self.alt_pos = self.seeded().then_some((0, 0));
             self.last_prof = None;
         } else if let Some(t) = &tight {
             let (w, h) = (self.width as usize, self.height as usize);
@@ -1738,6 +1753,15 @@ impl<P: EncPixel> Core<P> {
             Some(t) if !key => self.pick_golden([&t[0], &t[1], &t[2]], self.pos),
             _ => (1, 0.0),
         };
+        // The search on ALTREF starts where its picture stands from this
+        // one ([`super::tile::REF_SEED_SPEED`]).
+        if !key
+            && self.seeded()
+            && let Some(a) = self.alt_pos
+        {
+            self.enc
+                .set_ref_seed(2, (self.pos.0 - a.0, self.pos.1 - a.1));
+        }
         let n = if rt { RT_POOL } else { POOL };
         let pool_slot = if self.opts.alt_ref_layers > 1 {
             self.free_slot(false)
@@ -1989,6 +2013,14 @@ impl<P: EncPixel> Core<P> {
         Ok(())
     }
 
+    /// Whether the search on LAST and ALTREF starts where their pictures
+    /// stand ([`super::tile::REF_SEED_SPEED`]): with the reference pool
+    /// (whose positions are known), up to that speed (not on the alt-refs
+    /// of speeds 7 and 8, coded at speed 6).
+    fn seeded(&self) -> bool {
+        self.pooled() && self.opts.speed <= super::tile::REF_SEED_SPEED
+    }
+
     /// Whether the reference pool is kept ([`POOL`]): two passes, and one
     /// pass up to [`POOL_SPEED`].
     fn pooled(&self) -> bool {
@@ -2137,6 +2169,7 @@ impl<P: EncPixel> Core<P> {
         self.gold_src = None;
         self.shown = 0;
         self.pos = (0, 0);
+        self.alt_pos = None;
         self.refresh_at = 0;
         if let Some(d) = &mut self.denoiser {
             d.reset();

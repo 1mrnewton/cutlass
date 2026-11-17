@@ -315,6 +315,7 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// The next frame's whole-picture motion from LAST, if far.
     global: Option<Mv>,
     gold_mv: Option<Mv>,
+    ref_seeds: [Option<Mv>; 3],
     /// The loop filter level the frame being coded searched
     /// ([`pick_level`]), for its final header.
     lf_pick: Option<u8>,
@@ -399,6 +400,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             row_lanes: 0,
             global: None,
             gold_mv: None,
+            ref_seeds: [None; 3],
             lf_pick: None,
             lf_band: Vec::new(),
         }
@@ -445,6 +447,17 @@ impl<P: EncPixel> FrameEncoder<P> {
     /// stands from this one's content.
     pub fn set_gold_mv(&mut self, (x, y): (isize, isize)) {
         self.gold_mv = Some(Mv {
+            row: (y * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+            col: (x * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+        });
+    }
+
+    /// The next frame's picture stands `(x, y)` whole samples from the one
+    /// reference `r` (0 LAST, 1 GOLDEN, 2 ALTREF) holds: up to
+    /// [`tile::REF_SEED_SPEED`] every block's search on it starts there
+    /// too, and reaches as far past its range (the next frame only).
+    pub fn set_ref_seed(&mut self, r: usize, (x, y): (isize, isize)) {
+        self.ref_seeds[r] = Some(Mv {
             row: (y * 8).clamp(-8 * 1023, 8 * 1023) as i16,
             col: (x * 8).clamp(-8 * 1023, 8 * 1023) as i16,
         });
@@ -925,6 +938,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             ssim: &self.ssim,
             global: self.global.take(),
             gold_mv: self.gold_mv.take(),
+            ref_seeds: std::mem::take(&mut self.ref_seeds),
         };
         // Each tile column on its own thread, into its own copy of the
         // picture (intra prediction reads nothing across tile columns).

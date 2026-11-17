@@ -3210,3 +3210,45 @@ fn frames_with_alpha_round_trip_on_the_codec_contracts() {
     let out = VideoDecoder::push(&mut decoder, &bare).expect("decode");
     assert!(out.iter().all(|o| o.frame.alpha.is_none()));
 }
+
+#[test]
+fn a_pan_with_alt_refs_seeds_its_searches_and_decodes() {
+    // A pan of a sample a picture: an alt-ref every golden interval, which
+    // the frames after it search from where the pan puts it, and a key
+    // frame midway that resets where the pictures stand
+    // (`tile::REF_SEED_SPEED`; speed 7 reads no seed).
+    let (w, h) = (320u32, 192u32);
+    let frame = |i: u32| moving(w, h, i);
+    for speed in [5, 6, 7] {
+        let opts = super::Vp9Options {
+            qindex: 120,
+            lag: Some(16),
+            keyint: 20,
+            speed,
+            threads: 2,
+            ..super::Vp9Options::default()
+        };
+        let packets = encode_with(opts, (w, h), 40, frame);
+        assert_decodes(&packets, (w, h), 40);
+        let superframes = packets
+            .iter()
+            .filter(|p| {
+                crate::decode::split_superframe(&p.data)
+                    .expect("split")
+                    .len()
+                    > 1
+            })
+            .count();
+        assert!(superframes >= 2, "speed {speed}: {superframes} alt-refs");
+        // The pictures between the first alt-ref and its overlay predict
+        // from it and from LAST: a fraction of the key frame each.
+        let key = packets[0].data.len();
+        for p in &packets[2..11] {
+            assert!(
+                p.data.len() * 4 < key,
+                "speed {speed}: {} bytes, key frame {key}",
+                p.data.len()
+            );
+        }
+    }
+}

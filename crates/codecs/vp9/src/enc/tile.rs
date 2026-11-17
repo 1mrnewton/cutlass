@@ -262,6 +262,12 @@ pub struct Shared<'a, P> {
     /// of every block's search on LAST.
     pub global: Option<Mv>,
     pub gold_mv: Option<Mv>,
+    /// Up to [`REF_SEED_SPEED`], where the picture each reference (LAST,
+    /// GOLDEN, ALTREF) holds stands from this one, as a vector (see
+    /// [`super::FrameEncoder::set_ref_seed`]): a start of every block's
+    /// search on it, and the search reaches that far past its usual
+    /// range.
+    pub ref_seeds: [Option<Mv>; 3],
 }
 
 /// The context energy of a level (libvpx `vp9_pt_energy_class`): 0, 1, 2,
@@ -679,6 +685,21 @@ const DZ_TRIAL_SPEED: u8 = 5;
 /// one pass, where the key frame's size moves the rate control: the
 /// grainy pan's chroma lost 2 points at the same PSNR for its luma's 2.5.
 pub const KEY_FULL_SPEED: u8 = 5;
+
+/// Up to this speed the search on a reference starts also where its
+/// picture stands from this one ([`Shared::ref_seeds`]) and reaches that
+/// far past its usual 64 samples: an alt-ref's search on LAST (a golden
+/// interval of motion away), and every frame's on ALTREF (as many pictures
+/// away as it is from the alt-ref's). The search on ALTREF otherwise
+/// started from zero and from the neighbours' vectors on LAST, and on a
+/// pan stopped in the valleys of a smooth picture or of grain: at speed 5
+/// against `crf=` before, the gradient of "Synthetic pans" in the README
+/// +10.9% → +6.0% at the same PSNR-Y against FFmpeg's `-crf`, `testsrc2`
+/// +15.2% → +12.8%, the README's grainy pan 24% fewer bits at a fixed
+/// quantizer. (GOLDEN seeded from its pool picture's place as well: the
+/// gradient at +4.1%, but the pan in two passes 3.4 points worse at the
+/// same PSNR-U.)
+pub const REF_SEED_SPEED: u8 = 6;
 
 /// The dead zone's offsets at speeds 9 and 10 (0.5 rounds to nearest).
 const DZ_INTRA_ROUND: f32 = 0.42;
@@ -5394,8 +5415,18 @@ fn search_in<P: EncPixel>(
     let w = w.min((s.mi_cols - col) * 8);
     let h = h.min((s.mi_rows - row) * 8);
     // Starting points.
-    let mut cands = [Mv::ZERO; 7];
+    let mut cands = [Mv::ZERO; 8];
     let mut nc = 1;
+    // Where the reference's picture stands: a start, and the reach of the
+    // search past its range.
+    let mut reach = 0;
+    if s.speed <= REF_SEED_SPEED
+        && let Some(m) = s.ref_seeds[cur_ref]
+    {
+        cands[nc] = m;
+        nc += 1;
+        reach = i32::from(m.row.unsigned_abs().max(m.col.unsigned_abs()) / 8);
+    }
     if cur_ref == 0
         && let Some(g) = s.global
     {
@@ -5427,7 +5458,7 @@ fn search_in<P: EncPixel>(
     // Windows over the reference's edge are copied here.
     let mut edge = Vec::new();
     // (Neighbours often share a vector: each one's SAD is taken once.)
-    let mut seen = [((0i32, 0i32), None::<u64>); 7];
+    let mut seen = [((0i32, 0i32), None::<u64>); 8];
     for (k, m) in cands[..nc].iter().enumerate() {
         let (r, c) = ((i32::from(m.row) + 4) >> 3, (i32::from(m.col) + 4) >> 3);
         let sad = match seen[..k].iter().find(|e| e.0 == (r, c)) {
@@ -5449,7 +5480,7 @@ fn search_in<P: EncPixel>(
     // Diamond search in whole samples; below 64×64 the search starts
     // from the square around it, whose vector is a seed, with a smaller
     // step.
-    let range = 64;
+    let range = 64 + reach;
     let mut step = match (bsize, s.speed) {
         (BLOCK_64X64, 9..) => 4,
         (geom::BLOCK_32X32, 9..) => 1,

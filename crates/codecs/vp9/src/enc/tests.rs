@@ -393,3 +393,75 @@ fn a_searched_filter_level_decodes_as_the_encoder_filtered() {
         assert!(searched_levels::<u8>((0, 1), 8, 1, q) > 0);
     }
 }
+
+#[test]
+fn a_reference_seed_reaches_past_the_search_range() {
+    use crate::dsp::pixel::Pixel;
+    // `b`'s blocks are `a`'s 100 to the left and 40 up: past the 64
+    // samples the search reaches from its neighbours' vectors.
+    let (w, h) = (640usize, 320usize);
+    let a = texture(w, h, (200, 100));
+    let b = texture(w, h, (100, 60));
+    let cw = w.div_ceil(2);
+    let code = |speed: u8, seed: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 2);
+        let mut dec = Decoder::new();
+        let mut out = Vec::new();
+        for (t, pic) in [&a, &b].into_iter().enumerate() {
+            if t == 1 && seed {
+                enc.set_ref_seed(0, (-100, -40));
+            }
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            let coded = enc
+                .encode(FrameParams {
+                    key: t == 0,
+                    golden: false,
+                    hidden: false,
+                    qindex: 120,
+                    speed,
+                    altref_future: false,
+                    aq: false,
+                    second_pass: false,
+                    full_search: speed <= 5,
+                    fast_arf: false,
+                    uv_delta: 0,
+                    golden_slot: 1,
+                    also_refresh: 0,
+                    altref_slot: 2,
+                    last_slot: 0,
+                    hidden_slot: 2,
+                    noise: 0.0,
+                })
+                .expect("encode");
+            // Each picture decodes as the encoder reconstructed it.
+            let shown = dec.decode(&coded.data).expect("decode").expect("shown");
+            let rec = enc.last().expect("recon");
+            let (data, stride) = rec.buf.plane(0);
+            for r in 0..h {
+                let want: Vec<u8> = data[r * stride..r * stride + w]
+                    .iter()
+                    .map(|v| v.get() as u8)
+                    .collect();
+                assert_eq!(
+                    &shown.y[r * w..(r + 1) * w],
+                    &want[..],
+                    "speed {speed} row {r}"
+                );
+            }
+            out.push(coded.data);
+        }
+        out
+    };
+    for speed in [5, super::tile::REF_SEED_SPEED] {
+        let (with, without) = (code(speed, true), code(speed, false));
+        assert!(
+            with[1].len() * 2 < without[1].len(),
+            "speed {speed}: {} bytes with the seed, {} without",
+            with[1].len(),
+            without[1].len()
+        );
+    }
+    // Past REF_SEED_SPEED the seed is not read.
+    let speed = super::tile::REF_SEED_SPEED + 1;
+    assert!(code(speed, true) == code(speed, false));
+}

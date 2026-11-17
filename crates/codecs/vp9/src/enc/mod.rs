@@ -1399,6 +1399,13 @@ impl<P: EncPixel> FrameEncoder<P> {
                 h.tx_mode != geom::ONLY_4X4,
                 &mut self.lf_band,
             );
+            // At a fixed quantizer, an inter frame's level a share lower
+            // ([`LF_FIXED_SCALE`]).
+            let pick = if fp.full_search && !fp.second_pass && !key {
+                ((f64::from(pick) * LF_FIXED_SCALE) as u8).max(2)
+            } else {
+                pick
+            };
             if pick != lf_level {
                 for m in &mut masks {
                     m.rebase(lf_level, pick);
@@ -1904,6 +1911,25 @@ pub fn filter_level(qindex: u8, key: bool, bd: u8) -> u8 {
 /// searched ([`pick_level`]) rather than taken from the quantizer
 /// ([`filter_level`], libvpx's `LPF_PICK_FROM_Q`).
 pub const LF_SEARCH_SPEED: u8 = 5;
+
+/// At a fixed quantizer ([`FrameParams::full_search`] in one pass), an
+/// inter frame takes this share of the level [`pick_level`] finds. The
+/// search measures the frame it filters alone, and on a picture that
+/// stands still from frame to frame (blocks that keep their reference
+/// whole, their edges filtered again each time) it found levels that
+/// blurred the pictures after it: libvpx's on `testsrc2` at `-crf 35`
+/// were 1 to 14 where this encoder's were 6 to 21. At speed 5 against
+/// FFmpeg's `-crf`, BD-rate at the same PSNR-Y / U / V: `testsrc2` +10.0
+/// / +9.1 / +3.2% → +8.8 / +8.0 / +2.9%, the gradient of "Synthetic pans"
+/// in the README +6.2% → +4.3%; on the README's three clips at `q=60` to
+/// `210`, within a point either way (PSNR-Y −0.3, +0.7 and −0.3 points on
+/// the three scenes, the still scene and the pan; another run of the same
+/// scale, −0.6, −0.8 and −0.8). (At 0.45, the still scene lost a point; at
+/// 0.7, half the gain. The search's levels kept without its margin
+/// ([`LF_MARGIN`]): `testsrc2` +9.1%, the gradient +4.6%, PSNR-U lost on
+/// the still scene. At a bitrate, 0.6 lost 0.1 to 1.4 points of PSNR-Y on
+/// the three clips.)
+const LF_FIXED_SCALE: f64 = 0.6;
 
 /// [`pick_level`] filters one superblock row in this many, spread over
 /// the frame.

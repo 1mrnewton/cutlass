@@ -3189,11 +3189,19 @@ impl Rate {
     /// inter); `cut` for a golden frame that starts a scene.
     fn qindex(&mut self, kind: usize, seconds: f64, cut: bool) -> u8 {
         let q = self.qindex_in(kind, seconds, cut);
-        if kind == 0 && self.opts.bitrate > 0 && self.opts.max_intra_pct > 0 {
+        let q = if kind == 0 && self.opts.bitrate > 0 && self.opts.max_intra_pct > 0 {
             q.max(self.intra_cap(seconds)).min(self.opts.max_q.max(q))
         } else {
             q
-        }
+        };
+        // (Lossless stays lossless.)
+        if q == 0 { 0 } else { self.held(q) }
+    }
+
+    /// `q` within `min_q` and `max_q`, as libvpx holds every frame's
+    /// quantizer (in every rate mode, a fixed quantizer's too).
+    fn held(&self, q: u8) -> u8 {
+        q.clamp(self.opts.min_q, self.opts.max_q.max(self.opts.min_q))
     }
 
     /// The finest quantizer a key frame may take under
@@ -3614,10 +3622,12 @@ impl Rate {
             None => m,
         });
         if kind == 0 && self.model[2].is_none() {
-            self.last_q = q_of_step(
+            // (Within `max_q`: the inter frames after move from it a few
+            // steps a frame.)
+            self.last_q = self.held(q_of_step(
                 step_of(qindex, self.opts.bit_depth) / STEP_SCALE[0],
                 self.opts.bit_depth,
-            );
+            ));
         }
     }
 }

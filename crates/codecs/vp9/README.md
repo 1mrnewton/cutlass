@@ -3007,7 +3007,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-crf N -b:v 0` | `end-usage=q`, `cq-level` | `qindex` = `Vp9Encoder::qindex_of_level(N)` (`crf=`, `q=`) |
 | `-crf N -b:v R` | `end-usage=cq` | `cq_level` (`crf=` with `rate=`, `cq=`): added |
 | `-minrate` = `-maxrate` = `-b:v`, `-bufsize` | `end-usage=cbr`, `rc_buf_sz` | `cbr_buffer_ms` (`cbr=`) |
-| `-qmin`, `-qmax` | `min-q`, `max-q` | `min_q`, `max_q` as indices (`min_q=`, `max_q=`: added to `vp9enc`) |
+| `-qmin`, `-qmax` | `min-q`, `max-q` | `min_q`, `max_q` as indices (`min_q=`, `max_q=`: added to `vp9enc`): every frame's quantizer within them in every rate mode; see "Options measured" |
 | `-undershoot-pct`, `-overshoot-pct` | `undershoot-pct`, `overshoot-pct` | `undershoot_pct`, `overshoot_pct`: dead bands on what is paid back (added) |
 | `-max-intra-rate` | `max-intra-rate` | `max_intra_pct` (added) |
 | `-drop-threshold` | `drop-frame` | `drop_frame_pct` (`drop=`, added): one pass at a bitrate; see "Options measured" |
@@ -3052,6 +3052,25 @@ brackets). "Added" is new in this round; each has a test in
 | regions of interest (side data) | ROI map | `Vp9Encoder::set_roi_map` with a `RoiMap` (`roi_q=`, `roi_ref=`, `roi_skip=` in `vp9enc`, added): a segment a block, each with a quantizer and loop filter delta, a reference and skip |
 
 ### Options measured
+
+**Quantizer limits** (`min_q`, `max_q`; FFmpeg's `-qmin`, `-qmax` times
+4). Every frame's quantizer index, hidden alt-refs too, is held within
+them in every rate mode, as libvpx holds its frames to `best_quality` and
+`worst_quality`; a fixed quantizer (`q=`, `crf=`) outside them is held
+to them (FFmpeg refuses a `-crf` outside `-qmin`/`-qmax`). One pass at a
+variable bitrate took the first key frame's step over its scale as the
+inter quantizer to move from, past `max_q`: on the three scenes (60
+frames) at 200 kb/s with `max_q=80` the two pictures after the key frame
+came at 124 and 100 (192 and 168 with `max_q=160`). Now (FFmpeg `-b:v
+200k`, against ours, quantizer range, kB / PSNR-Y):
+
+| | FFmpeg 6.1 / libvpx 1.14 | Before | Now |
+| --- | --- | --- | --- |
+| `-qmax 20` / `max_q=80` | 43–80, 1067 kB / 45.59 dB | 23–124, 855 / 45.21 | 23–80, 870 / 45.29 |
+| `-qmax 40` / `max_q=160` | 127–160, 326 / 39.99 | 97–192, 241 / 38.82 | 97–160, 245 / 38.98 |
+| `-qmax 20`, two passes | 80–80, 801 / 44.63 | 80–80, 788 / 44.32 | the same |
+| `-qmin 40 -b:v 20000k` / `min_q=160` | 160–169, 295 / 37.99 | 160–192, 203 / 36.51 | the same |
+| `-crf 40 -qmax 20` / `crf=40 max_q=80` | refused | 97–160 | 80–80, 776 / 44.23 |
 
 **Frame dropping** (`drop_frame_pct`, FFmpeg's `-drop-threshold`). One
 pass at a bitrate keeps libvpx's buffer model beside its own: the buffer

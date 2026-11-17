@@ -3481,3 +3481,151 @@ fn a_still_drawn_picture_codes_no_alt_ref_at_a_coarse_quantizer() {
     assert!(hidden(super::STILL_ARF_Q - 40, false) > 0, "still, finer");
     assert!(hidden(super::STILL_ARF_Q + 20, true) > 0, "pan");
 }
+
+/// Every frame's header (the hidden ones in superframes too), each read
+/// against the state of a decoder that has decoded the frames before it.
+fn all_headers(packets: &[Packet]) -> Vec<header::Header> {
+    let mut dec = Decoder::new();
+    let mut out = Vec::new();
+    for p in packets {
+        for f in crate::decode::split_superframe(&p.data).expect("superframe") {
+            out.push(header::parse(dec.persist(), f).expect("header").header);
+            dec.decode(f).expect("decode");
+        }
+    }
+    out
+}
+
+/// Two passes over `n` pictures of `clip`: a first pass at its quantizer,
+/// then the second at `opts`.
+fn two_pass(
+    opts: super::Vp9Options,
+    (w, h): (u32, u32),
+    n: u32,
+    clip: &dyn Fn(u32) -> VideoFrame,
+) -> Vec<Packet> {
+    let probe = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let q = probe.first_pass_qindex(1.0 / 30.0);
+    let first_opts = super::Vp9Options {
+        bitrate: 0,
+        qindex: q,
+        speed: 10,
+        lag: Some(0),
+        ..opts
+    };
+    let bits: Vec<u64> = encode_with(first_opts, (w, h), n, clip)
+        .iter()
+        .map(|p| p.data.len() as u64 * 8)
+        .collect();
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    encoder.set_second_pass(&bits, q);
+    let mut packets = Vec::new();
+    for i in 0..n {
+        packets.extend(
+            encoder
+                .push(&VideoInput {
+                    frame: clip(i),
+                    pts: i64::from(i),
+                    duration: 1,
+                    timescale: 30,
+                })
+                .expect("push"),
+        );
+    }
+    packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+    packets
+}
+
+#[test]
+fn every_frame_stays_within_min_q_and_max_q_in_every_rate_mode() {
+    // A noisy pan at a rate far under what it costs at `max_q` (the rate
+    // control wants coarser), and at one far over what it costs at `min_q`
+    // (it wants finer): every frame, hidden ones too, stays within the two
+    // in each mode. (One pass at a variable bitrate once took the key
+    // frame's step over its scale for the inter quantizer, and the two
+    // frames after the key frame went up to 44 indices past `max_q`.)
+    let (w, h) = (160u32, 96u32);
+    let clip = |i: u32| noisy(w, h, i * 2, i);
+    let base = super::Vp9Options {
+        threads: 2,
+        speed: 6,
+        ..super::Vp9Options::default()
+    };
+    let modes: [(&str, super::Vp9Options); 7] = [
+        ("vbr", base),
+        (
+            "vbr lag 0",
+            super::Vp9Options {
+                lag: Some(0),
+                ..base
+            },
+        ),
+        (
+            "cbr",
+            super::Vp9Options {
+                cbr_buffer_ms: 1000,
+                ..base
+            },
+        ),
+        (
+            "cq",
+            super::Vp9Options {
+                cq_level: Some(30),
+                ..base
+            },
+        ),
+        (
+            "layers",
+            super::Vp9Options {
+                temporal_layers: 3,
+                ..base
+            },
+        ),
+        ("speed 10", super::Vp9Options { speed: 10, ..base }),
+        (
+            "arf layers",
+            super::Vp9Options {
+                alt_ref_layers: 3,
+                ..base
+            },
+        ),
+    ];
+    for (rate, min_q, max_q) in [(20_000u32, 1u8, 80u8), (8_000_000, 120, 236)] {
+        let check = |name: &str, packets: &[Packet]| {
+            for (i, hd) in all_headers(packets).iter().enumerate() {
+                if hd.show_existing {
+                    continue;
+                }
+                assert!(
+                    (min_q..=max_q).contains(&hd.base_qindex),
+                    "{name} at {rate}: frame {i} q {} outside {min_q} to {max_q}",
+                    hd.base_qindex
+                );
+            }
+        };
+        for (name, mode) in modes {
+            let opts = super::Vp9Options {
+                bitrate: rate,
+                min_q,
+                max_q,
+                ..mode
+            };
+            check(name, &encode_with(opts, (w, h), 30, clip));
+        }
+        let opts = super::Vp9Options {
+            bitrate: rate,
+            min_q,
+            max_q,
+            ..base
+        };
+        check("two passes", &two_pass(opts, (w, h), 30, &clip));
+        // A fixed quantizer outside the two is held to them.
+        let fixed = super::Vp9Options {
+            qindex: if rate < 1_000_000 { 200 } else { 40 },
+            min_q,
+            max_q,
+            ..base
+        };
+        check("fixed", &encode_with(fixed, (w, h), 30, clip));
+    }
+}

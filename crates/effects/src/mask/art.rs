@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use super::MaskShape;
 
 /// The most points a drawing holds, over all its lines.
-pub const MAX_ART_POINTS: usize = 20_000;
+pub const MAX_ART_POINTS: usize = 40_000;
 /// The most brush strokes a mask holds.
 pub const MAX_STROKES: usize = 512;
 /// The most characters a text mask spells.

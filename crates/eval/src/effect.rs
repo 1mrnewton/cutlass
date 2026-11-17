@@ -634,10 +634,19 @@ pub(crate) fn drawn_masks(
     kind: &str,
     time: Micros,
 ) -> Vec<cutlass_effects::DrawnMask> {
+    let canvas = (
+        u32::try_from(draft.canvas_config.width).unwrap_or(1),
+        u32::try_from(draft.canvas_config.height).unwrap_or(1),
+    );
     cutlass_effects::listed_masks(draft, segment, kind)
         .iter()
         .map(|listed| {
-            cutlass_effects::DrawnMask::shape(listed.at(segment, &draft.keyframe_graph_list, time))
+            let mask = listed.at(segment, &draft.keyframe_graph_list, time);
+            let art = listed
+                .art
+                .as_ref()
+                .and_then(|art| crate::mask_art::art_picture(art, &mask, canvas));
+            cutlass_effects::DrawnMask { mask, art }
         })
         .collect()
 }

@@ -390,7 +390,15 @@ fn a_drawn_mask_keeps_its_drawing_until_it_is_given_another() {
         }],
     };
     let brush = Mask::new(MaskShape::Brush);
-    add_mask(&mut draft, &a(), &id("b"), &brush, Some(&stroke(0.0)), false).unwrap();
+    add_mask(
+        &mut draft,
+        &a(),
+        &id("b"),
+        &brush,
+        Some(&stroke(0.0)),
+        false,
+    )
+    .unwrap();
     let art = |draft: &Draft| {
         segment_masks(draft, &draft.tracks[0].segments[0])
             .first()
@@ -401,19 +409,43 @@ fn a_drawn_mask_keeps_its_drawing_until_it_is_given_another() {
     let moved = Mask { x: 0.3, ..brush };
     edit_mask(&mut draft, &a(), 0, &id("b2"), &moved, None, false).unwrap();
     assert_eq!(art(&draft), Some(stroke(0.0)));
-    edit_mask(&mut draft, &a(), 0, &id("b2"), &moved, Some(&stroke(0.5)), false).unwrap();
+    edit_mask(
+        &mut draft,
+        &a(),
+        0,
+        &id("b2"),
+        &moved,
+        Some(&stroke(0.5)),
+        false,
+    )
+    .unwrap();
     assert_eq!(art(&draft), Some(stroke(0.5)));
     // Another shape's drawing, or a drawing on an analytic shape, is
     // refused and leaves the draft alone.
     let before = draft.clone();
     let pen = Mask::new(MaskShape::Pen);
     assert_eq!(
-        edit_mask(&mut draft, &a(), 0, &id("x"), &pen, Some(&stroke(0.0)), false),
+        edit_mask(
+            &mut draft,
+            &a(),
+            0,
+            &id("x"),
+            &pen,
+            Some(&stroke(0.0)),
+            false
+        ),
         Err(EditError::Mask)
     );
     let circle = Mask::new(MaskShape::Circle);
     assert_eq!(
-        add_mask(&mut draft, &a(), &id("y"), &circle, Some(&stroke(0.0)), false),
+        add_mask(
+            &mut draft,
+            &a(),
+            &id("y"),
+            &circle,
+            Some(&stroke(0.0)),
+            false
+        ),
         Err(EditError::Mask)
     );
     assert_eq!(draft, before);

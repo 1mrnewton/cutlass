@@ -362,6 +362,91 @@ fn a_clips_masks_and_colour_masks_joined_by_their_modes_match() {
 }
 
 #[test]
+fn drawn_masks_pen_brush_and_text_match() {
+    use cutlass_effects::{BrushStroke, MaskArt, MaskMode};
+    use cutlass_model::ShapePoint;
+    let Some(renderer) = renderer() else { return };
+    let at = |x: f64, y: f64| ShapePoint {
+        at: [x, y],
+        ..ShapePoint::default()
+    };
+    let pen = MaskArt::Pen {
+        points: vec![at(-0.9, -0.7), at(0.8, -0.8), at(0.6, 0.9), at(-0.5, 0.6)],
+    };
+    let brush = MaskArt::Brush {
+        strokes: vec![
+            BrushStroke {
+                points: vec![[-0.8, 0.0], [0.0, 0.3], [0.8, 0.0]],
+                size: 0.3,
+                erase: false,
+            },
+            BrushStroke {
+                points: vec![[0.0, 0.3]],
+                size: 0.15,
+                erase: true,
+            },
+        ],
+    };
+    const TTF: &[u8] = include_bytes!("../../font/fixtures/sample.ttf");
+    let text = cutlass_eval::text_mask_art(TTF, "sample.ttf", "AB").expect("text art");
+    let add = |id: &str, mask: Mask, art: MaskArt| Request::AddMask {
+        segment_id: clip(),
+        material_id: id.into(),
+        mask,
+        art: Some(art),
+        color: false,
+    };
+    let draft = apply(
+        scene(),
+        &[
+            add(
+                "pen",
+                Mask {
+                    feather: 0.15,
+                    ..Mask::new(MaskShape::Pen)
+                },
+                pen,
+            ),
+            add(
+                "brush",
+                Mask {
+                    mode: MaskMode::Subtract,
+                    ..Mask::new(MaskShape::Brush)
+                },
+                brush,
+            ),
+            add(
+                "text",
+                Mask {
+                    width: 0.8,
+                    height: 0.5,
+                    rotation: 10.0,
+                    mode: MaskMode::Add,
+                    ..Mask::new(MaskShape::Text)
+                },
+                text,
+            ),
+        ],
+    );
+    let (gpu, cpu, sources) = both(&renderer, &draft, 0);
+    agree("drawn masks", &gpu, &cpu);
+    // The masks cut: the frame is not the one without them.
+    let (plain, _, _) = both(&renderer, &scene(), 0);
+    let changed = plain.iter().zip(&gpu).filter(|(a, b)| a != b).count();
+    assert!(changed > plain.len() / 20, "{changed}");
+    let drawn = sources.iter().find_map(|source| match source {
+        GpuSource::Nested(child) => child.layers.iter().find_map(|layer| match &layer.source {
+            GpuSource::Cut(masks) => {
+                Some(masks.masks.iter().filter(|mask| mask.art.is_some()).count())
+            }
+            _ => None,
+        }),
+        _ => None,
+    });
+    assert_eq!(drawn, Some(3), "{sources:?}");
+}
+
+#[test]
 fn an_adjustment_layer_matches_over_the_clips_below_it() {
     let Some(renderer) = renderer() else { return };
     let layer = SegmentId::new("layer");

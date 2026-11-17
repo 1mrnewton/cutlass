@@ -192,6 +192,16 @@ pub trait EncPixel: Store {
     fn sad(a: &[Self], sa: usize, b: &[Self], sb: usize, w: usize, h: usize) -> u32;
     fn sad4(a: &[Self], sa: usize, b: [&[Self]; 4], sb: usize, w: usize, h: usize) -> [u32; 4];
     fn sse(a: &[Self], sa: usize, b: &[Self], sb: usize, w: usize, h: usize) -> u64;
+    /// The SADs of the left and right halves (8 samples each) of a block
+    /// 16 wide and `h` rows against four others.
+    fn halves4(a: &[Self], sa: usize, b: [&[Self]; 4], sb: usize, h: usize) -> [[u32; 2]; 4] {
+        b.map(|b| {
+            [
+                Self::sad(a, sa, b, sb, 8, h),
+                Self::sad(&a[8..], sa, &b[8..], sb, 8, h),
+            ]
+        })
+    }
     #[allow(clippy::too_many_arguments)]
     fn sad_bilinear(
         a: &[Self],
@@ -217,6 +227,11 @@ impl EncPixel for u8 {
     #[inline(always)]
     fn sse(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u64 {
         crate::dsp::sad::sse(a, sa, b, sb, w, h)
+    }
+    #[inline(always)]
+    fn halves4(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, h: usize) -> [[u32; 2]; 4] {
+        cutlass_simd::vp9::sad8::halves4(a, sa, b, sb, h)
+            .unwrap_or_else(|| cutlass_simd::vp9::sad8::halves4_scalar(a, sa, b, sb, h))
     }
     #[inline(always)]
     fn sad_bilinear(

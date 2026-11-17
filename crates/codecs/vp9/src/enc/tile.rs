@@ -735,6 +735,28 @@ pub const RECT_SPEED: std::ops::RangeInclusive<u8> = 4..=5;
 /// the README's clips (30 pictures, one key frame).
 const KEY_HALVES: f64 = 1.1;
 
+/// At a fixed quantizer in one pass, a 16×16 block's whole-sample search
+/// on each reference ends with a mesh: every second sample within this
+/// many of the diamond's choice, measured on every other row, the best
+/// two of the block and of each 8×8 quarter kept (the quarters' for their
+/// own searches, which take no mesh of their own) and measured whole.
+/// A diamond stops on the plateaus of flat pictures, where a small object
+/// moves over a plain background (`testsrc2`'s squares and bars: its
+/// error is the same at every vector short of the object's), and on a
+/// distant reference whose motion is many times a picture's; libvpx's
+/// slower speeds search meshes too (`full_pixel_exhaustive`).
+const MESH_RANGE: i32 = 32;
+
+/// Only where the diamond's choice leaves more than this error a sample
+/// (its SAD; in 8-bit units) ...
+const MESH_ERROR: f64 = 1.5;
+
+/// ... gathered in few samples: its squared error over this many times
+/// its SAD (the mean size of an error, weighed by size, in 8-bit units).
+/// Noise and grain spread their error over the block, and a mesh seldom
+/// finds them a better vector.
+const MESH_SPARSE: f64 = 8.0;
+
 /// The dead zone's offsets at speeds 9 and 10 (0.5 rounds to nearest).
 const DZ_INTRA_ROUND: f32 = 0.42;
 const DZ_INTER_ROUND: f32 = 0.33;
@@ -1103,6 +1125,9 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     /// ([`RECT_SPEED`]): the choices whose predictions its inter
     /// candidates take.
     rect_seeds: Vec<Blk>,
+    /// Each reference's mesh of the 16×16 block searched last
+    /// ([`MESH_RANGE`]).
+    mesh: [Mesh; 3],
     /// Snapshots: 0 the superblock, then four per level.
     snaps: Vec<Snap<P>>,
     toks: Vec<Tok>,
@@ -1221,6 +1246,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             part: [PARTITION_NONE; 21],
             rect: [[[Blk::default(); 2]; 21]; 2],
             rect_seeds: Vec::with_capacity(3),
+            mesh: [None; 3],
             snaps,
             toks,
             kept,
@@ -3144,7 +3170,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let Some(rp) = self.rec_ref() else {
             return (Mv::ZERO, u64::MAX / 4);
         };
-        search_in(self.s, rp, &self.seeds, self.cur_ref, row, col, bsize)
+        let r = self.cur_ref;
+        let mut mesh = self.mesh[r];
+        let found = search_in(self.s, rp, &self.seeds, r, row, col, bsize, &mut mesh);
+        self.mesh[r] = mesh;
+        found
     }
 
     /// Refines a whole-sample vector of a block to halves and quarters (and
@@ -5685,8 +5715,13 @@ fn sad4_ref<P: EncPixel>(
     out
 }
 
-/// A superblock's whole-sample search on LAST, made ahead of coding.
-#[allow(clippy::type_complexity)]
+/// A 16×16 block's mesh ([`MESH_RANGE`]): its place, and each 8×8
+/// quarter's best two whole-sample vectors.
+type Mesh = Option<(usize, usize, [[(i32, i32); 2]; 4])>;
+
+/// A superblock's whole-sample search on LAST, made ahead of coding (and
+/// a block's on any reference, with its reference's `mesh`).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn search_in<P: EncPixel>(
     s: &Shared<'_, P>,
     rp: ((&[P], usize), (i32, i32)),
@@ -5695,6 +5730,7 @@ fn search_in<P: EncPixel>(
     row: usize,
     col: usize,
     bsize: u8,
+    mesh: &mut Mesh,
 ) -> (Mv, u64) {
     let src = (s.src.planes[0], s.src.strides[0]);
     let (bw, bh) = MI_WH[usize::from(bsize)];
@@ -5813,6 +5849,29 @@ fn search_in<P: EncPixel>(
         }
         step /= 2;
     }
+    // A mesh's best two ([`MESH_RANGE`]), measured whole.
+    let mut more = [None; 2];
+    if s.full_search && !s.second_pass {
+        if bsize == geom::BLOCK_16X16 {
+            *mesh = mesh_in(s, src, rp, (x, y, w, h), best, best_sad).map(|(whole, quarters)| {
+                more = whole;
+                (row, col, quarters)
+            });
+        } else if bsize == BLOCK_8X8
+            && let Some((r0, c0, quarters)) = *mesh
+            && (r0, c0) == (row & !1, col & !1)
+        {
+            more = quarters[(row & 1) * 2 + (col & 1)].map(Some);
+        }
+    }
+    for p in more.into_iter().flatten() {
+        if let Some(v) = sad4_ref(&mut edge, src, rp, (x, y, w, h), [p; 4], i32::MAX)[0]
+            && v < best_sad
+        {
+            best_sad = v;
+            best = p;
+        }
+    }
     // Every whole sample within two of the diamond's choice.
     if s.speed <= 6 {
         let c = best;
@@ -5848,6 +5907,88 @@ fn search_in<P: EncPixel>(
         col: (best.1 * 8) as i16,
     };
     (mv, best_sad)
+}
+
+/// The mesh of a 16×16 block at `(x, y)` around the whole-sample vector
+/// `c` (rows, columns) whose SAD is `sad` ([`MESH_RANGE`]): `None` where
+/// it is not searched, else the best two of the whole block and of each
+/// 8×8 quarter (in raster order) by their SAD on every other row.
+#[allow(clippy::type_complexity)]
+fn mesh_in<P: EncPixel>(
+    s: &Shared<'_, P>,
+    (sd, ss): (&[P], usize),
+    ((data, stride), (rw, rh)): ((&[P], usize), (i32, i32)),
+    (x, y, w, h): (usize, usize, usize, usize),
+    c: (i32, i32),
+    sad: u64,
+) -> Option<([Option<(i32, i32)>; 2], [[(i32, i32); 2]; 4])> {
+    let inside = |(r, cc): (i32, i32)| {
+        let (bx, by) = (x as i32 + cc, y as i32 + r);
+        bx >= 0 && by >= 0 && bx + 16 <= rw && by + 16 <= rh
+    };
+    let at = |(r, cc): (i32, i32)| (y as i32 + r) as usize * stride + (x as i32 + cc) as usize;
+    let scale = f64::from(1u32 << (s.h.bit_depth - 8));
+    if w != 16 || h != 16 || (sad as f64) < MESH_ERROR * scale * 256.0 || !inside(c) {
+        return None;
+    }
+    let sse = P::sse(&sd[y * ss + x..], ss, &data[at(c)..], stride, 16, 16);
+    if (sse as f64) < MESH_SPARSE * scale * sad as f64 {
+        return None;
+    }
+    let keep = |t: &mut [(u32, (i32, i32)); 2], v: u32, p: (i32, i32)| {
+        if v < t[0].0 {
+            t[1] = t[0];
+            t[0] = (v, p);
+        } else if v < t[1].0 {
+            t[1] = (v, p);
+        }
+    };
+    let none = (u32::MAX, c);
+    let mut whole = [none; 2];
+    let mut quarters = [[none; 2]; 4];
+    // (The square of two around the choice is searched after.)
+    let mut pts = [c; 4];
+    let mut n = 0;
+    let mut flush = |pts: &[(i32, i32); 4], n: usize| {
+        let mut sum = [0u32; 4];
+        for half in 0..2 {
+            let b = pts.map(|p| &data[at(p) + 8 * half * stride..]);
+            let v = P::halves4(&sd[(y + 8 * half) * ss + x..], 2 * ss, b, 2 * stride, 4);
+            for (j, &p) in pts[..n].iter().enumerate() {
+                for side in 0..2 {
+                    keep(&mut quarters[2 * half + side], v[j][side], p);
+                    sum[j] += v[j][side];
+                }
+            }
+        }
+        for (j, &p) in pts[..n].iter().enumerate() {
+            keep(&mut whole, sum[j], p);
+        }
+    };
+    for dr in (-MESH_RANGE..=MESH_RANGE).step_by(2) {
+        for dc in (-MESH_RANGE..=MESH_RANGE).step_by(2) {
+            let p = (c.0 + dr, c.1 + dc);
+            if (dr.abs() <= 2 && dc.abs() <= 2) || !inside(p) {
+                continue;
+            }
+            pts[n] = p;
+            n += 1;
+            if n == 4 {
+                flush(&pts, 4);
+                n = 0;
+            }
+        }
+    }
+    if n > 0 {
+        for k in n..4 {
+            pts[k] = pts[0];
+        }
+        flush(&pts, n);
+    }
+    Some((
+        whole.map(|t| (t.0 != u32::MAX).then_some(t.1)),
+        quarters.map(|t| t.map(|e| e.1)),
+    ))
 }
 
 /// The fast path's partition and vectors of one superblock, searched
@@ -5911,7 +6052,7 @@ fn pre_choose<P: EncPixel>(
     }
     let lam = u64::from(s.lambda);
     let estimate = |seeds: &mut [Mv], pre: &mut Pre, bsize: u8| -> u64 {
-        let (mv, sad) = search_in(s, rp, seeds, 0, row, col, bsize);
+        let (mv, sad) = search_in(s, rp, seeds, 0, row, col, bsize, &mut None);
         pre.found[Tile::<P>::slot(row, col, bsize)] = (mv, sad);
         let bw = MI_WH[usize::from(bsize)].0;
         for r in 0..bw.min(s.mi_rows - row) {

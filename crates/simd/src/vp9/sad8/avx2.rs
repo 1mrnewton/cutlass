@@ -14,10 +14,10 @@
 
 use core::arch::x86_64::{
     __m128i, __m256i, _mm_add_epi32, _mm_add_epi64, _mm_cvtsi128_si32, _mm_cvtsi128_si64,
-    _mm_loadl_epi64, _mm_loadu_si128, _mm_sad_epu8, _mm_shuffle_epi32, _mm_unpackhi_epi64,
-    _mm_unpacklo_epi64, _mm256_add_epi32, _mm256_add_epi64, _mm256_castsi256_si128,
-    _mm256_cvtepu8_epi16, _mm256_extracti128_si256, _mm256_loadu_si256, _mm256_madd_epi16,
-    _mm256_sad_epu8, _mm256_set_m128i, _mm256_setzero_si256, _mm256_sub_epi16,
+    _mm_loadl_epi64, _mm_loadu_si128, _mm_sad_epu8, _mm_setzero_si128, _mm_shuffle_epi32,
+    _mm_unpackhi_epi64, _mm_unpacklo_epi64, _mm256_add_epi32, _mm256_add_epi64,
+    _mm256_castsi256_si128, _mm256_cvtepu8_epi16, _mm256_extracti128_si256, _mm256_loadu_si256,
+    _mm256_madd_epi16, _mm256_sad_epu8, _mm256_set_m128i, _mm256_setzero_si256, _mm256_sub_epi16,
 };
 
 /// # Safety
@@ -194,6 +194,29 @@ pub(super) fn sad4(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, w: usize, h: u
         32 => sad4_w::<32>(a, sa, b, sb, h),
         _ => sad4_w::<64>(a, sa, b, sb, h),
     }
+}
+
+/// The SADs of the left and right halves (8 samples each) of a block 16
+/// wide and `h` rows, against four others: `psadbw` of a row gives both.
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+pub(super) fn halves4(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, h: usize) -> [[u32; 2]; 4] {
+    let mut acc = [_mm_setzero_si128(); 4];
+    // SAFETY: rows `0..h` of all five blocks hold 16 samples (`fits`).
+    unsafe {
+        for r in 0..h {
+            let x = l128(a, r * sa);
+            for k in 0..4 {
+                acc[k] = _mm_add_epi64(acc[k], _mm_sad_epu8(x, l128(b[k], r * sb)));
+            }
+        }
+    }
+    acc.map(|v| {
+        [
+            _mm_cvtsi128_si64(v) as u32,
+            _mm_cvtsi128_si64(_mm_unpackhi_epi64(v, v)) as u32,
+        ]
+    })
 }
 
 #[inline]

@@ -725,3 +725,37 @@ fn a_key_frame_codes_a_smooth_picture_in_64x64_halves() {
     assert!(halves(false) > 0);
     assert_eq!(halves(true), 0);
 }
+
+#[test]
+fn a_mesh_finds_a_small_textured_square_moved_over_a_flat_picture() {
+    // A 6×6 textured square on a flat picture moves by (12, 14) samples:
+    // short of the square, every vector leaves the same error, and the
+    // diamond stops at zero. At a fixed quantizer in one pass a 16×16
+    // block's search ends with a mesh (`tile::MESH_RANGE`), which finds the
+    // square's vector: its picture codes in 24 bytes, against 70 without
+    // the mesh (as a second pass, which takes none).
+    let (w, h) = (128usize, 128usize);
+    let flat = [
+        vec![90u8; w * h],
+        vec![128; w * h / 4],
+        vec![128; w * h / 4],
+    ];
+    let with_square = |r0: usize, c0: usize| {
+        let mut p = flat.clone();
+        for r in r0..r0 + 6 {
+            for c in c0..c0 + 6 {
+                p[0][r * w + c] = 40 + (((r - r0) * 7 + (c - c0) * 13) % 11 * 19) as u8;
+            }
+        }
+        p
+    };
+    let pics = [with_square(42, 40), with_square(54, 54)];
+    let (one, _) = code_checked(&pics, (w, h), 60, 5, false);
+    let (two, _) = code_checked(&pics, (w, h), 60, 5, true);
+    assert!(
+        one[1].len() * 2 < two[1].len(),
+        "one pass {} bytes, a second pass (no mesh) {}",
+        one[1].len(),
+        two[1].len()
+    );
+}

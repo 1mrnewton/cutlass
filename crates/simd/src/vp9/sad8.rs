@@ -55,6 +55,36 @@ pub fn sad4(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, w: usize, h: usize) -
     None
 }
 
+/// The SADs of the left and right halves (8 samples each) of a block 16
+/// wide and `h` rows (rows `sa` apart) against four others (rows `sb`
+/// apart), for each of the four.
+#[must_use]
+#[inline(always)]
+pub fn halves4(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, h: usize) -> Option<[[u32; 2]; 4]> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if super::avx2() && fits(a, sa, 16, h) && b.iter().all(|b| fits(b, sb, 16, h)) {
+            // SAFETY: `avx2` checked at run time that the CPU has AVX2,
+            // the only feature `avx2::halves4` enables.
+            #[allow(unsafe_code)]
+            return Some(unsafe { avx2::halves4(a, sa, b, sb, h) });
+        }
+    }
+    let _ = (a, sa, b, sb, h);
+    None
+}
+
+/// The scalar twin of [`halves4`].
+#[must_use]
+pub fn halves4_scalar(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, h: usize) -> [[u32; 2]; 4] {
+    b.map(|b| {
+        [
+            sad_scalar(a, sa, b, sb, 8, h),
+            sad_scalar(&a[8..], sa, &b[8..], sb, 8, h),
+        ]
+    })
+}
+
 /// The sum of squared differences of two `w`×`h` blocks.
 #[must_use]
 #[inline(always)]

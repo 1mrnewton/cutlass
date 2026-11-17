@@ -1,4 +1,4 @@
-use super::{sad, sad_scalar, sad4, sse, sse_scalar};
+use super::{halves4, halves4_scalar, sad, sad_scalar, sad4, sse, sse_scalar};
 
 #[test]
 fn matches_the_scalar_twins() {
@@ -43,6 +43,41 @@ fn matches_the_scalar_twins() {
     }
     if super::super::avx2() {
         assert_eq!(ran, 2000);
+    }
+}
+
+#[test]
+fn halves_match_the_scalar_twin() {
+    let mut seed = 11u32;
+    let mut rnd = || {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        (seed >> 8) as u8
+    };
+    let (sa, sb) = (48, 90);
+    let mut ran = 0;
+    for case in 0..200 {
+        let h = 1 + case % 16;
+        let mut gen_ = |n: usize, k: usize| -> Vec<u8> {
+            (0..n)
+                .map(|i| match case % 4 {
+                    0 => [0, 255][k % 2],
+                    1 => [0, 255][(i + k) % 2],
+                    _ => rnd(),
+                })
+                .collect()
+        };
+        // Each block ends exactly where its last row does.
+        let a = gen_((h - 1) * sa + 16, 0);
+        let bs: Vec<Vec<u8>> = (0..4).map(|k| gen_((h - 1) * sb + 16, k + 1)).collect();
+        let b = [&bs[0][..], &bs[1][..], &bs[2][..], &bs[3][..]];
+        let want = halves4_scalar(&a, sa, b, sb, h);
+        if let Some(got) = halves4(&a, sa, b, sb, h) {
+            ran += 1;
+            assert_eq!(got, want, "case {case} h {h}");
+        }
+    }
+    if super::super::avx2() {
+        assert_eq!(ran, 200);
     }
 }
 

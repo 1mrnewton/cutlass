@@ -49,6 +49,7 @@ mod job;
 mod mask;
 mod matte;
 mod matte_frame;
+mod matting;
 mod mobile_sam;
 mod portrait;
 mod reframe_job;
@@ -77,6 +78,9 @@ pub use job::{JobError, SelectJob};
 pub use mask::Mask;
 pub use matte::{Follower, Matte, Matter, Prompt};
 pub use matte_frame::MATTE_MAX_SIDE;
+pub use matting::{
+    MATTING_MODEL, MATTING_MULTIPLE, MATTING_SIDE, MATTING_WEIGHTS, Matting, convert_birefnet,
+};
 pub use mobile_sam::{DECODER_WEIGHTS, ENCODER_WEIGHTS, MobileSam};
 pub use portrait::{PORTRAIT_MODEL, PORTRAIT_SIDE, PORTRAIT_WEIGHTS, Portrait, convert_modnet};
 pub use reframe_job::{REFRAME_SIDE, find_subjects, subject_of};

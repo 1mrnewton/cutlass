@@ -717,6 +717,12 @@ struct Queued<P> {
     /// At a fixed quantizer in one pass, the share of its 16×16 blocks the
     /// picture before holds exactly ([`super::arf::exact_share`]).
     exact: f32,
+    /// ... and the share it holds exactly where it stands, at no vector
+    /// (as much where the picture did not move): see [`STILL_ARF_Q`].
+    still: f32,
+    /// ... and which of its 16×16 blocks it does not hold there
+    /// ([`super::arf::still_blocks`]).
+    changed: Vec<bool>,
 }
 
 /// The pictures a push codes: data, key frame, and the picture's `pts`,
@@ -1280,21 +1286,26 @@ impl<P: EncPixel> Core<P> {
             (0, 0)
         };
         // At a fixed quantizer in one pass: how much of it the picture
-        // before holds exactly ([`DRAWN_SHARE`]).
-        let exact = if self.full_search() && self.rc.pass2.is_none() {
-            match self.queue.back() {
-                Some(before) => super::arf::exact_share(&before.planes[0], &tight[0], w, h, step),
-                None if self.last_luma.len() == w * h => {
-                    super::arf::exact_share(&self.last_luma, &tight[0], w, h, step)
-                }
-                None => 0.0,
-            }
+        // before holds exactly ([`DRAWN_SHARE`]), where the picture moved
+        // and where it stands ([`STILL_ARF_Q`]).
+        let (exact, (still, changed)) = if self.full_search() && self.rc.pass2.is_none() {
+            let before = match self.queue.back() {
+                Some(before) => Some(&before.planes[0][..]),
+                None if self.last_luma.len() == w * h => Some(&self.last_luma[..]),
+                None => None,
+            };
+            before.map_or((0.0, (0.0, Vec::new())), |b| {
+                let at = super::arf::exact_share(b, &tight[0], w, h, step);
+                (at, super::arf::still_blocks(b, &tight[0], w, h))
+            })
         } else {
-            0.0
+            (0.0, (0.0, Vec::new()))
         };
         self.queue.push_back(Queued {
             step,
             exact,
+            still,
+            changed,
             cut,
             planes: tight,
             seconds,
@@ -1329,6 +1340,8 @@ impl<P: EncPixel> Core<P> {
         let drawn = f.exact.max(self.queue.front().map_or(0.0, |q| q.exact)) >= DRAWN_SHARE;
         self.rc.drawn = drawn;
         self.enc.set_drawn(drawn);
+        self.enc
+            .set_still((drawn && f.still >= DRAWN_SHARE).then(|| f.changed.clone()));
         if self.shown == 0 && self.rc.wants_probe() {
             self.probe(&f)?;
         }
@@ -1348,6 +1361,13 @@ impl<P: EncPixel> Core<P> {
         if !key_next
             && self.opts.alt_ref
             && self.opts.tune_content != TuneContent::Screen
+            // (Nor on a still drawn picture at a coarse fixed quantizer.)
+            && !(drawn
+                && self.opts.bitrate == 0
+                && self.opts.qindex >= STILL_ARF_Q
+                && f.still >= DRAWN_SHARE
+                && k >= 1
+                && self.queue.get(k - 1).is_some_and(|q| q.still >= DRAWN_SHARE))
             && idx == self.gold.0 + 1
             // (One pass: only after a golden place, not after a cut.)
             && (self.rc.pass2.is_some() || idx % GF_INTERVAL == 1)
@@ -2630,6 +2650,19 @@ const GF_REACH: u32 = 64;
 /// blocks that stand still, and search more in pictures they find drawn
 /// (`FC_GRAPHICS_ANIMATION`).
 const DRAWN_SHARE: f32 = 0.5;
+
+/// From this quantizer (a fixed one, in one pass), a drawn picture that
+/// stands still ([`DRAWN_SHARE`] of its 16×16 blocks the picture before
+/// holds where they stand, at the start of a golden interval and at its
+/// end) codes no alt-ref: its golden frame comes in its place. Its
+/// alt-refs, coded from LAST a golden interval of motion away, were a
+/// fifth of `testsrc2`'s bits at `crf=50`, and libvpx's `-crf` codes
+/// none. Against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U / V)
+/// `testsrc2` +0.7 / +0.5 / −4.6% → +0.3 / −0.1 / −4.7% (nine points
+/// +3.0% → +2.7%); from 140, +0.7%; from 180, +3.0% at nine points. A
+/// drawn picture that moves (the still scene's drawn pan) keeps them:
+/// without, the still scene lost 1.6 points at `q=60` to `210`.
+const STILL_ARF_Q: u8 = 160;
 
 /// The quantizer step of a drawn picture's key frame, and of its golden
 /// frames and alt-refs, over the inter frames' ([`DRAWN_SHARE`];

@@ -349,6 +349,9 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// Whether the picture coded next is drawn
     /// ([`FrameEncoder::set_drawn`]).
     drawn: bool,
+    /// If it stands still, which of its 16×16 blocks changed
+    /// ([`FrameEncoder::set_still`]).
+    still: Option<Vec<bool>>,
     /// What every frame signals.
     stream: Stream,
     /// The threads the encoder was made for.
@@ -443,6 +446,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             next_layer: None,
             layer: None,
             drawn: false,
+            still: None,
             ref_use: [(0, 1024, 0); 3],
             stream: Stream::default(),
             threads: threads.max(1),
@@ -520,6 +524,15 @@ impl<P: EncPixel> FrameEncoder<P> {
     /// ([`tile::Shared::drawn_key`]).
     pub fn set_drawn(&mut self, drawn: bool) {
         self.drawn = drawn;
+    }
+
+    /// For the picture coded next, if it is drawn and stands still (see
+    /// the encoder's `STILL_ARF_Q`), which of its 16×16 blocks (`width /
+    /// 16` a row) differ from the picture before where they stand: at a
+    /// fixed quantizer in one pass, its inter frames search more there
+    /// ([`tile::Shared::still`]).
+    pub fn set_still(&mut self, changed: Option<Vec<bool>>) {
+        self.still = changed;
     }
 
     pub fn set_global(&mut self, (x, y): (isize, isize)) {
@@ -647,10 +660,16 @@ impl<P: EncPixel> FrameEncoder<P> {
             tx_select: fp.qindex != 0,
             inter: !key,
             switchable: !key && fp.speed <= SWITCHABLE_SPEED,
-            allow_hp: true,
+            allow_hp: Self::allow_hp(fp),
             compound_allowed: future,
             compound: future.then_some(true),
         }
+    }
+
+    /// Whether an inter frame's vectors may take eighths of a sample: not
+    /// at a fixed quantizer in one pass from [`HP_MAX_Q`] up.
+    fn allow_hp(fp: FrameParams) -> bool {
+        !(fp.full_search && !fp.second_pass && fp.qindex >= HP_MAX_Q)
     }
 
     /// A frame that shows the picture of `slot` again
@@ -755,7 +774,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             }
             b.write_bit(true); // size from the first reference
             render(&mut b);
-            b.write_bit(true); // allow_high_precision_mv
+            b.write_bit(Self::allow_hp(fp)); // allow_high_precision_mv
             if switchable {
                 b.write_bit(true); // a filter per block
             } else {
@@ -772,8 +791,17 @@ impl<P: EncPixel> FrameEncoder<P> {
         let level = if lossless {
             0
         } else {
-            self.lf_pick
-                .unwrap_or_else(|| filter_level(qindex, key, self.bd))
+            self.lf_pick.unwrap_or_else(|| {
+                let l = filter_level(qindex, key, self.bd);
+                // At a fixed quantizer in one pass the level is searched
+                // from the highest it can be rebased from (see
+                // [`LF_SEARCH_CAP`]).
+                if fp.full_search && !fp.second_pass && fp.speed <= LF_SEARCH_SPEED {
+                    l.min(LF_SEARCH_CAP)
+                } else {
+                    l
+                }
+            })
         };
         b.write(u32::from(level), 6);
         b.write(u32::from(st.sharpness.min(7)), 3);
@@ -1001,6 +1029,11 @@ impl<P: EncPixel> FrameEncoder<P> {
             gold_mv: self.gold_mv.take(),
             ref_seeds: std::mem::take(&mut self.ref_seeds),
             drawn_key: self.drawn && key && fp.full_search && !fp.second_pass,
+            still: self
+                .still
+                .as_deref()
+                .filter(|_| !key && !fp.hidden && fp.full_search && !fp.second_pass)
+                .map(|m| (m, self.width as usize / 16)),
             pop_mvs: if fp.full_search && !fp.second_pass && !key {
                 popular_mvs(self.dec.prev_mvs())
             } else {
@@ -1982,6 +2015,22 @@ pub fn filter_level(qindex: u8, key: bool, bd: u8) -> u8 {
 /// searched ([`pick_level`]) rather than taken from the quantizer
 /// ([`filter_level`], libvpx's `LPF_PICK_FROM_Q`).
 pub const LF_SEARCH_SPEED: u8 = 5;
+
+/// The quantizer from which an inter frame at a fixed quantizer in one
+/// pass codes its vectors in quarters of a sample (libvpx's
+/// `HIGH_PRECISION_MV_QTHRESH`). On `testsrc2` at `crf=50` against
+/// FFmpeg's `-crf`, 1.5 points fewer bits at the same PSNR-Y (from 150,
+/// where the alt-refs at 172 lose it, as many as before).
+const HP_MAX_Q: u8 = 200;
+
+/// At a fixed quantizer in one pass ([`FrameParams::full_search`]), the
+/// quantizer's level is capped at this, the highest the masks can be
+/// rebased from ([`lpf::rebasable`]), so that the level is searched at
+/// every quantizer: from about 208 up (`testsrc2` at `crf=55`) the level
+/// from the quantizer is 63 and was kept unsearched (libvpx's levels
+/// there 3 to 16): `testsrc2` at `crf=55`, 21 057 bytes at 35.48 dB →
+/// 19 572 at 35.65 dB.
+const LF_SEARCH_CAP: u8 = 61;
 
 /// At a fixed quantizer ([`FrameParams::full_search`] in one pass), an
 /// inter frame takes this share of the level [`pick_level`] finds. The

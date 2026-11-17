@@ -335,6 +335,28 @@ pub fn exact_share<P: EncPixel>(
     n as f32 / (bw * bh) as f32
 }
 
+/// Which 16×16 blocks of `to` (luma, `w`×`h`, `w / 16` blocks a row)
+/// differ from `from` where they stand (at no vector), and the share of
+/// them that do not ([`exact_share`] at no vector).
+pub fn still_blocks<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> (f32, Vec<bool>) {
+    let (bw, bh) = (w / 16, h / 16);
+    if bw == 0 || bh == 0 || from.len() < w * h || to.len() < w * h {
+        return (0.0, Vec::new());
+    }
+    let mut changed = vec![true; bw * bh];
+    let mut n = 0usize;
+    for by in 0..bh {
+        for bx in 0..bw {
+            let o = by * 16 * w + bx * 16;
+            if P::sad(&to[o..], w, &from[o..], w, 16, 16) == 0 {
+                changed[by * bw + bx] = false;
+                n += 1;
+            }
+        }
+    }
+    (n as f32 / (bw * bh) as f32, changed)
+}
+
 /// The whole-sample vector `to` moved by from `from` (luma, `w`×`h`), each
 /// component the median of those of a sample of 16×16 blocks of detail
 /// that moved (as [`motion`]), searched near `guess` (the vector the

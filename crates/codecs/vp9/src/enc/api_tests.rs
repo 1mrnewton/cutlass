@@ -3410,3 +3410,74 @@ fn a_drawn_pictures_key_frame_is_finer_and_its_alt_refs_coarser() {
     assert_eq!(drawn, (at(0.3), at(0.6)), "drawn");
     assert_eq!(camera.0, at(0.35), "camera");
 }
+
+#[test]
+fn a_still_drawn_picture_codes_no_alt_ref_at_a_coarse_quantizer() {
+    // A drawn picture that stands still (`testsrc2`: what moves, moves over
+    // a background that repeats exactly where it stands) codes no alt-ref
+    // at a fixed quantizer from `STILL_ARF_Q`; under it, it does, and so
+    // does a drawn picture that moves as a whole (a pan) at any quantizer.
+    let (w, h) = (160u32, 96u32);
+    let pic = |t: u32, pan: bool| {
+        let (cw, ch) = (w / 2, h / 2);
+        let mut y = Vec::new();
+        for row in 0..h {
+            for col in 0..w {
+                let x = if pan { col + 2 * t } else { col };
+                let mut v = (x * 9 + row * 3) % 200 + 20;
+                // A square that moves across the picture.
+                let sx = (3 * t) % (w - 16);
+                if !pan && (40..56).contains(&row) && (sx..sx + 16).contains(&col) {
+                    v = 250;
+                }
+                y.push(u8::try_from(v).unwrap_or(0));
+            }
+        }
+        let u = vec![110u8; (cw * ch) as usize];
+        let v = vec![140u8; (cw * ch) as usize];
+        VideoFrame::yuv420p(
+            w,
+            h,
+            Plane::tight(w, h, y).expect("y"),
+            Plane::tight(cw, ch, u).expect("u"),
+            Plane::tight(cw, ch, v).expect("v"),
+        )
+        .expect("frame")
+    };
+    let hidden = |qindex: u8, pan: bool| {
+        let opts = super::Vp9Options {
+            qindex,
+            speed: 5,
+            threads: 1,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let mut packets = Vec::new();
+        for t in 0..40u32 {
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: pic(t, pan),
+                        pts: i64::from(t),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        let mut dec = Decoder::new();
+        let mut n = 0;
+        for p in &packets {
+            for f in crate::decode::split_superframe(&p.data).expect("superframe") {
+                let hd = header::parse(dec.persist(), f).expect("header").header;
+                n += usize::from(!hd.show_frame);
+                dec.decode(f).expect("decode");
+            }
+        }
+        n
+    };
+    assert_eq!(hidden(super::STILL_ARF_Q, false), 0, "still");
+    assert!(hidden(super::STILL_ARF_Q - 40, false) > 0, "still, finer");
+    assert!(hidden(super::STILL_ARF_Q + 20, true) > 0, "pan");
+}

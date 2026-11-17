@@ -970,3 +970,176 @@ fn a_drawn_key_frame_tries_halves_at_every_size() {
     assert!(rects(true) > 0);
     assert_eq!(rects(false), 0);
 }
+
+#[test]
+fn a_coarse_fixed_quantizer_still_searches_the_filter_level() {
+    // From about quantizer 208 the level from the quantizer is 63, which
+    // the masks cannot be rebased from: at a fixed quantizer in one pass
+    // the level starts from 61 (`LF_SEARCH_CAP`) and is searched, and an
+    // inter frame takes `LF_FIXED_SCALE` of what the search finds.
+    let (w, h) = (256usize, 128usize);
+    let pics: Vec<[Vec<u8>; 3]> = (0..3)
+        .map(|t| texture(w, h, (10 + 3 * t, 20 + t)))
+        .collect();
+    assert_eq!(super::filter_level(230, false, 8), 63);
+    let cw = w.div_ceil(2);
+    let mut enc = FrameEncoder::new(w as u32, h as u32, 1);
+    let mut dec = Decoder::new();
+    for (t, pic) in pics.iter().enumerate() {
+        enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+        enc.lf_found = None;
+        let coded = enc.encode(fixed_params(t, 230, 5, false)).expect("encode");
+        let head = crate::header::parse(dec.persist(), &coded.data)
+            .expect("header")
+            .header;
+        dec.decode(&coded.data).expect("decode").expect("shown");
+        let found = enc.lf_found.expect("searched");
+        if t > 0 {
+            assert_eq!(
+                head.filter_level,
+                ((f64::from(found) * super::LF_FIXED_SCALE) as u8).max(2),
+                "picture {t}"
+            );
+            assert!(head.filter_level < 62, "picture {t}");
+        }
+    }
+}
+
+#[test]
+fn a_coarse_fixed_quantizer_codes_vectors_in_quarters() {
+    // At a fixed quantizer in one pass, an inter frame from quantizer 200
+    // (`HP_MAX_Q`, libvpx's `HIGH_PRECISION_MV_QTHRESH`) does not allow
+    // eighths of a sample; under it, and in a second pass, it does.
+    let (w, h) = (128usize, 64usize);
+    let pics: Vec<[Vec<u8>; 3]> = (0..2).map(|t| texture(w, h, (t, 0))).collect();
+    let cw = w.div_ceil(2);
+    let hp = |qindex: u8, second_pass: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 1);
+        let mut dec = Decoder::new();
+        let mut last = None;
+        for (t, pic) in pics.iter().enumerate() {
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            let coded = enc
+                .encode(fixed_params(t, qindex, 5, second_pass))
+                .expect("encode");
+            let head = crate::header::parse(dec.persist(), &coded.data)
+                .expect("header")
+                .header;
+            dec.decode(&coded.data).expect("decode").expect("shown");
+            last = Some(head.allow_hp);
+        }
+        last.expect("an inter frame")
+    };
+    assert!(!hp(200, false));
+    assert!(!hp(240, false));
+    assert!(hp(196, false));
+    assert!(hp(200, true));
+}
+
+#[test]
+fn a_still_drawn_picture_tries_vectors_under_8x8_where_it_changed() {
+    // An inter frame of a drawn picture that stands still
+    // (`FrameEncoder::set_still`) tries 4×4, 8×4 and 4×8 blocks with
+    // vectors of their own in the 16×16 blocks that changed (at speed 5
+    // otherwise only speeds 0 and 1 do). In the second picture every 8×8
+    // block of a band has its left half moved one way and its right half
+    // the other: halves of 8×8 blocks follow them.
+    let (w, h) = (128usize, 64usize);
+    let cw = w.div_ceil(2);
+    let a = texture(w, h, (0, 0));
+    let left = texture(w, h, (2, 0));
+    let right = texture(w, h, (6, 0));
+    let mut b = a.clone();
+    for r in 16..48 {
+        for c in 16..112 {
+            b[0][r * w + c] = if c % 8 < 4 {
+                left[0][r * w + c]
+            } else {
+                right[0][r * w + c]
+            };
+        }
+    }
+    let changed: Vec<bool> = (0..h / 16)
+        .flat_map(|br| {
+            let (a, b) = (&a, &b);
+            (0..w / 16).map(move |bc| {
+                (0..16).any(|r| {
+                    let o = (br * 16 + r) * w + bc * 16;
+                    a[0][o..o + 16] != b[0][o..o + 16]
+                })
+            })
+        })
+        .collect();
+    let small = |still: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 1);
+        let mut dec = Decoder::new();
+        let mut n = 0;
+        for (t, pic) in [&a, &b].into_iter().enumerate() {
+            enc.set_drawn(true);
+            enc.set_still((still && t > 0).then(|| changed.clone()));
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            let coded = enc.encode(fixed_params(t, 120, 5, false)).expect("encode");
+            dec.decode(&coded.data).expect("decode").expect("shown");
+            if t > 0 {
+                n = dec
+                    .last_blocks()
+                    .filter(|b| b.bsize < crate::geom::BLOCK_8X8 && b.refs[0] > 0)
+                    .count();
+            }
+        }
+        n
+    };
+    assert!(small(true) > 0);
+    assert_eq!(small(false), 0);
+}
+
+#[test]
+fn a_still_drawn_picture_tries_halves_over_what_changed_and_what_did_not() {
+    // An inter frame of a drawn picture that stands still
+    // (`FrameEncoder::set_still`) tries the halves of a 32×32 or 64×64
+    // block that covers 16×16 blocks that changed and blocks that did not
+    // (at speed 5 otherwise only a key frame's). In the second picture the
+    // lower half of each 64×64 block moved and the upper half stands.
+    let (w, h) = (128usize, 128usize);
+    let cw = w.div_ceil(2);
+    let a = texture(w, h, (0, 0));
+    let moved = texture(w, h, (3, 0));
+    let mut b = a.clone();
+    for r in 0..h {
+        if r % 64 >= 32 {
+            b[0][r * w..r * w + w].copy_from_slice(&moved[0][r * w..r * w + w]);
+        }
+    }
+    let changed: Vec<bool> = (0..h / 16)
+        .flat_map(|br| (0..w / 16).map(move |_| br % 4 >= 2))
+        .collect();
+    let rects = |still: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 1);
+        let mut dec = Decoder::new();
+        let mut n = 0;
+        for (t, pic) in [&a, &b].into_iter().enumerate() {
+            enc.set_drawn(true);
+            enc.set_still((still && t > 0).then(|| changed.clone()));
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            let coded = enc.encode(fixed_params(t, 120, 5, false)).expect("encode");
+            dec.decode(&coded.data).expect("decode").expect("shown");
+            if t > 0 {
+                n = dec
+                    .last_blocks()
+                    .filter(|b| {
+                        matches!(
+                            b.bsize,
+                            crate::geom::BLOCK_32X16
+                                | crate::geom::BLOCK_16X32
+                                | crate::geom::BLOCK_64X32
+                                | crate::geom::BLOCK_32X64
+                        )
+                    })
+                    .count();
+            }
+        }
+        n
+    };
+    assert!(rects(true) > 0);
+    assert_eq!(rects(false), 0);
+}

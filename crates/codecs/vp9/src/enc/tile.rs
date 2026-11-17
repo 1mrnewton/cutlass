@@ -279,6 +279,21 @@ pub struct Shared<'a, P> {
     /// README +0.1% → −0.3% (within what five points move between builds
     /// that differ in little, both ways).
     pub drawn_key: bool,
+    /// An inter frame of drawn pictures that stand still, at a fixed
+    /// quantizer in one pass ([`super::FrameEncoder::set_drawn`]): which
+    /// of its 16×16 blocks (the second, a row) changed from the picture
+    /// before. There each 8×8 block tries 4×4, 8×4 and 4×8 sub-blocks
+    /// with vectors of their own (as speeds 0 and 1, `SUB8_SPEED`), and
+    /// each 32×32 or 64×64 block over blocks that changed and blocks that
+    /// did not tries its halves (as speeds 0 to 3). What changed in such
+    /// a picture moved over a background that stands exactly: glyphs,
+    /// edges and objects whose parts move by a sample each way. Against
+    /// FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U / V): `testsrc2`
+    /// +0.3 / −0.1 / −4.7% → −1.7 / −4.2 / −8.7% (nine points +2.7% →
+    /// +1.3%; the sub-blocks alone −0.9%, the halves alone −0.5%), in
+    /// 1.11 times the time on the README's three scenes (a third of
+    /// which is `testsrc2`).
+    pub still: Option<(&'a [bool], usize)>,
     /// At a fixed quantizer in one pass, the whole-sample vectors the
     /// previous frame's blocks took most on each reference
     /// ([`POP_STARTS`]): more starts of the search on it.
@@ -1754,7 +1769,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             // 8×4 or 4×8 sub-blocks, each with its own vector.
             let whole_b = self.choice[Self::slot(row, col, bsize)];
             if !s.intra_frame
-                && s.speed <= SUB8_SPEED
+                && (s.speed <= SUB8_SPEED || self.still_cover(row, col, 1).0)
                 && whole
                 && !self.seg_skip(&whole_b)
                 && whole_b.refs[0] != INTRA_FRAME
@@ -1793,7 +1808,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.save(row, col, (n, n), before + 1);
         }
         // Halves, across and down.
-        if whole && (s.speed < 4 || s.drawn_key) {
+        if whole && (s.speed < 4 || s.drawn_key || self.still_cover(row, col, n) == (true, true)) {
             best = self.try_halves(row, col, level, before, best);
         }
         // No split when the whole block needs no residual and its error is
@@ -1912,6 +1927,27 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.part[node] = best.1;
             best.0
         }
+    }
+
+    /// In a still drawn picture ([`Shared::still`]), whether any of the
+    /// 16×16 blocks the `n`×`n` (in 8×8s) block at `(row, col)` covers
+    /// changed, and whether any did not; neither elsewhere.
+    fn still_cover(&self, row: usize, col: usize, n: usize) -> (bool, bool) {
+        let Some((map, bw)) = self.s.still else {
+            return (false, false);
+        };
+        let (mut changed, mut kept) = (false, false);
+        for r in row / 2..(row + n).div_ceil(2) {
+            for c in col / 2..(col + n).div_ceil(2) {
+                // (Past the blocks measured: changed.)
+                if c < bw && !map.get(r * bw + c).copied().unwrap_or(true) {
+                    kept = true;
+                } else {
+                    changed = true;
+                }
+            }
+        }
+        (changed, kept)
     }
 
     /// The halves across and down of the square of `level` at `(row,

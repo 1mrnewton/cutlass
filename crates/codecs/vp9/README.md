@@ -2097,6 +2097,170 @@ at −0.3% (nine points −0.7%). The halves and the trials that would take
 `testsrc2` past libvpx cost more time than the still scene's drawn pan
 allows.
 
+**The coarse end, and drawn pictures that stand still** (17 November
+2026, after `2999cff7`). What was left: `testsrc2` at +1.0% / +0.9% /
+−3.9% against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U / V,
+`crf=15` to `55`, speed 5, four threads; nine points +3.1%), the
+gradient at −0.3%. Against FFmpeg at more points (`-crf 15` to `61`, by
+one or two at the coarse end), the bits this encoder took at the same
+PSNR-Y were within −0.7% and +2.9% from `crf=15` to `45`, but 10% over
+at `crf=50` (37.5 dB) and 20% over at `crf=55`. Decoded with each block's
+mode and residual bits printed (the cost of each symbol at its
+probability), four findings, and four changes:
+
+- From quantizer 208 or so the loop filter's level from the quantizer is
+  63, past what the masks can be rebased from (2 to 61), and the level
+  was not searched at all: `testsrc2`'s inter frames at `crf=55` were
+  filtered at 63, libvpx's at 3 to 16. At a fixed quantizer in one pass
+  the search now starts from 61 at most (`LF_SEARCH_CAP`): `testsrc2` at
+  `crf=55` 21 057 bytes at 35.48 dB → 19 572 at 35.65 dB.
+- libvpx codes vectors in quarters of a sample from quantizer 200
+  (`HIGH_PRECISION_MV_QTHRESH`); this encoder allowed eighths at every
+  quantizer. At a fixed quantizer in one pass it now does as libvpx
+  (`HP_MAX_Q`): at `crf=50`, 1.5 points fewer bits at the same PSNR-Y
+  (from 150 on, the alt-refs at 172 lost as much).
+- At `crf=50` against FFmpeg's `-crf 55`, at the same PSNR-Y, this
+  encoder's inter frames coded the picture at least as well as libvpx's
+  by region (squared error and bits of the blocks that did not change,
+  that changed, and of the squares of noise), but a fifth of its bits
+  went on its four hidden alt-refs; libvpx's `-crf` codes none. With no
+  alt-ref `testsrc2` took fewer bits from `crf=40` down and more above,
+  and the gradient 15% fewer at every point; but without them on every
+  drawn picture from `q=160` the still scene, whose drawn pan moves, lost
+  1.6 points of PSNR-Y (BD-rate at `q=60` to `210`). A drawn
+  picture (`DRAWN_SHARE`) is now also measured where it stands: the
+  share of its 16×16 blocks the picture before holds exactly at no
+  vector (`testsrc2` 0.81, where `arf::shift` finds the vector of what
+  moves, (6, −4); the gradient 0; the still scene's drawn pan 0.12 to
+  0.28). One that stands still (half its blocks or more, at the start of
+  a golden interval and at its end) codes no alt-ref from quantizer 160
+  (`STILL_ARF_Q`; from 140, `testsrc2` +0.7%; from 180, +3.0% at nine
+  points).
+- At `q=192` against FFmpeg's `-crf 52` (as many bits), this encoder's
+  squared error outside the squares of noise was 38 against libvpx's 28
+  million, and half the difference was the counter's digits, which
+  change every picture: 12.0 against 6.8 million. libvpx codes the rows of a glyph that moved
+  by a sample as 4×4 blocks with vectors of their own, without a
+  residual; this encoder kept the 8×8 block's vector and its error (39 000
+  where libvpx's 1 000), as blocks under 8×8 are tried only up to speed 1
+  (`SUB8_SPEED`). In an inter frame of a drawn picture that stands still,
+  at a fixed quantizer in one pass, the 16×16 blocks that changed from
+  the picture before (`arf::still_blocks`, `tile::Shared::still`) now
+  try them: each 8×8 block there its 4×4, 8×4 and 4×8 sub-blocks with the
+  whole block's reference, as speeds 0 and 1; and each 32×32 or 64×64
+  block that covers both blocks that changed and blocks that did not
+  tries its halves after the whole block, as speeds 0 to 3 and a drawn
+  key frame. Where nothing changed nothing is tried, and a drawn picture
+  that moves (a pan) tries none.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets with nine points, `crf=15` to `55` by 5, against the same
+five of FFmpeg's):
+
+| | `testsrc2` | Gradient |
+| --- | --- | --- |
+| Before | +1.0 / +0.9 / −3.9% (+3.1 / +1.2 / −4.4%) | −0.3% (−0.7%) |
+| The filter's level and quarters | +0.7 / +0.5 / −4.6% (+3.0 / +1.0 / −4.4%) | −0.2% (−0.8%) |
+| And no alt-ref on still pictures | +0.3 / −0.1 / −4.7% (+2.7 / +0.7 / −4.9%) | −0.2% (−0.8%) |
+| And blocks under 8×8 and halves (now) | −1.7 / −4.2 / −8.7% (+1.3 / −2.1 / −7.4%) | −0.2% (−0.8%) |
+
+With nine points of this encoder's at `crf=17` to `57` (the grid moved
+by two) against the same five of FFmpeg's, PSNR-Y: +3.9% before, +3.1%
+without the alt-refs, +1.7% now. Blocks under 8×8 alone: −0.9 / −0.5 /
+−5.3% (+1.9%); halves alone: −0.5 / −3.6 / −8.0% (+2.4%).
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 321071, 52.65 dB | 319877, 52.70 dB | 12696, 53.38 dB | 12696, 53.38 dB |
+| 25 | 240212, 48.84 dB | 239847, 48.89 dB | 9267, 51.89 dB | 9267, 51.89 dB |
+| 35 | 142966, 43.62 dB | 142253, 43.70 dB | 7141, 49.57 dB | 7141, 49.57 dB |
+| 45 | 58143, 39.03 dB | 56002, 39.11 dB | 5984, 46.62 dB | 5984, 46.62 dB |
+| 55 | 21057, 35.48 dB | 18831, 35.85 dB | 5360, 43.72 dB | 5426, 43.71 dB |
+
+On the README's three clips at `q=60` to `210` against the build before
+(BD-rate Y / U / V / FFmpeg's average / 6:1:1):
+
+| Fixed q | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| The filter's level and quarters | −0.6 / −1.2 / −0.9 / −0.8 / −0.7 | −0.7 / −0.5 / −0.5 / −0.6 / −0.7 | −0.6 / −0.7 / −0.7 / −0.7 / −0.6 |
+| And no alt-ref on still pictures | −0.2 / −0.6 / −0.4 / −0.3 / −0.3 | −0.7 / −0.5 / −0.5 / −0.6 / −0.7 | −0.6 / −0.7 / −0.7 / −0.7 / −0.6 |
+| And blocks under 8×8 and halves (now) | −0.2 / −1.2 / −0.8 / −0.5 / −0.4 | −0.7 / −0.5 / −0.5 / −0.6 / −0.7 | −0.6 / −0.7 / −0.7 / −0.7 / −0.6 |
+
+(The first two changes act at `q=210` only; the three scenes' `testsrc2`
+loses 0.4 points of PSNR-Y without its alt-refs at 180 and 210.) Every
+other mode (speeds 5 to 10 at a bitrate, two passes, speeds 6 to 8 at a
+fixed quantizer) writes the same streams as before.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` (`-threads 4`) and
+the build before, three rounds interleaved, the mean over each one's
+points of the median of the rounds (Cutlass at `q=60` to `210`; the still
+scene and the pan from a second run, the first having put both builds
+there at 0.92 to 0.94 of FFmpeg's time, FFmpeg's own 4.1 s):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 7.21 s | 5.09 s (0.71) | 5.64 s (0.78) |
+| Still scene | 4.44 s | 3.60 s (0.81) | 3.61 s (0.81) |
+| Grainy pan | 3.08 s | 2.68 s (0.87) | 2.65 s (0.86) |
+
+The three scenes' 11% is their `testsrc2`, a third of the clip; the still
+scene's drawn pan moves and tries nothing more.
+
+Checks: of the identity check's 41 configurations, four at a fixed
+quantizer change (the synthetic 4:2:0 and 4:4:4 sources at `q=60`,
+speeds 2 and 5), the other 37 do not. FFmpeg's `vp9` (threaded and on
+one thread), libvpx and this decoder agree on 10 new streams (40 of 40
+decodes: `testsrc2` at `crf=35`, `50` and `55`, at `crf=45` on one
+thread and at `crf=30` at speed 2, the gradient at `crf=55`, the three
+scenes at `q=180` on two threads, the still scene and the pan at
+`q=210`, 4:4:4 at `q=200`). New tests: an inter frame at quantizer 230
+searches its filter level; from quantizer 200 a fixed quantizer's
+inter frames code no eighths, under it and in a second pass they do; a
+still drawn picture codes no alt-ref from `STILL_ARF_Q`, under it it
+does, and a drawn pan does above it; a still drawn picture's changed
+blocks try sub-blocks under 8×8 with vectors of their own, and the
+halves of blocks over what changed and what did not (each fails without
+its change).
+
+Tried and dropped (BD-rate on `testsrc2` against FFmpeg's `-crf`, five
+points [nine], from the step before unless said):
+
+- The first picture alone (of three, so that it is found drawn) is 3.2%
+  over libvpx's at every rate, and as much at speeds 0 and 3: not the
+  search. At the same quantizer (146 and 145) its squared error is 1.5
+  times libvpx's for 13% fewer bits, most of it in the squares of noise.
+  Dead-zone quantization on key frames, as libvpx's speed 5 (no
+  trellis): +4.9% on the picture (rounding 0.375 the same, 0.3 +5.9%).
+- From `q=180` on drawn pictures: alt-refs at 0.75 and 0.9 of the step
+  (not 0.6), +0.4% [+3.1%] and +0.6% [+3.3%]; key frames at 0.25 and
+  0.35 (not 0.3), +1.3% and +1.1% [+3.5%]; the inter frames' loop filter
+  at 0.4 or 0.8 of the level found (not 0.6), and the level searched on
+  every superblock row (not one in four; steadier, but +1.4% [+1.4%]
+  after the last change against −1.7% [+1.3%]): within the noise. No
+  compound prediction from 180: +1.1% [+3.5%]; never: +2.0% [+4.3%].
+  `arnr_strength=0`: +0.4% [+3.0%]; one picture filtered: +0.8% [+3.0%].
+- RD lambda × 1.3 and × 0.8 on inter frames from 180: within the noise.
+  × 1.5 and × 2 in 8×8 blocks of variance over 1000 (the squares of
+  noise): +3.0% and +5.4%; × 0.7 and × 0.85, within the noise.
+- With no alt-ref on still pictures: libvpx's cycle of inter steps (0.5
+  / 1 / 0.85 / 1 / 0.7 / 1 / 0.85 / 1): +1.8% (its square root +0.7%);
+  golden frames at 0.5, 0.65, 0.75, 0.82 or 0.9 of the step (not 0.6):
+  +0.8%, +0.1%, −0.2%, +0.3%, −0.1% (+2.8% to +3.2% on the moved grid):
+  noise.
+- In still pictures' changed blocks, after the halves: halves only in
+  the direction that parts what changed from what did not, −0.1% [+2.6%]
+  against −0.5% [+2.4%]; with the candidates' margin left out there too,
+  −1.5% [+1.2%] (+1.1% on the moved grid, −3.1 / −8.6% chroma) against
+  −1.7% [+1.3%] for more trials; with the dead-zone trials left out too,
+  as the round before: 1.4 times the time on the three scenes.
+
+What is left: `testsrc2` at −1.7% / −4.2% / −8.7%, with nine points
++1.3% (the coarse end: from `crf=40`, 37.4 to 40.4 dB, five to eight
+points over FFmpeg's curve at the same PSNR-Y, the first picture 3% over
+libvpx's at every rate), the gradient at −0.2% (nine points −0.8%).
+
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and
 against the defaults (BD-rate; FFmpeg's time a stream with `-row-mt 1`,

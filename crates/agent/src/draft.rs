@@ -976,10 +976,19 @@ fn difference(stored: &Value, plain: &Value) -> Option<Value> {
 /// with what they mean: text with no color is drawn white.
 const MEANT: &[(&str, &str, &str)] = &[("texts", "text_color", "#ffffff")];
 
-/// `record` as a view writes it: [`trimmed`], with the [`MEANT`] values
-/// written out, so a reader is not left to guess what a missing one is.
+/// `record` as a view writes it: what it holds that a new record of its
+/// pool would not, with the [`MEANT`] values written out, so a reader is
+/// not left to guess what a missing one is.
+///
+/// A value is left out when it is the one a new record has, not when it
+/// is zero: a title's alpha is 1 when new, so an alpha of 0, a title that
+/// is there and cannot be seen, is said.
 fn shown_record(pool: &str, record: &Value) -> Value {
-    let mut shown = trimmed(record);
+    let mut shown = match new_record(pool) {
+        Some(new) => unlike(record, &new).unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+        // A pool whose records do not read from an id alone.
+        None => trimmed(record),
+    };
     if let Some(map) = shown.as_object_mut() {
         for (in_pool, key, meaning) in MEANT {
             if *in_pool == pool && !map.contains_key(*key) {
@@ -988,6 +997,38 @@ fn shown_record(pool: &str, record: &Value) -> Value {
         }
     }
     shown
+}
+
+/// A record of `pool` as it is when new: one read from an id alone, with
+/// every other field at what it starts as.
+fn new_record(pool: &str) -> Option<Value> {
+    let mut pools = serde_json::Map::new();
+    pools.insert(pool.to_owned(), serde_json::json!([{ "id": "" }]));
+    let materials: cutlass_model::Materials = serde_json::from_value(Value::Object(pools)).ok()?;
+    let written = serde_json::to_value(&materials).ok()?;
+    written.get(pool)?.as_array()?.first().cloned()
+}
+
+/// What `stored` holds that `new` does not. A field a new record has is
+/// kept when its value is another one, zero included; a field it lacks is
+/// kept unless it says nothing.
+fn unlike(stored: &Value, new: &Value) -> Option<Value> {
+    match (stored, new) {
+        (Value::Object(stored), Value::Object(new)) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in stored {
+                let kept = match new.get(key) {
+                    Some(start) => unlike(value, start),
+                    None => Some(trimmed(value)).filter(|value| !says_nothing(value)),
+                };
+                if let Some(kept) = kept {
+                    out.insert(key.clone(), kept);
+                }
+            }
+            (!out.is_empty()).then_some(Value::Object(out))
+        }
+        _ => (stored != new).then(|| trimmed(stored)),
+    }
 }
 
 /// `record` without its empty, zero and false values, which say nothing.
@@ -1339,6 +1380,33 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(colored.contains(r##""text_color":"#ffcc00""##), "{colored}");
+        // A new title's alphas are 1, and saying so says nothing.
+        assert!(!colored.contains("alpha"), "{colored}");
+        // One stored at 0 is a title that cannot be seen: the view says
+        // it, where a view that left out every zero showed a plain title.
+        let mut draft = tools.session().draft().clone();
+        draft.materials.texts[0].global_alpha = 0.0;
+        draft.materials.texts[0].text_alpha = 0.0;
+        let unseen = DraftTools::new(Session::open(draft))
+            .query(&DraftQuery::Material {
+                material_id: MaterialId::new("title-text"),
+            })
+            .unwrap()
+            .to_string();
+        let record: Value = serde_json::from_str(
+            unseen
+                .lines()
+                .next()
+                .and_then(|line| line.split_once("texts="))
+                .map(|(_, record)| record)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["global_alpha"], 0.0, "{unseen}");
+        assert_eq!(record["text_alpha"], 0.0, "{unseen}");
+        assert!(record.get("background_alpha").is_none(), "{unseen}");
+        assert_eq!(record["content"], "Summer trip");
+        assert_eq!(record["id"], "title-text");
         // A plain clip has nothing set, and a track view stays one line.
         let (mut tools, track) = open_tools();
         tools

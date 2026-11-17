@@ -108,6 +108,37 @@ fn load_follower(dir: &Path, compute: Compute) -> Result<Box<dyn Follower + Send
     Ok(Box::new(model))
 }
 
+/// Add the matte each clip in `draft` and its compound clips draws with to
+/// `keep`. `false` when that cannot be told for some clip.
+fn used_mattes(draft: &cutlass_model::Draft, root: &Path, keep: &mut Vec<PathBuf>) -> bool {
+    for segment in draft.tracks.iter().flat_map(|track| &track.segments) {
+        let Some(matting) = segment_matting(draft, segment) else {
+            continue;
+        };
+        if !matting.ready() {
+            continue;
+        }
+        // A file that is gone may not even name a matte: keep them all.
+        let Ok(ask) = matte_ask(draft, Some(root), &segment.id) else {
+            return false;
+        };
+        if !ask.source.is_file() {
+            return false;
+        }
+        if let Some((path, _)) = find_matte(root, &ask.key(), &ask.range) {
+            keep.push(path);
+        }
+    }
+    draft
+        .materials
+        .drafts
+        .iter()
+        .all(|compound| match &compound.draft {
+            Some(inner) => used_mattes(inner, root, keep),
+            None => compound.draft_file_path.is_empty(),
+        })
+}
+
 /// One Custom removal pick as the page lists it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PickRow {
@@ -628,6 +659,27 @@ impl Shell {
         self.add_pick(picking.segment_id.clone(), pick, vec![off])?;
         self.picking = None;
         Ok(())
+    }
+
+    /// Take out the project's mattes that no clip draws with now, inside
+    /// compound clips too: those left by earlier trims, picks and models.
+    /// Done when a project opens, since undo does not reach back past
+    /// that; a matte needed again is made again. When a clip's file cannot
+    /// be read or a compound clip's own draft is not in the project, no
+    /// matte is taken out, so one that only waits for its file stays.
+    pub(super) fn prune_mattes(&self) {
+        let (Some(draft), Some(root)) = (self.draft(), self.path.as_deref()) else {
+            return;
+        };
+        let mut keep = Vec::new();
+        if !used_mattes(draft, root, &mut keep) {
+            return;
+        }
+        match cutlass_store::remove_mattes_but(root, &keep) {
+            Ok(0) => {}
+            Ok(removed) => cutlass_logger::info!("took out {removed} unused mattes"),
+            Err(error) => cutlass_logger::warn!("unused mattes stay: {error}"),
+        }
     }
 
     /// The selected clip's Custom removal picks in the order they are in

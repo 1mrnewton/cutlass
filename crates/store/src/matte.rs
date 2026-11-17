@@ -15,6 +15,7 @@ use cutlass_model::TimeRange;
 
 use crate::StoreError;
 use crate::enhance::{copy_file, find_copy, source_stem};
+use crate::folder::{RESOURCES_DIR, io_error, stay_inside};
 
 const MATTE_DIR: &str = "video_matte";
 
@@ -63,6 +64,44 @@ pub fn find_matte(
     range: &TimeRange,
 ) -> Option<(PathBuf, TimeRange)> {
     find_copy(project, &key.stem().ok()?, MATTE_DIR, range)
+}
+
+/// Remove every matte video in the project at `project` but those in
+/// `keep`, and any a job left half written; how many went. Mattes are made
+/// again when needed, so a project does not keep one for every trim and
+/// pick it has had.
+pub fn remove_mattes_but(project: &Path, keep: &[PathBuf]) -> Result<usize, StoreError> {
+    let project = project
+        .canonicalize()
+        .map_err(|error| io_error(project, error))?;
+    let folder = project.join(RESOURCES_DIR).join(MATTE_DIR);
+    let entries = match std::fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(io_error(&folder, error)),
+    };
+    stay_inside(&project, &folder)?;
+    let keep: Vec<PathBuf> = keep
+        .iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .collect();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let made = matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("mp4" | "part")
+        );
+        if !made || !path.is_file() || stay_inside(&project, &path).is_err() {
+            continue;
+        }
+        if keep.contains(&path) {
+            continue;
+        }
+        std::fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
+        removed += 1;
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

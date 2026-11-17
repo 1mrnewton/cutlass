@@ -1690,11 +1690,14 @@ impl Shell {
         cutlass_logger::info!("open project {}", path.display());
         let opened = self.open_folder_in(path);
         match &opened {
-            Ok(()) => cutlass_logger::info!(
-                "opened project {} at revision {}",
-                path.display(),
-                self.session.as_ref().map_or(0, Session::revision)
-            ),
+            Ok(()) => {
+                cutlass_logger::info!(
+                    "opened project {} at revision {}",
+                    path.display(),
+                    self.session.as_ref().map_or(0, Session::revision)
+                );
+                self.prune_mattes();
+            }
             Err(error) => cutlass_logger::error!("open project {}: {error}", path.display()),
         }
         opened

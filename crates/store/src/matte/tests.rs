@@ -96,3 +96,25 @@ fn a_matte_video_and_a_depth_video_never_share_a_name() {
     let b = relight_file(&temp.0, &relight, &held).unwrap();
     assert_ne!(a.file_name(), b.file_name());
 }
+
+#[test]
+fn only_the_mattes_kept_and_other_files_stay() {
+    let (temp, key) = project();
+    let used = matte_file(&temp.0, &key, &TimeRange::new(0, 1_000)).unwrap();
+    let old = matte_file(&temp.0, &key, &TimeRange::new(0, 5_000)).unwrap();
+    let half = old.with_extension("part");
+    let other = used.with_file_name("notes.txt");
+    for file in [&used, &old, &half, &other] {
+        fs::write(file, b"x").unwrap();
+    }
+    assert_eq!(remove_mattes_but(&temp.0, std::slice::from_ref(&used)).unwrap(), 2);
+    assert!(used.is_file() && other.is_file());
+    assert!(!old.exists() && !half.exists());
+    assert_eq!(remove_mattes_but(&temp.0, std::slice::from_ref(&used)).unwrap(), 0);
+    let empty = Temp::new();
+    assert_eq!(
+        remove_mattes_but(&empty.0, &[]).unwrap(),
+        0,
+        "no folder yet"
+    );
+}

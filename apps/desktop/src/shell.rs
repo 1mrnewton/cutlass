@@ -87,7 +87,7 @@ pub use speech_model::SPEECH_MODEL_QUESTION;
 pub use update::RUNNING_VERSION;
 
 pub use inspector::{KeyedSetting, LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
-pub use masks::{MaskFocus, MaskRow};
+pub use masks::{MaskDraw, MaskFocus, MaskRow};
 
 use crate::face::FaceTable;
 use crate::tokens;
@@ -777,6 +777,10 @@ pub struct Shell {
     preview_cache: RefCell<FrameCache>,
     /// The mask the Mask page has in hand.
     mask_focus: MaskFocus,
+    /// The Mask page showed since the preview last looked.
+    mask_page_seen: bool,
+    /// A pen or brush mask being drawn on the preview.
+    mask_draw: Option<MaskDraw>,
     /// Stretches of the timeline drawn ahead, which the preview plays.
     renders: render::Renders,
     proxies: proxy::Proxies,
@@ -988,6 +992,8 @@ impl Shell {
             transport: Transport::new(),
             preview_cache: RefCell::new(FrameCache::new()),
             mask_focus: MaskFocus::default(),
+            mask_page_seen: false,
+            mask_draw: None,
             renders: render::Renders::new(Self::home().renders()),
             proxies: proxy::Proxies::new(proxy::home_folder()),
             lanes_cache: RefCell::new(None),

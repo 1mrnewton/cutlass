@@ -19,6 +19,15 @@ pub struct MaskFocus {
     pub index: usize,
 }
 
+/// Drawing a pen or brush mask on the preview.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MaskDraw {
+    /// Points put down one by one, the outline closed on the first.
+    Pen(cutlass_editor::PenPath),
+    /// Strokes painted, or rubbed out, `size` canvas pixels wide.
+    Brush { size: f64, erase: bool },
+}
+
 /// One mask of the list, as it is at the playhead.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaskRow {
@@ -305,6 +314,153 @@ impl Shell {
     pub fn text_mask_art(&self, font: &str, text: &str) -> Option<MaskArt> {
         let bytes = self.face.face(font)?;
         cutlass_eval::text_mask_art(bytes, font, text)
+    }
+}
+
+impl Shell {
+    /// Say the Mask page is showing, so the preview shows the mask in
+    /// hand's handles rather than moving the clip.
+    pub fn note_mask_page(&mut self) {
+        self.mask_page_seen = true;
+    }
+
+    /// Whether the Mask page showed since this was last asked, and forget
+    /// it. A drawing in progress stops when the page has gone.
+    pub fn take_mask_page(&mut self) -> bool {
+        let seen = std::mem::take(&mut self.mask_page_seen);
+        if !seen {
+            self.mask_draw = None;
+        }
+        seen
+    }
+
+    /// Whether the Mask page is showing, without forgetting it.
+    #[must_use]
+    pub fn mask_page_showing(&self) -> bool {
+        self.mask_page_seen
+    }
+
+    /// The drawing in progress on the preview.
+    #[must_use]
+    pub fn mask_draw(&self) -> Option<&MaskDraw> {
+        self.mask_draw.as_ref()
+    }
+
+    pub fn mask_draw_mut(&mut self) -> Option<&mut MaskDraw> {
+        self.mask_draw.as_mut()
+    }
+
+    /// Start drawing on the preview, or stop with `None`.
+    pub fn set_mask_draw(&mut self, draw: Option<MaskDraw>) {
+        self.mask_draw = draw;
+    }
+
+    /// Store what a drag on a mask's handle asks for. While the pointer is
+    /// down the edits join one undo step.
+    pub fn apply_mask_requests(&mut self, requests: &[Request]) -> Result<(), ShellError> {
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
+        self.refuse_locked(&segment_id)?;
+        self.apply_requests(requests)
+    }
+
+    /// The face a new text mask is set in.
+    #[must_use]
+    pub fn mask_font(&self) -> String {
+        self.face.name().to_owned()
+    }
+
+    /// Make the mask in hand `mask` drawn from `art`, as one undo step.
+    pub fn set_focused_drawn(&mut self, mask: Mask, art: MaskArt) -> Result<(), ShellError> {
+        let focus = self.mask_focus();
+        if self.focused_mask().is_none() {
+            return self.add_mask(focus.color, mask, Some(art));
+        }
+        let segment_id = self.mask_segment(focus.color)?;
+        let material_id =
+            MaterialId::new(self.fresh(if focus.color { "color-mask" } else { "mask" }));
+        self.apply(Request::EditMask {
+            segment_id,
+            index: focus.index,
+            material_id,
+            mask,
+            art: Some(art),
+            color: focus.color,
+        })
+    }
+
+    /// Spell the mask in hand, a text mask, `text`. Refused when the face
+    /// cannot set it.
+    pub fn set_mask_text(&mut self, text: &str) -> Result<(), ShellError> {
+        let art = self
+            .text_mask_art(&self.mask_font(), text)
+            .ok_or_else(|| ShellError::Unavailable("that text cannot be set".to_owned()))?;
+        self.set_mask_art(art)
+    }
+
+    /// Close the pen outline drawn on the preview into the mask in hand.
+    pub fn finish_mask_pen(&mut self) -> Result<(), ShellError> {
+        let Some(MaskDraw::Pen(pen)) = self.mask_draw.take() else {
+            return Ok(());
+        };
+        let (Some(mask), Some(frame)) = (self.focused_mask(), self.mask_frame()) else {
+            return Ok(());
+        };
+        let frame = cutlass_editor::ClipFrame(frame);
+        let art = cutlass_editor::pen_art(&mask, &frame, pen.points()).ok_or_else(|| {
+            ShellError::Unavailable("a pen mask needs three points or more".to_owned())
+        })?;
+        self.set_mask_art(art)
+    }
+
+    /// Paint, or rub out, a brush stroke through canvas pixels `trace` on
+    /// the mask in hand, a brush mask.
+    pub fn paint_mask_stroke(&mut self, trace: &[(f64, f64)]) -> Result<(), ShellError> {
+        let Some(MaskDraw::Brush { size, erase }) = self.mask_draw.clone() else {
+            return Ok(());
+        };
+        let listed = self
+            .focused_listed()
+            .ok_or_else(|| ShellError::Unavailable("pick a mask first".to_owned()))?;
+        let frame = cutlass_editor::ClipFrame(
+            self.mask_frame()
+                .ok_or_else(|| ShellError::Unavailable("the clip is not shown here".to_owned()))?,
+        );
+        let mask = listed.at(
+            self.selected_segment().ok_or(ShellError::NoProject)?,
+            &self
+                .draft()
+                .ok_or(ShellError::NoProject)?
+                .keyframe_graph_list,
+            self.playhead,
+        );
+        let Some(stroke) = cutlass_editor::brush_stroke(&mask, &frame, trace, size, erase) else {
+            return Ok(());
+        };
+        let art = cutlass_editor::brush_art(listed.art.as_ref(), stroke);
+        if !art.is_valid() {
+            return Err(ShellError::Unavailable(
+                "the brush mask holds no more strokes".to_owned(),
+            ));
+        }
+        self.set_mask_art(art)
+    }
+
+    /// Take every mask of the selected clip's list off, as one undo step.
+    pub fn clear_masks(&mut self, color: bool) -> Result<(), ShellError> {
+        let count = self.mask_rows(color).len();
+        if count == 0 {
+            return Ok(());
+        }
+        let segment_id = self.mask_segment(color)?;
+        let requests: Vec<Request> = (0..count)
+            .map(|_| Request::RemoveMask {
+                segment_id: segment_id.clone(),
+                index: 0,
+                color,
+            })
+            .collect();
+        self.mask_draw = None;
+        self.apply_requests(&requests)
     }
 }
 

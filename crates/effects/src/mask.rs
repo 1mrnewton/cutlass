@@ -26,6 +26,12 @@ use cutlass_model::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+mod stack;
+
+pub use stack::{
+    ArtPicture, CanvasMasks, DrawnMask, MAX_STACK, STACK_FLOATS, STACK_WGSL, drawn_coverage,
+};
+
 /// The material `type` of a mask.
 pub const MASK: &str = "mask";
 
@@ -44,9 +50,17 @@ pub enum MaskShape {
     Rectangle,
     Heart,
     Star,
+    /// Letters: the clip shows through the words of its text.
+    Text,
+    /// Painted strokes.
+    Brush,
+    /// A drawn outline of curves.
+    Pen,
 }
 
 impl MaskShape {
+    /// The shapes worked out from their numbers alone, in the order the
+    /// GPU numbers them.
     pub const ALL: [Self; 6] = [
         Self::Linear,
         Self::Mirror,
@@ -55,6 +69,16 @@ impl MaskShape {
         Self::Heart,
         Self::Star,
     ];
+
+    /// The shapes drawn from a picture of their own: what the record keeps
+    /// as its art (their art).
+    pub const DRAWN: [Self; 3] = [Self::Text, Self::Brush, Self::Pen];
+
+    /// Whether the shape is drawn from art rather than its numbers.
+    #[must_use]
+    pub fn is_drawn(self) -> bool {
+        Self::DRAWN.contains(&self)
+    }
 
     #[must_use]
     pub fn key(self) -> &'static str {
@@ -65,6 +89,9 @@ impl MaskShape {
             Self::Rectangle => "rectangle",
             Self::Heart => "heart",
             Self::Star => "star",
+            Self::Text => "text",
+            Self::Brush => "brush",
+            Self::Pen => "pen",
         }
     }
 
@@ -77,12 +104,18 @@ impl MaskShape {
             Self::Rectangle => "Rectangle",
             Self::Heart => "Heart",
             Self::Star => "Star",
+            Self::Text => "Text",
+            Self::Brush => "Brush",
+            Self::Pen => "Pen",
         }
     }
 
     #[must_use]
     pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|shape| shape.key() == key)
+        Self::ALL
+            .into_iter()
+            .chain(Self::DRAWN)
+            .find(|shape| shape.key() == key)
     }
 }
 
@@ -166,15 +199,22 @@ pub struct Mask {
 }
 
 impl Mask {
-    /// A new mask of `shape`, centred, half the clip's size.
+    /// A new mask of `shape`, centred, half the clip's size; a brush or pen
+    /// mask's box is the whole clip, so what is drawn lands where it is
+    /// drawn.
     #[must_use]
     pub fn new(shape: MaskShape) -> Self {
+        let size = if matches!(shape, MaskShape::Brush | MaskShape::Pen) {
+            1.0
+        } else {
+            0.5
+        };
         Self {
             shape,
             x: 0.0,
             y: 0.0,
-            width: 0.5,
-            height: 0.5,
+            width: size,
+            height: size,
             rotation: 0.0,
             feather: 0.0,
             round: 0.0,
@@ -245,6 +285,9 @@ impl Mask {
                 let reach = 0.45 + 0.55 * into;
                 edge(radius / reach, soft / half_w.min(half_h))
             }
+            // Drawn from their art (see `DrawnMask`); alone they keep
+            // nothing.
+            MaskShape::Text | MaskShape::Brush | MaskShape::Pen => 0.0,
         };
         if self.invert { 1.0 - keep } else { keep }
     }

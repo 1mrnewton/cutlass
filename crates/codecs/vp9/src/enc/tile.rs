@@ -722,6 +722,19 @@ pub const REF_SEED_SPEED: u8 = 6;
 /// split, won or not, at every size, +10.4%.)
 pub const RECT_SPEED: std::ops::RangeInclusive<u8> = 4..=5;
 
+/// From speed 4 to [`KEY_FULL_SPEED`] at a fixed quantizer (one pass,
+/// [`super::FrameParams::full_search`]), a key frame's 64×64 block whose
+/// whole cost came within this factor of the best of whole and split
+/// tries its halves after the split (speeds 0 to 3 try halves at every
+/// size). On a smooth picture the 64×32 and 32×64 halves code a gradient
+/// for less than four 32×32 blocks: the first picture of the gradient of
+/// "Synthetic pans" in the README alone, against libvpx's at the same
+/// PSNR-Y, +6.5% → +5.2% (with halves at every 64×64 block, +4.6%;
+/// speed 3, +2.7%), and the whole stream at speed 5 against FFmpeg's
+/// `-crf` +4.3% → +3.6%, in 1.00 to 1.06 times the time at `q=120` on
+/// the README's clips (30 pictures, one key frame).
+const KEY_HALVES: f64 = 1.1;
+
 /// The dead zone's offsets at speeds 9 and 10 (0.5 rounds to nearest).
 const DZ_INTRA_ROUND: f32 = 0.42;
 const DZ_INTER_ROUND: f32 = 0.33;
@@ -1685,37 +1698,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         }
         // Halves, across and down.
         if whole && s.speed < 4 {
-            let node = Self::node(row, col, level);
-            for (p, k, offs) in [
-                (PARTITION_HORZ, 0usize, [(0, 0), (hbs, 0)]),
-                (PARTITION_VERT, 1, [(0, 0), (0, hbs)]),
-            ] {
-                let sub = geom::subsize(p, bsize);
-                // Halves whose chroma has no size of its own (4:2:2's tall
-                // ones, 4:4:0's wide ones) are not allowed.
-                if !geom::uv_valid(sub, s.h.ss_x, s.h.ss_y) {
-                    continue;
-                }
-                self.restore(before);
-                let c0 = self.cost;
-                self.part_symbol(row, col, bsize, p);
-                let mut j = (self.cost - c0) as f64 * lam;
-                let mut picks = [Blk::default(); 2];
-                for (i, (dr, dc)) in offs.into_iter().enumerate() {
-                    if j >= best.0 {
-                        break;
-                    }
-                    let (jb, b) = self.best_block(row + dr, col + dc, sub, before + 2);
-                    j += jb;
-                    picks[i] = b;
-                }
-                if j < best.0 {
-                    self.part_after(row, col, bsize, p);
-                    best = (j, p);
-                    self.rect[k][node] = picks;
-                    self.save(row, col, (n, n), before + 1);
-                }
-            }
+            best = self.try_halves(row, col, level, before, best);
         }
         // No split when the whole block needs no residual and its error is
         // under the quantizer's own noise (or the picture's, see
@@ -1791,6 +1774,28 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             j += self.rd_node(row + dr, col + dc, level - 1);
         }
         let node = Self::node(row, col, level);
+        // A key frame's 64×64 block, at a fixed quantizer, where whole it
+        // came close to the best ([`KEY_HALVES`]).
+        if level == 3
+            && whole
+            && s.intra_frame
+            && s.full_search
+            && !s.second_pass
+            && (4..=KEY_FULL_SPEED).contains(&s.speed)
+            && best.1 == PARTITION_NONE
+            && best.0 <= KEY_HALVES * j.min(best.0)
+        {
+            let won = if j < best.0 {
+                self.save(row, col, (n, n), before + 1);
+                (j, PARTITION_SPLIT)
+            } else {
+                best
+            };
+            let (j, p) = self.try_halves(row, col, level, before, won);
+            self.restore(before + 1);
+            self.part[node] = p;
+            return j;
+        }
         if j < best.0
             && level == 1
             && whole
@@ -1811,6 +1816,58 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.part[node] = best.1;
             best.0
         }
+    }
+
+    /// The halves across and down of the square of `level` at `(row,
+    /// col)`, each half's best block, against `best` (its cost and
+    /// partition, its state in snapshot `before + 1`; the state before it
+    /// in `before`). Returns the best of them, its state left in `before +
+    /// 1` and its halves in `rect`.
+    fn try_halves(
+        &mut self,
+        row: usize,
+        col: usize,
+        level: usize,
+        before: usize,
+        mut best: (f64, u8),
+    ) -> (f64, u8) {
+        let s = self.s;
+        let lam = f64::from(s.rd_lambda * self.lam_at(row, col)) / 256.0;
+        let n = 1usize << level;
+        let hbs = n / 2;
+        let bsize = SQUARE[level];
+        let node = Self::node(row, col, level);
+        for (p, k, offs) in [
+            (PARTITION_HORZ, 0usize, [(0, 0), (hbs, 0)]),
+            (PARTITION_VERT, 1, [(0, 0), (0, hbs)]),
+        ] {
+            let sub = geom::subsize(p, bsize);
+            // Halves whose chroma has no size of its own (4:2:2's tall
+            // ones, 4:4:0's wide ones) are not allowed.
+            if !geom::uv_valid(sub, s.h.ss_x, s.h.ss_y) {
+                continue;
+            }
+            self.restore(before);
+            let c0 = self.cost;
+            self.part_symbol(row, col, bsize, p);
+            let mut j = (self.cost - c0) as f64 * lam;
+            let mut picks = [Blk::default(); 2];
+            for (i, (dr, dc)) in offs.into_iter().enumerate() {
+                if j >= best.0 {
+                    break;
+                }
+                let (jb, b) = self.best_block(row + dr, col + dc, sub, before + 2);
+                j += jb;
+                picks[i] = b;
+            }
+            if j < best.0 {
+                self.part_after(row, col, bsize, p);
+                best = (j, p);
+                self.rect[k][node] = picks;
+                self.save(row, col, (n, n), before + 1);
+            }
+        }
+        best
     }
 
     /// After the split of the 16×16 block at `(row, col)` won at cost

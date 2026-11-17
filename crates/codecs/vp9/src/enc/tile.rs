@@ -703,16 +703,19 @@ pub const REF_SEED_SPEED: u8 = 6;
 
 /// At speeds 4 and 5 with [`super::FrameParams::full_search`] (a fixed
 /// quantizer, a second pass), an inter frame's 16×16 block whose split won
-/// also tries its halves across and down (speeds 0 to 3 try them at every
+/// also tries its halves across or down (speeds 0 to 3 try them at every
 /// size, before the split) where two of its quarters side by side share a
-/// prediction (reference and vector): each half tries the best two by SAD
-/// and vector rate of the whole block's and its two quarters' choices, with
-/// no search of its own ([`Tile::rect_cands`]), and the intra modes when
-/// those predict poorly. On `testsrc2`, where half of the splits of 16×16
-/// lose to a half, against FFmpeg's `-crf` at the same PSNR-Y: +12.8% →
-/// +12.0%; halves tried after every split that won (with their own search
-/// and candidates), +11.1% for 1.25 times the time on the README's clip of
-/// three scenes.
+/// prediction (reference and vector), in the direction with more such
+/// pairs (both when as many): each half tries the best by SAD and vector
+/// rate of the whole block's and its two quarters' choices, with no search
+/// of its own ([`Tile::rect_cands`]), and the intra modes when it predicts
+/// poorly. On `testsrc2`, where half of the splits of 16×16 lose to a
+/// half, against FFmpeg's `-crf` at the same PSNR-Y: +12.8% → +11.9%, for
+/// 2.6% more blocks coded in trials (by area) on the README's clip of
+/// three scenes at a fixed quantizer (two candidates, as many bits for
+/// 3.7%; halves after every split that won, with their own search and
+/// candidates, +11.1% for 1.25 times the time; after every split, won or
+/// not, at every size, +10.4%).
 pub const RECT_SPEED: std::ops::RangeInclusive<u8> = 4..=5;
 
 /// The dead zone's offsets at speeds 9 and 10 (0.5 rounds to nearest).
@@ -1798,7 +1801,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
 
     /// After the split of the 16×16 block at `(row, col)` won at cost
     /// `best.0` (its state in snapshot `before + 1`, the state before it in
-    /// `before`), its halves across and down where two of its quarters side
+    /// `before`), its halves across or down where two of its quarters side
     /// by side share a prediction ([`RECT_SPEED`]). Leaves the winner's
     /// state in `before + 1`, its partition in `part`, and returns its cost.
     fn halves_after_split(
@@ -1824,14 +1827,17 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         };
         let whole = self.choice[Self::slot(row, col, bsize)];
         let mut best = best;
+        // Pairs across and down: a direction with fewer than the other is
+        // left out.
+        let pairs = |h: [(usize, usize); 2]| h.iter().filter(|&&(a, b)| same(&q[a], &q[b])).count();
+        let (ph, pv) = (pairs([(0, 1), (2, 3)]), pairs([(0, 2), (1, 3)]));
         for (p, k, halves) in [
             (PARTITION_HORZ, 0usize, [(0, 1), (2, 3)]),
             (PARTITION_VERT, 1, [(0, 2), (1, 3)]),
         ] {
             let sub = geom::subsize(p, bsize);
-            if !halves.iter().any(|&(a, b)| same(&q[a], &q[b]))
-                || !geom::uv_valid(sub, s.h.ss_x, s.h.ss_y)
-            {
+            let (mine, other) = if k == 0 { (ph, pv) } else { (pv, ph) };
+            if mine == 0 || mine < other || !geom::uv_valid(sub, s.h.ss_x, s.h.ss_y) {
                 continue;
             }
             self.restore(before);
@@ -1864,8 +1870,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
 
     /// The inter candidates of a half tried after a split
     /// ([`RECT_SPEED`]): the predictions of [`Tile::rect_seeds`] (one
-    /// reference each) over the half, the best two by SAD and vector rate
-    /// (as [`Tile::inter_cands`] scores them).
+    /// reference each) over the half, the best by SAD and vector rate (as
+    /// [`Tile::inter_cands`] scores them).
     fn rect_cands(&mut self, base: &Blk, out: &mut Vec<Blk>) {
         let s = self.s;
         let (row, col) = (base.row, base.col);
@@ -1929,7 +1935,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.rect_seeds = seeds;
         scored.sort_by_key(|t| t.0);
         self.last_sad = scored.first().map_or(u64::MAX, |t| t.0);
-        out.extend(scored.iter().take(2).map(|t| t.1));
+        out.extend(scored.first().map(|t| t.1));
     }
 
     /// Codes the best of the block's candidate modes (leaving the state

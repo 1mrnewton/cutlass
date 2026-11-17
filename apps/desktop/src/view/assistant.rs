@@ -82,12 +82,8 @@ pub fn panel(shell: &mut Shell, ui: &mut Ui, assistant: &mut Assistant, rect: Re
             }
         });
     });
-    let model = &shell.settings().model;
-    let source = if model.local {
-        format!("{} on this machine", model.local_name)
-    } else {
-        "The local model is off".to_owned()
-    };
+    // The model the next turn runs on, as the turn itself chooses it.
+    let source = crate::assistant::model_source(shell.settings());
     ui.label(RichText::new(source).size(11.0).color(tokens::FAINT));
     ui.add_space(8.0);
 

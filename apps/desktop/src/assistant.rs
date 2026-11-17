@@ -718,26 +718,74 @@ fn explain(error: String) -> String {
     error
 }
 
+/// Which model a turn runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chosen {
+    /// The cloud model: the conversation leaves this computer.
+    Cloud,
+    /// The model served on this machine.
+    Local,
+    /// Both are off.
+    Neither,
+}
+
+/// The model `settings` choose for a turn: the cloud one while it is on,
+/// whether or not the local one is, then the local one. The turn is built
+/// from this and the panel says it, so the two cannot disagree.
+#[must_use]
+pub fn chosen_model(settings: &Settings) -> Chosen {
+    if settings.model.cloud {
+        Chosen::Cloud
+    } else if settings.model.local {
+        Chosen::Local
+    } else {
+        Chosen::Neither
+    }
+}
+
+/// What the panel says of the model the next turn runs on, and where the
+/// conversation goes.
+#[must_use]
+pub fn model_source(settings: &Settings) -> String {
+    let model = &settings.model;
+    match chosen_model(settings) {
+        Chosen::Cloud => {
+            let name = model.cloud_name.trim();
+            let name = if name.is_empty() {
+                "The cloud model"
+            } else {
+                name
+            };
+            format!("{name} in the cloud: what you ask leaves this computer")
+        }
+        Chosen::Local => format!("{} on this machine", model.local_name),
+        Chosen::Neither => "Both models are off".to_owned(),
+    }
+}
+
 /// The local or the cloud model, whichever `settings` choose, told the
 /// user's `notes` while Memory is on.
 fn build_model(settings: &Settings, notes: &str) -> Result<AnyModel, String> {
     let context = cutlass_agent::prompt_context(settings, notes);
-    if settings.model.cloud {
-        let key = crate::cloud::key(&crate::cloud::keys_file(), &settings.model.cloud_provider);
-        let model = crate::cloud::model(settings, &key, &context)?;
-        return Ok(AnyModel::Cloud(CloudModel::from_settings(settings, model)));
-    }
-    if !settings.model.local {
-        return Err(
+    match chosen_model(settings) {
+        Chosen::Cloud => {
+            let key =
+                crate::cloud::key(&crate::cloud::keys_file(), &settings.model.cloud_provider);
+            let model = crate::cloud::model(settings, &key, &context)?;
+            Ok(AnyModel::Cloud(CloudModel::from_settings(settings, model)))
+        }
+        Chosen::Neither => Err(
             "Both models are off. Turn on the local model, or the cloud model with your own key, in Settings › Assistant."
                 .to_owned(),
-        );
+        ),
+        Chosen::Local => {
+            let transport =
+                LoopbackHttp::new(&settings.model.local_url).map_err(|error| error.to_string())?;
+            Ok(AnyModel::Local(
+                ChatModel::new(transport, &settings.model.local_name).with_context(&context),
+            ))
+        }
     }
-    let transport =
-        LoopbackHttp::new(&settings.model.local_url).map_err(|error| error.to_string())?;
-    Ok(AnyModel::Local(
-        ChatModel::new(transport, &settings.model.local_name).with_context(&context),
-    ))
 }
 
 /// The model a turn runs on.
@@ -1106,6 +1154,40 @@ mod tests {
         assert!(!assistant.can_undo_turn(&shell));
         assert_eq!(clips(&shell), 3);
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn the_panel_names_the_model_a_turn_runs_on() {
+        use super::{Chosen, chosen_model, model_source};
+        let mut settings = cutlass_settings::Settings::default();
+        settings.model.local_name = "qwen".to_owned();
+        settings.model.cloud_name = "claude-opus-5-5".to_owned();
+        // The local model alone.
+        settings.model.local = true;
+        settings.model.cloud = false;
+        assert_eq!(chosen_model(&settings), Chosen::Local);
+        assert_eq!(model_source(&settings), "qwen on this machine");
+        // Both on: the turn goes to the cloud, and the panel does not say
+        // it stays on this machine.
+        settings.model.cloud = true;
+        assert_eq!(chosen_model(&settings), Chosen::Cloud);
+        let source = model_source(&settings);
+        assert!(source.contains("claude-opus-5-5"), "{source}");
+        assert!(source.contains("leaves this computer"), "{source}");
+        assert!(!source.contains("on this machine"), "{source}");
+        // The cloud model alone, with no name typed yet.
+        settings.model.local = false;
+        settings.model.cloud_name = " ".to_owned();
+        assert_eq!(chosen_model(&settings), Chosen::Cloud);
+        assert!(model_source(&settings).starts_with("The cloud model in the cloud"));
+        // Neither: the turn says so too.
+        settings.model.cloud = false;
+        assert_eq!(chosen_model(&settings), Chosen::Neither);
+        assert_eq!(model_source(&settings), "Both models are off");
+        assert!(matches!(
+            super::build_model(&settings, ""),
+            Err(error) if error.starts_with("Both models are off")
+        ));
     }
 
     #[test]

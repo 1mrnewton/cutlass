@@ -1143,3 +1143,78 @@ fn a_still_drawn_picture_tries_halves_over_what_changed_and_what_did_not() {
     assert!(rects(true) > 0);
     assert_eq!(rects(false), 0);
 }
+
+#[test]
+fn a_drawn_picture_at_a_fixed_quantizer_picks_each_blocks_filter() {
+    // Noise, then the same noise through the smooth filter half a sample
+    // across: in a drawn picture at a fixed quantizer in one pass at speed
+    // 5, the inter frame codes the filter per block (`DRAWN_FILTER_SPEED`),
+    // and blocks take the smooth one; otherwise the frame keeps one filter.
+    let (w, h) = (128usize, 64usize);
+    let cw = w.div_ceil(2);
+    let mut k = 0x9e37_79b9u32;
+    let mut next = || {
+        k ^= k << 13;
+        k ^= k >> 17;
+        k ^= k << 5;
+        (40 + (k >> 24) % 120) as u8
+    };
+    let first: [Vec<u8>; 3] = [
+        (0..w * h).map(|_| next()).collect(),
+        (0..cw * h / 2).map(|_| next()).collect(),
+        (0..cw * h / 2).map(|_| next()).collect(),
+    ];
+    // (Luma half a sample, chroma a quarter of its own.)
+    let smooth = |p: &[u8], pw: usize, taps: [i32; 8]| -> Vec<u8> {
+        (0..p.len())
+            .map(|i| {
+                let (r, c) = (i / pw, i % pw);
+                let mut v = 64;
+                for (t, &f) in taps.iter().enumerate() {
+                    let x = (c as i32 + t as i32 - 3).clamp(0, pw as i32 - 1) as usize;
+                    v += f * i32::from(p[r * pw + x]);
+                }
+                (v >> 7).clamp(0, 255) as u8
+            })
+            .collect()
+    };
+    let second = [
+        smooth(&first[0], w, [-1, -4, 14, 55, 55, 14, -4, -1]),
+        smooth(&first[1], cw, [-2, -3, 24, 62, 46, 5, -4, 0]),
+        smooth(&first[2], cw, [-2, -3, 24, 62, 46, 5, -4, 0]),
+    ];
+    let noise = |t: u32| {
+        if t == 0 {
+            first.clone()
+        } else {
+            second.clone()
+        }
+    };
+    let run = |drawn: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 2);
+        let mut dec = Decoder::new();
+        let mut out = (false, 0);
+        for t in 0..2 {
+            let pic = noise(t as u32);
+            enc.set_drawn(drawn);
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            let coded = enc.encode(fixed_params(t, 120, 5, false)).expect("encode");
+            let head = crate::header::parse(dec.persist(), &coded.data)
+                .expect("header")
+                .header;
+            dec.decode(&coded.data).expect("decode");
+            if t == 1 {
+                let smooth = dec
+                    .last_blocks()
+                    .filter(|b| b.refs[0] > 0 && b.interp == crate::geom::SMOOTH)
+                    .count();
+                out = (head.interp == crate::geom::SWITCHABLE, smooth);
+            }
+        }
+        out
+    };
+    let (switchable, smooth) = run(true);
+    assert!(switchable);
+    assert!(smooth > 0, "no block took the smooth filter");
+    assert!(!run(false).0);
+}

@@ -2261,6 +2261,105 @@ What is left: `testsrc2` at −1.7% / −4.2% / −8.7%, with nine points
 points over FFmpeg's curve at the same PSNR-Y, the first picture 3% over
 libvpx's at every rate), the gradient at −0.2% (nine points −0.8%).
 
+**Squares of noise, and the smooth filter** (17 November 2026, after
+`8b877186`). What was left: `testsrc2` at −1.7% / −4.2% / −8.7%, +1.3%
+with nine points. Two findings about the measure first. The nine points
+are this encoder's at `crf=15` to `55` by 5 against FFmpeg's five (15 to
+55 by 10), and FFmpeg's own nine against its five come to +2.1% / +2.2%
+/ +2.2%: its points at `-crf 40` and `50` lie 7.3% and 7.7% over the
+chords between its five, so the denser curve loses about two points to
+the sparser one whoever draws it. Against FFmpeg's own nine, this
+encoder was at −1.0% / −4.4% / −9.6%. And a 5% cut in bits at one point
+moves the nine-point figure by 0.3 (at `crf=15` and `50`) to 1.0 points
+(`crf=35`): the middle of the range carries it.
+
+The first picture alone (of three, so that it is found drawn) was 3.2%
+over libvpx's, and FFmpeg's `libvpx-vp9` runs at its speed 1 (FFmpeg's
+default `-cpu-used`), not 5: trellis quantization, and rectangular
+partitions on key frames. libvpx's lambda on a key frame is the DC step
+squared times 4.35 plus a thousandth of the quantizer
+(`vp9_compute_rd_mult`), 0.0022 times the step squared for a bit at the
+scale of the squared error (its trellis 1.25 times that on luma, 0.75 on
+chroma); this encoder's is 0.00358, 1.6 times libvpx's. At 0.6 times,
+the first picture is 1.4% over libvpx's (0.4 times, 1.6%; 0.3, 1.9%;
+1.5, 6.0%), and with 8×4 and 4×8 intra blocks under 8×8 too (which
+libvpx codes for 107 of its 734 blocks, this encoder for none) 0.6%.
+But the whole stream did not move with either: nine points +1.1% to
++1.5% with the lambda at 0.4 to 0.75 times, +1.3% with the blocks, both
++1.1%.
+
+Most of `testsrc2`'s bits go on its squares of noise (160×80 samples of
+noise in 16×16 squares, redrawn every picture): in the inter frames at
+`crf=35` against FFmpeg's `-crf 38`, 96 of about 120 kB, and 30 of 36
+million of the squared error. Cut out alone (192×96, nine points each
+side), this encoder was at +0.9% / +0.8% / −7.3%, and 5.0% and 6.7%
+over FFmpeg's curve at `crf=35` and `40`. At the same PSNR-Y there
+(33.4 dB), libvpx's inter frames take 16.5 kB of modes and 94.3 kB of
+coefficients, this encoder's 11.9 and 105.2 kB; libvpx's filter is
+switchable, its blocks 43% smooth, 45% regular, while from speed 3 this
+encoder's frames keep the regular filter (`SWITCHABLE_SPEED`, 2). None
+of the speed-5 prunes lifted alone helped the cut-out (the candidates'
+margin, the breakouts, one candidate, the subpel prune, the skipped
+transform trials, the dead-zone trials, the reference prune, sub-blocks,
+halves: between −0.1 and +0.8 points); speed 3 was at −0.8%.
+
+In a drawn picture at a fixed quantizer in one pass, the inter blocks
+now pick their filter up to speed 5 (`DRAWN_FILTER_SPEED`), as speeds 0
+to 2 do: the best candidate tries the smooth and the sharp filter, where
+its vectors leave a whole sample in some plane (on whole samples every
+filter predicts alike). The choice weighs chroma's error as it is, not
+twice as the trials weigh it (`tile::Shared::filter_by_luma`): weighed
+twice, the smooth filter, which predicts chroma's detail better, cost
+luma's, and the still scene's drawn pan (its pictures 60 to 89) lost
+0.7 points of PSNR-Y for 1.1 and 1.2 of PSNR-U and V; now 0.1 for 0.9
+and 1.0. The cut-out, taken as drawn: −1.0% / −1.3% / −8.5%.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets nine points against FFmpeg's five):
+
+| | `testsrc2` | Gradient |
+| --- | --- | --- |
+| Before | −1.7 / −4.2 / −8.7% (+1.3 / −2.1 / −7.4%) | −0.2% (−0.8%) |
+| Each block's filter, chroma weighed twice | −2.0 / −4.8 / −9.2% (+0.9 / −3.1 / −8.2%) | −2.4% (−3.2%) |
+| By luma's error and chroma's (now) | −2.2 / −5.5 / −9.1% (+0.3 / −3.6 / −8.4%) | −2.4% (−3.2%) |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 319877, 52.70 dB | 319068, 52.71 dB | 12696, 53.38 dB | 12638, 53.72 dB |
+| 25 | 239847, 48.89 dB | 238127, 48.91 dB | 9267, 51.89 dB | 9381, 52.17 dB |
+| 35 | 142253, 43.70 dB | 140854, 43.68 dB | 7141, 49.57 dB | 7219, 49.74 dB |
+| 45 | 56002, 39.11 dB | 55956, 39.06 dB | 5984, 46.62 dB | 5933, 46.66 dB |
+| 55 | 18831, 35.85 dB | 18402, 35.95 dB | 5426, 43.71 dB | 5358, 43.69 dB |
+
+On the README's three clips at `q=60` to `210` against the build before
+(BD-rate Y / U / V / FFmpeg's average / 6:1:1): the three scenes −0.5 /
+−0.4 / −0.4 / −0.5 / −0.5, the still scene +0.1 / −0.2 / −0.2 / −0.0 /
++0.0, the pan unchanged (it is not drawn). On every picture, not
+only drawn ones, the three clips gained −1.0 / −0.4 / +0.1 points of
+PSNR-Y and −1.2 / −2.1 / −1.0 of PSNR-U, but in 6 to 11% more time,
+which puts the still scene and the pan at 0.94 of FFmpeg's.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` and the build
+before, three rounds interleaved, the mean over each one's points of the
+median of the rounds (Cutlass at `q=60` to `210`):
+
+| | FFmpeg | Before | Now | Every picture |
+| --- | --- | --- | --- | --- |
+| Three scenes | 7.32 s | 5.76 s (0.79) | 5.88 s (0.80) | 6.51 s (0.89) |
+| Still scene | 4.24 s | 3.70 s (0.87) | 3.76 s (0.89) | 3.98 s (0.94) |
+| Grainy pan | 2.89 s | 2.50 s (0.86) | 2.53 s (0.88) | 2.72 s (0.94) |
+
+Checks: of the identity check's 41 configurations, three at a fixed
+quantizer change (the synthetic 4:4:4 source at `q=60`, speeds 2 and 5,
+and the noisy 4:2:0 one at speed 2), the other 38 do not. FFmpeg's `vp9`
+(threaded and on one thread), libvpx and this decoder agree on 10 new
+streams (40 of 40 decodes). New test: noise and the same noise through
+the smooth filter half a sample across, drawn, codes the filter per
+block and takes the smooth one; not drawn, the frame keeps one filter
+(fails without the change).
+
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and
 against the defaults (BD-rate; FFmpeg's time a stream with `-row-mt 1`,

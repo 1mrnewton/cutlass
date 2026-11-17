@@ -224,6 +224,12 @@ pub struct Shared<'a, P> {
     pub speed: u8,
     /// Whether each inter block codes its filter.
     pub switchable: bool,
+    /// With [`Shared::switchable`], the filter of a block is chosen by
+    /// luma's error and chroma's as they are (not chroma's weighed
+    /// [`CHROMA_DIST`]), and only where its vectors leave a whole sample
+    /// in some plane (elsewhere every filter predicts alike): a fixed
+    /// quantizer in one pass (see [`super::DRAWN_FILTER_SPEED`]).
+    pub filter_by_luma: bool,
     /// The fast path's search, made ahead for the whole frame (inter
     /// frames at speed 7 and up), by superblock in raster order.
     pub prepass: Option<&'a [Pre]>,
@@ -1252,6 +1258,12 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     tx_dom: bool,
     /// The summed [`TxRd::dist`] of the block's tx blocks.
     dist_sum: (f32, f32),
+    /// The chroma planes' error, unweighted, of the block
+    /// [`Tile::block_sse`] last measured.
+    uv_sse: f64,
+    /// The cost and the chroma's error ([`Tile::uv_sse`]) of the best
+    /// candidate so far in [`Tile::best_block`].
+    best_full: (f64, f64),
     /// In a trial nothing is written or counted: bits add to `cost`
     /// (1/256 bits).
     trial: bool,
@@ -1346,6 +1358,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             rd: TxRd::default(),
             tx_dom: false,
             dist_sum: (0.0, 0.0),
+            uv_sse: 0.0,
+            best_full: (0.0, 0.0),
             trial: false,
             cost: 0,
         }
@@ -2181,28 +2195,36 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let film = s.film && !s.intra_frame;
         let energy =
             (film && bsize >= geom::BLOCK_16X16 && inside).then(|| self.energy_range(&base));
-        let try_one =
-            |t: &mut Self, i: usize, b: &Blk, best: &mut (f64, usize), last: &mut usize| {
-                if *last != usize::MAX {
-                    if inside {
-                        t.restore_ctx(slot);
-                    } else {
-                        t.restore(slot);
-                    }
+        // (`luma`: how much of chroma's error the cost compared leaves
+        // out.)
+        let try_one = |t: &mut Self,
+                       i: usize,
+                       b: &Blk,
+                       best: &mut (f64, usize),
+                       last: &mut usize,
+                       luma: f64| {
+            if *last != usize::MAX {
+                if inside {
+                    t.restore_ctx(slot);
+                } else {
+                    t.restore(slot);
                 }
-                let c0 = t.cost;
-                let d = t.code_block(b);
-                let j = d + (t.cost - c0) as f64 * lam;
-                let j = if film { t.film_rd(b, j, energy) } else { j };
-                *last = i;
-                if j < best.0 {
-                    *best = (j, i);
-                    t.choice_skip = (t.coded_skip, d);
-                    t.save(row, col, (bw_mi, bh_mi), slot + 1);
-                }
-            };
+            }
+            let c0 = t.cost;
+            let d = t.code_block(b);
+            let j = d + (t.cost - c0) as f64 * lam;
+            let j = if film { t.film_rd(b, j, energy) } else { j };
+            *last = i;
+            let jc = j - luma * t.uv_sse;
+            if jc < best.0 {
+                *best = (jc, i);
+                t.best_full = (j, t.uv_sse);
+                t.choice_skip = (t.coded_skip, d);
+                t.save(row, col, (bw_mi, bh_mi), slot + 1);
+            }
+        };
         for (i, b) in cands.clone().iter().enumerate() {
-            try_one(self, i, b, &mut best, &mut last);
+            try_one(self, i, b, &mut best, &mut last, 0.0);
         }
         // Chroma and transform size for the best intra mode.
         if best.1 >= intra_first
@@ -2228,7 +2250,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             for b in more {
                 let i = cands.len();
                 cands.push(b);
-                try_one(self, i, &b, &mut best, &mut last);
+                try_one(self, i, &b, &mut best, &mut last, 0.0);
             }
         }
         let trial = s.second_pass
@@ -2267,24 +2289,42 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let i = cands.len();
                 let b = Blk { tx, ..b0 };
                 cands.push(b);
-                try_one(self, i, &b, &mut best, &mut last);
+                try_one(self, i, &b, &mut best, &mut last, 0.0);
             }
         }
         // The other filters for the best inter candidate.
-        if s.switchable && cands[best.1].refs[0] != INTRA_FRAME {
+        if s.switchable
+            && cands[best.1].refs[0] != INTRA_FRAME
+            && !(s.filter_by_luma && self.whole_mv(&cands[best.1]))
+        {
             let b0 = cands[best.1];
+            let luma = if s.filter_by_luma {
+                self.chroma_dist() - 1.0
+            } else {
+                0.0
+            };
+            best.0 = self.best_full.0 - luma * self.best_full.1;
             for f in [geom::SMOOTH, geom::SHARP] {
                 let i = cands.len();
                 let b = Blk { interp: f, ..b0 };
                 cands.push(b);
-                try_one(self, i, &b, &mut best, &mut last);
+                try_one(self, i, &b, &mut best, &mut last, luma);
             }
+            best.0 = self.best_full.0;
         }
         if last != best.1 {
             self.restore(slot + 1);
         }
         self.last_skip = self.choice_skip;
         (best.0, cands[best.1])
+    }
+
+    /// Whether inter block `b`'s vectors land on whole samples in every
+    /// plane, where the filters all predict alike.
+    fn whole_mv(&self, b: &Blk) -> bool {
+        let (sx, sy) = plane_ss(self.s, 1);
+        let whole = |m: Mv| m.col % (8 << sx) == 0 && m.row % (8 << sy) == 0;
+        b.bsize >= BLOCK_8X8 && whole(b.mv) && (b.refs[1] == INTRA_FRAME || whole(b.mv2))
     }
 
     /// Film ([`Shared::film`]): the RD cost `j` of the inter frame's
@@ -3799,6 +3839,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             total[usize::from(p > 0)] +=
                 P::sse(&src[y * sst + x..], sst, v.at(y, x), stride, vw * 4, vh * 4);
         }
+        self.uv_sse = total[1] as f64;
         total[0] as f64 + total[1] as f64 * self.chroma_dist()
     }
 

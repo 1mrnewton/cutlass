@@ -652,14 +652,14 @@ impl<P: EncPixel> FrameEncoder<P> {
 
     /// What the headers of a frame code (and so which probabilities it
     /// can update).
-    fn coded(key: bool, fp: FrameParams) -> probs::Coded {
+    fn coded(&self, key: bool, fp: FrameParams) -> probs::Coded {
         // The sign bias goes with compound prediction: alone it only makes
         // the vectors of neighbours on the other side worse candidates.
         let future = !key && !fp.hidden && fp.altref_future && fp.speed <= COMPOUND_SPEED;
         probs::Coded {
             tx_select: fp.qindex != 0,
             inter: !key,
-            switchable: !key && fp.speed <= SWITCHABLE_SPEED,
+            switchable: self.switchable(key, fp),
             allow_hp: Self::allow_hp(fp),
             compound_allowed: future,
             compound: future.then_some(true),
@@ -687,6 +687,14 @@ impl<P: EncPixel> FrameEncoder<P> {
         b.finish()
     }
 
+    /// Whether the frame's inter blocks each pick their filter: up to
+    /// [`SWITCHABLE_SPEED`], and in a drawn picture at a fixed quantizer
+    /// in one pass up to [`DRAWN_FILTER_SPEED`].
+    fn switchable(&self, key: bool, fp: FrameParams) -> bool {
+        !key && (fp.speed <= SWITCHABLE_SPEED
+            || (self.drawn && fp.full_search && !fp.second_pass && fp.speed <= DRAWN_FILTER_SPEED))
+    }
+
     /// The uncompressed and compressed headers.
     fn headers(
         &self,
@@ -698,8 +706,8 @@ impl<P: EncPixel> FrameEncoder<P> {
         let qindex = fp.qindex;
         let hidden = fp.hidden && !key;
         let lossless = qindex == 0;
-        let switchable = !key && fp.speed <= SWITCHABLE_SPEED;
-        let compressed = compressed_header(lossless, &Self::coded(key, fp), coef, nc)?;
+        let switchable = self.switchable(key, fp);
+        let compressed = compressed_header(lossless, &self.coded(key, fp), coef, nc)?;
         let mut b = BitWriter::new();
         b.write(2, 2); // frame marker
         // Profile 0 for 8-bit 4:2:0, 1 for 8-bit 4:2:2, 4:4:0 and 4:4:4;
@@ -762,7 +770,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             } | u32::from(fp.also_refresh);
             let refresh = self.layer.map_or(refresh, |l| u32::from(l.0));
             b.write(refresh, 8);
-            let future = Self::coded(key, fp).compound_allowed;
+            let future = self.coded(key, fp).compound_allowed;
             let slots = [
                 u32::from(fp.last_slot),
                 u32::from(fp.golden_slot),
@@ -1015,6 +1023,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             speed: fp.speed,
             refs_live,
             switchable: h.interp == geom::SWITCHABLE,
+            filter_by_luma: fp.full_search && !fp.second_pass,
             prepass: None,
             tok: &tok,
             second_pass: fp.second_pass,
@@ -1168,7 +1177,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             probs: OnceLock::new(),
             old: flat_coef(&parsed.fc),
             old_nc: probs::flatten(&parsed.fc),
-            coded: Self::coded(key, fp),
+            coded: self.coded(key, fp),
             max_tx: if h.lossless { 0 } else { 3 },
         });
         let run = |t: &mut TileWork<P>,
@@ -1533,7 +1542,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             Some((new, new_nc, _)) => (*new, *new_nc),
             None => (
                 coef_updates(&old, &counts, if lossless { 0 } else { 3 }),
-                probs::updates(&old_nc, &counts, &Self::coded(key, fp)),
+                probs::updates(&old_nc, &counts, &self.coded(key, fp)),
             ),
         };
         // A tile column's symbols, one coder for each tile row.
@@ -2254,6 +2263,26 @@ fn popular_mvs(prev: Option<&[frame::MvRef]>) -> [[Option<Mv>; tile::POP_STARTS]
 
 /// Speeds at and below which each inter block picks its filter.
 pub const SWITCHABLE_SPEED: u8 = 2;
+
+/// Up to this speed at a fixed quantizer in one pass, the inter blocks of
+/// a drawn picture ([`FrameEncoder::set_drawn`]) pick their filter too,
+/// by luma's error and chroma's unweighted
+/// ([`tile::Shared::filter_by_luma`]), where their vectors leave a whole
+/// sample in some plane. `testsrc2` spends most of its bits on its
+/// squares of noise, redrawn every picture: FFmpeg's `libvpx-vp9` (at its
+/// speed 1) predicts 43% of their blocks through the smooth filter, this
+/// encoder predicted all through the regular one. Against FFmpeg's `-crf`
+/// at speed 5 (BD-rate at the same PSNR-Y / U / V, ours at `crf=15` to
+/// `55` by 5 against FFmpeg's by 10): from +1.3 / −2.1 / −7.4% to +0.3 /
+/// −3.6 / −8.4% (at five points each, from −1.7 / −4.2 / −8.7% to −2.2 /
+/// −5.5 / −9.1%); the gradient from −0.2% to −2.4%. With chroma's error
+/// weighed twice, as the trials weigh it, the smooth filter that predicts
+/// chroma's detail better cost luma's: on the still scene's drawn pan
+/// (the README's clips at `q=60` to `210`) 0.7 points of PSNR-Y for 1.1
+/// of PSNR-U and V, now 0.1 for 0.9. On every picture, not only drawn
+/// ones: the three clips −1.0 / −0.4 / +0.1 points of PSNR-Y and −1.2 /
+/// −2.1 / −1.0 of PSNR-U, in 6 to 11% more time.
+pub const DRAWN_FILTER_SPEED: u8 = 5;
 
 fn compressed_header(
     lossless: bool,

@@ -31,7 +31,8 @@
 //!
 //! The seventh is Remove BG: a [`Matter`] takes the background off a frame
 //! as a soft [`Matte`], and a [`Follower`] carries what the user picked
-//! through a clip.
+//! through a clip: [`Portrait`] and [`Matting`] are the first, and
+//! [`FollowModel`] the second.
 
 #![forbid(unsafe_code)]
 
@@ -42,6 +43,7 @@ mod detect;
 mod device;
 mod enhance;
 mod enhance_job;
+mod follow;
 mod frame;
 mod generated;
 mod interpolate;
@@ -70,6 +72,7 @@ pub use detect::{BODY_WEIGHTS, Detector, FACE_WEIGHTS, Found, HAND_WEIGHTS, Part
 pub use device::{Compute, gpu_available, keep_kernels_in};
 pub use enhance::{ENHANCE_MAX_SIDE, ENHANCE_WEIGHTS, Enhanced, Enhancer, SCALE, convert_pytorch};
 pub use enhance_job::{CopyModels, EnhanceJobError, enhance_clip, enhanced_size, noise_for_level};
+pub use follow::{FOLLOW_MODEL, FOLLOW_SIDE, FOLLOW_WEIGHTS, FollowModel, convert_sam2};
 pub use frame::MAX_SIDE;
 pub use interpolate::{
     INTERPOLATE_MAX_SIDE, INTERPOLATE_WEIGHTS, Interpolator, Prepared, convert_rife,

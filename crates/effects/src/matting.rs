@@ -374,14 +374,14 @@ pub fn stroke_layer(alpha: &[u8], width: u32, height: u32, stroke: &Stroke) -> V
                         0.0
                     }
                 }
-                style => {
-                    let d = distance[index] - gap;
-                    if distance[index] <= 0.0 {
-                        0.0
-                    } else {
-                        style_cover(style, d, size, x, y)
-                    }
-                }
+                // A wholly kept pixel hides what is under it; a soft one
+                // on the edge has the outline start right under it.
+                style => match (distance[index] > 0.0, alpha[index]) {
+                    (false, 255) => 0.0,
+                    (false, _) if gap > 0.0 => 0.0,
+                    (false, _) => style_cover(style, 0.0, size, x, y),
+                    (true, _) => style_cover(style, distance[index] - gap, size, x, y),
+                },
             };
             if cover <= 0.0 {
                 continue;
@@ -405,7 +405,7 @@ pub fn stroke_layer(alpha: &[u8], width: u32, height: u32, stroke: &Stroke) -> V
 
 /// How much of the outline covers a pixel `d` pixels past the gap, 0 to 1.
 fn style_cover(style: StrokeStyle, d: f64, size: f64, x: usize, y: usize) -> f64 {
-    let band = |width: f64| (width - d + 1.0).clamp(0.0, 1.0) * (d + 0.5).clamp(0.0, 1.0);
+    let band = |width: f64| (width - d + 1.0).clamp(0.0, 1.0) * (d + 1.0).clamp(0.0, 1.0);
     match style {
         StrokeStyle::Solid => band(size),
         StrokeStyle::Paper => {

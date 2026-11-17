@@ -23,7 +23,6 @@ const LOGS: &str = "Logs";
 const SETTINGS: &str = "settings.json";
 const PRESETS: &str = "Presets";
 const TEXT_PRESETS: &str = "text.json";
-const STUDIO: &str = "Studio";
 const FONTS: &str = "Fonts";
 const ASSISTANT: &str = "Assistant";
 const NOTES: &str = "notes.md";
@@ -172,13 +171,6 @@ impl Home {
         self.root.join(FONTS)
     }
 
-    /// The effects and transitions being made in the effect studio, as
-    /// recipe files. The folder is made when the first one is saved.
-    #[must_use]
-    pub fn studio(&self) -> PathBuf {
-        self.root.join(STUDIO)
-    }
-
     fn folders(&self) -> [PathBuf; 6] {
         [
             self.projects(),
@@ -305,7 +297,6 @@ mod tests {
             home.text_presets_file(),
             root.join("Presets").join("text.json")
         );
-        assert_eq!(home.studio(), root.join("Studio"));
         assert_eq!(home.fonts(), root.join("Fonts"));
     }
 

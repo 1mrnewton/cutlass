@@ -17,8 +17,7 @@
 use cutlass_compositor::{ComposeError, Device, Extent, Frame, submit};
 use cutlass_effects::{
     ADJUSTMENT, Colour, EffectSource, Mask, PackageKind, PackageStore, Step, animation_package_id,
-    entry, package_id, plugin_package_id, recipe as find_recipe, segment_package_id,
-    video_package_id,
+    bundled_recipe, entry, package_id, plugin_package_id, segment_package_id, video_package_id,
 };
 use cutlass_model::{
     Draft, DraftId, MaterialRef, Micros, Segment, SegmentId, TimeRange, TrackAttribute,
@@ -314,7 +313,7 @@ fn paint<D: Device>(
 
 fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) -> Vec<Mark<'a>> {
     let mut marks: Vec<Mark<'a>> = effect_segments(draft, time, stack)
-        .filter(|(_, _, _, id)| find_recipe(id).is_none())
+        .filter(|(_, _, _, id)| bundled_recipe(id).is_none())
         .filter(|(_, _, _, id)| {
             !matches!(entry(id).map(|row| row.kind), Some(PackageKind::Blend(_)))
         })
@@ -523,7 +522,7 @@ pub(crate) fn recipe_marks(
 ) -> Vec<RecipeMark> {
     let mut marks: Vec<RecipeMark> = effect_segments(draft, time, stack)
         .filter_map(|(track_index, segment_index, segment, id)| {
-            let recipe = find_recipe(id)?;
+            let recipe = bundled_recipe(id)?;
             let bound = match segment.bound_clip() {
                 Some(clip) => Some(find_segment(draft, &clip)?),
                 None => None,
@@ -597,7 +596,7 @@ fn recipe_clips_in(
                 }
             }
             Some(MaterialRef::Effect(_) | MaterialRef::VideoEffect(_) | MaterialRef::Plugin(_)) => {
-                let recipe = segment_package_id(draft, segment).and_then(find_recipe);
+                let recipe = segment_package_id(draft, segment).and_then(bundled_recipe);
                 let bound_to_nothing = segment
                     .bound_clip()
                     .is_some_and(|clip| find_segment(draft, &clip).is_none());

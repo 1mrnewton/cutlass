@@ -25,7 +25,7 @@ fn main() -> ExitCode {
                 Err(_) => ExitCode::FAILURE,
             };
         }
-        Command::Window | Command::Studio | Command::Mcp(_) | Command::New(_) => {}
+        Command::Window | Command::Mcp(_) | Command::New(_) => {}
     }
     let _opened = cutlass::boot(None);
     let opened = match command {
@@ -49,8 +49,6 @@ fn main() -> ExitCode {
                 Err(error) => fail("cutlass new", &error.to_string()),
             };
         }
-        // `cutlass studio`: the window, open on the effect studio.
-        Command::Studio => cutlass::window::run_studio(),
         _ => cutlass::window::run(),
     };
     if let Err(error) = opened {

@@ -259,7 +259,7 @@ impl Shell {
         else {
             return None;
         };
-        let recipe = cutlass_effects::recipe(&effect.effect_id)?;
+        let recipe = cutlass_effects::bundled_recipe(&effect.effect_id)?;
         // Keyed controls show where the playhead is.
         let stored = cutlass_effects::keyed_controls(
             recipe,
@@ -292,7 +292,7 @@ impl Shell {
         else {
             return None;
         };
-        let recipe = cutlass_effects::recipe(&effect.effect_id)?;
+        let recipe = cutlass_effects::bundled_recipe(&effect.effect_id)?;
         let control = recipe
             .controls
             .iter()

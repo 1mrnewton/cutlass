@@ -20,7 +20,6 @@ pub mod sandbox;
 #[cfg(test)]
 mod open_movie;
 pub mod shell;
-pub mod studio;
 pub mod tokens;
 pub mod ui;
 pub mod view;

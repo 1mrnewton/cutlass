@@ -6,7 +6,7 @@
 //! that clip alone, and is linked to it so it moves with it. Every screen
 //! places an effect through here.
 
-use cutlass_effects::{recipe as find_recipe, recipes};
+use cutlass_effects::{bundled, bundled_recipe};
 use cutlass_model::{
     Draft, MaterialId, MaterialRef, Micros, Segment, SegmentId, TrackId, TrackType,
 };
@@ -74,11 +74,10 @@ pub struct EffectCard {
     pub category: String,
 }
 
-/// Every effect the app can run, in shelf order: the bundled ones, then
-/// the ones in the studio folder.
+/// Every effect the app can run, in shelf order.
 #[must_use]
 pub fn effect_cards() -> Vec<EffectCard> {
-    recipes()
+    bundled()
         .iter()
         .map(|recipe| {
             let effect_id = recipe.effect_id();
@@ -107,7 +106,7 @@ pub fn effect_categories() -> Vec<&'static str> {
 #[must_use]
 pub fn effect_of_card(card_id: &str) -> Option<String> {
     let effect_id = card_id.strip_prefix(EFFECT_CARD_PREFIX)?;
-    find_recipe(effect_id).map(cutlass_effects::Recipe::effect_id)
+    bundled_recipe(effect_id).map(cutlass_effects::Recipe::effect_id)
 }
 
 /// Where a new effect goes and what its ids are.
@@ -285,7 +284,7 @@ mod tests {
     #[test]
     fn every_card_names_a_bundled_effect() {
         let cards = effect_cards();
-        assert_eq!(cards.len(), cutlass_effects::bundled().len());
+        assert_eq!(cards.len(), bundled().len());
         assert!(cards.len() >= 40);
         for card in &cards {
             assert_eq!(

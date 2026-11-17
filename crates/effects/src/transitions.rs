@@ -36,9 +36,8 @@ pub enum TransitionKind {
     Spin,
     Blur,
     Glitch,
-    /// The transition recipe at this place: in
-    /// [`crate::bundled_transitions`], then among the studio's, which keep
-    /// their places for as long as the app runs.
+    /// The transition recipe at this place in
+    /// [`crate::bundled_transitions`].
     Recipe(u16),
 }
 
@@ -131,32 +130,20 @@ impl TransitionKind {
         }
     }
 
-    /// The recipe a [`Self::Recipe`] names: a bundled one, or one from the
-    /// studio folder. None once a studio transition's file has gone.
+    /// The bundled recipe a [`Self::Recipe`] names.
     #[must_use]
     pub fn recipe(self) -> Option<&'static crate::TransitionRecipe> {
         match self {
-            Self::Recipe(index) => {
-                let index = usize::from(index);
-                let bundled = crate::bundled_transitions();
-                bundled
-                    .get(index)
-                    .or_else(|| crate::studio::studio_transition(index.checked_sub(bundled.len())?))
-            }
+            Self::Recipe(index) => crate::bundled_transitions().get(usize::from(index)),
             _ => None,
         }
     }
 
     /// Every transition the app draws: the built-in ones, then each
-    /// bundled recipe, then each of the studio's.
+    /// bundled recipe.
     #[must_use]
     pub fn every() -> Vec<Self> {
-        let bundled = crate::bundled_transitions().len();
-        let studio = crate::studio::studio_transition_places()
-            .into_iter()
-            .map(|place| bundled + place);
-        let recipes = (0..bundled)
-            .chain(studio)
+        let recipes = (0..crate::bundled_transitions().len())
             .filter_map(|index| u16::try_from(index).ok())
             .map(Self::Recipe);
         Self::ALL.into_iter().chain(recipes).collect()

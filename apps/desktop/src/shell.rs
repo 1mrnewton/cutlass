@@ -53,7 +53,6 @@ mod cover;
 mod effect_preview;
 mod follow;
 mod group;
-pub mod studio;
 pub(crate) use follow::clip_path;
 mod enhance;
 mod hear;
@@ -788,8 +787,6 @@ pub struct Shell {
     presets_file: Option<PathBuf>,
     /// The assistant's notes, when this shell has a file for them.
     notes_file: Option<PathBuf>,
-    /// The effect studio: its document, folder and preview pictures.
-    studio: studio::StudioState,
     saved_looks: Vec<cutlass_editor::SavedLook>,
     /// Files dropped on the window, imported one job after another.
     waiting_imports: std::collections::VecDeque<PathBuf>,
@@ -991,7 +988,6 @@ impl Shell {
             settings_file: None,
             presets_file: None,
             notes_file: None,
-            studio: studio::StudioState::new(),
             saved_looks: Vec::new(),
             waiting_imports: std::collections::VecDeque::new(),
             session: None,

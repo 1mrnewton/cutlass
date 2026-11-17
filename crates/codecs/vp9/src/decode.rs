@@ -157,6 +157,12 @@ impl Decoder {
         self.temporal_frames
     }
 
+    /// The blocks of the last frame decoded (on no worker threads).
+    #[cfg(test)]
+    pub fn last_blocks(&self) -> impl Iterator<Item = &crate::dec::syntax::BlockRec> {
+        self.bufs.tiles.iter().flat_map(|t| t.blocks.iter())
+    }
+
     /// The segment of every 8×8 block of the last frame decoded.
     #[cfg(test)]
     pub fn last_segmap(&self) -> &[u8] {

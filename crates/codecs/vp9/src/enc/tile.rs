@@ -2142,10 +2142,13 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let (smaller, trial) = (smaller && !half, trial && !half);
         if smaller || (s.intra_frame && s.speed < 9) || trial {
             let b0 = cands[best.1];
-            let tries = if s.speed < 4 { 2 } else { 1 };
+            // At a fixed quantizer in one pass, from speed 4 a second
+            // size smaller after the first won ([`TX_FIXED_TRIES`]).
+            let more = s.speed >= 4 && s.full_search && !s.second_pass;
+            let tries = if s.speed < 4 || more { 2 } else { 1 };
             let mut tx = b0.tx;
-            for _ in 0..tries {
-                if tx == 0 || b0.bsize < BLOCK_8X8 {
+            for k in 0..tries {
+                if tx == 0 || b0.bsize < BLOCK_8X8 || (k > 0 && more && best.1 != cands.len() - 1) {
                     break;
                 }
                 tx -= 1;

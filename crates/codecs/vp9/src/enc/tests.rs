@@ -759,3 +759,48 @@ fn a_mesh_finds_a_small_textured_square_moved_over_a_flat_picture() {
         two[1].len()
     );
 }
+
+#[test]
+fn a_fixed_quantizer_tries_a_second_smaller_transform() {
+    // A detailed picture moved, with lone samples brighter every 16 across
+    // and down: the residual of 16×16 and larger inter blocks is in specks
+    // that small transforms code for less. At a fixed quantizer in one
+    // pass, from speed 4, a block whose next smaller transform won tries
+    // the one after it too; a second pass (one size smaller only) takes
+    // none two sizes under the block's.
+    let (w, h) = (128usize, 128usize);
+    let a = texture(w, h, (0, 0));
+    let mut b = texture(w, h, (4, 0));
+    for r in (3..h).step_by(16) {
+        for c in (5..w).step_by(16) {
+            b[0][r * w + c] = b[0][r * w + c].saturating_add(70);
+        }
+    }
+    let two_under = |second_pass: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 2);
+        let mut dec = Decoder::new();
+        let cw = w.div_ceil(2);
+        let mut n = 0;
+        for (t, pic) in [&a, &b].into_iter().enumerate() {
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            let coded = enc
+                .encode(fixed_params(t, 60, 5, second_pass))
+                .expect("encode");
+            dec.decode(&coded.data).expect("decode");
+            if t == 1 {
+                n = dec
+                    .last_blocks()
+                    .filter(|k| k.refs[0] != 0)
+                    .filter(|k| match k.bsize {
+                        crate::geom::BLOCK_16X16 => k.tx == 0,
+                        crate::geom::BLOCK_32X32 | crate::geom::BLOCK_64X64 => k.tx <= 1,
+                        _ => false,
+                    })
+                    .count();
+            }
+        }
+        n
+    };
+    assert!(two_under(false) > 0);
+    assert_eq!(two_under(true), 0);
+}

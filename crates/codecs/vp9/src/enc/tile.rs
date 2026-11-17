@@ -1764,13 +1764,13 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 && (best.0 - none_skip.1) / lam < cheap.0 * pixels
                 && none_skip.1 < cheap.1 * pixels * step * step;
             let limit = (pixels * step * step / div).max(noise);
-            // With a full search, the error of a block that needs no
+            // At a fixed quantizer, the error of a block that needs no
             // residual is also read at its worst 8×8 ([`Tile::peak_sse`]).
             let stop = still
                 || small_skip
                 || cheap
                 || (none_skip.1 < limit
-                    && (!s.full_search || !none_skip.0 || {
+                    && (!s.full_search || s.second_pass || !none_skip.0 || {
                         self.restore(before + 1);
                         self.peak_sse(row, col, n) * pixels / 64.0 < limit
                     }));
@@ -3591,17 +3591,18 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     /// The largest luma error (SSE) of the 8×8 parts of the square of `n`
     /// 8×8 at `(row, col)` inside the picture, as it is reconstructed now.
     ///
-    /// With [`super::FrameParams::full_search`], a whole block that needs
-    /// no residual ends the partition search only where this too, over
-    /// the block, is under the quantizer's noise: its error summed hid a
-    /// small object (a moving square, a figure of the clock, a row of
-    /// noise) in a block that predicted the rest exactly, which then went
-    /// uncoded. On `testsrc2` at speed 5 against FFmpeg's `-crf`, at the
-    /// same PSNR-Y / U / V: +11.4 / +9.9 / +6.9% → +10.0 / +9.1 / +3.2%
-    /// (with chroma's error in it as the trials weigh it, +10.1 / +5.6 /
-    /// −0.7%, but 1.6 to 2.5 points of PSNR-Y lost on the README's clips
-    /// at fixed quantizers; without the stop at all, +9.8 / +4.7 / −1.5%
-    /// for 1.46 times the time).
+    /// At a fixed quantizer ([`super::FrameParams::full_search`] in one pass),
+    /// a whole block that needs no residual ends the partition search only
+    /// where this too, over the block, is under the quantizer's noise: its
+    /// error summed hid a small object (a moving square, a figure of the clock,
+    /// a row of noise) in a block that predicted the rest exactly, which then
+    /// went uncoded. On `testsrc2` at speed 5 against FFmpeg's `-crf`, at the
+    /// same PSNR-Y / U / V: +11.4 / +9.9 / +6.9% → +10.0 / +9.1 / +3.2% (with
+    /// chroma's error in it as the trials weigh it, +10.1 / +5.6 / −0.7%, but
+    /// 1.6 to 2.5 points of PSNR-Y lost on the README's clips at fixed
+    /// quantizers; without the stop at all, +9.8 / +4.7 / −1.5% for 1.46 times
+    /// the time). Not in a second pass, where the clip of a still scene and two
+    /// jumps lost 0.4 points of PSNR-Y.
     fn peak_sse(&mut self, row: usize, col: usize, n: usize) -> f64 {
         let s = self.s;
         let (src, sst) = (s.src.planes[0], s.src.strides[0]);

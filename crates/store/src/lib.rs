@@ -14,6 +14,7 @@ mod enhance;
 mod folder;
 mod hold;
 mod json;
+mod matte;
 mod projects;
 mod proxies;
 mod reframe;
@@ -34,6 +35,7 @@ pub use folder::{
 };
 pub use hold::{Hold, held_address, hold};
 pub use json::{parse_draft, write_draft};
+pub use matte::{MatteKey, find_matte, matte_file};
 pub use projects::{
     ListedProject, create_project, delete_project, duplicate_project, list_projects,
     listed_project, rename_project, saved_at,

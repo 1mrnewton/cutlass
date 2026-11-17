@@ -6,7 +6,9 @@
 //! changed file starts a new folder and is never shown through an old
 //! picture. Each thumbnail is one file named by its source time in
 //! microseconds: a JPEG, or a PNG when the picture is not opaque, as a
-//! JPEG has no alpha.
+//! JPEG has no alpha. A [`Thumb`] is premultiplied and a PNG stores
+//! straight alpha, so a PNG is divided out on the way to disk and
+//! multiplied back on the way in.
 //!
 //! The thumbnail worker owns the cache and is its only caller. A file that
 //! does not read back as a thumbnail is a miss, and the picture is decoded
@@ -152,9 +154,10 @@ fn encoded(thumb: &Thumb) -> Option<(Vec<u8>, &'static str)> {
             .ok()?;
         Some((bytes, "jpg"))
     } else {
+        let straight: Vec<u8> = pixels.iter().flat_map(|pixel| straight(*pixel)).collect();
         image::codecs::png::PngEncoder::new(&mut bytes)
             .write_image(
-                &thumb.rgba,
+                &straight,
                 thumb.width,
                 thumb.height,
                 ExtendedColorType::Rgba8,
@@ -176,11 +179,42 @@ fn read(path: &Path, format: ImageFormat) -> Option<Thumb> {
     if width == 0 || height == 0 || height > THUMB_HEIGHT || width > MAX_WIDTH {
         return None;
     }
+    let mut rgba = picture.into_rgba8().into_raw();
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        *pixel = premultiplied(*pixel);
+    }
     Some(Thumb {
         width,
         height,
-        rgba: picture.into_rgba8().into_raw(),
+        rgba,
     })
+}
+
+/// A premultiplied pixel as straight alpha. A clear pixel is clear black.
+fn straight([red, green, blue, alpha]: [u8; 4]) -> [u8; 4] {
+    if alpha == u8::MAX {
+        return [red, green, blue, alpha];
+    }
+    if alpha == 0 {
+        return [0; 4];
+    }
+    let undo = |value: u8| {
+        let value = (u32::from(value) * 255 + u32::from(alpha) / 2) / u32::from(alpha);
+        u8::try_from(value.min(255)).unwrap_or(u8::MAX)
+    };
+    [undo(red), undo(green), undo(blue), alpha]
+}
+
+/// A straight-alpha pixel premultiplied, rounded to the nearest.
+fn premultiplied([red, green, blue, alpha]: [u8; 4]) -> [u8; 4] {
+    if alpha == u8::MAX {
+        return [red, green, blue, alpha];
+    }
+    let scale = |value: u8| {
+        let value = (u32::from(value) * u32::from(alpha) + 127) / 255;
+        u8::try_from(value).unwrap_or(u8::MAX)
+    };
+    [scale(red), scale(green), scale(blue), alpha]
 }
 
 impl ThumbCache for FilmCache {
@@ -222,7 +256,7 @@ mod tests {
     use cutlass_engine::{Thumb, ThumbCache, ThumbKey};
     use cutlass_model::Micros;
 
-    use super::{FilmCache, folder_name, prune};
+    use super::{FilmCache, folder_name, premultiplied, prune, straight};
 
     /// A folder of this test's own, with a source file in it.
     fn scratch(name: &str) -> (PathBuf, PathBuf) {
@@ -242,13 +276,14 @@ mod tests {
         }
     }
 
-    /// A picture that runs from dark to light, with `alpha` everywhere.
+    /// A picture that runs from dark to light, with `alpha` everywhere,
+    /// premultiplied as a thumbnail is.
     fn ramp(width: u32, height: u32, alpha: u8) -> Thumb {
         let mut rgba = Vec::new();
         for y in 0..height {
             for x in 0..width {
                 let level = u8::try_from((x + y) * 255 / (width + height)).unwrap();
-                rgba.extend([level, level / 2, 255 - level, alpha]);
+                rgba.extend(premultiplied([level, level / 2, 255 - level, alpha]));
             }
         }
         Thumb {
@@ -305,6 +340,41 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["0.jpg", "2000000.png"]);
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_clear_thumbnail_is_stored_straight_and_read_back_premultiplied() {
+        // Half-clear red, premultiplied: the PNG holds full red.
+        assert_eq!(straight([128, 0, 0, 128]), [255, 0, 0, 128]);
+        assert_eq!(premultiplied([255, 0, 0, 128]), [128, 0, 0, 128]);
+        assert_eq!(straight([7, 7, 7, 0]), [0; 4]);
+        // Every premultiplied value at every alpha comes back as it went.
+        for alpha in 1..=255_u8 {
+            for value in 0..=alpha {
+                let pixel = [value, value, value, alpha];
+                assert_eq!(premultiplied(straight(pixel)), pixel, "{pixel:?}");
+            }
+        }
+        // On disk.
+        let (folder, source) = scratch("straight");
+        let mut cache = FilmCache::new(folder.join("cache"));
+        let clear = Thumb {
+            width: 1,
+            height: 1,
+            rgba: vec![128, 64, 0, 128],
+        };
+        cache.keep(&key(&source, 0), &clear);
+        let png = std::fs::read_dir(folder.join("cache"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("0.png");
+        let stored = image::open(png).unwrap().into_rgba8().into_raw();
+        assert_eq!(stored, [255, 128, 0, 128]);
+        assert_eq!(cache.load(&key(&source, 0)), Some(clear));
         std::fs::remove_dir_all(&folder).unwrap();
     }
 

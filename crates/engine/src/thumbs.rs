@@ -56,7 +56,10 @@ pub struct ThumbKey {
     pub time: Micros,
 }
 
-/// A small RGBA picture.
+/// A small RGBA picture, 8 bits a channel, premultiplied as every engine
+/// picture is: a half-clear pixel's colour is already scaled by its alpha.
+/// A texture upload or an image file that wants straight alpha divides it
+/// out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Thumb {
     pub width: u32,

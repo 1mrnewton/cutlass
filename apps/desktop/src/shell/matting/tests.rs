@@ -625,7 +625,7 @@ fn opening_a_project_takes_out_the_mattes_no_clip_draws_with() {
     let temp: &Path = &temp;
     shell.select(Some("v".into()));
     let auto = Matting::auto();
-    keep_matte(&shell, &temp, &auto);
+    keep_matte(&shell, temp, &auto);
     shell.put_matting("v".into(), Some(auto)).unwrap();
     // A matte from picks the clip no longer has, and one a job left half
     // written.
@@ -642,7 +642,7 @@ fn opening_a_project_takes_out_the_mattes_no_clip_draws_with() {
         }],
         ..Matting::default()
     };
-    keep_matte(&shell, &temp, &old);
+    keep_matte(&shell, temp, &old);
     let folder = temp.join("Resources/video_matte");
     std::fs::write(folder.join("half.part"), b"half").unwrap();
     let count = || std::fs::read_dir(&folder).unwrap().count();
@@ -653,7 +653,7 @@ fn opening_a_project_takes_out_the_mattes_no_clip_draws_with() {
         drop(shell);
         let (decoders, encoders) = crate::register_codecs();
         let mut shell = Shell::new(decoders, encoders, Settings::default());
-        shell.open_folder(&temp).unwrap();
+        shell.open_folder(temp).unwrap();
         shell.select(Some("v".into()));
         shell
     };
@@ -662,10 +662,10 @@ fn opening_a_project_takes_out_the_mattes_no_clip_draws_with() {
     assert!(shell.matte_made());
 
     // With the clip's file gone, every matte stays until it is back.
-    keep_matte(&shell, &temp, &old);
+    keep_matte(&shell, temp, &old);
     std::fs::rename(temp.join("walk.mp4"), temp.join("away.mp4")).unwrap();
     let shell = reopen(shell);
     assert_eq!(count(), 2);
     drop(shell);
-    let _ = std::fs::remove_dir_all(&temp);
+    let _ = std::fs::remove_dir_all(temp);
 }

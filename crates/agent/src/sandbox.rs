@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use cutlass_settings::Settings;
@@ -161,78 +161,110 @@ impl ProcessExecutor {
 
 impl SandboxExecutor for ProcessExecutor {
     fn execute(&mut self, source: &str, input_json: &str) -> Result<String, SandboxError> {
-        let failed = |message: String| SandboxError::Executor(message);
         let scratch = std::env::temp_dir().join(format!(
             "cutlass-sandbox-{}-{}",
             std::process::id(),
             next_call()
         ));
         std::fs::create_dir_all(&scratch).map_err(|error| failed(error.to_string()))?;
-        let result = (|| {
-            let mut child = Command::new(&self.program)
-                .args(&self.args)
-                .env_clear()
-                .current_dir(&scratch)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|error| failed(format!("{}: {error}", self.program.display())))?;
-            let call = serde_json::to_string(&ScriptCall {
-                source: source.to_owned(),
-                input: input_json.to_owned(),
-            })
-            .map_err(|error| failed(error.to_string()))?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(call.as_bytes())
-                    .map_err(|error| failed(error.to_string()))?;
-            }
-            let mut stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| failed("no stdout".to_owned()))?;
-            let reader = std::thread::spawn(move || {
-                let mut text = String::new();
-                stdout.read_to_string(&mut text).map(|_| text)
-            });
-            let deadline = Instant::now() + self.limit;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Ok(None) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(failed(format!(
-                            "the script ran past {} s and was stopped",
-                            self.limit.as_secs_f32()
-                        )));
-                    }
-                    Err(error) => return Err(failed(error.to_string())),
-                }
-            }
-            let text = reader
-                .join()
-                .map_err(|_| failed("the reader stopped".to_owned()))?
-                .map_err(|error| failed(error.to_string()))?;
-            let answer: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|_| failed("the runner did not answer".to_owned()))?;
-            if let Some(ok) = answer.get("ok") {
-                return Ok(ok.to_string());
-            }
-            Err(failed(
-                answer
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("the runner failed")
-                    .to_owned(),
-            ))
-        })();
+        let result = self.run_in(&scratch, source, input_json);
         let _ = std::fs::remove_dir_all(&scratch);
         result
+    }
+}
+
+fn failed(message: String) -> SandboxError {
+    SandboxError::Executor(message)
+}
+
+impl ProcessExecutor {
+    /// Start the runner in `scratch` and hand it the call. However the
+    /// call ends, the child is stopped and waited for before this returns:
+    /// one that failed to answer is not left running, or left behind as a
+    /// process no one collects.
+    fn run_in(
+        &self,
+        scratch: &std::path::Path,
+        source: &str,
+        input_json: &str,
+    ) -> Result<String, SandboxError> {
+        let call = serde_json::to_string(&ScriptCall {
+            source: source.to_owned(),
+            input: input_json.to_owned(),
+        })
+        .map_err(|error| failed(error.to_string()))?;
+        let mut child = Command::new(&self.program)
+            .args(&self.args)
+            .env_clear()
+            .current_dir(scratch)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| failed(format!("{}: {error}", self.program.display())))?;
+        let answer = self.answer_of(&mut child, call);
+        if answer.is_err() {
+            // Stopping a child that has ended is an error to ignore.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        answer
+    }
+
+    /// Hand `child` the call and wait, no longer than the limit, for its
+    /// answer. The limit starts before the call is written, and the call
+    /// is written from another thread, so a runner that never reads its
+    /// input is stopped at the limit like one that never answers.
+    fn answer_of(&self, child: &mut Child, call: String) -> Result<String, SandboxError> {
+        let deadline = Instant::now() + self.limit;
+        let stdin = child.stdin.take();
+        let writer = std::thread::spawn(move || {
+            if let Some(mut stdin) = stdin {
+                // A runner that ended without reading is found out by its
+                // missing answer. Dropping the pipe ends its input.
+                let _ = stdin.write_all(call.as_bytes());
+            }
+        });
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| failed("no stdout".to_owned()))?;
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            stdout.read_to_string(&mut text).map(|_| text)
+        });
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(None) => {
+                    return Err(failed(format!(
+                        "the script ran past {} s and was stopped",
+                        self.limit.as_secs_f32()
+                    )));
+                }
+                Err(error) => return Err(failed(error.to_string())),
+            }
+        }
+        let _ = writer.join();
+        let text = reader
+            .join()
+            .map_err(|_| failed("the reader stopped".to_owned()))?
+            .map_err(|error| failed(error.to_string()))?;
+        let answer: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|_| failed("the runner did not answer".to_owned()))?;
+        if let Some(ok) = answer.get("ok") {
+            return Ok(ok.to_string());
+        }
+        Err(failed(
+            answer
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("the runner failed")
+                .to_owned(),
+        ))
     }
 }
 
@@ -900,5 +932,67 @@ mod path_tests {
         let error = super::Sandbox::run(&mut online, "x", "{}").unwrap_err();
         assert_eq!(error, super::SandboxError::OnlineUnavailable);
         assert!(error.to_string().contains("account"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runner_that_fails_is_stopped_and_does_not_hold_the_caller() {
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+        use std::time::{Duration, Instant};
+
+        use super::{ProcessExecutor, SandboxError, SandboxExecutor};
+
+        // A runner that never reads its input and never answers, handed a
+        // call longer than a pipe holds: it is stopped at the limit, where
+        // writing the call once waited on it for good.
+        let long = "a".repeat(2 * 1024 * 1024);
+        let mut silent = ProcessExecutor::new(
+            PathBuf::from("/bin/sleep"),
+            vec![OsString::from("30")],
+            Duration::from_millis(300),
+        );
+        let asked = Instant::now();
+        let error = silent.execute(&long, "{}").unwrap_err();
+        assert!(
+            matches!(&error, SandboxError::Executor(why) if why.contains("ran past")),
+            "{error}"
+        );
+        assert!(
+            asked.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            asked.elapsed()
+        );
+        // One that ends at once without a word has not answered.
+        let mut mute = ProcessExecutor::new(
+            PathBuf::from("/usr/bin/true"),
+            Vec::new(),
+            Duration::from_secs(10),
+        );
+        let error = mute.execute("1 + 1", "{}").unwrap_err();
+        assert_eq!(
+            error,
+            SandboxError::Executor("the runner did not answer".to_owned())
+        );
+        // One that is not there is named.
+        let mut missing = ProcessExecutor::new(
+            PathBuf::from("/no/such/runner"),
+            Vec::new(),
+            Duration::from_secs(10),
+        );
+        let error = missing.execute("1 + 1", "{}").unwrap_err();
+        assert!(
+            matches!(&error, SandboxError::Executor(why) if why.contains("/no/such/runner")),
+            "{error}"
+        );
+        // Each call's scratch folder is gone once it has ended, however it
+        // ended.
+        let prefix = format!("cutlass-sandbox-{}-", std::process::id());
+        let left: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 }

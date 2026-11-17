@@ -932,7 +932,11 @@ fn description(name: &str) -> &'static str {
             "Reapply the combo that undo removed. Input: the revision draft.query or undo \
              returned."
         }
-        "settings.get" => "The user's settings as JSON, with the generation to send back.",
+        "settings.get" => {
+            "The user's settings as JSON, with the generation to send back. An MCP server's \
+             args and url are not shown, as they may hold keys: not_shown names the ones that \
+             are set, and a settings.set that leaves them out keeps them."
+        }
         "settings.set" => {
             "Change the user's app settings (not the project: its canvas and clips are \
              draft.apply): {\"expected_generation\":N, \"changes\":{...}}, the changes merged \
@@ -1032,15 +1036,52 @@ fn description(name: &str) -> &'static str {
 /// folders and say nothing about how Cutlass behaves.
 const HIDDEN_SETTINGS: &[&str] = &["recent_projects"];
 
+/// What `settings.get` leaves out of each MCP server: the arguments a
+/// program is started with and a remote server's address. A key is often
+/// written into either, and what this tool answers goes to the model, a
+/// cloud one included, and to any MCP client.
+const HIDDEN_SERVER_FIELDS: &[&str] = &["args", "url"];
+
 fn show_settings(tool: &SettingsTool) -> String {
     let view = tool.get();
     let mut settings = serde_json::to_value(&view.settings).unwrap_or_default();
+    let mut not_shown = Vec::new();
     if let Some(map) = settings.as_object_mut() {
         for key in HIDDEN_SETTINGS {
             map.remove(*key);
         }
+        let servers = map
+            .get_mut("mcp_servers")
+            .and_then(serde_json::Value::as_array_mut);
+        for server in servers.into_iter().flatten() {
+            let Some(server) = server.as_object_mut() else {
+                continue;
+            };
+            let name = server
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            for field in HIDDEN_SERVER_FIELDS {
+                let set = server.remove(*field).is_some_and(|value| match value {
+                    serde_json::Value::String(text) => !text.trim().is_empty(),
+                    serde_json::Value::Array(items) => !items.is_empty(),
+                    serde_json::Value::Null => false,
+                    _ => true,
+                });
+                if set {
+                    not_shown.push(format!("mcp_servers.{name}.{field}"));
+                }
+            }
+        }
     }
-    serde_json::json!({ "generation": view.generation, "settings": settings }).to_string()
+    let mut shown = serde_json::json!({ "generation": view.generation, "settings": settings });
+    // The caller learns which are set without their values: a change that
+    // leaves them out keeps them, as the lists merge by entry.
+    if !not_shown.is_empty() {
+        shown["not_shown"] = serde_json::json!(not_shown);
+    }
+    shown.to_string()
 }
 
 /// `settings.set` as JSON: the generation read and a merge patch
@@ -4242,6 +4283,82 @@ mod tests {
             "{}",
             broken.content
         );
+    }
+
+    #[test]
+    fn settings_get_keeps_a_servers_arguments_and_address_to_itself() {
+        let temp = Temp::new();
+        let mut initial = Settings::default();
+        let mut local = server("notes", true, McpServer::STDIO, "notes-server", "");
+        local.args = vec!["--api-key".to_owned(), "sk-local-secret".to_owned()];
+        initial.mcp_servers.push(local);
+        initial.mcp_servers.push(server(
+            "studio",
+            false,
+            McpServer::REMOTE,
+            "",
+            "https://studio.example/mcp?token=sk-remote-secret",
+        ));
+        initial
+            .mcp_servers
+            .push(server("plain", false, McpServer::STDIO, "plain-server", ""));
+        cutlass_settings::save(&temp.file(), 0, &initial).unwrap();
+        let mut registry = open(&temp, Gate::refuse());
+        let read = ToolSink::run_tool(
+            &mut registry,
+            &ToolCall {
+                id: "g".to_owned(),
+                name: "settings.get".to_owned(),
+                arguments: String::new(),
+            },
+        );
+        assert!(!read.is_error, "{}", read.content);
+        // Neither key reaches the caller, in any form.
+        assert!(!read.content.contains("secret"), "{}", read.content);
+        assert!(!read.content.contains("studio.example"), "{}", read.content);
+        let shown: serde_json::Value = serde_json::from_str(&read.content).unwrap();
+        let servers = shown["settings"]["mcp_servers"].as_array().unwrap();
+        assert_eq!(servers.len(), 3);
+        // What says which server it is, and how it is set, is still there.
+        assert_eq!(servers[0]["name"], "notes");
+        assert_eq!(servers[0]["command"], "notes-server");
+        assert_eq!(servers[0]["enabled"], true);
+        assert_eq!(servers[1]["kind"], McpServer::REMOTE);
+        for server in servers {
+            assert!(server.get("args").is_none(), "{server}");
+            assert!(server.get("url").is_none(), "{server}");
+        }
+        // The caller is told which are set, and only those.
+        assert_eq!(
+            shown["not_shown"],
+            serde_json::json!(["mcp_servers.notes.args", "mcp_servers.studio.url"])
+        );
+        // A change that does not name them keeps them as they are.
+        let generation = registry.settings.generation();
+        let set = ToolSink::run_tool(
+            &mut registry,
+            &ToolCall {
+                id: "s".to_owned(),
+                name: "settings.set".to_owned(),
+                arguments: format!(
+                    r#"{{"expected_generation":{generation},"changes":{{"mcp_servers":[{{"name":"notes","enabled":false}}]}}}}"#
+                ),
+            },
+        );
+        assert!(!set.is_error, "{}", set.content);
+        let kept = &registry.settings.settings().mcp_servers;
+        assert!(!kept[0].enabled);
+        assert_eq!(kept[0].args, ["--api-key", "sk-local-secret"]);
+        assert_eq!(
+            kept[1].url,
+            "https://studio.example/mcp?token=sk-remote-secret"
+        );
+        // With nothing set aside, the answer has no such list.
+        let bare = Temp::new();
+        let mut registry = open(&bare, Gate::refuse());
+        let read = registry.invoke(Invocation::SettingsGet).unwrap();
+        let shown: serde_json::Value = serde_json::from_str(&read).unwrap();
+        assert!(shown.get("not_shown").is_none(), "{read}");
     }
 
     #[test]

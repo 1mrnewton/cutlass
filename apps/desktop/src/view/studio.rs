@@ -16,7 +16,7 @@ use egui::{
 
 use cutlass_effects::{
     Block, CROSS, ControlUnit, CrossKind, Curve, EFFECT_CATEGORIES, Ease, MAX_CONTROLS, MAX_PASSES,
-    TRANSITION_CATEGORIES, gap_ease,
+    ORIGINAL, Pass, TRANSITION_CATEGORIES, gap_ease,
 };
 
 use crate::shell::Shell;
@@ -1182,6 +1182,7 @@ fn side_panel(shell: &mut Shell, ui: &mut Ui, view: &mut StudioView, rect: Rect)
                 if block.params().is_empty() {
                     faint(ui, "This block has nothing to set.");
                 }
+                kept_rows(shell, ui, &doc, stack, pass);
             }
             if !doc.is_effect() {
                 heading(ui, "The swap");
@@ -1193,6 +1194,45 @@ fn side_panel(shell: &mut Shell, ui: &mut Ui, view: &mut StudioView, rect: Rect)
             card_section(shell, ui, view, &doc);
             ui.add_space(16.0);
         });
+}
+
+/// What pass `pass` keeps for a later blend, and for a blend the picture
+/// it lays over.
+fn kept_rows(shell: &mut Shell, ui: &mut Ui, doc: &Doc, stack: Stack, pass: usize) {
+    let Some(found) = doc.passes(stack).get(pass) else {
+        return;
+    };
+    if found.block == Block::Blend {
+        let pictures = shell.studio().pictures_before(stack, pass);
+        let current = found.with.as_deref().unwrap_or(ORIGINAL);
+        ui.horizontal(|ui| {
+            faint(ui, "Lays over");
+            let names: Vec<&str> = pictures.iter().map(String::as_str).collect();
+            let salt = format!("with {stack:?} {pass}");
+            if let Some(index) = pick(ui, &salt, current, &names, 110.0) {
+                shell.studio_mut().set_with(stack, pass, names[index]);
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        faint(ui, "Keep as");
+        let key = format!("save {stack:?} {pass}");
+        if let Some(name) = text(ui, &key, found.save.as_deref().unwrap_or(""), 110.0) {
+            shell.studio_mut().set_save(stack, pass, &name);
+        }
+    });
+}
+
+/// A pass's row: its place, its block, and what it keeps or lays over.
+fn pass_label(index: usize, pass: &Pass) -> String {
+    let mut label = format!("{}  {}", index + 1, block_label(pass.block));
+    if pass.block == Block::Blend {
+        label.push_str(&format!(" · {}", pass.with.as_deref().unwrap_or(ORIGINAL)));
+    }
+    if let Some(name) = &pass.save {
+        label.push_str(&format!(" · keeps {name}"));
+    }
+    label
 }
 
 /// One stack: its passes in order, and a way to add one.
@@ -1226,7 +1266,7 @@ fn stack_section(shell: &mut Shell, ui: &mut Ui, doc: &Doc, stack: Stack) {
             ui.painter().text(
                 rect.left_center() + vec2(8.0, 0.0),
                 Align2::LEFT_CENTER,
-                format!("{}  {}", index + 1, block_label(pass.block)),
+                pass_label(index, pass),
                 FontId::proportional(12.5),
                 if muted { tokens::FAINT } else { tokens::TEXT },
             );
@@ -1579,7 +1619,7 @@ fn card_section(shell: &mut Shell, ui: &mut Ui, view: &mut StudioView, doc: &Doc
 
 #[cfg(test)]
 mod tests {
-    use super::{block_label, param_label, short};
+    use super::{block_label, param_label, pass_label, short};
     use cutlass_effects::Block;
 
     #[test]
@@ -1606,6 +1646,11 @@ mod tests {
         assert_eq!(block_label(Block::RgbSplit), "RGB split");
         assert_eq!(block_label(Block::ZoomBlur), "Zoom blur");
         assert_eq!(block_label(Block::Blur), "Blur");
+        let mut blend = cutlass_effects::Pass::new(Block::Blend);
+        assert_eq!(pass_label(1, &blend), "2  Blend · original");
+        blend.with = Some("soft".to_owned());
+        blend.save = Some("both".to_owned());
+        assert_eq!(pass_label(1, &blend), "2  Blend · soft · keeps both");
         assert_eq!(param_label("radius"), "Radius");
         assert_eq!(param_label("soft_edge"), "Soft edge");
         assert_eq!(param_label(""), "");

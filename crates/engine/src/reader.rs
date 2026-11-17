@@ -17,7 +17,9 @@ use cutlass_codec::access::{
     StandardLayout, Transfer,
 };
 use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
-use cutlass_container::{Demux, DisplayQuarter, OpenError, ProbeResult, ReadError, SeekTo};
+use cutlass_container::{
+    Demux, DisplayQuarter, Landing, OpenError, ProbeResult, ReadError, SeekTo,
+};
 use cutlass_decode::{
     AudioOutput, CodecError, DecodeFactory, Decoder, Output, Packet as AccessPacket, PictureOutput,
     PictureSamples, SideData, StillImage, Surface,
@@ -35,6 +37,11 @@ const MAX_PROBED: usize = 4_096;
 const DECODE_PACKETS: u32 = 64;
 /// Pictures one forward scene scan will decode. A longer file is read from its start.
 const MAX_SCAN_PICTURES: u32 = 4_000;
+
+/// The spacing from which [`Media::pictures_across`] seeks to each picture
+/// instead of decoding through: a key frame is usually closer than this, so
+/// a seek decodes less than the pictures between.
+const SEEK_SPACING: i64 = 2_000_000;
 /// How far past the last picture [`Media::decode_at`] keeps decoding forward
 /// instead of seeking. A longer jump seeks to the keyframe before the time.
 const FORWARD_REACH: i64 = 2_000_000;
@@ -673,8 +680,9 @@ impl Media {
     }
 
     /// Drop what the picture decoder holds and seek to the keyframe before
-    /// `source`.
-    fn restart_picture(&mut self, source: Micros) -> Result<(), EngineError> {
+    /// `source`. The source time of the packet the seek landed on, when the
+    /// demuxer names one.
+    fn restart_picture(&mut self, source: Micros) -> Result<Option<Micros>, EngineError> {
         let (track, timescale) = {
             let Some(pipe) = self.picture.as_mut() else {
                 return Err(EngineError::NoDecoder {
@@ -696,8 +704,12 @@ impl Media {
 
     /// Pictures from `range`, at least `gap` microseconds apart, at most `limit`.
     ///
-    /// One seek starts the read. Later pictures stay in file order. The stream
-    /// ending is an empty or short list, not an error.
+    /// One seek starts the read. Pictures [`SEEK_SPACING`] or more apart are
+    /// each sought, so a long range is covered before the decode budget runs
+    /// out; when a seek lands no later than the last picture, the key frames
+    /// are too far apart for that to save work, and the rest is decoded
+    /// through. Pictures stay in file order. The stream ending is an empty
+    /// or short list, not an error.
     pub fn pictures_across(
         &mut self,
         range: &TimeRange,
@@ -722,6 +734,7 @@ impl Media {
         let mut kept = Vec::new();
         let mut last = None;
         let mut decoded = 0_u32;
+        let mut seeking = gap >= SEEK_SPACING;
         while kept.len() < limit {
             if decoded == MAX_SCAN_PICTURES {
                 break;
@@ -743,37 +756,55 @@ impl Media {
             {
                 continue;
             }
-            last = Some(held.start.0);
+            let start = held.start.0;
+            last = Some(start);
             kept.push(held);
+            if seeking && kept.len() < limit {
+                let next = start.saturating_add(gap);
+                if next >= end {
+                    break;
+                }
+                let landed = self.restart_picture(Micros(next))?;
+                seeking = landed.is_some_and(|landed| landed.0 > start);
+            }
         }
         Ok(kept)
     }
 
+    /// Seek the picture track to `source`. The source time of the packet the
+    /// seek landed on, when the stream has a clock and the demuxer names one.
     fn seek_picture(
         &mut self,
         source: Micros,
         track: u32,
         timescale: Timescale,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Option<Micros>, EngineError> {
         self.run = None;
         if timescale.is_clock() {
             let lead = self.picture.as_ref().map_or(0, |pipe| pipe.lead);
             let ticks = micros_to_ticks_floor(source, timescale)?.saturating_add(lead);
-            self.demux
+            let landing = self
+                .demux
                 .seek(SeekTo {
                     track,
                     time: ticks,
                     end: None,
                 })
                 .map_err(from_read)?;
+            Ok(match landing.landing {
+                Landing::Packet { time, .. } => {
+                    ticks_to_micros(time.saturating_sub(lead), timescale).ok()
+                }
+                Landing::End => None,
+            })
         } else {
             let _ = self.demux.seek(SeekTo {
                 track,
                 time: 0,
                 end: None,
             });
+            Ok(None)
         }
-        Ok(())
     }
 
     /// The next picture in display order.

@@ -820,6 +820,49 @@ fn pictures_a_drain_releases_reach_the_scan_at_their_own_times() {
     assert_eq!(starts, expected);
 }
 
+/// Ten minutes at 30 fps, every picture a key frame the seek lands on.
+fn open_ten_minutes(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let mut movie = scripted(0, 18_000);
+    movie.lands = true;
+    Ok(Box::new(movie))
+}
+
+/// The same ten minutes, where every seek lands on the first picture.
+fn open_ten_minutes_unseekable(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(Box::new(scripted(0, 18_000)))
+}
+
+#[test]
+fn far_apart_pictures_are_sought_so_a_long_range_is_covered() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_ten_minutes);
+    readers.decoders_mut().register(CodecId::Jpeg, open_token);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let _ = script_counts();
+    let range = TimeRange::new(0, 600_000_000);
+    let frames = media.pictures_across(&range, 2_500_000, 240).expect("scan");
+    let (_, reads) = script_counts();
+    // All 240 pictures, across the whole ten minutes, from a packet or two
+    // each instead of the 4,000 the decode budget would stop at.
+    assert_eq!(frames.len(), 240);
+    let last = frames.last().expect("last").start.0;
+    assert!(last >= 597_000_000, "{last}");
+    assert!(reads < 1_000, "{reads} packets read");
+    let starts: Vec<i64> = frames.iter().map(|held| held.start.0).collect();
+    assert!(starts.windows(2).all(|pair| pair[1] - pair[0] >= 2_500_000));
+
+    // A file whose seeks land back at the start is decoded through after
+    // the first seek shows it, and still keeps its pictures in order.
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_ten_minutes_unseekable);
+    readers.decoders_mut().register(CodecId::Jpeg, open_token);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let frames = media.pictures_across(&range, 2_500_000, 240).expect("scan");
+    let starts: Vec<i64> = frames.iter().map(|held| held.start.0).collect();
+    assert!(starts.len() > 1);
+    assert!(starts.windows(2).all(|pair| pair[1] - pair[0] >= 2_500_000));
+}
+
 fn open_four(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     Ok(Box::new(scripted(0, 4)))
 }

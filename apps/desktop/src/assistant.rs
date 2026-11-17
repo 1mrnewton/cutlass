@@ -1344,18 +1344,27 @@ mod tests {
         // The second call is written for the project opened meanwhile, at
         // the revision it will be at: the worst case, where it would land.
         let there = 9_000;
-        let model = LocalModel::scripted(vec![
-            completion(
-                "",
-                vec![ToolCall {
-                    id: "read".to_owned(),
-                    name: "draft.query".to_owned(),
-                    arguments: "project".to_owned(),
-                }],
-            ),
-            completion("", split(there, "a", 1_000_000, "b")),
-            completion("Split.", Vec::new()),
-        ]);
+        // The model is held before its second answer until the project
+        // has changed, as a model that thinks for a while is.
+        let (go, held) = std::sync::mpsc::channel();
+        let model = Held {
+            steps: vec![
+                completion(
+                    "",
+                    vec![ToolCall {
+                        id: "read".to_owned(),
+                        name: "draft.query".to_owned(),
+                        arguments: "project".to_owned(),
+                    }],
+                ),
+                completion("", split(there, "a", 1_000_000, "b")),
+                completion("Split.", Vec::new()),
+            ]
+            .into(),
+            answered: 0,
+            hold_before: 1,
+            held,
+        };
         let mut assistant = Assistant::default();
         assistant.start(model, 8, "split it");
         // The turn's first call runs on the project it was asked in.
@@ -1371,6 +1380,7 @@ mod tests {
         shell.open_folder(&other_path).unwrap();
         let pinned = shell.session().unwrap().clone().starting_at(there);
         shell.adopt_session(pinned).unwrap();
+        go.send(()).unwrap();
         finish(&mut assistant, &mut shell);
         assert!(!assistant.busy());
         // Nothing of the turn reached the project that is open now.
@@ -1386,17 +1396,24 @@ mod tests {
         assert!(assistant.history.len() >= 3, "{:?}", assistant.history);
 
         // Closing the project ends a turn the same way.
-        let model = LocalModel::scripted(vec![
-            completion(
-                "",
-                vec![ToolCall {
-                    id: "read-2".to_owned(),
-                    name: "draft.query".to_owned(),
-                    arguments: "project".to_owned(),
-                }],
-            ),
-            completion("", split(there, "a", 1_000_000, "b")),
-        ]);
+        let (go, held) = std::sync::mpsc::channel();
+        let model = Held {
+            steps: vec![
+                completion(
+                    "",
+                    vec![ToolCall {
+                        id: "read-2".to_owned(),
+                        name: "draft.query".to_owned(),
+                        arguments: "project".to_owned(),
+                    }],
+                ),
+                completion("", split(there, "a", 1_000_000, "b")),
+            ]
+            .into(),
+            answered: 0,
+            hold_before: 1,
+            held,
+        };
         let steps = assistant.entries.len();
         assistant.start(model, 8, "split it");
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1414,6 +1431,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         shell.close_project().unwrap();
+        go.send(()).unwrap();
         finish(&mut assistant, &mut shell);
         assert_eq!(
             assistant.entries.last(),
@@ -1421,6 +1439,31 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&path);
         let _ = std::fs::remove_dir_all(&other_path);
+    }
+
+    /// A scripted model that waits to be told to go on before one of its
+    /// answers, so a test can act while it "thinks".
+    struct Held {
+        steps: std::collections::VecDeque<Completion>,
+        answered: usize,
+        /// The answer, counted from 0, it waits before.
+        hold_before: usize,
+        held: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl cutlass_agent::Model for Held {
+        fn complete(
+            &mut self,
+            _request: &cutlass_agent::CompletionRequest,
+        ) -> Result<Completion, cutlass_agent::ModelError> {
+            if self.answered == self.hold_before {
+                let _ = self.held.recv();
+            }
+            self.answered += 1;
+            self.steps
+                .pop_front()
+                .ok_or(cutlass_agent::ModelError::NoMoreSteps)
+        }
     }
 
     #[test]
@@ -1432,12 +1475,21 @@ mod tests {
             name: "draft.query".to_owned(),
             arguments: "project".to_owned(),
         };
-        // The turn splits, and after the user's edit only reads.
-        let model = LocalModel::scripted(vec![
-            completion("", split(at(&shell), "a", 1_000_000, "b")),
-            completion("", vec![read("look")]),
-            completion("Split.", Vec::new()),
-        ]);
+        // The turn splits, and after the user's edit only reads. The model
+        // is held before its second answer until the user has edited, as
+        // a model that thinks for a while is.
+        let (go, held) = std::sync::mpsc::channel();
+        let model = Held {
+            steps: vec![
+                completion("", split(at(&shell), "a", 1_000_000, "b")),
+                completion("", vec![read("look")]),
+                completion("Split.", Vec::new()),
+            ]
+            .into(),
+            answered: 0,
+            hold_before: 1,
+            held,
+        };
         assistant.start(model, 8, "split it");
         let deadline = Instant::now() + Duration::from_secs(10);
         while clips(&shell) == 1 {
@@ -1447,6 +1499,7 @@ mod tests {
         }
         // The user renames the project while the model thinks.
         shell.set_project_name("named by the user").unwrap();
+        go.send(()).unwrap();
         finish(&mut assistant, &mut shell);
         assert_eq!(clips(&shell), 2);
         // Taking the turn back would undo the rename with the split, so

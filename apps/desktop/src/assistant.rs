@@ -121,6 +121,10 @@ pub struct Assistant {
     pending: Option<Pending>,
     /// Where this conversation is kept; `None` keeps it nowhere.
     chat_file: Option<PathBuf>,
+    /// The file this conversation would be kept in, had it read: one that
+    /// did not, and could not be set aside, is asked for on every frame
+    /// and looked at once.
+    unkept: Option<PathBuf>,
     /// The edits of the turn running now, or of the last one.
     turn_edits: Option<TurnEdits>,
     /// A turn started and has not met the project yet.
@@ -556,25 +560,53 @@ impl Assistant {
     /// leaves what is on screen. A turn running holds on to the file it
     /// started with.
     pub fn follow(&mut self, file: Option<PathBuf>) {
-        if self.busy() || file == self.chat_file {
+        if self.busy() || file == self.chat_file || (file.is_some() && file == self.unkept) {
             return;
         }
+        self.unkept = None;
         if file.is_none() {
             self.chat_file = None;
             return;
         }
         self.pending = None;
-        self.history = file
-            .as_deref()
-            .map(|file| {
-                cutlass_agent::load_chat(file).unwrap_or_else(|error| {
-                    cutlass_logger::warn!("assistant chat: {error}");
-                    Vec::new()
-                })
-            })
-            .unwrap_or_default();
-        self.entries = shown(&self.history);
-        self.chat_file = file;
+        let Some(file) = file else {
+            return;
+        };
+        match cutlass_agent::load_chat(&file) {
+            Ok(history) => {
+                self.history = history;
+                self.entries = shown(&self.history);
+                self.chat_file = Some(file);
+            }
+            // The file is there and does not read: a newer build wrote it,
+            // or it is damaged. The next turn would write a new
+            // conversation over it, so it is first moved out of the way,
+            // where it can still be looked at.
+            Err(error) => {
+                cutlass_logger::warn!("assistant chat: {error}");
+                self.history.clear();
+                self.entries.clear();
+                let aside = file.with_extension(UNREAD_ENDING);
+                match std::fs::rename(&file, &aside) {
+                    Ok(()) => {
+                        cutlass_logger::warn!(
+                            "assistant chat: kept the unread file as {}",
+                            aside.display()
+                        );
+                        self.entries.push(Entry::Notice(UNREAD_KEPT.to_owned()));
+                        self.chat_file = Some(file);
+                    }
+                    // It could not be moved, so nothing is written there:
+                    // this conversation is kept nowhere.
+                    Err(error) => {
+                        cutlass_logger::warn!("assistant chat: {}: {error}", file.display());
+                        self.entries.push(Entry::Notice(UNREAD_LEFT.to_owned()));
+                        self.chat_file = None;
+                        self.unkept = Some(file);
+                    }
+                }
+            }
+        }
     }
 
     /// Write the conversation to its file; an empty one removes the file.
@@ -898,6 +930,19 @@ const PENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// was used when it was read.
 const OLD_RESULT_LIMIT: usize = 2000;
 
+/// The ending a conversation file that does not read is kept under.
+const UNREAD_ENDING: &str = "unread";
+
+/// What the panel says when a kept conversation did not read and was moved
+/// out of the way.
+const UNREAD_KEPT: &str = "The conversation kept for this project could not be read. It was set \
+     aside, and a new one starts here.";
+
+/// What the panel says when a kept conversation did not read and could not
+/// be moved.
+const UNREAD_LEFT: &str = "The conversation kept for this project could not be read. It is left \
+     as it is, and what is said now is not kept.";
+
 /// What a model is told, after what the user looks at, when the start of
 /// the conversation is no longer sent to it.
 const LEFT_OUT: &str = "; the earlier turns of this conversation are no longer sent to you, so \
@@ -1118,6 +1163,70 @@ mod tests {
         assistant.clear();
         assert!(!first.exists());
         assert!(!second.exists());
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_kept_conversation_that_does_not_read_is_set_aside_and_not_written_over() {
+        let (mut shell, path) = shell_with_project("unread");
+        let file = path.join("chats").join("a.json");
+        let aside = path.join("chats").join("a.unread");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // What a newer build might write: a message this one does not know.
+        let newer = r#"{"version":2,"messages":[{"role":"narrator","text":"kept"}]}"#;
+        std::fs::write(&file, newer).unwrap();
+        let mut assistant = Assistant::default();
+        assistant.follow(Some(file.clone()));
+        assert!(assistant.history.is_empty());
+        assert_eq!(
+            assistant.entries,
+            [Entry::Notice(super::UNREAD_KEPT.to_owned())]
+        );
+        // The file is out of the way, whole.
+        assert!(!file.exists());
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), newer);
+        // A turn keeps a new conversation in the file's place, and what
+        // was set aside is untouched.
+        assistant.start(
+            LocalModel::scripted(vec![completion("Hello.", Vec::new())]),
+            8,
+            "hello",
+        );
+        finish(&mut assistant, &mut shell);
+        assert_eq!(cutlass_agent::load_chat(&file).unwrap().len(), 2);
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), newer);
+        // A file that is not there is simply an empty conversation.
+        let none = path.join("chats").join("none.json");
+        assistant.follow(Some(none.clone()));
+        assert!(assistant.entries.is_empty() && assistant.history.is_empty());
+        assert!(!none.with_extension(super::UNREAD_ENDING).exists());
+
+        // One that cannot be moved out of the way is left alone: nothing
+        // is kept in its place, and it is looked at once, not each frame.
+        let stuck = path.join("chats").join("stuck.json");
+        std::fs::write(&stuck, newer).unwrap();
+        let taken = stuck.with_extension(super::UNREAD_ENDING);
+        std::fs::create_dir_all(taken.join("in the way")).unwrap();
+        assistant.follow(Some(stuck.clone()));
+        assert_eq!(
+            assistant.entries,
+            [Entry::Notice(super::UNREAD_LEFT.to_owned())]
+        );
+        assistant.start(
+            LocalModel::scripted(vec![completion("Hello.", Vec::new())]),
+            8,
+            "hello",
+        );
+        finish(&mut assistant, &mut shell);
+        let said = assistant.entries.len();
+        assert!(said > 1);
+        assistant.follow(Some(stuck.clone()));
+        assert_eq!(
+            assistant.entries.len(),
+            said,
+            "the talk is not started over"
+        );
+        assert_eq!(std::fs::read_to_string(&stuck).unwrap(), newer);
         let _ = std::fs::remove_dir_all(&path);
     }
 

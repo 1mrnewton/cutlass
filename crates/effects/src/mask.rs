@@ -582,8 +582,8 @@ pub fn listed_mask(draft: &Draft, segment: &Segment, kind: &str) -> Option<Mask>
 pub struct ListedMask {
     pub id: MaterialId,
     pub mask: Mask,
-    /// Whether it is the first of its kind on the clip, keyed under the
-    /// plain mask key names.
+    /// Whether it is the clip's first clip mask, keyed under the plain
+    /// mask key names. A colour mask never is.
     pub first: bool,
     /// What a drawn mask is drawn from, when it has been drawn.
     pub art: Option<MaskArt>,
@@ -628,9 +628,10 @@ pub fn listed_masks(draft: &Draft, segment: &Segment, kind: &str) -> Vec<ListedM
         if raw.kind != kind {
             continue;
         }
-        // The first record of the kind keys under the plain names, read or
-        // not, as the requests count places.
-        let first = seen == 0;
+        // The first clip mask keys under the plain names, read or not, as
+        // the requests count places. Colour masks always key under their
+        // records, so they never take a clip mask's keys.
+        let first = seen == 0 && kind == MASK;
         seen += 1;
         if let Some(mask) = Mask::from_fields(&raw.fields) {
             let art = MaskArt::from_fields(&raw.fields).filter(|art| art.shape() == mask.shape);

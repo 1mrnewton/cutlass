@@ -455,3 +455,52 @@ fn a_drawn_mask_keeps_its_drawing_until_it_is_given_another() {
     let raw = &draft.materials.common_mask[0];
     assert!(!raw.fields.contains_key("art"));
 }
+
+#[test]
+fn a_colour_mask_keys_under_its_record_and_never_takes_a_clip_masks_keys() {
+    let mut draft = one_clip();
+    let circle = Mask::new(MaskShape::Circle);
+    add_mask(&mut draft, &a(), &id("m"), &circle, None, false).unwrap();
+    add_mask(&mut draft, &a(), &id("c"), &circle, None, true).unwrap();
+    let x = MASK_KEYS[0];
+    key(&mut draft, x, 0.5);
+    key(&mut draft, &mask_key(x, Some("c")), -0.5);
+    let segment = &draft.tracks[0].segments[0];
+    let graphs = &draft.keyframe_graph_list;
+    let clip = &segment_masks(&draft, segment)[0];
+    let colour = &segment_color_masks(&draft, segment)[0];
+    assert_eq!(colour.key_record(), Some("c"));
+    assert!((clip.at(segment, graphs, Micros(0)).x - 0.5).abs() < 1e-6);
+    assert!((colour.at(segment, graphs, Micros(0)).x + 0.5).abs() < 1e-6);
+    // Taking the colour mask off takes its keys and leaves the clip mask's.
+    remove_mask(&mut draft, &a(), 0, true).unwrap();
+    assert_eq!(key_names(&draft), vec![x.to_owned()]);
+}
+
+#[test]
+fn setting_a_shared_first_mask_keeps_its_place_in_the_list() {
+    let mut draft = one_clip();
+    draft.tracks[0]
+        .segments
+        .push(Segment::new("b", "m", TimeRange::new(1_000_000, 1_000_000)));
+    let circle = Mask::new(MaskShape::Circle);
+    let star = mask(MaskShape::Star, MaskMode::Subtract);
+    add_mask(&mut draft, &a(), &id("m1"), &circle, None, false).unwrap();
+    add_mask(&mut draft, &a(), &id("m2"), &star, None, false).unwrap();
+    // The second clip shares the first mask.
+    draft.tracks[0].segments[1]
+        .extra_material_refs
+        .push(id("m1"));
+    let heart = Mask::new(MaskShape::Heart);
+    set_mask(&mut draft, &a(), &id("m1-own"), Some(&heart)).unwrap();
+    assert_eq!(ids(&draft), vec!["m1-own", "m2"]);
+    assert_eq!(
+        shapes(&draft),
+        vec![
+            (MaskShape::Heart, MaskMode::Add),
+            (MaskShape::Star, MaskMode::Subtract)
+        ]
+    );
+    let other = segment_masks(&draft, &draft.tracks[0].segments[1]);
+    assert_eq!(other[0].mask, circle);
+}

@@ -36,6 +36,13 @@ fn kind(color: bool) -> (&'static str, &'static [TrackType]) {
     }
 }
 
+/// The record the keys of the mask of `kind` at `index`, record `id`, are
+/// named for: none for a clip's first clip mask, which keys under the plain
+/// names; a colour mask always keys under its record.
+fn key_record<'a>(kind: &str, index: usize, id: &'a str) -> Option<&'a str> {
+    (kind != MASK || index > 0).then_some(id)
+}
+
 /// Put `mask` at the end of `segment_id`'s masks, as record `material_id`,
 /// drawn from `art` when it is a text, brush or pen mask.
 pub fn add_mask(
@@ -124,8 +131,8 @@ pub fn edit_mask(
     {
         *slot = material_id.clone();
     }
-    if index > 0 {
-        rename_keys(segment, Some(id.as_str()), Some(material_id.as_str()));
+    if let Some(old) = key_record(kind, index, id.as_str()) {
+        rename_keys(segment, Some(old), Some(material_id.as_str()));
     }
     Ok(())
 }
@@ -147,13 +154,12 @@ pub fn remove_mask(
     let alone = !shared(draft, &id);
     let segment = &mut draft.tracks[track].segments[at];
     segment.extra_material_refs.retain(|other| *other != id);
-    if index == 0 {
-        drop_keys(segment, None);
-        if let Some(next) = listed.get(1) {
-            rename_keys(segment, Some(next.as_str()), None);
-        }
-    } else {
-        drop_keys(segment, Some(id.as_str()));
+    drop_keys(segment, key_record(kind, index, id.as_str()));
+    if kind == MASK
+        && index == 0
+        && let Some(next) = listed.get(1)
+    {
+        rename_keys(segment, Some(next.as_str()), None);
     }
     if alone {
         draft.materials.common_mask.retain(|raw| raw.id != id);
@@ -194,7 +200,7 @@ pub fn move_mask(
         }
     }
     let new_first = &listed[0];
-    if *new_first != old_first {
+    if kind == MASK && *new_first != old_first {
         // The old first's plain keys take its name, then the new first's
         // named keys become the plain ones.
         rename_keys(segment, None, Some(old_first.as_str()));
@@ -203,18 +209,16 @@ pub fn move_mask(
     Ok(())
 }
 
-/// Before the clip's first mask of `kind` goes, by the one-mask requests:
-/// its plain keys go with it and the next takes the plain names.
-pub(super) fn first_leaves(draft: &mut Draft, segment_id: &SegmentId, kind: &str) {
-    let Ok((track, at)) = super::locate(draft, segment_id) else {
-        return;
-    };
-    let listed = records(draft, &draft.tracks[track].segments[at], kind);
-    let segment = &mut draft.tracks[track].segments[at];
-    if let Some(next) = listed.get(1) {
-        drop_keys(segment, None);
-        rename_keys(segment, Some(next.as_str()), None);
-    }
+/// How many masks of its kind `segment_id` lists, once it is known the
+/// clip may take them.
+pub(super) fn count(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    color: bool,
+) -> Result<usize, EditError> {
+    let (kind, tracks) = kind(color);
+    let (track, at) = target(draft, segment_id, tracks)?;
+    Ok(records(draft, &draft.tracks[track].segments[at], kind).len())
 }
 
 /// The clip's records of `kind`, in its order.

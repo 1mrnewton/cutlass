@@ -20,7 +20,7 @@
 //! layer shader converts transfers with.
 
 use crate::pool::{Bind, TextureKey};
-use cutlass_effects::{Block, Step};
+use cutlass_effects::{Block, MAX_VALUES, Step};
 
 use crate::CANVAS_FORMAT;
 
@@ -166,8 +166,11 @@ fn fs_copy_out(in: Out) -> @location(0) vec4<f32> {
 
 const SHADER: &str = r"
 struct Effect {
-    // The block, then for a blur 0 across and 1 down.
+    // The kernel: a block's code, or one of a block's own draws past
+    // them; then a small number it reads, such as a blur's direction (0
+    // across, 1 down).
     code: vec2<u32>,
+    // The size of the picture this draw writes, in pixels.
     size: vec2<f32>,
     a: vec4<f32>,
     b: vec4<f32>,
@@ -177,6 +180,9 @@ struct Effect {
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var linear_sampler: sampler;
 @group(0) @binding(2) var<uniform> fx: Effect;
+// A second picture a draw may read: a working picture of its block's, or
+// the picture again when the draw reads one only.
+@group(0) @binding(3) var other: texture_2d<f32>;
 
 struct Out {
     @builtin(position) position: vec4<f32>,
@@ -247,25 +253,64 @@ fn slices(uv: vec2<f32>) -> vec4<f32> {
     return fetch(uv + vec2<f32>(shift, 0.0));
 }
 
-fn blur(uv: vec2<f32>) -> vec4<f32> {
-    let short = min(fx.size.x, fx.size.y);
-    let reach = fx.a.x * short;
-    if (reach < 0.5) {
+// A Gaussian along one direction (`fx.code.y` 0 across, 1 down) of
+// `fx.a.x` texels of the picture read, which is the size of the one
+// written. Two texels a fetch: a pair of weights is one bilinear sample
+// placed between them by their ratio.
+fn gauss(uv: vec2<f32>) -> vec4<f32> {
+    let sigma = fx.a.x;
+    if (sigma < 0.2) {
         return fetch(uv);
     }
     var direction = vec2<f32>(1.0 / fx.size.x, 0.0);
     if (fx.code.y == 1u) {
         direction = vec2<f32>(0.0, 1.0 / fx.size.y);
     }
-    // A tap a pixel or closer apart up to 32 pixels each side, so a wide
-    // blur has no gaps; past that the 65 taps spread out.
-    let half = min(i32(ceil(reach)), 32);
-    let stride = direction * reach / f32(half);
-    var sum = vec4<f32>(0.0);
-    for (var k = -half; k <= half; k = k + 1) {
-        sum = sum + fetch(uv + stride * f32(k));
+    let reach = min(i32(ceil(sigma * 3.0)), 24);
+    let spread = 2.0 * sigma * sigma;
+    var sum = fetch(uv);
+    var total = 1.0;
+    for (var k = 1; k <= reach; k = k + 2) {
+        let near = f32(k);
+        let wa = exp(-near * near / spread);
+        let wb = select(0.0, exp(-(near + 1.0) * (near + 1.0) / spread), k + 1 <= reach);
+        let pair = wa + wb;
+        let offset = direction * (near + wb / pair);
+        sum = sum + (fetch(uv + offset) + fetch(uv - offset)) * pair;
+        total = total + 2.0 * pair;
     }
-    return sum / f32(2 * half + 1);
+    return sum / total;
+}
+
+// Half the size through a 1 3 3 1 filter each way: four bilinear samples
+// three quarters of a texel either side of the texel's middle. Unlike the
+// plain mean of the two by two under it, the filter keeps a thin line
+// where it was, so a blur drawn small does not move it.
+fn halve(uv: vec2<f32>) -> vec4<f32> {
+    let d = 0.75 / vec2<f32>(textureDimensions(source));
+    return (fetch(uv + vec2<f32>(-d.x, -d.y)) + fetch(uv + vec2<f32>(d.x, -d.y))
+        + fetch(uv + vec2<f32>(-d.x, d.y)) + fetch(uv + vec2<f32>(d.x, d.y))) * 0.25;
+}
+
+// A smaller picture brought up to this size through a cubic B-spline,
+// four bilinear samples, so no seam of its texels shows.
+fn smooth_up(uv: vec2<f32>) -> vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(source));
+    let p = uv * dims - vec2<f32>(0.5);
+    let i = floor(p);
+    let f = p - i;
+    let f2 = f * f;
+    let f3 = f2 * f;
+    let w0 = (vec2<f32>(1.0) - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+    let w1 = (vec2<f32>(4.0) - 6.0 * f2 + 3.0 * f3) / 6.0;
+    let w2 = (vec2<f32>(1.0) + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0;
+    let w3 = f3 / 6.0;
+    let g0 = w0 + w1;
+    let g1 = w2 + w3;
+    let low = (i - vec2<f32>(1.0) + w1 / g0 + vec2<f32>(0.5)) / dims;
+    let high = (i + vec2<f32>(1.0) + w3 / g1 + vec2<f32>(0.5)) / dims;
+    return (fetch(vec2<f32>(low.x, low.y)) * g0.x + fetch(vec2<f32>(high.x, low.y)) * g1.x) * g0.y
+        + (fetch(vec2<f32>(low.x, high.y)) * g0.x + fetch(vec2<f32>(high.x, high.y)) * g1.x) * g1.y;
 }
 
 fn grade(uv: vec2<f32>) -> vec4<f32> {
@@ -863,7 +908,7 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         case 0u: { return transform(uv); }
         case 1u: { return rgb_split(uv); }
         case 2u: { return slices(uv); }
-        case 3u: { return blur(uv); }
+        // 3, the blur, is drawn by its plan: GAUSS, HALVE and SMOOTH_UP.
         case 4u: { return grade(uv); }
         case 5u: { return flash(uv); }
         case 6u: { return vignette(uv); }
@@ -897,13 +942,161 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         case 34u: { return rays(uv); }
         case 35u: { return focus(uv); }
         case 36u: { return place(uv); }
+        case 100u: { return gauss(uv); }
+        case 101u: { return halve(uv); }
+        case 102u: { return smooth_up(uv); }
         default: { return fetch(uv); }
     }
 }
 ";
 
-/// Bytes in one step's uniform block.
+/// Bytes in one draw's uniform block.
 const PARAMS: u64 = 64;
+
+/// A picture one draw of a block reads or writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Picture {
+    /// The chain's picture so far. A draw that writes it makes the next
+    /// one, which the draws after it read.
+    Current,
+    /// One of the block's own working pictures, by its index in
+    /// [`Plan::work`].
+    Work(usize),
+}
+
+/// One draw of a block: a full-screen pass of one kernel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Draw {
+    /// What the shader runs: a block's code, or one of the kernels past
+    /// them.
+    pub(crate) kernel: u32,
+    /// A small number the kernel reads: a blur's direction, a level.
+    pub(crate) arg: u32,
+    /// The picture sampled as `source`.
+    pub(crate) read: Picture,
+    /// The picture sampled as `other`, when the draw reads two.
+    pub(crate) other: Option<Picture>,
+    /// The picture drawn.
+    pub(crate) write: Picture,
+    /// The kernel's twelve values.
+    pub(crate) values: [f32; MAX_VALUES],
+}
+
+/// How a block is drawn: its working pictures and its draws in order.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub(crate) struct Plan {
+    /// Each working picture, as how many times smaller than the picture
+    /// it is across and down: a power of two, 1 the picture's own size.
+    pub(crate) work: Vec<u32>,
+    pub(crate) draws: Vec<Draw>,
+}
+
+/// The size of a picture `shrink` times smaller than `size`, rounded up,
+/// never nothing.
+pub(crate) fn shrunk_size(size: (u32, u32), shrink: u32) -> (u32, u32) {
+    let shrink = shrink.max(1);
+    (
+        size.0.div_ceil(shrink).max(1),
+        size.1.div_ceil(shrink).max(1),
+    )
+}
+
+/// The kernels past the blocks' own codes.
+const GAUSS: u32 = 100;
+const HALVE: u32 = 101;
+const SMOOTH_UP: u32 = 102;
+
+/// The most times smaller than the picture a working picture is.
+pub(crate) const MAX_SHRINK: u32 = 64;
+
+/// The fewest texels of the working picture a blur's sigma spans: below
+/// it the picture would be too coarse to hold the blur's shape.
+const MIN_SIGMA_TEXELS: f32 = 2.0;
+
+/// How `step` is drawn over a `size` picture.
+pub(crate) fn plan(step: &Step, size: (u32, u32)) -> Plan {
+    match step.block {
+        Block::Blur => {
+            let short = size.0.min(size.1) as f32;
+            blur_plan(step.values[0] * short)
+        }
+        _ => Plan {
+            work: Vec::new(),
+            draws: vec![Draw {
+                kernel: step.block.code(),
+                arg: 0,
+                read: Picture::Current,
+                other: None,
+                write: Picture::Current,
+                values: step.values,
+            }],
+        },
+    }
+}
+
+/// A draw of `kernel` with `values` set from its first few.
+fn kernel(kernel: u32, arg: u32, read: Picture, write: Picture, first: &[f32]) -> Draw {
+    let mut values = [0.0; MAX_VALUES];
+    values[..first.len()].copy_from_slice(first);
+    Draw {
+        kernel,
+        arg,
+        read,
+        other: None,
+        write,
+        values,
+    }
+}
+
+/// A Gaussian blur as wide as a box of `reach` pixels each side: the same
+/// spread, `reach / sqrt(3)`, without the box's hard edge. A wide one is
+/// drawn on a picture halved until the spread is a few of its texels,
+/// then brought back up through a B-spline; the halving and the spline
+/// blur too, and the Gaussian drawn is narrowed by what they add, so the
+/// spread is the same at every size.
+fn blur_plan(reach: f32) -> Plan {
+    let sigma = reach / 3f32.sqrt();
+    if sigma < 0.2 {
+        return Plan::default();
+    }
+    let mut shrink = 1;
+    while shrink < MAX_SHRINK && sigma / (shrink * 2) as f32 >= MIN_SIGMA_TEXELS {
+        shrink *= 2;
+    }
+    if shrink == 1 {
+        return Plan {
+            work: Vec::new(),
+            draws: vec![
+                kernel(GAUSS, 0, Picture::Current, Picture::Current, &[sigma]),
+                kernel(GAUSS, 1, Picture::Current, Picture::Current, &[sigma]),
+            ],
+        };
+    }
+    // In the picture's pixels, the 1 3 3 1 halvings add about shrink² / 4
+    // to the variance, the B-spline shrink² / 3.
+    let s = shrink as f32;
+    let left = (sigma * sigma - s * s * (1.0 / 4.0 + 1.0 / 3.0)).max(0.0);
+    let at_level = left.sqrt() / s;
+    // Halvings into work 0, 1, ...; the last is at `shrink`, and one more
+    // of that size for the Gaussian to go across into.
+    let mut work = Vec::new();
+    let mut draws = Vec::new();
+    let mut level = 1;
+    let mut read = Picture::Current;
+    while level < shrink {
+        level *= 2;
+        work.push(level);
+        let write = Picture::Work(work.len() - 1);
+        draws.push(kernel(HALVE, 0, read, write, &[]));
+        read = write;
+    }
+    work.push(shrink);
+    let across = Picture::Work(work.len() - 1);
+    draws.push(kernel(GAUSS, 0, read, across, &[at_level]));
+    draws.push(kernel(GAUSS, 1, across, read, &[at_level]));
+    draws.push(kernel(SMOOTH_UP, 0, read, Picture::Current, &[]));
+    Plan { work, draws }
+}
 
 pub(crate) struct Effects {
     pipeline: wgpu::RenderPipeline,
@@ -1003,6 +1196,7 @@ impl Effects {
                     },
                     count: None,
                 },
+                texture_entry(3, true),
             ],
         });
         let pipeline = full_screen(
@@ -1103,15 +1297,39 @@ impl Effects {
                 std::mem::swap(&mut from, &mut to);
                 current = wanted;
             }
-            // A blur runs across, then down.
-            let directions: &[u32] = if step.block == Block::Blur {
-                &[0, 1]
-            } else {
-                &[0]
-            };
-            for direction in directions {
-                self.pass(device, queue, encoder, &from, &to, size, step, *direction);
-                std::mem::swap(&mut from, &mut to);
+            let plan = plan(step, size);
+            let work: Vec<(wgpu::TextureView, (u32, u32))> = plan
+                .work
+                .iter()
+                .map(|shrink| {
+                    let shrunk = shrunk_size(size, *shrink);
+                    (self.light(device, shrunk), shrunk)
+                })
+                .collect();
+            for draw in &plan.draws {
+                let view = |picture: Picture| match picture {
+                    Picture::Current => &from,
+                    Picture::Work(index) => &work[index].0,
+                };
+                let read = view(draw.read);
+                let other = draw.other.map_or(read, view);
+                let (target, target_size) = match draw.write {
+                    Picture::Current => (&to, size),
+                    Picture::Work(index) => (&work[index].0, work[index].1),
+                };
+                self.pass(
+                    device,
+                    queue,
+                    encoder,
+                    read,
+                    other,
+                    target,
+                    target_size,
+                    draw,
+                );
+                if draw.write == Picture::Current {
+                    std::mem::swap(&mut from, &mut to);
+                }
             }
         }
         let output = crate::blur::scratch(&self.pool, device, size);
@@ -1175,25 +1393,27 @@ impl Effects {
         pass.draw(0..3, 0..1);
     }
 
+    /// One draw: `read` and `other` sampled, `to`, a `size` picture,
+    /// drawn.
     #[allow(clippy::too_many_arguments)]
     fn pass(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        from: &wgpu::TextureView,
+        read: &wgpu::TextureView,
+        other: &wgpu::TextureView,
         to: &wgpu::TextureView,
         size: (u32, u32),
-        step: &Step,
-        direction: u32,
+        draw: &Draw,
     ) {
         let mut bytes = Vec::with_capacity(PARAMS as usize);
-        bytes.extend_from_slice(&step.block.code().to_le_bytes());
-        bytes.extend_from_slice(&direction.to_le_bytes());
+        bytes.extend_from_slice(&draw.kernel.to_le_bytes());
+        bytes.extend_from_slice(&draw.arg.to_le_bytes());
         for value in [size.0 as f32, size.1 as f32] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        for value in step.values {
+        for value in draw.values {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         let buffer = self.pool.uniform(
@@ -1208,9 +1428,10 @@ impl Effects {
             "cutlass-render effect",
             &self.layout,
             &[
-                (0, Bind::View(from)),
+                (0, Bind::View(read)),
                 (1, Bind::Sampler(&self.sampler)),
                 (2, Bind::Buffer(&buffer)),
+                (3, Bind::View(other)),
             ],
         );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1410,6 +1631,77 @@ mod tests {
         assert_eq!(middle[3], 255);
     }
 
+    /// Every draw of every block reads only pictures already drawn, never
+    /// the one it draws, and a block's working pictures are all drawn.
+    fn check_plan(plan: &super::Plan, what: &str) {
+        use super::Picture;
+        let mut drawn = vec![false; plan.work.len()];
+        for draw in &plan.draws {
+            for read in std::iter::once(draw.read).chain(draw.other) {
+                if let Picture::Work(index) = read {
+                    assert!(
+                        drawn[index],
+                        "{what}: reads work {index} before it is drawn"
+                    );
+                }
+                assert!(
+                    read != draw.write || read == Picture::Current,
+                    "{what}: draws the picture it reads"
+                );
+            }
+            if let Picture::Work(index) = draw.write {
+                drawn[index] = true;
+            }
+        }
+        assert!(
+            drawn.iter().all(|done| *done),
+            "{what}: a working picture never drawn"
+        );
+        for shrink in &plan.work {
+            assert!(
+                shrink.is_power_of_two() && *shrink <= super::MAX_SHRINK,
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_block_plan_reads_only_what_it_has_drawn() {
+        use cutlass_effects::Block;
+        for size in [(1, 1), (64, 4), (1920, 1080), (3840, 2160)] {
+            for block in Block::ALL {
+                for at in [0.0, 0.5, 1.0] {
+                    let mut values = [0.0; MAX_VALUES];
+                    for (slot, param) in values.iter_mut().zip(block.params()) {
+                        *slot = param.min + (param.max - param.min) * at;
+                    }
+                    let plan = super::plan(&Step { block, values }, size);
+                    check_plan(&plan, &format!("{block:?} at {at} on {size:?}"));
+                }
+            }
+        }
+    }
+
+    /// However wide, a blur is a handful of draws on a few pictures, none
+    /// of whose kernels takes more taps as the blur grows.
+    #[test]
+    fn a_blur_plan_stays_small_however_wide() {
+        // Up to the widest blur on an 8K picture: a tenth of its short
+        // side, about 430 pixels.
+        for reach in [0.0, 1.0, 5.0, 40.0, 200.0, 440.0] {
+            let plan = super::blur_plan(reach);
+            assert!(plan.draws.len() <= 9, "{reach}: {plan:?}");
+            assert!(plan.work.len() <= 7, "{reach}: {plan:?}");
+            for draw in &plan.draws {
+                if draw.kernel == super::GAUSS {
+                    // Sigma in texels of the picture it is drawn on.
+                    assert!(draw.values[0] <= 8.0, "{reach}: {plan:?}");
+                }
+            }
+        }
+        assert!(super::blur_plan(0.0).draws.is_empty());
+    }
+
     /// The blocks that average light work in light; the ones tuned by eye
     /// on encoded values are handed encoded values.
     #[test]
@@ -1436,6 +1728,28 @@ mod tests {
         }
     }
 
+    /// Linear light of a Rec. 709 encoded byte.
+    fn light(byte: u8) -> f64 {
+        let e = f64::from(byte) / 255.0;
+        if e < 0.081 {
+            e / 4.5
+        } else {
+            ((e + 0.099) / 1.099).powf(1.0 / 0.45)
+        }
+    }
+
+    /// The spread of the light in `row` about `middle`, in pixels.
+    fn spread(row: &[u8], middle: f64) -> f64 {
+        let (mut total, mut moment) = (0.0, 0.0);
+        for (x, byte) in row.iter().enumerate() {
+            let weight = light(*byte);
+            let d = x as f64 + 0.5 - middle;
+            total += weight;
+            moment += weight * d * d;
+        }
+        (moment / total).sqrt()
+    }
+
     #[test]
     fn a_blur_spreads_a_line_evenly_with_no_gaps() {
         let Some(renderer) = renderer() else { return };
@@ -1450,15 +1764,16 @@ mod tests {
                 }
             })
             .collect();
-        // A reach of 40 pixels: ten times the 4 pixel short side.
+        // A reach of 40 pixels: ten times the 4 pixel short side. Wide
+        // enough to be drawn on a picture an eighth of the size.
         let blur = step(Block::Blur, &[(0, 10.0)]);
         let got = draw(&renderer, &scene, (width, height), &[blur]);
         let row: Vec<u8> = got[..(width * 4) as usize]
             .chunks(4)
             .map(|pixel| pixel[0])
             .collect();
-        // Every column the reach covers gets some of the line, the same
-        // amount either side, and the rest stays black.
+        // Every column near the line gets some of it, the same either
+        // side, less the further away, with no gap or step.
         for offset in 1..=38 {
             let (left, right) = (row[64 - offset], row[64 + offset]);
             assert!(
@@ -1466,9 +1781,50 @@ mod tests {
                 "a gap {offset} from the line: {row:?}"
             );
             assert!(left.abs_diff(right) <= 2, "lopsided at {offset}: {row:?}");
+            assert!(
+                right <= row[64 + offset - 1] + 1,
+                "a step at {offset}: {row:?}"
+            );
         }
-        assert_eq!(row[64 - 44], 0, "{row:?}");
-        assert_eq!(row[64 + 44], 0, "{row:?}");
+        // Spread as a box of 40 each side would: 40 / sqrt(3).
+        let got = spread(&row, 64.5);
+        assert!((got - 23.1).abs() < 3.0, "spread {got}: {row:?}");
+    }
+
+    /// The same blur is the same share of the picture however large the
+    /// picture is: drawn whole on a small one, on a smaller copy of a
+    /// large one, the spread agrees.
+    #[test]
+    fn a_blur_spreads_alike_at_every_size() {
+        let Some(renderer) = renderer() else { return };
+        let mut spreads = Vec::new();
+        for side in [64u32, 512] {
+            // A white line a 64th of the picture wide, in the middle.
+            let line = side / 64;
+            let scene: Vec<u8> = (0..side * side)
+                .flat_map(|index| {
+                    let x = index % side;
+                    if x >= side / 2 && x < side / 2 + line {
+                        [255, 255, 255, 255]
+                    } else {
+                        [0, 0, 0, 255]
+                    }
+                })
+                .collect();
+            let blur = step(Block::Blur, &[(0, 0.08)]);
+            let got = draw(&renderer, &scene, (side, side), &[blur]);
+            let middle = ((side / 2) * side * 4) as usize;
+            let row: Vec<u8> = got[middle..middle + (side * 4) as usize]
+                .chunks(4)
+                .map(|pixel| pixel[0])
+                .collect();
+            let centre = f64::from(side / 2) + f64::from(line) / 2.0;
+            spreads.push(spread(&row, centre) / f64::from(side));
+        }
+        // 0.08 of the side each way as a box: 0.046 of the side.
+        for got in &spreads {
+            assert!((got - 0.0462).abs() < 0.004, "{spreads:?}");
+        }
     }
 
     #[test]

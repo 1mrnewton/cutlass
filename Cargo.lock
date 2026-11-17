@@ -3230,6 +3230,7 @@ dependencies = [
  "cutlass-lottie",
  "cutlass-model",
  "cutlass-picture",
+ "cutlass-png",
  "cutlass-renderer-software",
  "cutlass-session",
  "cutlass-storage",

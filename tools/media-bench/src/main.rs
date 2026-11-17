@@ -13,7 +13,9 @@
 //! straight to the decoder.
 //!
 //! `media-bench demux <file>` reads every packet of every stream and decodes
-//! none. `media-bench encode picture|sound ...` encodes raw 4:2:0 pictures
+//! none. `media-bench open <file>` opens the file the way the editor opens
+//! a clip, through the reader factory, with every container registered, and
+//! decodes nothing: the cost of putting a clip on the timeline. `media-bench encode picture|sound ...` encodes raw 4:2:0 pictures
 //! (or raw RGBA ones with `--rgba`, for an encoder that takes those) or raw
 //! float sound read from a file and writes the packets' bytes to `--out`; `--decoded <path>` also decodes those packets again with the
 //! Rust decoder and writes the pictures, to measure what the encoder kept.
@@ -44,6 +46,7 @@ static PLATFORM: AtomicBool = AtomicBool::new(false);
 
 const USAGE: &str = "usage: media-bench [--platform] decode <picture|sound|ivf> <file> [--dump <path>] [--repeat <n>]
        media-bench demux <file>
+       media-bench open <file> [--repeat <n>]
        media-bench encode picture <codec> <width> <height> <fps> <bitrate> <raw> [--out <path>] [--decoded <path>] [--rgba]
        media-bench encode sound <codec> <rate> <channels> <bitrate> <raw.f32> [--out <path>]
        media-bench compare <u8|u16|i16|f32> <ours> <theirs> [--channels <n>]";
@@ -78,6 +81,16 @@ fn run(args: &[String]) -> Result<String, String> {
         && command == "demux"
     {
         return demux(Path::new(file));
+    }
+    if let [command, file, rest @ ..] = args
+        && command == "open"
+    {
+        let repeat = match rest {
+            [] => 1,
+            [flag, count] if flag == "--repeat" => count.parse().map_err(|_| USAGE.to_owned())?,
+            _ => return Err(USAGE.to_owned()),
+        };
+        return open(Path::new(file), repeat);
     }
     if let [command, rest @ ..] = args
         && command == "encode"
@@ -842,6 +855,22 @@ fn rust_encoders() -> EncodeFactory {
 }
 
 /// The containers the desktop opens, decoded with the Rust codecs alone.
+/// Open `path` `repeat` times through one reader factory, as the editor
+/// opens a clip, and report the duration it found.
+fn open(path: &Path, repeat: u32) -> Result<String, String> {
+    let readers = readers();
+    let mut duration = None;
+    for _ in 0..repeat.max(1) {
+        let media = readers.open(path).map_err(|error| error.to_string())?;
+        duration = media.info().duration;
+    }
+    Ok(format!(
+        "opened {} times, duration {} us",
+        repeat.max(1),
+        duration.map_or_else(|| "none".to_owned(), |micros| micros.0.to_string())
+    ))
+}
+
 fn readers() -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);

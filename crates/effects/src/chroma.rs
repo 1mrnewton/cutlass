@@ -4,8 +4,10 @@
 //! lists among its extra materials, with `color` (`#rrggbb`), `strength`
 //! and `shadow`, each from 0 to 1. Strength is how far from the key colour
 //! a pixel may be and still go; shadow keeps the darker parts of the key
-//! colour, such as a person's shadow on a green wall. The colour left on
-//! an edge has the key colour pulled out of it.
+//! colour, such as a person's shadow on a green wall. `feather` widens the
+//! soft edge between what goes and what stays, and `clean_up` pulls the
+//! half-kept edge in, each from 0 to 1 and 0 when missing. The colour left
+//! on an edge has the key colour pulled out of it.
 
 use cutlass_model::{Draft, MaterialRef, Segment};
 
@@ -19,9 +21,32 @@ pub struct Chroma {
     pub color: [f32; 3],
     pub strength: f32,
     pub shadow: f32,
+    /// How much wider the soft edge is.
+    pub feather: f32,
+    /// How far the half-kept edge is pulled in.
+    pub clean_up: f32,
 }
 
+/// How wide the soft edge past the key is with no feather, and how much
+/// a full feather adds, in chroma for its brightness.
+pub(crate) const KEY_SOFT: f32 = 0.15;
+pub(crate) const KEY_FEATHER: f32 = 0.45;
+/// How much of the soft edge a full clean up takes out.
+pub(crate) const KEY_CLEAN_UP: f32 = 0.6;
+
 impl Chroma {
+    /// How wide the soft edge past the key is.
+    #[must_use]
+    pub fn soft(&self) -> f32 {
+        KEY_SOFT + self.feather.clamp(0.0, 1.0) * KEY_FEATHER
+    }
+
+    /// The share of the soft edge that clean up takes out.
+    #[must_use]
+    pub fn choke(&self) -> f32 {
+        self.clean_up.clamp(0.0, 1.0) * KEY_CLEAN_UP
+    }
+
     /// The key colour as `#rrggbb`.
     #[must_use]
     pub fn hex(&self) -> String {
@@ -45,7 +70,8 @@ impl Chroma {
         // How far from the key, in chroma for its brightness, a pixel is
         // cut out entirely, and how wide the soft edge past that is.
         let reach = 0.05 + self.strength.clamp(0.0, 1.0) * 0.6;
-        let soft = 0.15;
+        let soft = self.soft();
+        let choke = self.choke();
         for pixel in rgba.as_chunks_mut::<4>().0 {
             let alpha = f32::from(pixel[3]) / 255.0;
             if alpha <= 0.0 {
@@ -55,6 +81,9 @@ impl Chroma {
             let here = chroma_of(colour);
             let distance = ((here[0] - key[0]).powi(2) + (here[1] - key[1]).powi(2)).sqrt();
             let mut keep = smoothstep(reach, reach + soft, distance);
+            if choke > 0.0 {
+                keep = ((keep - choke) / (1.0 - choke)).clamp(0.0, 1.0);
+            }
             if self.shadow > 0.0 && keep < 1.0 {
                 let darker = ((key_luma - luma(colour)) / key_luma.max(1e-3)).clamp(0.0, 1.0);
                 keep = keep.max(darker * self.shadow);
@@ -107,6 +136,8 @@ pub fn segment_chroma(draft: &Draft, segment: &Segment) -> Option<Chroma> {
             color,
             strength: unit("strength"),
             shadow: unit("shadow"),
+            feather: unit("feather"),
+            clean_up: unit("clean_up"),
         })
     })
 }
@@ -158,6 +189,8 @@ mod tests {
         color: [0.0, 1.0, 0.0],
         strength: 0.5,
         shadow: 0.0,
+        feather: 0.0,
+        clean_up: 0.0,
     };
 
     fn run(chroma: &Chroma, pixel: [u8; 4]) -> [u8; 4] {
@@ -177,6 +210,30 @@ mod tests {
             ..GREEN
         };
         assert_eq!(run(&none, [0, 255, 0, 255]), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn feather_softens_the_edge_and_clean_up_pulls_it_in() {
+        // A colour a little past the soft edge: kept whole with no feather,
+        // half kept once the edge is wider.
+        let near = [90, 170, 90, 255];
+        assert_eq!(run(&GREEN, near)[3], 255);
+        let feathered = Chroma {
+            feather: 1.0,
+            ..GREEN
+        };
+        let soft = run(&feathered, near)[3];
+        assert!(soft > 0 && soft < 255, "{soft}");
+        // The half-kept edge goes further with clean up; what is wholly
+        // kept or wholly gone stays so.
+        let edge = [70, 180, 70, 255];
+        let cleaned = Chroma {
+            clean_up: 0.5,
+            ..GREEN
+        };
+        assert!(run(&cleaned, edge)[3] < run(&GREEN, edge)[3]);
+        assert_eq!(run(&cleaned, [200, 40, 40, 255]), [200, 40, 40, 255]);
+        assert_eq!(run(&cleaned, [0, 255, 0, 255])[3], 0);
     }
 
     #[test]

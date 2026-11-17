@@ -13,7 +13,7 @@ use crate::shell::{
 };
 use crate::{tokens, ui};
 
-use super::audio::{later_slider, later_value, name_tile};
+use super::audio::{later_slider, name_tile};
 use super::inspector::{
     InspectorState, ROW_GAP, body, color_row, none_tile, note, row_label, section, send,
     setting_row, slider,
@@ -530,7 +530,9 @@ fn chroma_key(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
     };
     if header.reset {
         let hex = key.hex();
-        send(shell, |shell| shell.set_chroma(&hex, KEY_STRENGTH, 0.0));
+        send(shell, |shell| {
+            shell.put_chroma(&hex, [KEY_STRENGTH, 0.0, 0.0, 0.0])
+        });
     }
     if !header.open && !state.open.contains("chroma") {
         return;
@@ -580,8 +582,30 @@ fn chroma_key(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
                 shell.set_chroma(&hex, strength, value / 100.0)
             });
         }
-        for label in ["Feather edge", "Clean up edge"] {
-            later_value(ui, label, 0.0);
+        let (feather, clean_up) = (f64::from(key.feather), f64::from(key.clean_up));
+        if let Some(value) = slider(
+            ui,
+            state,
+            "chroma-feather",
+            "Feather edge",
+            (feather * 100.0).round(),
+            0.0..=100.0,
+            |v| format!("{v:.0}"),
+        ) {
+            send(shell, |shell| {
+                shell.set_chroma_edge(value / 100.0, clean_up)
+            });
+        }
+        if let Some(value) = slider(
+            ui,
+            state,
+            "chroma-clean-up",
+            "Clean up edge",
+            (clean_up * 100.0).round(),
+            0.0..=100.0,
+            |v| format!("{v:.0}"),
+        ) {
+            send(shell, |shell| shell.set_chroma_edge(feather, value / 100.0));
         }
     });
 }

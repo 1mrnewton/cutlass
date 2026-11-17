@@ -865,7 +865,15 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             color,
             strength,
             shadow,
-        } => chroma::set_chroma(draft, segment_id, material_id, color, *strength, *shadow),
+            feather,
+            clean_up,
+        } => chroma::set_chroma(
+            draft,
+            segment_id,
+            material_id,
+            color,
+            [*strength, *shadow, *feather, *clean_up],
+        ),
         Request::SetMask {
             segment_id,
             material_id,

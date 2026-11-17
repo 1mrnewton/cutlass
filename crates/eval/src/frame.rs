@@ -1164,6 +1164,8 @@ mod tests {
                     color: "#00ff00".to_owned(),
                     strength: 0.4,
                     shadow: 0.0,
+                    feather: 0.0,
+                    clean_up: 0.0,
                 }],
             )
             .unwrap();

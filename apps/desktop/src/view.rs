@@ -11774,9 +11774,13 @@ mod tests {
         for label in ["LUT", "Teal punch", "Intensity", "100", "Protect skin tone"] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
-        // The Remove BG page keys green out and shows the key's values, with
-        // the chroma key's edge still marked Later.
+        // The Remove BG page keys green out and shows the key's values,
+        // its edge too, which a later change of strength keeps.
         shell.set_chroma("#00ff00", 0.4, 0.25).unwrap();
+        shell.set_chroma_edge(0.3, 0.6).unwrap();
+        shell.set_chroma("#00ff00", 0.4, 0.25).unwrap();
+        let key = shell.inspection().unwrap().chroma.unwrap();
+        assert_eq!((key.feather, key.clean_up), (0.3, 0.6));
         view.inspector.focus(inspector::Focus {
             tab: 0,
             page: 1,
@@ -11801,8 +11805,9 @@ mod tests {
             "Shadow",
             "25",
             "Feather edge",
+            "30",
             "Clean up edge",
-            "Later",
+            "60",
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }

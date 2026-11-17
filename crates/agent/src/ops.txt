@@ -254,7 +254,7 @@ set_wheel: Set a clip's color wheel lift, gamma or gain; x and y place the puck 
 set_lut: Put a LUT on a clip at strength 0 to 1; cube is the text of a 3D .cube file, kept under name; cube null keeps the clip's table and only sets strength (refused when it has none); an empty cube removes it. Except when removing, the LUT is stored anew under material_id, which must not name another material still in the draft.
 {"op":"set_lut","segment_id":"a","material_id":"a-lut","name":"film","cube":"LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n","strength":0.8}
 
-set_chroma: Key a color "#rrggbb" out of a clip on a video or sticker lane with strength and shadow 0 to 1; an empty color removes it.
+set_chroma: Key a color "#rrggbb" out of a clip on a video or sticker lane with strength and shadow 0 to 1, and optionally feather (softer edge) and clean_up (edge pulled in) 0 to 1; an empty color removes it.
 {"op":"set_chroma","segment_id":"a","material_id":"a-chroma","color":"#00ff00","strength":0.5,"shadow":0.2}
 
 set_mask: Mask a clip on a video or sticker lane, or null to remove; shape linear, mirror, circle, rectangle, heart or star; x and y -1 to 1 across the clip with y up (-2 to 2 allowed), width and height as parts of the clip's size (0 to 4), rotation -360 to 360 degrees counter-clockwise, feather and round 0 to 1, invert.

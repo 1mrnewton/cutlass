@@ -6446,13 +6446,49 @@ impl Shell {
         })
     }
 
+    /// Soften the selected picture's key edge by `feather` and pull it in
+    /// by `clean_up`, each 0 to 1. Refused with no key on.
+    pub fn set_chroma_edge(&mut self, feather: f64, clean_up: f64) -> Result<(), ShellError> {
+        let Some(was) = self.inspection().and_then(|inspection| inspection.chroma) else {
+            return Err(ShellError::Unavailable(
+                "turn Chroma key on first".to_owned(),
+            ));
+        };
+        self.put_chroma(
+            &was.hex(),
+            [
+                f64::from(was.strength),
+                f64::from(was.shadow),
+                feather.clamp(0.0, 1.0),
+                clean_up.clamp(0.0, 1.0),
+            ],
+        )
+    }
+
     /// Key `color` (`#rrggbb`) out of the selected picture with `strength`
-    /// and `shadow`, 0 to 1; an empty colour takes the key off.
+    /// and `shadow`, 0 to 1, its edge as it was; an empty colour takes the
+    /// key off.
     pub fn set_chroma(
         &mut self,
         color: &str,
         strength: f64,
         shadow: f64,
+    ) -> Result<(), ShellError> {
+        let edge = self
+            .inspection()
+            .and_then(|inspection| inspection.chroma)
+            .map_or((0.0, 0.0), |was| {
+                (f64::from(was.feather), f64::from(was.clean_up))
+            });
+        self.put_chroma(color, [strength, shadow, edge.0, edge.1])
+    }
+
+    /// Key `color` out of the selected picture with its strength, shadow,
+    /// feather and clean up, each 0 to 1, all at once.
+    pub fn put_chroma(
+        &mut self,
+        color: &str,
+        [strength, shadow, feather, clean_up]: [f64; 4],
     ) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("a chroma key belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
@@ -6464,6 +6500,8 @@ impl Shell {
             color: color.to_owned(),
             strength,
             shadow,
+            feather,
+            clean_up,
         }];
         let names = [KeyedSetting::ChromaStrength, KeyedSetting::ChromaShadow];
         if color.is_empty() {

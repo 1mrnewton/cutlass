@@ -657,13 +657,19 @@ pub enum Request {
         strength: f64,
     },
     /// Key `color` (`#rrggbb`) out of the clip with `strength` and
-    /// `shadow`, each 0 to 1. An empty colour takes the key off.
+    /// `shadow`, its edge softened by `feather` and pulled in by
+    /// `clean_up`, each 0 to 1 (the edge 0 when left out). An empty colour
+    /// takes the key off.
     SetChroma {
         segment_id: SegmentId,
         material_id: MaterialId,
         color: String,
         strength: f64,
         shadow: f64,
+        #[serde(default)]
+        feather: f64,
+        #[serde(default)]
+        clean_up: f64,
     },
     /// Mask the clip with `mask`, in the clip's own frame, or take its mask
     /// off with `None`.

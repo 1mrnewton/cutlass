@@ -205,6 +205,8 @@ fn a_chroma_key_matches_the_cpu() {
                 color,
                 strength: 0.5,
                 shadow,
+                feather: 0.0,
+                clean_up: 0.0,
             }),
             ..Colour::default()
         };
@@ -254,6 +256,8 @@ fn all_of_it_at_once_matches_the_cpu() {
             color: [0.2, 0.8, 0.2],
             strength: 0.3,
             shadow: 0.2,
+            feather: 0.0,
+            clean_up: 0.0,
         }),
         lut: Some(ClipLut {
             name: "id".into(),

@@ -87,7 +87,7 @@ pub use speech_model::SPEECH_MODEL_QUESTION;
 pub use update::RUNNING_VERSION;
 
 pub use inspector::{KeyedSetting, LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
-pub use matting::{Painting, Trail, auto_model_here, follow_model_here};
+pub use matting::{Painting, Trail, auto_model_here, follow_model_here, matte_model_question};
 
 use crate::face::FaceTable;
 use crate::tokens;

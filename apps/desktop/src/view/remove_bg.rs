@@ -8,7 +8,9 @@
 use cutlass_effects::{Matting, MattingMode, Stroke, StrokeStyle};
 use egui::{RichText, Ui, Vec2};
 
-use crate::shell::{Inspection, KeyedSetting, Shell, auto_model_here, follow_model_here};
+use crate::shell::{
+    Inspection, KeyedSetting, Shell, auto_model_here, follow_model_here, matte_model_question,
+};
 use crate::{tokens, ui};
 
 use super::audio::{later_slider, later_value, name_tile};
@@ -51,6 +53,28 @@ fn matte_state(shell: &mut Shell, ui: &mut Ui) {
         });
         ui.add_space(ROW_GAP);
     }
+}
+
+/// What a missing model is and a button that downloads it, or how far its
+/// download is.
+fn download_row(shell: &mut Shell, ui: &mut Ui, custom: bool) {
+    if let Some(done) = shell.matte_model_progress() {
+        note(ui, &format!("Downloading the model {:.0}%", done * 100.0));
+        return;
+    }
+    note(ui, matte_model_question(custom));
+    ui.horizontal(|ui| {
+        row_label(ui, "");
+        let free = shell.job().is_none();
+        if ui
+            .add_enabled(free, ui::Button::new("Download").text_size(12.0))
+            .on_disabled_hover_text("Wait for the job that is running.")
+            .clicked()
+        {
+            send(shell, |shell| shell.download_matte_model(custom));
+        }
+    });
+    ui.add_space(ROW_GAP);
 }
 
 /// Feather edge and Clean up edge, 0 to 100 on the page.
@@ -109,7 +133,7 @@ fn auto_removal(
     }
     body(ui, |ui| {
         if !auto_model_here() {
-            note(ui, "The background model is not on this machine yet.");
+            download_row(shell, ui, false);
         }
         let Some(matting) = matting.filter(|_| on) else {
             note(
@@ -274,10 +298,7 @@ fn custom_removal(
             note(ui, "The selection model is not on this machine yet.");
         }
         if !follows {
-            note(
-                ui,
-                "The model that follows the object through the clip is not on this machine yet, so a pick cuts this frame only.",
-            );
+            download_row(shell, ui, true);
         }
         if let Some(custom) = custom {
             let frames = custom.picks.len();

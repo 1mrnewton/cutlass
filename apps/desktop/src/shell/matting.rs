@@ -19,10 +19,14 @@ use cutlass_store::find_matte;
 use cutlass_vision::{Compute, EnhanceJobError, Follower, Matter, follow_clip, matte_clip};
 
 use super::enhance::model_dir;
+use super::speech_model::{ModelFile, fetch_model};
 use super::{Landing, Shell, ShellError};
 
 /// The job's label, which the inspector looks for to show its progress.
 pub(crate) const MATTE_JOB: &str = "Remove BG";
+
+/// The model download's label.
+const MODEL_JOB: &str = "Download the Remove BG model";
 
 /// The folder in `Models` holding Auto removal's model, and its weights.
 pub(super) const AUTO_FOLDER: &str = "matting";
@@ -37,6 +41,54 @@ pub(super) const FOLLOW_WEIGHTS: &str = cutlass_vision::FOLLOW_WEIGHTS;
 /// 768 takes about half the time, but on a busy room it kept a blanket and
 /// part of a couch that 1024 takes off.
 pub(super) const AUTO_SIDE: u32 = cutlass_vision::MATTING_SIDE;
+
+/// Auto removal's model as BiRefNet_lite's authors publish it (MIT),
+/// pinned to a revision and its SHA-256; converted on this machine.
+pub(super) const AUTO_DOWNLOAD: ModelFile = ModelFile {
+    folder: AUTO_FOLDER,
+    file: "birefnet_lite.safetensors",
+    url: "https://huggingface.co/ZhengPeng7/BiRefNet_lite/resolve/\
+          aa62cd87eafb9cc43056d08ef3615a14628b831d/model.safetensors",
+    sha256: "4417d89795250e698c3cb0ae8df15743810065f646f48a694fdfa7ca052d0815",
+    bytes: 177_634_392,
+};
+
+/// Custom removal's follower as Meta publishes it (Apache-2.0), pinned the
+/// same way.
+pub(super) const FOLLOW_DOWNLOAD: ModelFile = ModelFile {
+    folder: FOLLOW_FOLDER,
+    file: "sam2.1_hiera_tiny.safetensors",
+    url: "https://huggingface.co/facebook/sam2.1-hiera-tiny/resolve/\
+          de431c4043854a71d8101e17995dfe596bf101a5/model.safetensors",
+    sha256: "48c14467e5cf9e51870511feb72c89688e82dd74523142c0538b663e193ac2a7",
+    bytes: 155_908_064,
+};
+
+/// What the page says before a Remove BG model downloads; the button
+/// under it is the yes.
+#[must_use]
+pub fn matte_model_question(custom: bool) -> &'static str {
+    if custom {
+        "Following an object through the clip needs SAM 2.1 tiny (156 MB, from Hugging \
+         Face, Apache-2.0), downloaded into Cutlass's Models folder."
+    } else {
+        "Auto removal needs BiRefNet_lite (178 MB, from Hugging Face, MIT), downloaded \
+         into Cutlass's Models folder."
+    }
+}
+
+/// Turn the downloaded `published` weights into the `.bpk` the model loads,
+/// in `folder`, and drop the download.
+fn install_weights(published: &Path, folder: &Path, custom: bool) -> Result<(), String> {
+    let converted = if custom {
+        cutlass_vision::convert_sam2(published, &folder.join(FOLLOW_WEIGHTS))
+    } else {
+        cutlass_vision::convert_birefnet(published, &folder.join(AUTO_WEIGHTS))
+    };
+    converted.map_err(|error| error.to_string())?;
+    let _ = std::fs::remove_file(published);
+    Ok(())
+}
 
 /// The smallest and largest brush, as a share of the frame's short side.
 const BRUSH_SMALLEST: f64 = 0.005;
@@ -161,6 +213,14 @@ impl Shell {
     pub fn matte_progress(&self) -> Option<f32> {
         self.job()
             .filter(|job| job.label == MATTE_JOB)
+            .map(|job| job.fraction.unwrap_or(0.0))
+    }
+
+    /// How far a Remove BG model's download is, 0 to 1, while one runs.
+    #[must_use]
+    pub fn matte_model_progress(&self) -> Option<f32> {
+        self.job()
+            .filter(|job| job.label == MODEL_JOB)
             .map(|job| job.fraction.unwrap_or(0.0))
     }
 
@@ -325,6 +385,44 @@ impl Shell {
             return Ok(());
         }
         self.start_matte(root, ask)
+    }
+
+    /// Download Remove BG's model, Custom removal's follower when `custom`,
+    /// as a job: fetched, checked, and converted for this machine. Ask the
+    /// user first ([`matte_model_question`]).
+    pub fn download_matte_model(&mut self, custom: bool) -> Result<(), ShellError> {
+        let here = if custom {
+            follow_model_here()
+        } else {
+            auto_model_here()
+        };
+        if here {
+            return Ok(());
+        }
+        let models = Shell::home().models();
+        let model = if custom {
+            &FOLLOW_DOWNLOAD
+        } else {
+            &AUTO_DOWNLOAD
+        };
+        self.start_job(MODEL_JOB, move |progress| {
+            progress.stage("Downloading the model");
+            let result = fetch_model(model, &models, progress).and_then(|published| {
+                progress.stage("Preparing the model");
+                install_weights(&published, &models.join(model.folder), custom)
+            });
+            Box::new(move |shell: &mut Shell| match result {
+                Ok(()) => {
+                    shell.set_notice("The Remove BG model is ready");
+                    // A clip that waited for the model gets its matte.
+                    shell.matte_swept = None;
+                    Ok(())
+                }
+                Err(message) => Err(ShellError::Unavailable(format!(
+                    "the Remove BG model did not download: {message}"
+                ))),
+            })
+        })
     }
 
     /// Start the matte of the first clip with Remove BG the project lacks

@@ -482,3 +482,37 @@ fn a_wider_trim_makes_the_matte_again_once() {
     }
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+/// A downloaded BiRefNet_lite file becomes the weights Auto removal loads,
+/// and the download is dropped. Uses the copy in `local-files`; run by hand.
+#[test]
+#[ignore = "converts the real 178 MB weights"]
+fn downloaded_weights_are_converted_for_this_machine() {
+    let published = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../local-files/models/matting/hf/model.safetensors");
+    if !published.is_file() {
+        return;
+    }
+    let folder = std::env::temp_dir().join(format!("cutlass-install-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    let download = folder.join(AUTO_DOWNLOAD.file);
+    std::fs::copy(&published, &download).unwrap();
+    install_weights(&download, &folder, false).unwrap();
+    assert!(!download.exists(), "the download is dropped");
+    assert!(load_matter(&folder, Compute::Cpu).is_ok());
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn bad_weights_are_refused_and_kept_for_a_look() {
+    let folder = std::env::temp_dir().join(format!("cutlass-bad-install-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    let download = folder.join(FOLLOW_DOWNLOAD.file);
+    std::fs::write(&download, b"not weights").unwrap();
+    assert!(install_weights(&download, &folder, true).is_err());
+    assert!(!folder.join(FOLLOW_WEIGHTS).exists());
+    assert!(download.exists(), "a refused download is left to look at");
+    let _ = std::fs::remove_dir_all(&folder);
+}

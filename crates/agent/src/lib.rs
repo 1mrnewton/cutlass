@@ -55,7 +55,7 @@ pub use mcp_connection::{ANSWER_WITHIN, LIST_TOOLS, McpConnection, McpWire};
 pub use mcp_server::{MCP_PROTOCOL_VERSION, McpServer};
 pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
-    ToolDefinition, shorten_results,
+    ToolDefinition, first_sent, shorten_results,
 };
 pub use ops::{Op, describe as describe_ops, ops};
 pub use picture::{PICTURE_LIMIT, Picture, forget_pictures};

@@ -319,6 +319,10 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// The loop filter level the frame being coded searched
     /// ([`pick_level`]), for its final header.
     lf_pick: Option<u8>,
+    /// The level [`pick_level`] found for the frame coded last, before
+    /// [`LF_FIXED_SCALE`].
+    #[cfg(test)]
+    lf_found: Option<u8>,
     /// [`pick_level`]'s band of luma rows, unfiltered and filtered.
     lf_band: Vec<P>,
 }
@@ -402,6 +406,8 @@ impl<P: EncPixel> FrameEncoder<P> {
             gold_mv: None,
             ref_seeds: [None; 3],
             lf_pick: None,
+            #[cfg(test)]
+            lf_found: None,
             lf_band: Vec::new(),
         }
     }
@@ -1399,6 +1405,10 @@ impl<P: EncPixel> FrameEncoder<P> {
                 h.tx_mode != geom::ONLY_4X4,
                 &mut self.lf_band,
             );
+            #[cfg(test)]
+            {
+                self.lf_found = Some(pick);
+            }
             // At a fixed quantizer, an inter frame's level a share lower
             // ([`LF_FIXED_SCALE`]).
             let pick = if fp.full_search && !fp.second_pass && !key {

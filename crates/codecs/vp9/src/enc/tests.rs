@@ -547,3 +547,181 @@ fn halves_after_a_split_take_bands_that_move_apart() {
         );
     }
 }
+
+/// Frame parameters for the tests below: picture `t` of a stream at a fixed
+/// quantizer (`second_pass` for a second pass's).
+fn fixed_params(t: usize, qindex: u8, speed: u8, second_pass: bool) -> FrameParams {
+    FrameParams {
+        key: t == 0,
+        golden: false,
+        hidden: false,
+        qindex,
+        speed,
+        altref_future: false,
+        aq: false,
+        second_pass,
+        full_search: speed <= 5,
+        fast_arf: false,
+        uv_delta: 0,
+        golden_slot: 1,
+        also_refresh: 0,
+        altref_slot: 2,
+        last_slot: 0,
+        hidden_slot: 2,
+        noise: 0.0,
+    }
+}
+
+/// Codes `pics` (4:2:0, `w`×`h`) as a key frame and inter frames, each
+/// decoding as the encoder reconstructed it; returns the packets and the
+/// last reconstruction's luma.
+fn code_checked(
+    pics: &[[Vec<u8>; 3]],
+    (w, h): (usize, usize),
+    qindex: u8,
+    speed: u8,
+    second_pass: bool,
+) -> (Vec<Vec<u8>>, Vec<u8>) {
+    use crate::dsp::pixel::Pixel;
+    let cw = w.div_ceil(2);
+    let mut enc = FrameEncoder::new(w as u32, h as u32, 2);
+    let mut dec = Decoder::new();
+    let mut out = Vec::new();
+    let mut last = Vec::new();
+    for (t, pic) in pics.iter().enumerate() {
+        enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+        let coded = enc
+            .encode(fixed_params(t, qindex, speed, second_pass))
+            .expect("encode");
+        let shown = dec.decode(&coded.data).expect("decode").expect("shown");
+        let rec = enc.last().expect("recon");
+        let (data, stride) = rec.buf.plane(0);
+        last = (0..h)
+            .flat_map(|r| {
+                data[r * stride..r * stride + w]
+                    .iter()
+                    .map(|v| v.get() as u8)
+            })
+            .collect();
+        assert_eq!(shown.y, last, "speed {speed} picture {t}");
+        out.push(coded.data);
+    }
+    (out, last)
+}
+
+#[test]
+fn a_small_object_in_a_block_that_predicts_whole_is_coded() {
+    // The second picture is the first (flat) with a 2×2 square brighter,
+    // inside a 64×64 block that otherwise keeps the first picture exactly:
+    // summed over the block its error was under the stop of the partition
+    // search, and the square went uncoded (its error 9216, as dropped). At
+    // a fixed quantizer the stop reads the worst 8×8 too (`Tile::peak_sse`).
+    let (w, h) = (128usize, 128usize);
+    let a = [
+        vec![100u8; w * h],
+        vec![128; w * h / 4],
+        vec![128; w * h / 4],
+    ];
+    let mut b = a.clone();
+    for r in 36..38 {
+        for c in 20..22 {
+            b[0][r * w + c] += 48;
+        }
+    }
+    let err = |rec: &[u8]| -> u64 {
+        let mut e = 0;
+        for r in 36..38 {
+            for c in 20..22 {
+                let d = i64::from(rec[r * w + c]) - i64::from(b[0][r * w + c]);
+                e += (d * d) as u64;
+            }
+        }
+        e
+    };
+    let dropped = err(&a[0]);
+    let (_, rec) = code_checked(&[a.clone(), b.clone()], (w, h), 120, 5, false);
+    let coded = err(&rec);
+    assert!(
+        coded * 4 < dropped,
+        "the square's error {coded}, uncoded {dropped}"
+    );
+}
+
+#[test]
+fn a_fixed_quantizer_scales_the_inter_frames_searched_level() {
+    // At a fixed quantizer in one pass, an inter frame takes
+    // `LF_FIXED_SCALE` of the level the search finds; a key frame, and a
+    // second pass's frames, take the level found.
+    let (w, h) = (256usize, 128usize);
+    let pics: Vec<[Vec<u8>; 3]> = (0..3)
+        .map(|t| texture(w, h, (10 + 3 * t, 20 + t)))
+        .collect();
+    let cw = w.div_ceil(2);
+    for second_pass in [false, true] {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 1);
+        let mut dec = Decoder::new();
+        let mut scaled = 0;
+        for (t, pic) in pics.iter().enumerate() {
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            let coded = enc
+                .encode(fixed_params(t, 100, 5, second_pass))
+                .expect("encode");
+            let head = crate::header::parse(dec.persist(), &coded.data)
+                .expect("header")
+                .header;
+            dec.decode(&coded.data).expect("decode").expect("shown");
+            let found = enc.lf_found.expect("searched");
+            let want = if t > 0 && !second_pass {
+                ((f64::from(found) * super::LF_FIXED_SCALE) as u8).max(2)
+            } else {
+                found
+            };
+            assert_eq!(
+                head.filter_level, want,
+                "picture {t}, second pass {second_pass}"
+            );
+            scaled += usize::from(want != found);
+        }
+        assert_eq!(scaled > 0, !second_pass);
+    }
+}
+
+/// The partitions (block sizes) of the key frame `data`.
+fn key_block_sizes(data: &[u8]) -> Vec<u8> {
+    let parsed = crate::header::parse(&crate::header::Persist::new(), data).expect("header");
+    let mut fp =
+        crate::dec::FrameParse::new(&parsed, None, &[], [0; 3], Default::default()).expect("parse");
+    for r in 0..fp.sb_rows() {
+        fp.row(r).expect("row");
+    }
+    fp.finish()
+        .tiles
+        .iter()
+        .flat_map(|t| t.blocks.iter().map(|b| b.bsize))
+        .collect()
+}
+
+#[test]
+fn a_key_frame_codes_a_smooth_picture_in_64x64_halves() {
+    // A smooth picture: at a fixed quantizer, speed 5 tries the halves of
+    // a key frame's 64×64 blocks that came close whole
+    // (`tile::KEY_HALVES`), and some win; a second pass does not try them.
+    let (w, h) = (320usize, 192usize);
+    let y: Vec<u8> = (0..w * h)
+        .map(|i| {
+            let (x, y) = ((i % w) as f64, (i / w) as f64);
+            (128.0 + 127.0 * (x / 50.0).sin() * (y / 40.0).cos()) as u8
+        })
+        .collect();
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let pic = [y, vec![128; cw * ch], vec![128; cw * ch]];
+    let halves = |second_pass: bool| {
+        let (out, _) = code_checked(std::slice::from_ref(&pic), (w, h), 100, 5, second_pass);
+        key_block_sizes(&out[0])
+            .into_iter()
+            .filter(|&b| b == crate::geom::BLOCK_64X32 || b == crate::geom::BLOCK_32X64)
+            .count()
+    };
+    assert!(halves(false) > 0);
+    assert_eq!(halves(true), 0);
+}

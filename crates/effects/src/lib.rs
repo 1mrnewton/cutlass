@@ -68,8 +68,9 @@ pub use look::{
 };
 pub use lut::{ClipLut, KEPT_SIZE, LUT, Lut, LutError, MAX_CUBE_SIZE, segment_lut};
 pub use mask::{
-    COLOR_MASK, CanvasMask, MASK, MASK_WGSL, Mask, MaskShape, listed_mask, segment_color_mask,
-    segment_mask,
+    COLOR_MASK, CanvasMask, ListedMask, MASK, MASK_WGSL, Mask, MaskMode, MaskShape, apply_masks,
+    limit_masks, listed_mask, listed_masks, masks_at, segment_color_mask, segment_color_masks,
+    segment_mask, segment_masks, stack_coverage,
 };
 pub use package::{
     Located, MAX_PACKAGE_BYTES, MissingPackages, Package, PackageError, PackageStore,

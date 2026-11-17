@@ -2488,20 +2488,25 @@ V; in brackets nine points against FFmpeg's five):
 | 55 | 18371, 35.96 dB | 18634, 36.15 dB | 5358, 43.69 dB | 5344, 43.96 dB |
 
 On the README's three clips at `q=60` to `210`: the same streams as the
-build before. Time, four threads, against FFmpeg's `-crf 24` to `48`
-and the build before, three rounds interleaved, the mean over each
-one's points of the median of the rounds (Cutlass at `q=60` to `210`;
-all three write the same streams in both, so the differences are the
-noise of the measure; the still scene measured twice):
+build before. Yet with the 8×4/4×8 trial inlined into the partition
+search the still scene took 2.7% longer with the same streams: 0.905 of
+FFmpeg's time against 0.882, where the build before timed against a copy
+of itself gave 0.882 and 0.881. The trial now sits out of line
+(`Tile::drawn_key_halves`, `#[cold]`, `#[inline(never)]`), and a split
+that wins returns at once when there are no halves to try. Time, four
+threads, against FFmpeg's `-crf 24` to `48` and the build before, rounds
+interleaved, the mean over each one's points of the median of the rounds
+(Cutlass at `q=60` to `210`; the still scene five rounds, the others
+three):
 
 | | FFmpeg | Before | Now |
 | --- | --- | --- | --- |
-| Three scenes | 8.20 s | 6.84 s (0.83) | 6.78 s (0.83) |
-| Still scene | 4.42 s, 4.19 s | 3.95 s (0.89), 3.64 s (0.87) | 4.06 s (0.92), 3.75 s (0.90) |
-| Grainy pan | 3.33 s | 2.72 s (0.82) | 2.75 s (0.83) |
+| Three scenes | 7.96 s | 6.61 s (0.83) | 6.75 s (0.85) |
+| Still scene | 4.85 s | 4.23 s (0.87) | 4.20 s (0.87) |
+| Grainy pan | 3.45 s | 2.95 s (0.86) | 2.92 s (0.85) |
 
-(On one core, the still scene at `q=120`, four runs each, the two builds
-took 2.94 to 3.25 s and 2.87 to 3.60 s.)
+The three scenes' third of `testsrc2` is a drawn picture, and its key
+frame now searches more.
 
 Checks: of the identity check's 41 configurations, four at a fixed
 quantizer change (the synthetic 4:2:0 and 4:4:4 sources at `q=60`,

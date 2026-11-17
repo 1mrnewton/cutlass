@@ -26,7 +26,7 @@ pub(crate) const MATTE_JOB: &str = "Remove BG";
 
 /// The folder in `Models` holding Auto removal's model, and its weights.
 pub(super) const AUTO_FOLDER: &str = "matting";
-pub(super) const AUTO_WEIGHTS: &str = "birefnet_lite.bpk";
+pub(super) const AUTO_WEIGHTS: &str = cutlass_vision::MATTING_WEIGHTS;
 
 /// The folder in `Models` holding Custom removal's follower, and its
 /// weights.
@@ -37,10 +37,10 @@ pub(super) const FOLLOW_WEIGHTS: &str = "sam2.1_hiera_tiny.bpk";
 const BRUSH_SMALLEST: f64 = 0.005;
 const BRUSH_LARGEST: f64 = 0.1;
 
-/// Auto removal's model, loaded from `dir`.
+/// Auto removal's model, BiRefNet_lite, loaded from `dir`.
 fn load_matter(dir: &Path, compute: Compute) -> Result<Box<dyn Matter + Send>, String> {
-    let _ = (dir, compute);
-    Err("Auto removal's model is not in this build yet".to_owned())
+    let model = cutlass_vision::Matting::load(dir, compute).map_err(|error| error.to_string())?;
+    Ok(Box::new(model))
 }
 
 /// Custom removal's follower, loaded from `dir`.

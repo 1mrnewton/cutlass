@@ -210,3 +210,25 @@ fn a_clip_point_is_a_unit_point_of_its_frame() {
     assert_eq!(unit_of_clip((0.0, 0.0)), (0.5, 0.5));
     assert_eq!(unit_of_clip((3.0, -3.0)), (1.0, 1.0));
 }
+
+#[test]
+fn auto_removal_names_its_mattes_by_the_model_that_makes_them() {
+    // A matte is found by the model's name, so eval's name for Auto
+    // removal's model has to be the one the loaded model gives.
+    assert_eq!(
+        cutlass_eval::MATTE_AUTO_MODEL,
+        cutlass_vision::MATTING_MODEL
+    );
+    assert_eq!(AUTO_WEIGHTS, cutlass_vision::MATTING_WEIGHTS);
+}
+
+#[test]
+fn a_missing_model_is_refused_with_a_reason() {
+    let empty = std::env::temp_dir().join(format!("cutlass-no-matter-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&empty);
+    let Err(reason) = load_matter(&empty, Compute::Cpu) else {
+        panic!("an empty folder has no model");
+    };
+    assert!(!reason.is_empty());
+    let _ = std::fs::remove_dir_all(&empty);
+}

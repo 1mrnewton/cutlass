@@ -7,15 +7,146 @@
 //! linear and mirrors at the edges, so a shaken or turned frame shows a
 //! reflection at its border instead of a hole. A blur runs as two steps,
 //! across and then down.
+//!
+//! The steps run in light. The canvas holds Rec. 709 encoded bytes; a first
+//! pass decodes them into a half-float picture of linear light, and a last
+//! pass encodes the result back into the canvas format. Between the two
+//! nothing is rounded to bytes. Each block says which values its
+//! arithmetic is written for ([`space`]): a blur averages light, so a
+//! bright edge stays bright, while a grade or a colour look was drawn by
+//! eye on encoded values and is handed those, then its result is decoded
+//! again. The curve is the Rec. 709 OETF and its inverse, the one the layer
+//! shader converts transfers with.
 
-use crate::pool::Bind;
+use crate::pool::{Bind, TextureKey};
 use cutlass_effects::{Block, Step};
 
 use crate::CANVAS_FORMAT;
 
+/// The format the steps draw into: linear light needs more than eight
+/// bits, and values past white survive between steps.
+pub(crate) const LIGHT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// What a block's arithmetic is written for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Space {
+    /// Linear light: blocks that average or add light, and blocks that
+    /// only move pixels, which then interpolate in light.
+    Light,
+    /// Rec. 709 encoded values, as the canvas holds them: blocks whose
+    /// numbers were tuned by eye on an encoded picture.
+    Display,
+}
+
+/// The values `block`'s arithmetic is written for.
+pub(crate) const fn space(block: Block) -> Space {
+    match block {
+        // Averages of light.
+        Block::Blur | Block::ZoomBlur | Block::MotionBlur | Block::Focus => Space::Light,
+        // Pixels moved, not mixed.
+        Block::Transform
+        | Block::RgbSplit
+        | Block::Slices
+        | Block::Mirror
+        | Block::Pixelate
+        | Block::Swirl
+        | Block::Ripple
+        | Block::Bulge
+        | Block::Tile
+        | Block::Grid
+        | Block::Stretch
+        | Block::Blocks
+        | Block::Kaleido
+        | Block::Fringe => Space::Light,
+        // Colour tuned by eye, and light whose thresholds and strengths
+        // were tuned on encoded values.
+        Block::Grade
+        | Block::Flash
+        | Block::Vignette
+        | Block::Noise
+        | Block::Scanlines
+        | Block::Invert
+        | Block::Glow
+        | Block::LightLeak
+        | Block::Hue
+        | Block::Posterize
+        | Block::Edges
+        | Block::GradientMap
+        | Block::Spotlight
+        | Block::Reveal
+        | Block::Dust
+        | Block::Halftone
+        | Block::Prints
+        | Block::Rays
+        | Block::Place => Space::Display,
+    }
+}
+
+/// The curve between the canvas's bytes and light, shared by the passes
+/// in and out of light and by the steps that work on encoded values.
+const CURVE: &str = r"
+// Linear light from a Rec. 709 encoded value, and back. Past 1 the power
+// segment carries on, so a highlight past white keeps its place.
+fn to_light(encoded: vec3<f32>) -> vec3<f32> {
+    let e = max(encoded, vec3<f32>(0.0));
+    return select(pow((e + 0.099) / 1.099, vec3<f32>(1.0 / 0.45)), e / 4.5, e < vec3<f32>(0.081));
+}
+
+fn to_encoded(light: vec3<f32>) -> vec3<f32> {
+    let l = max(light, vec3<f32>(0.0));
+    return select(1.099 * pow(l, vec3<f32>(0.45)) - 0.099, 4.5 * l, l < vec3<f32>(0.018));
+}
+
+// A premultiplied colour from one side to the other, alpha untouched.
+fn light_of(c: vec4<f32>) -> vec4<f32> {
+    if (c.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(to_light(c.rgb / c.a) * c.a, c.a);
+}
+
+fn encoded_of(c: vec4<f32>) -> vec4<f32> {
+    if (c.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(to_encoded(c.rgb / c.a) * c.a, c.a);
+}
+";
+
+/// The passes in and out of light: the picture read texel for texel.
+const CONVERT: &str = r"
+@group(0) @binding(0) var picture: texture_2d<f32>;
+
+struct Out {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) index: u32) -> Out {
+    let x = f32((index << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(index & 2u) * 2.0 - 1.0;
+    var out: Out;
+    out.position = vec4<f32>(x, y, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_decode(in: Out) -> @location(0) vec4<f32> {
+    return light_of(textureLoad(picture, vec2<i32>(in.position.xy), 0));
+}
+
+@fragment
+fn fs_encode(in: Out) -> @location(0) vec4<f32> {
+    let c = textureLoad(picture, vec2<i32>(in.position.xy), 0);
+    let a = clamp(c.a, 0.0, 1.0);
+    return encoded_of(vec4<f32>(min(c.rgb, vec3<f32>(c.a)), a));
+}
+";
+
 const SHADER: &str = r"
 struct Effect {
-    // The block, then for a blur 0 across and 1 down.
+    // The block, then the pass: bit 0 is a blur's direction (0 across,
+    // 1 down), bit 1 set when the block works on encoded values.
     code: vec2<u32>,
     size: vec2<f32>,
     a: vec4<f32>,
@@ -40,8 +171,18 @@ fn vs(@builtin(vertex_index) index: u32) -> Out {
     return out;
 }
 
+// Whether this block works on encoded values rather than light.
+fn on_encoded() -> bool {
+    return (fx.code.y & 2u) != 0u;
+}
+
+// The picture so far at `uv`, in the values the block works on.
 fn fetch(uv: vec2<f32>) -> vec4<f32> {
-    return textureSampleLevel(source, linear_sampler, uv, 0.0);
+    let c = textureSampleLevel(source, linear_sampler, uv, 0.0);
+    if (on_encoded()) {
+        return encoded_of(c);
+    }
+    return c;
 }
 
 fn pcg(value: u32) -> u32 {
@@ -102,7 +243,7 @@ fn blur(uv: vec2<f32>) -> vec4<f32> {
         return fetch(uv);
     }
     var direction = vec2<f32>(1.0 / fx.size.x, 0.0);
-    if (fx.code.y == 1u) {
+    if ((fx.code.y & 1u) == 1u) {
         direction = vec2<f32>(0.0, 1.0 / fx.size.y);
     }
     // A tap a pixel or closer apart up to 32 pixels each side, so a wide
@@ -706,7 +847,14 @@ fn prints(uv: vec2<f32>) -> vec4<f32> {
 
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
-    let uv = in.position.xy / fx.size;
+    let made = block(in.position.xy / fx.size);
+    if (on_encoded()) {
+        return light_of(made);
+    }
+    return made;
+}
+
+fn block(uv: vec2<f32>) -> vec4<f32> {
     switch (fx.code.x) {
         case 0u: { return transform(uv); }
         case 1u: { return rgb_split(uv); }
@@ -757,28 +905,78 @@ pub(crate) struct Effects {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// Canvas bytes into light, and light back into canvas bytes.
+    decode: wgpu::RenderPipeline,
+    encode: wgpu::RenderPipeline,
+    convert_layout: wgpu::BindGroupLayout,
     pool: std::sync::Arc<crate::pool::Pool>,
+}
+
+/// A full-screen pipeline over `layout` drawing `entry` of `module` into
+/// `format`.
+fn full_screen(
+    device: &wgpu::Device,
+    label: &'static str,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    entry: &'static str,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some(entry),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn texture_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
 }
 
 impl Effects {
     pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render effect"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{CURVE}{SHADER}").into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cutlass-render effect"),
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                texture_entry(0, true),
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -797,36 +995,38 @@ impl Effects {
                 },
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("cutlass-render effect"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
+        let pipeline = full_screen(
+            device,
+            "cutlass-render effect",
+            &module,
+            &layout,
+            "fs",
+            LIGHT_FORMAT,
+        );
+        let convert = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cutlass-render effect light"),
+            source: wgpu::ShaderSource::Wgsl(format!("{CURVE}{CONVERT}").into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("cutlass-render effect"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: CANVAS_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
+        let convert_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cutlass-render effect light"),
+            entries: &[texture_entry(0, false)],
         });
+        let decode = full_screen(
+            device,
+            "cutlass-render effect into light",
+            &convert,
+            &convert_layout,
+            "fs_decode",
+            LIGHT_FORMAT,
+        );
+        let encode = full_screen(
+            device,
+            "cutlass-render effect out of light",
+            &convert,
+            &convert_layout,
+            "fs_encode",
+            CANVAS_FORMAT,
+        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("cutlass-render effect"),
             address_mode_u: wgpu::AddressMode::MirrorRepeat,
@@ -840,35 +1040,97 @@ impl Effects {
             pipeline,
             layout,
             sampler,
+            decode,
+            encode,
+            convert_layout,
         }
     }
 
-    /// Run `steps` over `first`, using `second` in between. Returns the
-    /// texture that holds the result.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn run<'v>(
+    /// Run `steps` over `input`, a `size` picture in the canvas format.
+    /// Returns a new picture in the canvas format holding the result; with
+    /// no steps, `input` itself.
+    pub(crate) fn run(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        first: &'v wgpu::TextureView,
-        second: &'v wgpu::TextureView,
+        input: &wgpu::TextureView,
         size: (u32, u32),
         steps: &[Step],
-    ) -> &'v wgpu::TextureView {
-        let (mut from, mut to) = (first, second);
+    ) -> wgpu::TextureView {
+        if steps.is_empty() {
+            return input.clone();
+        }
+        let mut from = self.light(device, size);
+        let mut to = self.light(device, size);
+        self.convert(device, encoder, &self.decode, input, &from);
         for step in steps {
+            // A blur runs across, then down.
             let directions: &[u32] = if step.block == Block::Blur {
                 &[0, 1]
             } else {
                 &[0]
             };
             for direction in directions {
-                self.pass(device, queue, encoder, from, to, size, step, *direction);
+                self.pass(device, queue, encoder, &from, &to, size, step, *direction);
                 std::mem::swap(&mut from, &mut to);
             }
         }
-        from
+        let output = crate::blur::scratch(&self.pool, device, size);
+        self.convert(device, encoder, &self.encode, &from, &output);
+        output
+    }
+
+    /// A `size` half-float picture the steps take turns drawing into.
+    fn light(&self, device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
+        self.pool
+            .texture(
+                device,
+                "cutlass-render effect light",
+                TextureKey {
+                    size,
+                    format: LIGHT_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                },
+            )
+            .1
+    }
+
+    /// Draw `input` through `pipeline` into `output`, texel for texel.
+    fn convert(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::RenderPipeline,
+        input: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+    ) {
+        let group = self.pool.group(
+            device,
+            "cutlass-render effect light",
+            &self.convert_layout,
+            &[(0, Bind::View(input))],
+        );
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("cutlass-render effect light"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -883,9 +1145,10 @@ impl Effects {
         step: &Step,
         direction: u32,
     ) {
+        let encoded = u32::from(space(step.block) == Space::Display);
         let mut bytes = Vec::with_capacity(PARAMS as usize);
         bytes.extend_from_slice(&step.block.code().to_le_bytes());
-        bytes.extend_from_slice(&direction.to_le_bytes());
+        bytes.extend_from_slice(&(direction | (encoded << 1)).to_le_bytes());
         for value in [size.0 as f32, size.1 as f32] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
@@ -1046,6 +1309,89 @@ mod tests {
         }
         let white = draw(&renderer, &ROW, (4, 1), &[step(Block::Flash, &[(0, 1.0)])]);
         close(&white, &[255; 16]);
+    }
+
+    /// Into light and back leaves every byte, at every alpha, where it
+    /// was: the half-float picture between keeps all eight bits.
+    #[test]
+    fn every_byte_comes_back_from_light_as_it_went_in() {
+        let Some(renderer) = renderer() else { return };
+        let alphas = [255u8, 200, 128, 37, 1, 0];
+        let (width, height) = (256u32, alphas.len() as u32);
+        let mut scene = Vec::with_capacity((width * height * 4) as usize);
+        for alpha in alphas {
+            for value in 0..=255u8 {
+                // Premultiplied: no channel above its alpha.
+                let v = value.min(alpha);
+                scene.extend_from_slice(&[v, v / 2, alpha - v / 3 * u8::from(alpha > 0), alpha]);
+            }
+        }
+        // A step that moves nothing, in light, and one at rest on
+        // encoded values.
+        for resting in [step(Block::Transform, &[]), step(Block::Grade, &[])] {
+            let got = draw(&renderer, &scene, (width, height), &[resting]);
+            for (index, (a, b)) in got.iter().zip(&scene).enumerate() {
+                assert!(
+                    a.abs_diff(*b) <= 1,
+                    "{:?}, byte {index}: {a} vs {b}",
+                    resting.block
+                );
+            }
+        }
+    }
+
+    /// A blur averages light, not encoded values: black and white mixed
+    /// half and half is half the light, which encodes far above half way.
+    #[test]
+    fn a_blur_averages_light_so_bright_detail_stays_bright() {
+        let Some(renderer) = renderer() else { return };
+        // Black and white columns, one pixel each.
+        let (width, height) = (64u32, 4u32);
+        let scene: Vec<u8> = (0..width * height)
+            .flat_map(|index| {
+                if index % 2 == 0 {
+                    [255, 255, 255, 255]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            })
+            .collect();
+        let blur = step(Block::Blur, &[(0, 2.0)]);
+        let got = draw(&renderer, &scene, (width, height), &[blur]);
+        // About half of white's light, Rec. 709 encoded: 1.099 * 0.5^0.45
+        // - 0.099 is 0.705, or 180 of 255; the 17 taps take 8 or 9 white
+        // columns, 175 or 185. Averaging the bytes would give near 128.
+        let middle = &got[((2 * width + 32) * 4) as usize..][..4];
+        for channel in &middle[..3] {
+            assert!((172..=188).contains(channel), "{middle:?}");
+        }
+        assert_eq!(middle[3], 255);
+    }
+
+    /// The blocks that average light work in light; the ones tuned by eye
+    /// on encoded values are handed encoded values.
+    #[test]
+    fn blurs_work_in_light_and_colour_looks_on_encoded_values() {
+        use super::{Space, space};
+        for block in [
+            Block::Blur,
+            Block::ZoomBlur,
+            Block::MotionBlur,
+            Block::Focus,
+        ] {
+            assert_eq!(space(block), Space::Light, "{block:?}");
+        }
+        for block in [
+            Block::Grade,
+            Block::Hue,
+            Block::Posterize,
+            Block::GradientMap,
+            Block::Glow,
+            Block::Rays,
+            Block::LightLeak,
+        ] {
+            assert_eq!(space(block), Space::Display, "{block:?}");
+        }
     }
 
     #[test]

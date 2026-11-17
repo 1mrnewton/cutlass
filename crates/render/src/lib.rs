@@ -573,18 +573,14 @@ impl Renderer {
                     }
                     // What is drawn so far becomes one picture the steps
                     // run over, and that result is the bottom layer again.
+                    // The steps leave their input as it was, so a masked
+                    // effect keeps it as the picture outside the mask.
                     let first = blur::scratch(&self.pool, device, size);
-                    let second = blur::scratch(&self.pool, device, size);
                     Self::paint(&self.layers, encoder, &first, &bound);
-                    let before = mask.map(|_| {
-                        let before = blur::scratch(&self.pool, device, size);
-                        Self::paint(&self.layers, encoder, &before, &bound);
-                        before
-                    });
+                    let before = mask.map(|_| first.clone());
                     let mut result = self
                         .effects
-                        .run(device, queue, encoder, &first, &second, size, steps)
-                        .clone();
+                        .run(device, queue, encoder, &first, size, steps);
                     // A masked effect shows only inside its shape.
                     if let (Some(mask), Some(before)) = (mask, before) {
                         let kept = blur::scratch(&self.pool, device, size);
@@ -658,14 +654,12 @@ impl Renderer {
             (incoming, &crossing.incoming),
         ] {
             let first = blur::scratch(&self.pool, device, size);
-            let second = blur::scratch(&self.pool, device, size);
             let bound = [self.layers.bind(&self.pool, device, queue, side, canvas)];
             Self::paint(&self.layers, encoder, &first, &bound);
-            let result = self
-                .effects
-                .run(device, queue, encoder, &first, &second, size, steps)
-                .clone();
-            sides.push(result);
+            sides.push(
+                self.effects
+                    .run(device, queue, encoder, &first, size, steps),
+            );
         }
         let mixed = blur::scratch(&self.pool, device, size);
         self.cross.run(

@@ -708,12 +708,14 @@ pub const REF_SEED_SPEED: u8 = 6;
 /// prediction (reference and vector), in the direction with more such
 /// pairs (both when as many): each half tries the best by SAD and vector
 /// rate of the whole block's and its two quarters' choices, with no search
-/// of its own ([`Tile::rect_cands`]), and the intra modes when it predicts
-/// poorly. On `testsrc2`, where half of the splits of 16×16 lose to a
-/// half, against FFmpeg's `-crf` at the same PSNR-Y: +12.8% → +11.9%, for
-/// 2.6% more blocks coded in trials (by area) on the README's clip of
-/// three scenes at a fixed quantizer (two candidates, as many bits for
-/// 3.7%; halves after every split that won, with their own search and
+/// of its own ([`Tile::rect_cands`]), and, where one of those chose intra,
+/// the intra modes when it predicts poorly. On `testsrc2`, where half of
+/// the splits of 16×16 lose to a half, against FFmpeg's `-crf` at the same
+/// PSNR-Y: +12.8% → +12.0%; its trials are 2.7% of the blocks coded in
+/// trials (by area) on the README's clip of three scenes at a fixed
+/// quantizer (with the intra modes wherever a half predicts poorly,
+/// +11.9% for 3.6%; with two candidates, as many bits for a third more
+/// trials; halves after every split that won, with their own search and
 /// candidates, +11.1% for 1.25 times the time; after every split, won or
 /// not, at every size, +10.4%).
 pub const RECT_SPEED: std::ops::RangeInclusive<u8> = 4..=5;
@@ -1954,7 +1956,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.inter_cands(&base, &mut cands);
         }
         let intra_first = cands.len();
-        if s.intra_frame || self.intra_worth(&base, &cands) {
+        // (A half tried after a split, only where the block or one of its
+        // two quarters chose intra.)
+        let no_intra = !self.rect_seeds.is_empty()
+            && !self.rect_seeds.iter().any(|b| b.refs[0] == INTRA_FRAME);
+        if s.intra_frame || (!no_intra && self.intra_worth(&base, &cands)) {
             self.intra_cands(&base, &mut cands);
         }
         let intra_first = self.seg_restrict(&base, &mut cands).unwrap_or(intra_first);

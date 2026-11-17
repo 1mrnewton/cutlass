@@ -314,15 +314,25 @@ impl Shell {
     }
 
     fn run_agent_tool_in(&mut self, call: &ToolCall, allowed: &[ApprovalAction]) -> AgentRun {
+        let no_project = || AgentRun {
+            outcome: ToolOutcome {
+                content: "no project is open".to_owned(),
+                is_error: true,
+                picture: None,
+            },
+            wants: None,
+        };
+        if self.session.is_none() {
+            return no_project();
+        }
+        // Reading how the jobs stand lands one that has finished, and a
+        // landing may edit the project. The call takes its copy of the
+        // session after that: a copy taken before would be written back
+        // over the landed edit.
+        let tracks_now = self.agent_tracks_now();
+        let export_now = self.agent_export_now();
         let Some(session) = self.session.clone() else {
-            return AgentRun {
-                outcome: ToolOutcome {
-                    content: "no project is open".to_owned(),
-                    is_error: true,
-                    picture: None,
-                },
-                wants: None,
-            };
+            return no_project();
         };
         let before = session.revision();
         let (path, generation) = self
@@ -333,13 +343,13 @@ impl Shell {
         let jobs = std::mem::take(&mut self.agent_speech_jobs);
         let track_jobs = std::mem::take(&mut self.agent_track_jobs);
         let tracks = Tracks {
-            now: self.agent_tracks_now(),
+            now: tracks_now,
             started: None,
         };
         let exports = Exports {
             next: self.agent_export_next(),
             path: None,
-            now: self.agent_export_now(),
+            now: export_now,
         };
         let mut servers = std::mem::take(&mut self.mcp_servers);
         servers.configure(&self.settings.mcp_servers);
@@ -665,6 +675,68 @@ mod tests {
             pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60,
             "the middle of the frame is {pixel:?}"
         );
+    }
+
+    #[test]
+    fn a_job_that_lands_as_a_call_begins_keeps_its_edit() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.tracks[0].id = TrackId::new("main");
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "missing", TimeRange::new(0, 2_000_000)));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let read = desktop.revision().unwrap();
+        // A job of the user's has finished and waits to land: its landing
+        // edits the project.
+        let (done, finished) = std::sync::mpsc::channel();
+        desktop
+            .start_job("Rename", move |_| {
+                let _ = done.send(());
+                Box::new(|shell: &mut crate::shell::Shell| shell.set_project_name("landed"))
+            })
+            .unwrap();
+        finished.recv().unwrap();
+        // Its thread hands the landing over right after it says so.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // The assistant writes on the revision it read before the landing.
+        let split = |revision: u64| {
+            json!({
+                "expected_revision": revision,
+                "requests": [{
+                    "op": "split", "segment_id": "a", "at": 1_000_000, "right_id": "b",
+                }],
+            })
+            .to_string()
+        };
+        let stale = desktop
+            .run_agent_tool(&call("draft.apply", &split(read)), &[])
+            .outcome;
+        // The landing came first, so the write is on a revision that has
+        // moved: it is refused, and the landed edit is still there.
+        assert!(desktop.job().is_none(), "the job landed in the call");
+        assert!(stale.is_error, "{}", stale.content);
+        assert!(
+            stale.content.contains("does not match"),
+            "{}",
+            stale.content
+        );
+        assert_eq!(desktop.draft().unwrap().name, "landed");
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
+        // Read again, and both edits hold, each its own undo step.
+        let landed = desktop.revision().unwrap();
+        assert_eq!(landed, read + 1);
+        let fresh = desktop
+            .run_agent_tool(&call("draft.apply", &split(landed)), &[])
+            .outcome;
+        assert!(!fresh.is_error, "{}", fresh.content);
+        assert_eq!(desktop.draft().unwrap().name, "landed");
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().name, "landed");
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub mod grade;
 pub mod look;
 pub mod lut;
 pub mod mask;
+pub mod matting;
 pub mod package;
 pub mod preview;
 pub mod recipe;
@@ -70,6 +71,9 @@ pub use lut::{ClipLut, KEPT_SIZE, LUT, Lut, LutError, MAX_CUBE_SIZE, segment_lut
 pub use mask::{
     COLOR_MASK, CanvasMask, MASK, MASK_WGSL, Mask, MaskShape, listed_mask, segment_color_mask,
     segment_mask,
+};
+pub use matting::{
+    Brush, MATTING, Matting, MattingMode, Pick, PickClick, Stroke, StrokeStyle, segment_matting,
 };
 pub use package::{
     Located, MAX_PACKAGE_BYTES, MissingPackages, Package, PackageError, PackageStore,

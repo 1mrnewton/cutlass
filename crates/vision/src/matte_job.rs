@@ -183,17 +183,19 @@ fn prompted_step(
 ) -> Result<Matte, EnhanceJobError> {
     let vision = EnhanceJobError::Vision;
     let Some(prompt) = prompt else {
-        let matte = follower.step(image, None).map_err(vision)?;
+        let mut matte = follower.step(image, None).map_err(vision)?;
         check_size(&matte, image.width, image.height, k)?;
+        harden(&mut matte);
         return Ok(matte);
     };
     let clicks = prompt.clicks(image.width, image.height);
     let painted = prompt.painted();
     if painted.is_empty() {
-        let matte = follower
+        let mut matte = follower
             .step(image, Some(&Prompt { clicks, mask: None }))
             .map_err(vision)?;
         check_size(&matte, image.width, image.height, k)?;
+        harden(&mut matte);
         return Ok(matte);
     }
     let mut base = if clicks.is_empty() {
@@ -204,10 +206,11 @@ fn prompted_step(
         )
         .ok_or_else(|| lost(k))?
     } else {
-        let matte = follower
+        let mut matte = follower
             .step(image, Some(&Prompt { clicks, mask: None }))
             .map_err(vision)?;
         check_size(&matte, image.width, image.height, k)?;
+        harden(&mut matte);
         matte
     };
     paint(&mut base, &painted);
@@ -278,6 +281,15 @@ impl PickPrompt {
             .iter()
             .filter(|brush| !brush.smart)
             .collect()
+    }
+}
+
+/// A follower's matte cut at half: SAM 2 answers in or out, and its soft
+/// values where it is unsure show as a grey haze with a faint grid, so the
+/// edge's softness comes from Feather edge instead.
+pub(crate) fn harden(matte: &mut Matte) {
+    for value in &mut matte.alpha {
+        *value = if *value >= 128 { 255 } else { 0 };
     }
 }
 

@@ -556,7 +556,7 @@ fn birefnet_mattes_a_real_clip() {
     } else {
         crate::Compute::Cpu
     };
-    let mut model = crate::Matting::load(&weights, compute).unwrap();
+    let mut model = crate::Matting::load_at(&weights, compute, 768).unwrap();
     assert_eq!(model.id(), ask.model());
     let start = std::time::Instant::now();
     let file = matte_clip(
@@ -586,4 +586,39 @@ fn birefnet_mattes_a_real_clip() {
     if let Some(out) = std::env::var_os("CUTLASS_MATTE_OUT") {
         fs::copy(&file, Path::new(&out).join("party-matte.mp4")).unwrap();
     }
+}
+
+/// Answers every step with the same soft greys, as SAM 2 does where it is
+/// unsure.
+struct Hazy;
+
+impl Follower for Hazy {
+    fn id(&self) -> &str {
+        "hazy"
+    }
+
+    fn reset(&mut self) {}
+
+    fn step(&mut self, image: &Image<'_>, _: Option<&Prompt>) -> Result<Matte, VisionError> {
+        let alpha = (0..image.width * image.height)
+            .map(|i| [90, 127, 128, 170][i as usize % 4])
+            .collect();
+        Ok(Matte::new(image.width, image.height, alpha).unwrap())
+    }
+}
+
+#[test]
+fn a_followers_unsure_greys_are_cut_at_half() {
+    let rgb = vec![50_u8; 8 * 2 * 3];
+    let image = Image {
+        rgb: &rgb,
+        width: 8,
+        height: 2,
+    };
+    let expected: Vec<u8> = (0..16).map(|i| [0, 0, 255, 255][i % 4]).collect();
+    let followed = prompted_step(&mut Hazy, &image, None, 0).unwrap();
+    assert_eq!(followed.alpha, expected);
+    let mut matte = Matte::new(4, 1, vec![0, 127, 128, 255]).unwrap();
+    harden(&mut matte);
+    assert_eq!(matte.alpha, vec![0, 0, 255, 255]);
 }

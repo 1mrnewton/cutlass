@@ -743,6 +743,69 @@ fn a_seek_back_shows_the_old_picture_until_the_asked_one_is_ready() {
     assert!(shown.iter().all(|start| *start == tick(150)), "{shown:?}");
 }
 
+/// While set, [`Failing`] refuses every packet.
+static REFUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// [`Token`], refusing every packet while [`REFUSE`] is set.
+struct Failing;
+
+impl Decoder for Failing {
+    fn codec(&self) -> CodecId {
+        CodecId::Jpeg
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        if REFUSE.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "refused",
+            });
+        }
+        Token.push(packet)
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {}
+}
+
+#[test]
+fn a_read_that_does_not_wait_tries_a_failed_time_again_after_a_while() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_eight);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, |_params| Ok(Box::new(Failing)));
+    let media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let ahead = ReadAhead::start(media, TimeRange::new(0, 1_000_000), 2).expect("thread");
+    let at = Micros(40_000);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let failed = loop {
+        match ahead.try_picture(at) {
+            Err(error) => break error,
+            Ok(Some(_)) => panic!("the decoder refuses"),
+            Ok(None) => {}
+        }
+        assert!(std::time::Instant::now() < until, "no answer");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    };
+    assert!(!matches!(failed, EngineError::Interrupted));
+    // The file reads now, but the error stands for a moment first.
+    REFUSE.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(ahead.try_picture(at).is_err());
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(Some(held)) = ahead.try_picture(at) {
+            assert!(held.start.0 <= at.0 && at.0 < held.end.0);
+            break;
+        }
+        assert!(std::time::Instant::now() < until, "never tried again");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// [`OnePicture`], three milliseconds a picture, so a test sees a decode on
 /// its way.
 struct SlowPicture;

@@ -11,11 +11,16 @@
 //!
 //! Moving backward, a long-GOP file can only be decoded forward from a
 //! keyframe. So while the asked time moves back the worker keeps every
-//! picture it decodes behind it, up to [`BEHIND_BYTES`], and once it has
-//! answered it fills in the pictures before those, a keyframe run at a time,
-//! so stepping back finds them already decoded.
+//! picture it decodes behind it, up to its share of [`BEHIND_BYTES`], and
+//! once it has answered it fills in the pictures before those, a keyframe
+//! run at a time, so stepping back finds them already decoded.
+//!
+//! A time that failed to decode is that read's error. A caller that does
+//! not wait gets it until [`RETRY_AFTER`] has passed, then the time is
+//! decoded again, so one failed read does not blank a clip for good.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -27,8 +32,15 @@ use crate::reader::{HeldFrame, Media, Steer};
 
 /// Pictures kept before the asked time, for a short step back.
 pub const BEHIND: usize = 2;
-/// The memory kept in pictures before the asked time while it moves back.
+/// The memory kept in pictures before the asked time while it moves back,
+/// shared equally by every clip moving back at once, so a stack of reversed
+/// clips holds no more than one does.
 pub const BEHIND_BYTES: usize = 384 << 20;
+/// How long a caller that does not wait is given a failed time's error
+/// before the time is decoded again.
+const RETRY_AFTER: Duration = Duration::from_millis(500);
+/// Clips moving back now, which share [`BEHIND_BYTES`].
+static MOVING_BACK: AtomicUsize = AtomicUsize::new(0);
 /// Pictures this close are one run with no picture missing between them.
 const TOUCHING: i64 = 1_000;
 /// How often a waiting caller checks that the worker is still running.
@@ -57,12 +69,15 @@ struct State {
     /// A time before the first picture or past the last one is answered by a
     /// picture that does not cover it.
     answer: Option<(Micros, Micros)>,
-    /// Why the last asked time has no picture.
-    failed: Option<(Micros, EngineError)>,
+    /// Why the last asked time has no picture, and when it failed.
+    failed: Option<(Micros, EngineError, Instant)>,
     /// Decoding forward reached the last picture.
     ended: bool,
     /// The asked time last moved earlier.
     backward: bool,
+    /// The count of clips moving back that this one is in while `backward`.
+    moving_back: &'static AtomicUsize,
+    counted: bool,
     /// A fill behind this picture start found nothing earlier: the start of
     /// the stream, or a run that would not decode.
     floor: Option<Micros>,
@@ -85,6 +100,8 @@ impl ReadAhead {
                 failed: None,
                 ended: false,
                 backward: false,
+                moving_back: &MOVING_BACK,
+                counted: false,
                 floor: None,
                 shown: None,
                 following: false,
@@ -118,10 +135,16 @@ impl ReadAhead {
             state.shown = Some(held.clone());
             return Ok(Some(held));
         }
-        if let Some((at, error)) = &state.failed
+        if let Some((at, error, when)) = &state.failed
             && *at == source
         {
-            return Err(error.clone());
+            if when.elapsed() < RETRY_AFTER {
+                return Err(error.clone());
+            }
+            state.failed = None;
+            state.answer = None;
+            self.shared.wake.notify_all();
+            return Ok(None);
         }
         if state.want != Some(source) {
             aim(&mut state, source);
@@ -188,7 +211,7 @@ impl ReadAhead {
                 .wake
                 .wait_timeout_while(state, CHECK, |state| {
                     find(state, source).is_none()
-                        && state.failed.as_ref().is_none_or(|(at, _)| *at != source)
+                        && state.failed.as_ref().is_none_or(|(at, ..)| *at != source)
                 })
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(held) = find(&state, source) {
@@ -196,7 +219,7 @@ impl ReadAhead {
                 state.shown = Some(held.clone());
                 return Ok(held);
             }
-            if state.failed.as_ref().is_some_and(|(at, _)| *at == source) {
+            if state.failed.as_ref().is_some_and(|(at, ..)| *at == source) {
                 break;
             }
             if self.worker.as_ref().is_none_or(JoinHandle::is_finished) {
@@ -204,7 +227,7 @@ impl ReadAhead {
             }
         }
         match state.failed.take() {
-            Some((_, error)) => Err(error),
+            Some((_, error, _)) => Err(error),
             None => Err(EngineError::NotReady),
         }
     }
@@ -212,7 +235,11 @@ impl ReadAhead {
 
 impl Drop for ReadAhead {
     fn drop(&mut self) {
-        lock(&self.shared.state).stop = true;
+        let mut state = lock(&self.shared.state);
+        state.stop = true;
+        state.backward = false;
+        count_backward(&mut state);
+        drop(state);
         self.shared.wake.notify_all();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -228,6 +255,24 @@ fn aim(state: &mut State, source: Micros) {
         state.backward = source.0 < want.0;
     }
     state.want = Some(source);
+    count_backward(state);
+}
+
+/// Keep the count of clips moving back in step with `state.backward`.
+fn count_backward(state: &mut State) {
+    if state.backward != state.counted {
+        if state.backward {
+            state.moving_back.fetch_add(1, Ordering::Relaxed);
+        } else {
+            state.moving_back.fetch_sub(1, Ordering::Relaxed);
+        }
+        state.counted = state.backward;
+    }
+}
+
+/// This clip's share of [`BEHIND_BYTES`] while it moves back.
+fn behind_budget(state: &State) -> usize {
+    BEHIND_BYTES / state.moving_back.load(Ordering::Relaxed).max(1)
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -266,7 +311,7 @@ enum Job {
 fn next_job(state: &State, ahead: usize) -> Option<Job> {
     let want = state.want?;
     if find(state, want).is_none() {
-        if state.failed.as_ref().is_some_and(|(at, _)| *at == want) {
+        if state.failed.as_ref().is_some_and(|(at, ..)| *at == want) {
             return None;
         }
         return Some(Job::Answer(want));
@@ -289,8 +334,9 @@ fn next_job(state: &State, ahead: usize) -> Option<Job> {
 }
 
 /// Fill in before the run of pictures that ends at `want`, once it holds
-/// less than three quarters of [`BEHIND_BYTES`]. Waiting for the run to run
-/// low keeps each step back from decoding a keyframe run for one picture.
+/// less than three quarters of this clip's share of [`BEHIND_BYTES`].
+/// Waiting for the run to run low keeps each step back from decoding a
+/// keyframe run for one picture.
 fn behind_job(state: &State, want: Micros) -> Option<Job> {
     let found = find(state, want)?.start;
     let mut index = state.frames.iter().position(|held| held.start == found)?;
@@ -304,7 +350,7 @@ fn behind_job(state: &State, want: Micros) -> Option<Job> {
         index -= 1;
     }
     let edge = state.frames[index].start;
-    if bytes >= BEHIND_BYTES / 4 * 3 || state.floor == Some(edge) {
+    if bytes >= behind_budget(state) / 4 * 3 || state.floor == Some(edge) {
         return None;
     }
     Some(Job::Behind(edge))
@@ -367,7 +413,7 @@ fn run(shared: &Shared, mut media: Media, cover: &TimeRange, ahead: usize) {
             }
             Err(error) => {
                 if answering {
-                    state.failed = Some((time, error));
+                    state.failed = Some((time, error, Instant::now()));
                 } else {
                     state.ended = true;
                 }
@@ -451,7 +497,7 @@ fn fill(
 
 /// Insert `held` in display order and drop pictures outside the window
 /// around the asked time. Moving back, the pictures nearest it are kept up to
-/// [`BEHIND_BYTES`]; otherwise [`BEHIND`] of them.
+/// this clip's share of [`BEHIND_BYTES`]; otherwise [`BEHIND`] of them.
 fn store(state: &mut State, held: HeldFrame, ahead: usize) {
     if !state.frames.iter().any(|stored| stored.start == held.start) {
         let at = state
@@ -471,7 +517,11 @@ fn store(state: &mut State, held: HeldFrame, ahead: usize) {
     let keep = |held: &HeldFrame| {
         answer == Some(held.start) || held.end.0 > want.0 || held.start.0 > want.0
     };
-    let budget = if state.backward { BEHIND_BYTES } else { 0 };
+    let budget = if state.backward {
+        behind_budget(state)
+    } else {
+        0
+    };
     let (mut behind, mut bytes) = (0, 0);
     for index in (0..state.frames.len()).rev() {
         if !keep(&state.frames[index]) {
@@ -495,10 +545,11 @@ fn store(state: &mut State, held: HeldFrame, ahead: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BEHIND, BEHIND_BYTES, Job, State, aim, next_job, store};
+    use super::{BEHIND, BEHIND_BYTES, Job, State, aim, behind_budget, next_job, store};
     use crate::reader::{DecodedFrame, HeldFrame};
     use cutlass_model::Micros;
     use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
 
     fn held(start: i64) -> HeldFrame {
         HeldFrame {
@@ -512,7 +563,13 @@ mod tests {
         }
     }
 
+    /// A state with a count of clips moving back of its own, so tests that
+    /// run at once do not share one.
     fn state(want: i64) -> State {
+        state_counted(want, Box::leak(Box::new(AtomicUsize::new(0))))
+    }
+
+    fn state_counted(want: i64, moving_back: &'static AtomicUsize) -> State {
         State {
             want: Some(Micros(want)),
             frames: VecDeque::new(),
@@ -520,6 +577,8 @@ mod tests {
             failed: None,
             ended: false,
             backward: false,
+            moving_back,
+            counted: false,
             floor: None,
             shown: None,
             following: false,
@@ -603,6 +662,30 @@ mod tests {
         let mut state = state(want);
         state.backward = backward;
         state
+    }
+
+    #[test]
+    fn clips_moving_back_at_once_share_the_memory_budget() {
+        let count: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
+        let mut first = state_counted(50, count);
+        let mut second = state_counted(50, count);
+        aim(&mut first, Micros(40));
+        assert_eq!(behind_budget(&first), BEHIND_BYTES);
+        aim(&mut second, Micros(40));
+        assert_eq!(behind_budget(&first), BEHIND_BYTES / 2);
+        // Each keeps half: three pictures of a third of the whole each are
+        // more than its share, so only BEHIND of them stay behind.
+        let each = BEHIND_BYTES / 3;
+        for start in [0, 10, 20, 30, 40] {
+            store(&mut first, sized(start, each), 3);
+        }
+        let starts: Vec<i64> = first.frames.iter().map(|held| held.start.0).collect();
+        assert_eq!(starts, [20, 30, 40]);
+        // Turning forward leaves the share to the other.
+        aim(&mut second, Micros(45));
+        assert_eq!(behind_budget(&first), BEHIND_BYTES);
+        aim(&mut second, Micros(45));
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]

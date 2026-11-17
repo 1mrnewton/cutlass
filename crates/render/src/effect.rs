@@ -14,9 +14,11 @@
 //! bright; a grade or a colour look was drawn by eye on Rec. 709 encoded
 //! values, as the canvas holds them, and is handed those. The picture is
 //! converted as a whole, once, wherever the chain moves from one to the
-//! other, and once more into the canvas format at the end: a run of colour
-//! blocks costs no more than before, and none of them pays for the curve on
-//! every tap. The curve is the Rec. 709 OETF and its inverse, the one the
+//! other: a run of colour blocks costs no more than before, and none of
+//! them pays for the curve on every tap. A chain that starts on encoded
+//! values reads the canvas picture itself, and the last draw writes the
+//! canvas format itself, encoding light on the way, so a chain of colour
+//! blocks draws no more passes than it has blocks. The curve is the Rec. 709 OETF and its inverse, the one the
 //! layer shader converts transfers with.
 //!
 //! A step may keep its result for a later blend to read. Keeping costs no
@@ -36,16 +38,17 @@ pub(crate) const LIGHT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16
 /// What a block's arithmetic is written for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Space {
-    /// Linear light: blocks that average or add light, and blocks that
-    /// only move pixels, which then interpolate in light.
+    /// Linear light: blocks that average or add light.
     Light,
     /// Rec. 709 encoded values, as the canvas holds them: blocks whose
     /// numbers were tuned by eye on an encoded picture.
     Display,
 }
 
-/// The values `block`'s arithmetic is written for.
-pub(crate) const fn space(block: Block) -> Space {
+/// The values `block`'s arithmetic is written for. None for a block that
+/// only moves pixels: it runs on whatever the chain holds, so it never
+/// costs a conversion.
+pub(crate) const fn space(block: Block) -> Option<Space> {
     match block {
         // Averages of light, and light laid over light.
         Block::Blur
@@ -53,7 +56,7 @@ pub(crate) const fn space(block: Block) -> Space {
         | Block::MotionBlur
         | Block::Focus
         | Block::Glow
-        | Block::Blend => Space::Light,
+        | Block::Blend => Some(Space::Light),
         // Pixels moved, not mixed.
         Block::Transform
         | Block::RgbSplit
@@ -68,7 +71,7 @@ pub(crate) const fn space(block: Block) -> Space {
         | Block::Stretch
         | Block::Blocks
         | Block::Kaleido
-        | Block::Fringe => Space::Light,
+        | Block::Fringe => None,
         // Colour tuned by eye, and light whose thresholds and strengths
         // were tuned on encoded values.
         Block::Grade
@@ -88,8 +91,28 @@ pub(crate) const fn space(block: Block) -> Space {
         | Block::Halftone
         | Block::Prints
         | Block::Rays
-        | Block::Place => Space::Display,
+        | Block::Place => Some(Space::Display),
     }
+}
+
+/// The space each of `steps` runs in: its block's, or for a block that
+/// only moves pixels, what the chain holds then. Steps before the first
+/// block that cares hold what that block wants, or encoded values, as the
+/// canvas does, when none cares.
+fn spaces(steps: &[Step]) -> Vec<Space> {
+    let mut holding = steps
+        .iter()
+        .find_map(|step| space(step.block))
+        .unwrap_or(Space::Display);
+    steps
+        .iter()
+        .map(|step| {
+            if let Some(wanted) = space(step.block) {
+                holding = wanted;
+            }
+            holding
+        })
+        .collect()
 }
 
 /// The passes between the canvas's bytes, encoded values and light: the
@@ -121,6 +144,12 @@ fn encoded_of(c: vec4<f32>) -> vec4<f32> {
     }
     return vec4<f32>(to_encoded(c.rgb / c.a) * c.a, c.a);
 }
+
+// What the canvas can hold: alpha from 0 to 1, no channel above it.
+fn held(c: vec4<f32>) -> vec4<f32> {
+    let a = clamp(c.a, 0.0, 1.0);
+    return vec4<f32>(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(a)), a);
+}
 ";
 
 const CONVERT: &str = r"
@@ -143,12 +172,6 @@ fn here(in: Out) -> vec4<f32> {
     return textureLoad(picture, vec2<i32>(in.position.xy), 0);
 }
 
-// What the canvas can hold: alpha from 0 to 1, no channel above it.
-fn held(c: vec4<f32>) -> vec4<f32> {
-    let a = clamp(c.a, 0.0, 1.0);
-    return vec4<f32>(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(a)), a);
-}
-
 @fragment
 fn fs_decode(in: Out) -> @location(0) vec4<f32> {
     return light_of(here(in));
@@ -157,11 +180,6 @@ fn fs_decode(in: Out) -> @location(0) vec4<f32> {
 @fragment
 fn fs_encode(in: Out) -> @location(0) vec4<f32> {
     return encoded_of(here(in));
-}
-
-@fragment
-fn fs_copy(in: Out) -> @location(0) vec4<f32> {
-    return here(in);
 }
 
 @fragment
@@ -975,7 +993,33 @@ fn prints(uv: vec2<f32>) -> vec4<f32> {
 
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
-    let uv = in.position.xy / fx.size;
+    return kernel(in.position.xy / fx.size);
+}
+
+// The chain's last draw, straight into the canvas format: from encoded
+// values, or from light.
+@fragment
+fn fs_last_encoded(in: Out) -> @location(0) vec4<f32> {
+    return held(kernel(in.position.xy / fx.size));
+}
+
+@fragment
+fn fs_last_light(in: Out) -> @location(0) vec4<f32> {
+    return encoded_of(held(kernel(in.position.xy / fx.size)));
+}
+
+// A step's last draw when the next step wants the other values.
+@fragment
+fn fs_into_encoded(in: Out) -> @location(0) vec4<f32> {
+    return encoded_of(kernel(in.position.xy / fx.size));
+}
+
+@fragment
+fn fs_into_light(in: Out) -> @location(0) vec4<f32> {
+    return light_of(kernel(in.position.xy / fx.size));
+}
+
+fn kernel(uv: vec2<f32>) -> vec4<f32> {
     switch (fx.code.x) {
         case 0u: { return transform(uv); }
         case 1u: { return rgb_split(uv); }
@@ -1292,14 +1336,21 @@ fn blur_plan(reach: f32) -> Plan {
 
 pub(crate) struct Effects {
     pipeline: wgpu::RenderPipeline,
+    /// The chain's last draw, into the canvas format: from encoded values
+    /// as they are, or from light.
+    last_encoded: wgpu::RenderPipeline,
+    last_light: wgpu::RenderPipeline,
+    /// A step's last draw, converting for the step after it: into encoded
+    /// values from light, and into light from encoded values.
+    draw_into_encoded: wgpu::RenderPipeline,
+    draw_into_light: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// The whole picture between encoded values and light, into a half
-    /// float picture: `into[space]` makes it `space`'s from the other,
-    /// `copy_in` from the canvas as it is.
+    /// float picture: `into_light` from the canvas or from encoded values,
+    /// `into_encoded` from light.
     into_light: wgpu::RenderPipeline,
     into_encoded: wgpu::RenderPipeline,
-    copy_in: wgpu::RenderPipeline,
     /// The result back into the canvas format, from light or as it is.
     out_of_light: wgpu::RenderPipeline,
     out_of_encoded: wgpu::RenderPipeline,
@@ -1399,6 +1450,38 @@ impl Effects {
             "fs",
             LIGHT_FORMAT,
         );
+        let last_encoded = full_screen(
+            device,
+            "cutlass-render effect last",
+            &module,
+            &layout,
+            "fs_last_encoded",
+            CANVAS_FORMAT,
+        );
+        let last_light = full_screen(
+            device,
+            "cutlass-render effect last from light",
+            &module,
+            &layout,
+            "fs_last_light",
+            CANVAS_FORMAT,
+        );
+        let draw_into_encoded = full_screen(
+            device,
+            "cutlass-render effect into encoded",
+            &module,
+            &layout,
+            "fs_into_encoded",
+            LIGHT_FORMAT,
+        );
+        let draw_into_light = full_screen(
+            device,
+            "cutlass-render effect into light",
+            &module,
+            &layout,
+            "fs_into_light",
+            LIGHT_FORMAT,
+        );
         let convert = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render effect light"),
             source: wgpu::ShaderSource::Wgsl(format!("{LIGHT}{CONVERT}").into()),
@@ -1420,7 +1503,6 @@ impl Effects {
             "fs_encode",
             LIGHT_FORMAT,
         );
-        let copy_in = converting("cutlass-render effect copy in", "fs_copy", LIGHT_FORMAT);
         let out_of_light = converting(
             "cutlass-render effect out of light",
             "fs_encode_out",
@@ -1442,11 +1524,14 @@ impl Effects {
         Self {
             pool,
             pipeline,
+            last_encoded,
+            last_light,
+            draw_into_encoded,
+            draw_into_light,
             layout,
             sampler,
             into_light,
             into_encoded,
-            copy_in,
             out_of_light,
             out_of_encoded,
             convert_layout,
@@ -1468,24 +1553,37 @@ impl Effects {
         if steps.is_empty() {
             return input.clone();
         }
-        let mut from = self.light(device, size);
         let mut to = self.light(device, size);
         // The pictures kept for a blend, each with the values it holds;
         // the first is the input, as the canvas bytes it is.
         let mut kept: [Option<(wgpu::TextureView, Space)>; MAX_SAVED + 1] = Default::default();
         kept[0] = Some((input.clone(), Space::Display));
-        // Whether `from` is kept, so must not be drawn over.
-        let mut held = false;
-        // The canvas holds encoded values: decoded only if the first step
-        // wants light.
-        let mut current = space(steps[0].block);
-        let first = match current {
-            Space::Light => &self.into_light,
-            Space::Display => &self.copy_in,
+        // The canvas holds encoded values: a first step that wants them
+        // reads the input itself, and one that wants light reads it
+        // decoded. The input is never drawn over, so it is held.
+        let spaces = spaces(steps);
+        let mut current = spaces[0];
+        let (mut from, mut held) = match current {
+            Space::Display => (input.clone(), true),
+            Space::Light => {
+                let decoded = self.light(device, size);
+                self.convert(device, encoder, &self.into_light, input, &decoded);
+                (decoded, false)
+            }
         };
-        self.convert(device, encoder, first, input, &from);
-        for step in steps {
-            let wanted = space(step.block);
+        let plans: Vec<Plan> = steps.iter().map(|step| plan(step, size)).collect();
+        // The last step's last draw writes the result into the canvas
+        // format itself, unless it keeps a picture or draws nothing there.
+        let folds = steps.last().is_some_and(|step| step.save.is_none())
+            && plans
+                .last()
+                .and_then(|plan| plan.draws.last())
+                .is_some_and(|draw| draw.write == Picture::Current);
+        let output = crate::blur::scratch(&self.pool, device, size);
+        for (index, (step, plan)) in steps.iter().zip(&plans).enumerate() {
+            // Converted here only when the step before could not: it drew
+            // nothing, or it kept its picture.
+            let wanted = spaces[index];
             if wanted != current {
                 let pipeline = match wanted {
                     Space::Light => &self.into_light,
@@ -1495,7 +1593,6 @@ impl Effects {
                 self.turn(device, size, &mut from, &mut to, &mut held);
                 current = wanted;
             }
-            let plan = plan(step, size);
             let work: Vec<(wgpu::TextureView, (u32, u32))> = plan
                 .work
                 .iter()
@@ -1504,8 +1601,16 @@ impl Effects {
                     (self.light(device, shrunk), shrunk)
                 })
                 .collect();
-            for draw in &plan.draws {
+            for (number, draw) in plan.draws.iter().enumerate() {
                 let mut draw = *draw;
+                let ends = number + 1 == plan.draws.len() && draw.write == Picture::Current;
+                let last = folds && ends && index + 1 == steps.len();
+                // The step's last draw hands the next step the values it
+                // wants, unless the step keeps its picture as it is.
+                let next = spaces
+                    .get(index + 1)
+                    .copied()
+                    .filter(|next| ends && *next != current && step.save.is_none());
                 let read = match draw.read {
                     Picture::Work(index) => &work[index].0,
                     _ => &from,
@@ -1525,20 +1630,35 @@ impl Effects {
                 };
                 let (target, target_size) = match draw.write {
                     Picture::Work(index) => (&work[index].0, work[index].1),
+                    _ if last => (&output, size),
                     _ => (&to, size),
+                };
+                let pipeline = match (last, current, next) {
+                    (true, Space::Display, _) => &self.last_encoded,
+                    (true, Space::Light, _) => &self.last_light,
+                    (false, _, Some(Space::Display)) => &self.draw_into_encoded,
+                    (false, _, Some(Space::Light)) => &self.draw_into_light,
+                    (false, _, None) => &self.pipeline,
                 };
                 self.pass(
                     device,
                     queue,
                     encoder,
+                    pipeline,
                     read,
                     other,
                     target,
                     target_size,
                     &draw,
                 );
+                if last {
+                    return output;
+                }
                 if draw.write == Picture::Current {
                     self.turn(device, size, &mut from, &mut to, &mut held);
+                }
+                if let Some(next) = next {
+                    current = next;
                 }
             }
             if let Some(slot) = step.save.and_then(|slot| kept.get_mut(usize::from(slot))) {
@@ -1547,7 +1667,6 @@ impl Effects {
                 held = true;
             }
         }
-        let output = crate::blur::scratch(&self.pool, device, size);
         let last = match current {
             Space::Light => &self.out_of_light,
             Space::Display => &self.out_of_encoded,
@@ -1633,6 +1752,7 @@ impl Effects {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::RenderPipeline,
         read: &wgpu::TextureView,
         other: &wgpu::TextureView,
         to: &wgpu::TextureView,
@@ -1682,7 +1802,7 @@ impl Effects {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &group, &[]);
         pass.draw(0..3, 0..1);
     }
@@ -2066,8 +2186,9 @@ mod tests {
             Block::MotionBlur,
             Block::Focus,
             Block::Glow,
+            Block::Blend,
         ] {
-            assert_eq!(space(block), Space::Light, "{block:?}");
+            assert_eq!(space(block), Some(Space::Light), "{block:?}");
         }
         for block in [
             Block::Grade,
@@ -2077,8 +2198,31 @@ mod tests {
             Block::Rays,
             Block::LightLeak,
         ] {
-            assert_eq!(space(block), Space::Display, "{block:?}");
+            assert_eq!(space(block), Some(Space::Display), "{block:?}");
         }
+        for block in [Block::Transform, Block::Swirl, Block::Slices, Block::RgbSplit] {
+            assert_eq!(space(block), None, "{block:?}");
+        }
+    }
+
+    #[test]
+    fn a_block_that_moves_pixels_runs_on_what_the_chain_holds() {
+        use super::Space::{Display, Light};
+        let chain = |blocks: &[Block]| {
+            let steps: Vec<Step> = blocks.iter().map(|block| step(*block, &[])).collect();
+            super::spaces(&steps)
+        };
+        // A VHS look: moved, then graded, all on encoded values.
+        assert_eq!(
+            chain(&[Block::Slices, Block::RgbSplit, Block::Grade, Block::Noise]),
+            [Display; 4]
+        );
+        assert_eq!(chain(&[Block::Transform, Block::Blur]), [Light, Light]);
+        assert_eq!(
+            chain(&[Block::Blur, Block::Swirl, Block::Grade, Block::Mirror]),
+            [Light, Light, Display, Display]
+        );
+        assert_eq!(chain(&[Block::Transform]), [Display]);
     }
 
     /// Linear light of a Rec. 709 encoded byte.
@@ -2449,6 +2593,52 @@ mod tests {
         close(&draw(&renderer, &scene, size, &both), &blurred);
         let back = [saving(Block::Invert, &[(0, 1.0)], 1), swirl, blend(4.0, 1.0, 0)];
         close(&draw(&renderer, &scene, size, &back), &scene);
+    }
+
+    #[test]
+    fn a_chain_ends_alike_however_its_last_step_ends() {
+        let Some(renderer) = renderer() else { return };
+        let size = (4u32, 1u32);
+        let invert = step(Block::Invert, &[(0, 1.0)]);
+        let inverted = draw(&renderer, &LEVELS, size, &[invert]);
+        // A last step that keeps its picture, or draws nothing, is still
+        // the chain's result.
+        let keeping = saving(Block::Invert, &[(0, 1.0)], 1);
+        close(&draw(&renderer, &LEVELS, size, &[keeping]), &inverted);
+        let unlit = step(Block::Glow, &[(0, 0.0)]);
+        close(&draw(&renderer, &LEVELS, size, &[invert, unlit]), &inverted);
+        // Ending in light or in encoded values, from either.
+        let turn = step(Block::Transform, &[]);
+        close(&draw(&renderer, &LEVELS, size, &[invert, turn]), &inverted);
+        close(&draw(&renderer, &LEVELS, size, &[turn, invert]), &inverted);
+        close(&draw(&renderer, &LEVELS, size, &[turn]), &LEVELS);
+    }
+
+    #[test]
+    fn a_change_of_space_drawn_in_a_step_matches_one_drawn_alone() {
+        let Some(renderer) = renderer() else { return };
+        let size = (16u32, 8u32);
+        let scene: Vec<u8> = (0..size.0 * size.1)
+            .flat_map(|index| {
+                let (x, y) = (index % size.0, index / size.0);
+                [(x * 16) as u8, (y * 32) as u8, 200, 255]
+            })
+            .collect();
+        let soft = [(0, 0.2)];
+        let grade = [(1, 1.3), (2, 0.8)];
+        // A step that keeps its picture leaves the change to a pass of
+        // its own; one that does not makes it in its last draw.
+        for (first, then) in [
+            ((Block::Blur, &soft[..]), (Block::Grade, &grade[..])),
+            ((Block::Grade, &grade[..]), (Block::Blur, &soft[..])),
+        ] {
+            let folded = [step(first.0, first.1), step(then.0, then.1)];
+            let apart = [saving(first.0, first.1, 1), step(then.0, then.1)];
+            close(
+                &draw(&renderer, &scene, size, &folded),
+                &draw(&renderer, &scene, size, &apart),
+            );
+        }
     }
 
     #[test]

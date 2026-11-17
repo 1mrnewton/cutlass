@@ -9,7 +9,7 @@
 //! The transport speaks plain HTTP/1.1 to a loopback address only, so the
 //! prompt never leaves the machine on this path.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -471,12 +471,60 @@ impl ChatTransport for LoopbackHttp {
     }
 }
 
+/// The longest reply a runner may send, in bytes: what the cloud path
+/// takes too. A length the runner only claims is not room set aside for it.
+const REPLY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// The longest status or header line, and the most header lines.
+const HEAD_LINE_LIMIT: usize = 64 * 1024;
+const HEAD_LINES: usize = 1000;
+
+/// One line of a response's head or of its chunk framing, no longer than
+/// [`HEAD_LINE_LIMIT`].
+fn head_line(reader: &mut impl BufRead) -> Result<String, ModelError> {
+    let mut line = String::new();
+    let most = u64::try_from(HEAD_LINE_LIMIT).unwrap_or(u64::MAX) + 1;
+    reader
+        .take(most)
+        .read_line(&mut line)
+        .map_err(|error| ModelError::Inner(format!("the model's reply broke off: {error}")))?;
+    if line.len() > HEAD_LINE_LIMIT {
+        return Err(ModelError::Inner(
+            "the model's reply has a header too long to read".to_owned(),
+        ));
+    }
+    Ok(line)
+}
+
+/// Read `length` more bytes of a body into `body`, as they come: nothing
+/// is set aside for a length the runner named and does not send.
+fn read_body(
+    reader: &mut impl BufRead,
+    body: &mut Vec<u8>,
+    length: usize,
+) -> Result<(), ModelError> {
+    if length > REPLY_LIMIT.saturating_sub(body.len()) {
+        return Err(ModelError::Inner(format!(
+            "the model's reply is longer than {REPLY_LIMIT} bytes, too long to read"
+        )));
+    }
+    let read = reader
+        .take(u64::try_from(length).unwrap_or(u64::MAX))
+        .read_to_end(body)
+        .map_err(|error| ModelError::Inner(format!("the model's reply broke off: {error}")))?;
+    if read < length {
+        return Err(ModelError::Inner(
+            "the model's reply broke off: it ended before its length".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// The body of an HTTP/1.1 response: by its length, chunked, or to the end.
+/// The runner is any program that listens on the address, so every length
+/// it names and every line it sends is bounded.
 fn read_response(mut reader: impl BufRead) -> Result<String, ModelError> {
-    let broken =
-        |error: std::io::Error| ModelError::Inner(format!("the model's reply broke off: {error}"));
-    let mut status = String::new();
-    reader.read_line(&mut status).map_err(broken)?;
+    let status = head_line(&mut reader)?;
     let code: u16 = status
         .split_whitespace()
         .nth(1)
@@ -486,13 +534,12 @@ fn read_response(mut reader: impl BufRead) -> Result<String, ModelError> {
         })?;
     let mut length = None;
     let mut chunked = false;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).map_err(broken)? == 0 {
-            break;
-        }
+    let mut ended = false;
+    for _ in 0..HEAD_LINES {
+        let line = head_line(&mut reader)?;
         let line = line.trim_end();
         if line.is_empty() {
+            ended = true;
             break;
         }
         if let Some((name, value)) = line.split_once(':') {
@@ -506,27 +553,38 @@ fn read_response(mut reader: impl BufRead) -> Result<String, ModelError> {
             }
         }
     }
+    if !ended {
+        return Err(ModelError::Inner(
+            "the model's reply has too many headers to read".to_owned(),
+        ));
+    }
     let mut body = Vec::new();
     if chunked {
         loop {
-            let mut size = String::new();
-            reader.read_line(&mut size).map_err(broken)?;
+            let size = head_line(&mut reader)?;
             let size = usize::from_str_radix(size.trim().split(';').next().unwrap_or("0"), 16)
                 .map_err(|_| ModelError::Inner("the model's reply has a bad chunk".to_owned()))?;
             if size == 0 {
                 break;
             }
-            let mut chunk = vec![0; size];
-            reader.read_exact(&mut chunk).map_err(broken)?;
-            body.extend_from_slice(&chunk);
-            let mut end = String::new();
-            reader.read_line(&mut end).map_err(broken)?;
+            read_body(&mut reader, &mut body, size)?;
+            // The line break that ends the chunk.
+            head_line(&mut reader)?;
         }
     } else if let Some(length) = length {
-        body.resize(length, 0);
-        reader.read_exact(&mut body).map_err(broken)?;
+        read_body(&mut reader, &mut body, length)?;
     } else {
-        reader.read_to_end(&mut body).map_err(broken)?;
+        // To the end, and no further than the limit.
+        let most = u64::try_from(REPLY_LIMIT).unwrap_or(u64::MAX) + 1;
+        reader
+            .take(most)
+            .read_to_end(&mut body)
+            .map_err(|error| ModelError::Inner(format!("the model's reply broke off: {error}")))?;
+        if body.len() > REPLY_LIMIT {
+            return Err(ModelError::Inner(format!(
+                "the model's reply is longer than {REPLY_LIMIT} bytes, too long to read"
+            )));
+        }
     }
     let text = String::from_utf8(body)
         .map_err(|_| ModelError::Inner("the model's reply is not text".to_owned()))?;
@@ -686,6 +744,45 @@ mod tests {
         );
         let error = read_response(missing.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("404: model missing"), "{error}");
+    }
+
+    #[test]
+    fn a_reply_that_names_more_than_it_sends_or_than_may_be_read_is_refused() {
+        // A length no one could hold: refused, with nothing set aside.
+        let huge = "HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551615\r\n\r\nhi";
+        let error = read_response(huge.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("too long to read"), "{error}");
+        let chunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffff\r\nab";
+        let error = read_response(chunk.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("too long to read"), "{error}");
+        // Chunks that each fit and together do not.
+        let half = super::REPLY_LIMIT / 2 + 1;
+        let mut two = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{half:x}\r\n")
+            .into_bytes();
+        two.extend(std::iter::repeat_n(b'a', half));
+        two.extend_from_slice(format!("\r\n{half:x}\r\n").as_bytes());
+        let error = read_response(two.as_slice()).unwrap_err();
+        assert!(error.to_string().contains("too long to read"), "{error}");
+        // A length within the limit that the reply ends before.
+        let short = "HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\nhi";
+        let error = read_response(short.as_bytes()).unwrap_err();
+        assert!(
+            error.to_string().contains("ended before its length"),
+            "{error}"
+        );
+        // A header line with no end, and headers with no end.
+        let line = format!(
+            "HTTP/1.1 200 OK\r\nX: {}",
+            "a".repeat(super::HEAD_LINE_LIMIT + 10)
+        );
+        let error = read_response(line.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("header too long"), "{error}");
+        let many = format!(
+            "HTTP/1.1 200 OK\r\n{}",
+            "X: 1\r\n".repeat(super::HEAD_LINES + 1)
+        );
+        let error = read_response(many.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("too many headers"), "{error}");
     }
 
     fn looked(call_id: &str, picture: Option<crate::Picture>) -> Message {

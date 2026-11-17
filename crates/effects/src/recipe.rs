@@ -220,12 +220,18 @@ const BULGE: &[Param] = &[
     param("x", 0.0, -0.5, 0.5),
     param("y", 0.0, -0.5, 0.5),
 ];
-/// Light above `threshold` spreads as far as `radius`, a fraction of the
-/// shorter side.
+/// Light above `threshold`, a level of the picture as it is shown, spreads
+/// as far as `radius`, a fraction of the shorter side. `knee` softens the
+/// threshold, from a hard edge at 0 to a ramp as wide as the threshold at
+/// 1; `red`, `green` and `blue` tint the light that spreads.
 const GLOW: &[Param] = &[
     param("amount", 0.0, 0.0, 3.0),
     param("radius", 0.03, 0.0, 0.2),
     param("threshold", 0.6, 0.0, 1.0),
+    param("knee", 0.5, 0.0, 1.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 1.0, 0.0, 1.0),
+    param("blue", 1.0, 0.0, 1.0),
 ];
 /// `x` and `y` place the light from the middle, in frames; `size` is a
 /// fraction of the shorter side.

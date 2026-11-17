@@ -1,6 +1,6 @@
 //! A clip's mask (see `cutlass_effects::mask`).
 
-use cutlass_effects::{COLOR_MASK, MASK, Mask, SELECTION, Selection};
+use cutlass_effects::{COLOR_MASK, MASK, MATTING, Mask, Matting, SELECTION, Selection};
 use cutlass_model::{Draft, MaterialId, MaterialRef, RawMaterial, SegmentId, TrackType};
 use serde_json::{Map, Value};
 
@@ -66,6 +66,27 @@ pub fn set_selection(
         material_id,
         selection.map(Selection::to_fields),
         SELECTION,
+        &[TrackType::Video],
+    )
+}
+
+/// Set `segment_id`'s Remove BG settings to `matting`, or take them off
+/// with `None`. They sit beside any shape mask, selection and chroma key.
+pub fn set_matting(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    material_id: &MaterialId,
+    matting: Option<&Matting>,
+) -> Result<(), EditError> {
+    if matting.is_some_and(|matting| !matting.is_valid()) {
+        return Err(EditError::Mask);
+    }
+    set_listed(
+        draft,
+        segment_id,
+        material_id,
+        matting.map(Matting::to_fields),
+        MATTING,
         &[TrackType::Video],
     )
 }
@@ -327,5 +348,116 @@ mod tests {
             &draft,
             &draft.tracks[0].segments[0]
         ));
+    }
+
+    #[test]
+    fn matting_is_set_changed_and_taken_off_beside_a_selection() {
+        use cutlass_effects::{
+            Matting, MattingMode, Pick, PickClick, Stroke, StrokeStyle, segment_matting,
+            segment_selection,
+        };
+
+        let mut draft = one_clip();
+        let a = SegmentId::new("a");
+        super::set_selection(&mut draft, &a, &MaterialId::new("s"), Some(&selection())).unwrap();
+        super::set_matting(
+            &mut draft,
+            &a,
+            &MaterialId::new("r"),
+            Some(&Matting::auto()),
+        )
+        .unwrap();
+        let segment = &draft.tracks[0].segments[0];
+        assert_eq!(segment_matting(&draft, segment), Some(Matting::auto()));
+        assert_eq!(segment_selection(&draft, segment), Some(selection()));
+
+        let custom = Matting {
+            mode: MattingMode::Custom,
+            feather: 0.3,
+            stroke: Some(Stroke::new(StrokeStyle::Glow)),
+            picks: vec![Pick {
+                frame: cutlass_model::Micros(0),
+                clicks: vec![PickClick {
+                    x: 0.5,
+                    y: 0.5,
+                    keep: true,
+                }],
+                brushes: Vec::new(),
+            }],
+            ..Matting::auto()
+        };
+        super::set_matting(&mut draft, &a, &MaterialId::new("r2"), Some(&custom)).unwrap();
+        assert_eq!(
+            segment_matting(&draft, &draft.tracks[0].segments[0]),
+            Some(custom)
+        );
+        assert_eq!(draft.materials.common_mask.len(), 2);
+
+        super::set_matting(&mut draft, &a, &MaterialId::new("r3"), None).unwrap();
+        let segment = &draft.tracks[0].segments[0];
+        assert_eq!(segment_matting(&draft, segment), None);
+        assert_eq!(segment_selection(&draft, segment), Some(selection()));
+        assert_eq!(draft.materials.common_mask.len(), 1);
+    }
+
+    #[test]
+    fn bad_matting_or_a_clip_that_is_not_video_leaves_the_draft() {
+        use cutlass_effects::Matting;
+
+        let mut draft = one_clip();
+        let mut words = cutlass_model::Track::main("t");
+        words.kind = cutlass_model::TrackType::Text;
+        words
+            .segments
+            .push(Segment::new("t", "m", TimeRange::new(0, 1)));
+        draft.tracks.push(words);
+        let before = draft.clone();
+        let bad = Matting {
+            feather: 2.0,
+            ..Matting::auto()
+        };
+        assert_eq!(
+            super::set_matting(
+                &mut draft,
+                &SegmentId::new("a"),
+                &MaterialId::new("r"),
+                Some(&bad)
+            ),
+            Err(EditError::Mask)
+        );
+        assert_eq!(
+            super::set_matting(
+                &mut draft,
+                &SegmentId::new("t"),
+                &MaterialId::new("r"),
+                Some(&Matting::auto())
+            ),
+            Err(EditError::EffectTarget)
+        );
+        assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn turning_matting_on_is_one_undo_step() {
+        use cutlass_effects::{Matting, segment_matting};
+
+        let mut session = crate::Session::open(one_clip());
+        let revision = session.revision();
+        session
+            .apply(
+                revision,
+                &[crate::Request::SetMatting {
+                    segment_id: SegmentId::new("a"),
+                    material_id: MaterialId::new("r"),
+                    matting: Some(Matting::auto()),
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert!(segment_matting(session.draft(), segment).is_some());
+        session.undo().unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert!(segment_matting(session.draft(), segment).is_none());
+        assert!(session.draft().materials.common_mask.is_empty());
     }
 }

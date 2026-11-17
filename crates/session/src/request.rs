@@ -679,6 +679,14 @@ pub enum Request {
         material_id: MaterialId,
         selection: Option<cutlass_effects::Selection>,
     },
+    /// Remove BG: set the video clip's matting (how its subject is found,
+    /// its edge, its outline and Custom removal's picks), or take it off
+    /// with `None`. The matte itself is made by a job after.
+    SetMatting {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        matting: Option<cutlass_effects::Matting>,
+    },
     /// Make `followers` (video, sticker or text clips) follow the video clip
     /// `target` along `path`, the target's corners on the canvas frame by
     /// frame. Each follower keeps its offset from the target at `anchor`,

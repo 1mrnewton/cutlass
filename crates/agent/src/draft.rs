@@ -679,6 +679,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetChroma { .. } => "set_chroma",
         Request::SetMask { .. } => "set_mask",
         Request::SetSelection { .. } => "set_selection",
+        Request::SetMatting { .. } => "set_matting",
         Request::Track { .. } => "track",
         Request::Untrack { .. } => "untrack",
         Request::SetColorMask { .. } => "set_color_mask",

@@ -21,6 +21,16 @@ pub enum ApprovalAction {
     EnableRemoteMcp {
         /// The server the user would enable.
         server: String,
+        /// The address its tools' arguments would be sent to.
+        url: String,
+    },
+    /// Send the tool arguments of a remote server that is on somewhere
+    /// else.
+    MoveRemoteMcp {
+        /// The server, which is already enabled.
+        server: String,
+        /// The address its tools' arguments would be sent to from now on.
+        url: String,
     },
     /// Delete media bytes the draft undo cannot restore.
     DeleteMedia {
@@ -53,7 +63,7 @@ impl ApprovalAction {
     #[must_use]
     pub fn prompt(&self) -> String {
         match self {
-            Self::ExportReplace { path } => format!("Replace {path}?"),
+            Self::ExportReplace { path } => format!("Replace {}?", shown(path)),
             Self::EnableCloudModel => {
                 "Turn on the cloud model? Your messages and the project details the \
                  assistant reads are sent off this computer."
@@ -62,22 +72,38 @@ impl ApprovalAction {
             Self::EnableOnlineSandbox => "Turn on the online sandbox? Code the assistant \
                  runs, and its input, are sent off this computer."
                 .to_owned(),
-            Self::EnableRemoteMcp { server } => format!(
-                "Enable the remote server {server}? The arguments of its tools are sent to it."
+            // The name is the caller's to choose, so the address is what
+            // tells the user where the arguments go.
+            Self::EnableRemoteMcp { server, url } => format!(
+                "Enable the remote server {} at {}? The arguments of its tools are sent there.",
+                shown(server),
+                shown_address(url)
+            ),
+            Self::MoveRemoteMcp { server, url } => format!(
+                "Send the arguments of the remote server {}'s tools to {} from now on? The \
+                 server is already on, and this changes where they go.",
+                shown(server),
+                shown_address(url)
             ),
             Self::DeleteMedia { path } => {
-                format!("Delete {path}? Undo cannot bring the file back.")
+                format!("Delete {}? Undo cannot bring the file back.", shown(path))
             }
             Self::AddExternalSkill { path } => {
-                format!("Add the skills in {path}? The assistant will follow what they say.")
+                format!(
+                    "Add the skills in {}? The assistant will follow what they say.",
+                    shown(path)
+                )
             }
             Self::RunLocalMcp { server, command } => format!(
-                "Let the assistant add the server {server}, which runs this program on your \
-                 computer with your access?\n{command}"
+                "Let the assistant add the server {}, which runs this program on your \
+                 computer with your access?\n{}",
+                shown(server),
+                shown(command)
             ),
             Self::ChangeCloudAddress { address } => format!(
-                "Send the cloud model's requests to {address}? Your messages and the key \
-                 kept for that service go there."
+                "Send the cloud model's requests to {}? Your messages and the key \
+                 kept for that service go there.",
+                shown_address(address)
             ),
         }
     }
@@ -88,7 +114,8 @@ impl ApprovalAction {
             Self::ExportReplace { .. } => "replacing a file",
             Self::EnableCloudModel => "turning on the cloud model",
             Self::EnableOnlineSandbox => "turning on the online sandbox",
-            Self::EnableRemoteMcp { .. } => "enabling a remote MCP server or changing its address",
+            Self::EnableRemoteMcp { .. } => "enabling a remote MCP server",
+            Self::MoveRemoteMcp { .. } => "changing the address of a remote MCP server that is on",
             Self::DeleteMedia { .. } => "deleting a media file",
             Self::AddExternalSkill { .. } => "adding an external skill folder",
             Self::RunLocalMcp { .. } => "adding a program to run as a local MCP server",
@@ -102,6 +129,25 @@ impl ApprovalAction {
             Self::ExportReplace { .. } => "; export to a new file name instead",
             _ => "",
         }
+    }
+}
+
+/// `text` on one line: a name, path or command comes from whoever asked,
+/// and a line break or another control character in it could push the
+/// part that matters out of sight or make the question read as two.
+fn shown(text: &str) -> String {
+    text.chars()
+        .map(|letter| if letter.is_control() { ' ' } else { letter })
+        .collect()
+}
+
+/// [`shown`], or words for an address that was left empty.
+fn shown_address(address: &str) -> String {
+    let address = shown(address.trim());
+    if address.is_empty() {
+        "an address that is not set".to_owned()
+    } else {
+        address
     }
 }
 
@@ -183,10 +229,35 @@ mod tests {
             assert!(action.prompt().contains(&path), "{action:?}");
             assert!(action.prompt().ends_with('?') || action.prompt().ends_with('.'));
         }
+        // A remote server's question names where the arguments go: the
+        // name is the caller's to choose and says nothing of that.
         let remote = ApprovalAction::EnableRemoteMcp {
             server: "far".to_owned(),
+            url: "https://far.example/mcp".to_owned(),
         };
         assert!(remote.prompt().contains("far"));
+        assert!(remote.prompt().contains("https://far.example/mcp"));
+        let moved = ApprovalAction::MoveRemoteMcp {
+            server: "far".to_owned(),
+            url: "https://elsewhere.example/mcp".to_owned(),
+        };
+        assert!(moved.prompt().contains("https://elsewhere.example/mcp"));
+        assert!(moved.prompt().contains("already on"));
+        assert_ne!(moved.prompt(), remote.prompt());
+        // A name or command with line breaks is asked about on one line.
+        let padded = ApprovalAction::RunLocalMcp {
+            server: "notes\n\nAllowed".to_owned(),
+            command: "sh -c\n\n\n\nrm -rf".to_owned(),
+        };
+        let asked = padded.prompt();
+        assert_eq!(asked.matches('\n').count(), 1, "{asked}");
+        assert!(asked.contains("notes  Allowed"), "{asked}");
+        assert!(asked.ends_with("sh -c    rm -rf"), "{asked}");
+        let unset = ApprovalAction::EnableRemoteMcp {
+            server: "far".to_owned(),
+            url: "  ".to_owned(),
+        };
+        assert!(unset.prompt().contains("an address that is not set"));
         assert!(
             ApprovalAction::EnableCloudModel
                 .prompt()
@@ -240,6 +311,7 @@ mod tests {
         refuse(
             ApprovalAction::EnableRemoteMcp {
                 server: "studio".to_owned(),
+                url: "https://studio.example/mcp".to_owned(),
             },
             "remote MCP server",
         );

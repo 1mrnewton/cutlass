@@ -1305,6 +1305,7 @@ pub fn pending_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAct
         {
             actions.push(ApprovalAction::EnableRemoteMcp {
                 server: server.name.clone(),
+                url: server.url.clone(),
             });
         }
     }
@@ -1341,8 +1342,9 @@ pub fn assistant_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalA
                         && known.url != server.url
                 });
             if moved {
-                actions.push(ApprovalAction::EnableRemoteMcp {
+                actions.push(ApprovalAction::MoveRemoteMcp {
                     server: server.name.clone(),
+                    url: server.url.clone(),
                 });
             }
             continue;
@@ -3473,6 +3475,7 @@ mod tests {
             registry.approver.actions,
             vec![ApprovalAction::EnableRemoteMcp {
                 server: "far".to_owned(),
+                url: "http://127.0.0.1:9/mcp".to_owned(),
             }]
         );
         assert_eq!(registry.settings.generation(), 0);
@@ -3595,7 +3598,10 @@ mod tests {
         assert!(matches!(
             moved,
             Err(ToolError::Approval(refused))
-                if refused.action == ApprovalAction::EnableRemoteMcp { server: "far".to_owned() }
+                if refused.action == ApprovalAction::MoveRemoteMcp {
+                    server: "far".to_owned(),
+                    url: "https://two.example/mcp".to_owned(),
+                }
         ));
         let service = set(&mut registry, &|next| {
             next.model.cloud_provider = cutlass_settings::ModelChoice::OPENAI.to_owned();

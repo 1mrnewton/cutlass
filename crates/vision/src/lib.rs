@@ -28,6 +28,10 @@
 //!
 //! The sixth is finding a face, a body or a hand for tracking to start from:
 //! [`Detector`] runs YuNet or MediaPipe's person or palm detector.
+//!
+//! The seventh is Remove BG: a [`Matter`] takes the background off a frame
+//! as a soft [`Matte`], and a [`Follower`] carries what the user picked
+//! through a clip.
 
 #![forbid(unsafe_code)]
 
@@ -43,6 +47,7 @@ mod generated;
 mod interpolate;
 mod job;
 mod mask;
+mod matte;
 mod mobile_sam;
 mod reframe_job;
 mod relight_job;
@@ -68,6 +73,7 @@ pub use interpolate::{
 };
 pub use job::{JobError, SelectJob};
 pub use mask::Mask;
+pub use matte::{Follower, Matte, Matter, Prompt};
 pub use mobile_sam::{DECODER_WEIGHTS, ENCODER_WEIGHTS, MobileSam};
 pub use reframe_job::{REFRAME_SIDE, find_subjects, subject_of};
 pub use relight_job::{RELIGHT_SIDE, relight_clip};

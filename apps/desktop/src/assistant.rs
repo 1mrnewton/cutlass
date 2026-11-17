@@ -894,6 +894,9 @@ const LOCAL_HISTORY: usize = 40_000;
 /// [`LOCAL_HISTORY`] for a cloud model, whose context is far larger.
 const CLOUD_HISTORY: usize = 300_000;
 
+// A cloud model is never sent less than a local one.
+const _: () = assert!(CLOUD_HISTORY > LOCAL_HISTORY);
+
 /// How much of the earlier conversation a turn on the model `settings`
 /// choose is sent.
 fn history_budget(settings: &Settings) -> usize {
@@ -1277,7 +1280,6 @@ mod tests {
         assert_eq!(super::history_budget(&settings), super::LOCAL_HISTORY);
         settings.model.cloud = true;
         assert_eq!(super::history_budget(&settings), super::CLOUD_HISTORY);
-        assert!(super::CLOUD_HISTORY > super::LOCAL_HISTORY);
     }
 
     #[test]

@@ -522,10 +522,11 @@ pub fn segment_color_masks(draft: &Draft, segment: &Segment) -> Vec<ListedMask> 
 }
 
 /// Every mask of `kind` that `segment` lists, in its order. A record whose
-/// fields do not read is left out.
+/// fields do not read is left out, and still holds its place for keys.
 #[must_use]
 pub fn listed_masks(draft: &Draft, segment: &Segment, kind: &str) -> Vec<ListedMask> {
     let mut masks = Vec::new();
+    let mut seen = 0_usize;
     for id in &segment.extra_material_refs {
         let Some(MaterialRef::Other(raw)) = draft.materials.get(id.as_str()) else {
             continue;
@@ -533,11 +534,15 @@ pub fn listed_masks(draft: &Draft, segment: &Segment, kind: &str) -> Vec<ListedM
         if raw.kind != kind {
             continue;
         }
+        // The first record of the kind keys under the plain names, read or
+        // not, as the requests count places.
+        let first = seen == 0;
+        seen += 1;
         if let Some(mask) = Mask::from_fields(&raw.fields) {
             masks.push(ListedMask {
                 id: id.clone(),
                 mask,
-                first: masks.is_empty(),
+                first,
             });
         }
     }

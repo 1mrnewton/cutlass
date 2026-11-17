@@ -23,6 +23,7 @@ mod lut;
 mod magnet;
 mod mark;
 mod mask;
+pub mod masks;
 mod mirror;
 mod move_segment;
 mod name;
@@ -202,6 +203,9 @@ pub enum EditError {
     Lut,
     /// A mask number is out of its range.
     Mask,
+    /// No mask is at that place on the clip, or the clip already lists as
+    /// many masks as it may.
+    MaskList,
     /// A track's path is empty, out of order, not numbers, or outside its
     /// clip, or a follower is not a picture clip on the path.
     Track,
@@ -330,6 +334,9 @@ impl std::fmt::Display for EditError {
             Self::UnknownEffect => "that effect, filter or transition id is not one Cutlass ships",
             Self::Lut => "the text is not a 3D .cube table, or the clip has no LUT to change",
             Self::Mask => "a mask number is out of its range",
+            Self::MaskList => {
+                "there is no mask at that place on the clip, or it already has eight masks"
+            }
             Self::Track => {
                 "the path is empty, out of order or outside its clip, or a follower is not a \
                  picture clip that plays along the path"
@@ -880,6 +887,30 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             mask,
         } => mask::set_mask(draft, segment_id, material_id, mask.as_ref()),
+        Request::AddMask {
+            segment_id,
+            material_id,
+            mask,
+            color,
+        } => masks::add_mask(draft, segment_id, material_id, mask, *color),
+        Request::EditMask {
+            segment_id,
+            index,
+            material_id,
+            mask,
+            color,
+        } => masks::edit_mask(draft, segment_id, *index, material_id, mask, *color),
+        Request::RemoveMask {
+            segment_id,
+            index,
+            color,
+        } => masks::remove_mask(draft, segment_id, *index, *color),
+        Request::MoveMask {
+            segment_id,
+            from,
+            to,
+            color,
+        } => masks::move_mask(draft, segment_id, *from, *to, *color),
         Request::SetSelection {
             segment_id,
             material_id,

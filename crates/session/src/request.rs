@@ -672,6 +672,43 @@ pub enum Request {
         material_id: MaterialId,
         mask: Option<cutlass_effects::Mask>,
     },
+    /// Put `mask` at the end of the clip's masks, as record `material_id`;
+    /// with `color`, at the end of the masks on its colour work. A clip
+    /// lists eight of each at most.
+    AddMask {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        mask: cutlass_effects::Mask,
+        #[serde(default)]
+        color: bool,
+    },
+    /// Make the clip's mask at `index` (0 the first) into `mask`. A record
+    /// another clip shares stays theirs and this clip gets its own, named
+    /// `material_id`, with its keys.
+    EditMask {
+        segment_id: SegmentId,
+        index: usize,
+        material_id: MaterialId,
+        mask: cutlass_effects::Mask,
+        #[serde(default)]
+        color: bool,
+    },
+    /// Take the clip's mask at `index` off, with its keys.
+    RemoveMask {
+        segment_id: SegmentId,
+        index: usize,
+        #[serde(default)]
+        color: bool,
+    },
+    /// Move the clip's mask at `from` to place `to`; masks join in their
+    /// order, so this changes what each one adds to or takes from.
+    MoveMask {
+        segment_id: SegmentId,
+        from: usize,
+        to: usize,
+        #[serde(default)]
+        color: bool,
+    },
     /// Cut the video clip down to `selection`, the object click-to-select
     /// found, or take its selection off with `None`.
     SetSelection {

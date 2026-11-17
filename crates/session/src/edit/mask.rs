@@ -15,11 +15,15 @@ pub fn set_mask(
     material_id: &MaterialId,
     mask: Option<&Mask>,
 ) -> Result<(), EditError> {
+    let fields = shape_fields(mask)?;
+    if fields.is_none() {
+        super::masks::first_leaves(draft, segment_id, MASK);
+    }
     set_listed(
         draft,
         segment_id,
         material_id,
-        shape_fields(mask)?,
+        fields,
         MASK,
         &[TrackType::Video, TrackType::Sticker],
     )
@@ -34,11 +38,15 @@ pub fn set_color_mask(
     material_id: &MaterialId,
     mask: Option<&Mask>,
 ) -> Result<(), EditError> {
+    let fields = shape_fields(mask)?;
+    if fields.is_none() {
+        super::masks::first_leaves(draft, segment_id, COLOR_MASK);
+    }
     set_listed(
         draft,
         segment_id,
         material_id,
-        shape_fields(mask)?,
+        fields,
         COLOR_MASK,
         &[
             TrackType::Video,

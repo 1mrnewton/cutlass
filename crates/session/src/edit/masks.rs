@@ -39,7 +39,7 @@ fn kind(color: bool) -> (&'static str, &'static [TrackType]) {
 /// The record the keys of the mask of `kind` at `index`, record `id`, are
 /// named for: none for a clip's first clip mask, which keys under the plain
 /// names; a colour mask always keys under its record.
-fn key_record<'a>(kind: &str, index: usize, id: &'a str) -> Option<&'a str> {
+pub(super) fn key_record<'a>(kind: &str, index: usize, id: &'a str) -> Option<&'a str> {
     (kind != MASK || index > 0).then_some(id)
 }
 

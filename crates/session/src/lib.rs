@@ -19,5 +19,5 @@ pub use edit::{
     follow_first_picture, lane_fits, new_lane_index, ratio_request, text_range_pattern,
 };
 pub use history::{UNDO_BYTES, UNDO_LIMIT};
-pub use request::{Arrange, ImportedMedium, Request, SubtitleCue, TrimEdge};
+pub use request::{Arrange, ImportedMedium, Request, SubtitleCue, TrackedMask, TrimEdge};
 pub use session::{Session, drop_empty_lanes};

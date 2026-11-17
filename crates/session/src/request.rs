@@ -735,10 +735,10 @@ pub enum Request {
         tracking_id: MaterialId,
         anchor: Micros,
         path: cutlass_model::TrackPath,
-        /// Clips whose mask follows instead, each with the path in its own
+        /// Masks that follow instead, each with the path in its clip's own
         /// frame (-1 to 1, y up).
         #[serde(default)]
-        masks: Vec<(SegmentId, cutlass_model::TrackPath)>,
+        masks: Vec<TrackedMask>,
     },
     /// Stop `segment_id` following the track it lists, and take off the
     /// keys the track wrote: its pose keys, or its mask's when its mask
@@ -1036,5 +1036,62 @@ mod tests {
         let text = serde_json::to_string(&request).unwrap();
         assert!(text.starts_with(r#"{"op":"place""#), "{text}");
         assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
+    }
+}
+
+/// A mask that follows a track: the clip's mask at `index` (0 the first) of
+/// its clip masks, or with `color` of its colour masks, along `path`, the
+/// target's box in the clip's own frame. It reads from `[clip, path]`, the
+/// clip's first clip mask, as well.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "TrackedMaskForm")]
+pub struct TrackedMask {
+    pub segment_id: SegmentId,
+    pub path: cutlass_model::TrackPath,
+    pub index: usize,
+    pub color: bool,
+}
+
+impl From<(SegmentId, cutlass_model::TrackPath)> for TrackedMask {
+    fn from((segment_id, path): (SegmentId, cutlass_model::TrackPath)) -> Self {
+        Self {
+            segment_id,
+            path,
+            index: 0,
+            color: false,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TrackedMaskForm {
+    Pair(SegmentId, cutlass_model::TrackPath),
+    Full {
+        segment_id: SegmentId,
+        path: cutlass_model::TrackPath,
+        #[serde(default)]
+        index: usize,
+        #[serde(default)]
+        color: bool,
+    },
+}
+
+impl From<TrackedMaskForm> for TrackedMask {
+    fn from(form: TrackedMaskForm) -> Self {
+        match form {
+            TrackedMaskForm::Pair(segment_id, path) => (segment_id, path).into(),
+            TrackedMaskForm::Full {
+                segment_id,
+                path,
+                index,
+                color,
+            } => Self {
+                segment_id,
+                path,
+                index,
+                color,
+            },
+        }
     }
 }

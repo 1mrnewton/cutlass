@@ -7868,6 +7868,7 @@ impl Shell {
         Ok(ExportPlan {
             draft,
             outputs: main.into_iter().chain(gif).collect(),
+            replace: request.replace,
             captions,
             folder: request
                 .path
@@ -8058,6 +8059,17 @@ impl Shell {
                     renderer: renderer.as_ref(),
                     encoders: &encoders,
                 };
+                // An export that may not replace a file found its place
+                // free before it started, and writing takes a while. So
+                // it is written beside its place and moved there only if
+                // the place is still free: a file that appeared meanwhile
+                // is not written over unasked.
+                let staged = if plan.replace {
+                    None
+                } else {
+                    staged_path(path)
+                };
+                let path = staged.as_deref().unwrap_or(path);
                 written = match output {
                     ExportOutput::Movie { request, .. } => {
                         cutlass_export::write_movie(&sources, request, path, &mut report)
@@ -8080,8 +8092,17 @@ impl Shell {
                     )
                     .map(|_| ()),
                 };
+                if let Some(staged) = &staged {
+                    written = written.and_then(|()| {
+                        place_new(staged, output.path())
+                            .map_err(|error| cutlass_export::ExportError::File(error.to_string()))
+                    });
+                    if written.is_err() {
+                        let _ = std::fs::remove_file(staged);
+                    }
+                }
                 if let Err(error) = &written {
-                    cutlass_logger::error!("export {}: {error}", path.display());
+                    cutlass_logger::error!("export {}: {error}", output.path().display());
                     break;
                 }
             }
@@ -8756,6 +8777,8 @@ struct ExportPlan {
     draft: Draft,
     /// The main file first, then a GIF beside it.
     outputs: Vec<ExportOutput>,
+    /// The export may put its files where files already are.
+    replace: bool,
     /// A caption file written alone, when there is no movie to carry it.
     captions: Option<(cutlass_export::SidecarRequest, String)>,
     folder: PathBuf,
@@ -8843,6 +8866,38 @@ fn export_failure(error: cutlass_export::ExportError) -> ShellError {
     match error {
         cutlass_export::ExportError::Encoder(error) => ShellError::CodecDeclined(error.to_string()),
         error => ShellError::Eval(error.to_string()),
+    }
+}
+
+/// Where a file that must not replace another is written before it is
+/// put at `path`: beside it, under a name that keeps its ending.
+fn staged_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    Some(path.with_file_name(format!(".placing.{name}")))
+}
+
+/// Put the file at `staged` at `path` if nothing is there, and refuse if
+/// something is: what is there stays as it is. A hard link is made only
+/// where no file is, in one step; on a volume that has no hard links the
+/// place is looked at and then taken, a moment apart.
+fn place_new(staged: &Path, path: &Path) -> std::io::Result<()> {
+    let taken = || {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "a file appeared at {} while the export was written, and was left as it is",
+                path.display()
+            ),
+        )
+    };
+    match std::fs::hard_link(staged, path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(staged);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(taken()),
+        Err(_) if path.exists() => Err(taken()),
+        Err(_) => std::fs::rename(staged, path),
     }
 }
 
@@ -12543,6 +12598,30 @@ mod tests {
             );
             last = next;
         }
+    }
+
+    #[test]
+    fn a_file_is_put_in_place_only_where_no_file_is() {
+        let temp = Temp::new();
+        std::fs::create_dir_all(&temp.path).unwrap();
+        let place = temp.path.join("cut.mp4");
+        let staged = super::staged_path(&place).unwrap();
+        // Beside its place, under a name that keeps the ending.
+        assert_eq!(staged.parent(), place.parent());
+        assert_eq!(staged.extension(), place.extension());
+        assert_ne!(staged, place);
+        // A free place takes the file, and the staged one is gone.
+        std::fs::write(&staged, b"new").unwrap();
+        super::place_new(&staged, &place).unwrap();
+        assert_eq!(std::fs::read(&place).unwrap(), b"new");
+        assert!(!staged.exists());
+        // A place that was taken meanwhile keeps what is there.
+        std::fs::write(&place, b"someone else's").unwrap();
+        std::fs::write(&staged, b"newer").unwrap();
+        let error = super::place_new(&staged, &place).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("was left as it is"), "{error}");
+        assert_eq!(std::fs::read(&place).unwrap(), b"someone else's");
     }
 
     #[test]

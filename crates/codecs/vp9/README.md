@@ -1633,6 +1633,160 @@ What is left: `testsrc2` at +8.7% (speed 4: +7.1%, speed 2: +2.0%), the
 gradient at +3.6% (speed 4: +2.3%). Most of `testsrc2`'s is halves before
 the split, which cost more time than speed 5 has.
 
+**A mesh after the diamond, and a second smaller transform** (17
+November 2026, after `944bc05a`). What was left: `testsrc2` at +8.7% /
++8.0% / +2.7% against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V, 15 to 55, speed 5, four threads), the gradient at +3.6%. Coded at
+FFmpeg's `-crf 35` and at `crf=32` here (175 644 and 181 194 bytes), the
+error of `testsrc2` by region, ours against libvpx's: blocks whose source
+did not change, 1.19 against 0.82 million (squared error, luma, the 59
+inter frames); blocks that changed, 20.5 against 18.8 million. Mapped by
+8×8, the excess sits on the small objects that move over the flat bars:
+the grey bar that grows 6 samples a picture at each end, the square that
+moves down by the green bar, the ring of small squares, the clock's
+figures. Decoded with each block's mode and vector printed, libvpx codes
+the grey bar's ends in the first inter frame as NEWMV (0, 6) and (0, 4)
+samples and NEAREST, all without a residual; ours took vector 0 with a
+residual, intra, and ALTREF at (0, −3.75). One cause, and a smaller one:
+
+- The whole-sample search is a diamond from the neighbours' vectors and
+  the pool's seeds, then the square of two around its choice. Over a flat
+  background a small object leaves the same error at every vector short
+  of its own (the grey bar's 8×8 block: 2 samples wrong a row from 0 to 4
+  samples across, none at 6), and the diamond stops at its start; on
+  GOLDEN and ALTREF, many pictures away, the motion is many times a
+  picture's and the diamond stops in the valleys between. A square of
+  radius 4, 6 or 8 at the end took `testsrc2` from +8.7% to +7.7%, +6.4%
+  and +5.7%; a mesh of every second sample within 16 at every block size,
+  to +4.0%, in 1.3 to 1.4 times the time on the README's clips (with a
+  floor on its SAD). At a
+  fixed quantizer in one pass a 16×16 block's search now ends with a mesh
+  (`tile::MESH_RANGE`, `mesh_in`): every second sample within 32 of the
+  diamond's choice, measured on every other row, where the choice leaves
+  more than 1.5 a sample of SAD (`MESH_ERROR`) in few samples (its squared
+  error over 8 times its SAD, `MESH_SPARSE`: grain spreads its error, and
+  a mesh seldom finds it a better vector). A `psadbw` gives both halves
+  of a 16-wide row (`cutlass_simd::vp9::sad8::halves4`), so one pass
+  keeps the best two of the block and of each 8×8 quarter; both are
+  measured whole, the quarters' at the quarters' own searches, which take
+  no mesh of their own. GOLDEN and ALTREF take one only where LAST's did.
+  libvpx's slower speeds search meshes too (`full_pixel_exhaustive`).
+- From speed 4, after the best mode, one transform size smaller is tried;
+  speeds 0 to 3 try two. At a fixed quantizer in one pass, the second is
+  now tried where the first won.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V):
+
+| | Before | Mesh, every reference | And the transform | Mesh on GOLDEN and ALTREF after LAST's (now) |
+| --- | --- | --- | --- | --- |
+| `testsrc2` | +8.7 / +8.0 / +2.7% | +2.9 / +1.7 / −2.5% | +2.4 / +1.8 / −3.4% | +3.1 / +2.2 / −2.9% |
+| Gradient | +3.6% | +3.6% | +3.6% | +3.6% |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, FFmpeg | Before | Now | Gradient, FFmpeg | Before | Now |
+| --- | --- | --- | --- | --- | --- | --- |
+| 15 | 357003, 54.36 dB | 333472, 52.72 dB | 324395, 52.76 dB | 17767, 55.10 dB | 12916, 53.06 dB | 13000, 53.05 dB |
+| 25 | 272682, 50.37 dB | 250075, 48.80 dB | 242857, 48.89 dB | 14431, 53.64 dB | 9557, 51.57 dB | 9559, 51.57 dB |
+| 35 | 175644, 45.59 dB | 150857, 43.60 dB | 145479, 43.67 dB | 8704, 51.31 dB | 7238, 49.42 dB | 7196, 49.39 dB |
+| 45 | 87402, 40.61 dB | 64750, 38.83 dB | 61447, 39.00 dB | 6428, 48.40 dB | 5996, 46.71 dB | 5996, 46.71 dB |
+| 55 | 33071, 37.41 dB | 22915, 35.27 dB | 21703, 35.53 dB | 5395, 45.09 dB | 5620, 43.54 dB | 5620, 43.54 dB |
+
+Speed 2 on `testsrc2`: +2.0 / −2.6 / −7.7% → −1.9 / −6.4 / −11.2%. The
+gradient's search never meets the mesh's bounds (its error is small and
+spread), and its streams barely change. Five points of BD-rate on
+`testsrc2` move by up to a point between builds that differ in little;
+with nine (`crf=15` to `55` by 5, against the same five of FFmpeg's) it is
++10.7% before and +5.1% now.
+
+On the README's three clips at `q=60` to `210` against the build before
+(BD-rate Y / U / V / FFmpeg's average / 6:1:1):
+
+| Fixed q | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| Now | −3.1 / −2.1 / −2.0 / −2.7 / −2.8 | −0.8 / −0.1 / +0.0 / −0.4 / −0.6 | −0.2 / +0.1 / +0.0 / −0.1 / −0.1 |
+
+Against FFmpeg's `-crf` there: −11.9 / −22.0 / −23.0 / −16.4 / −14.7 on
+the three scenes, −17.0 / −49.1 / −48.9 / −39.0 / −31.2 on the still
+scene and −46.0 / −60.4 / −60.5 / −55.0 / −51.3 on the pan (−9.3, −17.8
+and −45.9 at the same PSNR-Y before, measured against the same FFmpeg
+curves). Every other mode (speeds 5 to 10 at a bitrate, two passes)
+writes the same streams as before.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` (`-threads 4`) and
+the build before, three rounds interleaved, the mean over each one's
+points of the median of the rounds (Cutlass at `q=60` to `210`):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 6.74 s | 4.12 s (0.61) | 4.63 s (0.69) |
+| Still scene | 3.87 s | 3.30 s (0.85) | 3.24 s (0.84) |
+| Grainy pan | 2.71 s | 2.25 s (0.83) | 2.24 s (0.83) |
+
+At the same bitrate (each one's time interpolated in log rate over the
+range both cover; FFmpeg's time hardly falls below 2.3 s at its lowest
+rates), 0.70, 1.06 and 1.04 now, 0.62, 1.07 and 1.06 before. In pairs on
+the pan alone (`q=120`, six runs each) the two changes cost 2%; the three
+scenes, whose busy blocks take the mesh most, 12% (above).
+
+Checks: of the identity check's 41 configurations, the seven at a fixed
+quantizer (speeds 2 and 5 on three pictures, the still scene at `q=120`)
+change, the other 34 (every bitrate, two passes, speeds 6 to 10) do not.
+FFmpeg's `vp9` (threaded and on one thread), libvpx and this decoder agree
+on 10 new streams (40 of 40 decodes: `testsrc2` at `crf=35`, at `crf=25`
+at speed 4, at `crf=30` at speed 2 and at `crf=40` on one thread, the
+gradient at `crf=35`, 4:4:4 at `q=60`, the pan at 10 bits at `q=100` and
+at `q=120`, the still scene at `q=80`, the three scenes at `q=150` on two
+threads). New tests: a textured 6×6 square moved 12 and 14 samples over a
+flat picture codes in 24 bytes at a fixed quantizer (70 without the mesh,
+as a second pass); a picture of specks takes inter transforms two sizes
+under the block's in one pass and none in a second (each fails without its
+change); `halves4` matches its scalar twin.
+
+Tried and dropped (BD-rate on `testsrc2` at speed 5 against FFmpeg's
+`-crf`, from +8.7%, unless said):
+
+- The mesh at every second sample within 48 (+2.3%) or 64: the stop that
+  `a_reference_seed_reaches_past_the_search_range` reads (a seeded search
+  takes half the bytes of an unseeded one) no longer holds: within 48 the
+  mesh finds most of a 100-sample jump without the seed. Within 36 and
+  dense to 16, every fourth beyond: +2.8% for half the points. Within 32
+  at every fourth sample: +3.7%.
+- The mesh on every reference (+2.4% with the transform's change): on the
+  grainy pan 7 to 10% of the time. Its gate at SSE over 12 or 16 times
+  the SAD: as many meshes on the pan, `testsrc2` 0.6 points worse; at 0.5
+  or 0.25 a sample of SAD: no better.
+- A mesh at every block size, on every row (+4.0%, 1.3 to 1.4 times the
+  time); one only where the diamond's last four neighbours come within 0
+  to 5% of its choice (the plateau the mesh is for), with the vectors
+  below as starts: +5.2% to +7.0% against +4.0% without that gate.
+- The previous frame's most common vectors on each reference as starts of
+  the search: the gradient +3.6% → +1.0% (from ALTREF's alone +1.5%),
+  `testsrc2` +7.8%, but the still scene at a fixed quantizer +0.7 to +2.5
+  points of PSNR-Y, with or without a rate for them and a floor on their
+  count. On the gradient they find the periodic plane's aliases for the
+  content that enters at the right edge, from an alt-ref far behind.
+- No alt-ref: the gradient −10.5%, `testsrc2` +3.3%, but the three clips
+  at a fixed quantizer +5.2, +5.3 and +17.6 points. No alt-ref where the
+  filtered picture is within 0.06 a sample (squared) of its target
+  (nothing to filter, as on both synthetic sources): the gradient −10.5%,
+  the three scenes +0.9 and the still scene +0.6 points; with the pool's
+  noise under 1 too, the still scene +2.4. Most of the gradient's gain is
+  again the old reference's periodic aliases.
+- Key frames at 0.25 of the step: `testsrc2` +3.0% (from +2.9%), the
+  gradient +4.0%. The loop filter's fixed-quantizer scale at 0.45 and
+  0.3: the gradient +3.8% and +5.7%. The 8×8 peak on whole blocks that
+  code a residual: a full search never stops there.
+
+What is left: `testsrc2` at +3.1% (+2.2% / −2.9% at PSNR-U / V), most of
+it at the low rates (at the same PSNR-Y, +8% to +15% from `crf=35` up),
+where libvpx's squares of noise and its key frame are better (on its
+first picture alone speed 5 is at +8.1%, speed 0 at +5.6%: a vertical
+edge of a bar left in a V_PRED 32×32 block without a residual at `q=55`,
+which libvpx codes at 47, and copied down 200 rows and through every
+picture after); the gradient at +3.6%.
+
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and
 against the defaults (BD-rate; FFmpeg's time a stream with `-row-mt 1`,

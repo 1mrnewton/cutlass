@@ -332,3 +332,86 @@ fn auto_removal_cuts_a_real_clip_in_the_preview() {
     eprintln!("the matte job took {took:.2?}");
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+/// The whole of Custom removal on a real clip: three clicks on a dancer
+/// against a green wall on the clip's first frame are followed through a
+/// second of it by SAM 2.1 tiny, and the preview half a second on shows
+/// her with the wall gone. Slow, so run by hand with `--ignored`; set
+/// `CUTLASS_MATTE_OUT` to a folder to keep the frames.
+#[test]
+#[ignore = "reads a real clip and runs the real model"]
+fn custom_removal_follows_real_clicks_through_a_clip() {
+    let local = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    let clip = local.join("6905095-hd_1920_1080_25fps.mp4");
+    if !clip.is_file() || !follow_model_here() {
+        return;
+    }
+    let temp = std::env::temp_dir().join(format!("cutlass-follow-real-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    let mut draft = Draft::empty("draft");
+    draft.fps = 25.0;
+    draft.materials.videos.push(MaterialVideo {
+        id: "m".into(),
+        kind: "video".into(),
+        width: 1920,
+        height: 1080,
+        duration: Micros(76_926_667),
+        path: "dancer.mp4".into(),
+        ..MaterialVideo::default()
+    });
+    let mut segment = Segment::new("v", "m", TimeRange::new(0, 1_000_000));
+    segment.source_range = Some(TimeRange::new(2_000_000, 1_000_000));
+    draft.tracks[0].segments.push(segment);
+    cutlass_store::Folder::new(draft).save(&temp).unwrap();
+    std::fs::copy(&clip, temp.join("dancer.mp4")).unwrap();
+    let (decoders, encoders) = crate::register_codecs();
+    let mut shell = Shell::new(decoders, encoders, Settings::default());
+    shell.open_folder(&temp).unwrap();
+    shell.select(Some("v".into()));
+    shell.seek(Micros(500_000));
+    let keep = |picture: &crate::shell::Picture, name: &str| {
+        if let Some(out) = std::env::var_os("CUTLASS_MATTE_OUT") {
+            image::RgbaImage::from_raw(picture.width, picture.height, picture.rgba.clone())
+                .unwrap()
+                .save(PathBuf::from(out).join(name))
+                .unwrap();
+        }
+    };
+    // Face, torso and shorts on the frame at 2 s of the file.
+    let click = |x: f64, y: f64| PickClick { x, y, keep: true };
+    let pick = Pick {
+        frame: Micros(2_000_000),
+        clicks: vec![
+            click(0.444, 0.333),
+            click(0.417, 0.556),
+            click(0.417, 0.796),
+        ],
+        brushes: Vec::new(),
+    };
+    shell.add_pick("v".into(), pick, Vec::new()).unwrap();
+    assert!(shell.matte_progress().is_some(), "a pick starts the job");
+    let start = std::time::Instant::now();
+    while shell.poll_job() && start.elapsed().as_secs() < 900 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let took = start.elapsed();
+    assert!(shell.matte_made(), "{:?}", shell.notice());
+    let cut = shell.preview_bytes().unwrap();
+    keep(&cut, "follow-cut.png");
+    let (w, h) = (cut.width as usize, cut.height as usize);
+    let opaque = |x: usize, y: usize| cut.rgba[(y * w + x) * 4 + 3] > 128;
+    let kept = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .filter(|&(x, y)| opaque(x, y))
+        .count();
+    let left = (0..h)
+        .flat_map(|y| (0..w / 4).map(move |x| (x, y)))
+        .filter(|&(x, y)| opaque(x, y))
+        .count();
+    let share = kept as f64 / (w * h) as f64;
+    // She fills a slice of the frame's middle; the wall left of her is gone.
+    assert!((0.03..0.3).contains(&share), "{share}");
+    assert!(left < w * h / 400, "{left} kept left of her");
+    eprintln!("the follow job took {took:.2?}, {share:.3} of the frame kept");
+    let _ = std::fs::remove_dir_all(&temp);
+}

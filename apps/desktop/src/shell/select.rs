@@ -511,7 +511,7 @@ fn load_detector(
     kernels: &std::path::Path,
     part: Part,
 ) -> Result<cutlass_vision::Detector, ShellError> {
-    let compute = Compute::best();
+    let compute = crate::gpu_trust::compute();
     if compute == Compute::Gpu
         && let Err(error) = cutlass_vision::keep_kernels_in(kernels)
     {
@@ -657,7 +657,7 @@ fn mask_bounds(mask: &cutlass_vision::Mask) -> Option<((f64, f64), (f64, f64))> 
 
 /// Load the selection model; slow, so a job does it.
 fn load_vision(kernels: &std::path::Path) -> Result<VisionModel, ShellError> {
-    let compute = Compute::best();
+    let compute = crate::gpu_trust::compute();
     if compute == Compute::Gpu {
         // A missing cache folder only costs the warm-up on every launch.
         if let Err(error) = cutlass_vision::keep_kernels_in(kernels) {

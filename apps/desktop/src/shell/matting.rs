@@ -535,10 +535,10 @@ impl Shell {
         let readers = self.readers.clone();
         let encoders = self.encoders.clone();
         let kernels = Shell::home().cache().join("kernels");
-        let compute = Compute::best();
         let tried = failure_key(&ask);
         self.start_job(MATTE_JOB, move |progress| {
             progress.stage("Loading the model");
+            let compute = crate::gpu_trust::compute();
             if let Err(error) = cutlass_vision::keep_kernels_in(&kernels) {
                 cutlass_logger::warn!("kernel cache: {error}");
             }

@@ -398,7 +398,7 @@ impl Shell {
             .any(|ask| ask.interpolate > 0 || ask.motion_blur.is_some());
         // Remove flicker alone loads no model and runs anywhere.
         let models = enhance || denoise || interpolate;
-        if models && Compute::best() != Compute::Gpu {
+        if models && !cutlass_vision::gpu_available() {
             return Err(ShellError::Unavailable(format!(
                 "{label} needs a GPU this build can use"
             )));
@@ -428,20 +428,31 @@ impl Shell {
                     cutlass_logger::warn!("kernel cache: {error}");
                 }
             }
+            let trusted = !models || crate::gpu_trust::compute() == Compute::Gpu;
             let loaded = (|| {
+                if !trusted {
+                    return Err(format!(
+                        "{label} needs a GPU, and this machine's did not pass the GPU check"
+                    ));
+                }
+                let text = |error: cutlass_vision::VisionError| error.to_string();
                 let enhancer = enhance
                     .then(|| Enhancer::load(&enhance_dir, Compute::Gpu))
-                    .transpose()?;
+                    .transpose()
+                    .map_err(text)?;
                 let denoiser = denoise
                     .then(|| Denoiser::load(&denoise_dir, Compute::Gpu))
-                    .transpose()?;
+                    .transpose()
+                    .map_err(text)?;
                 let interpolator = interpolate
                     .then(|| Interpolator::load(&interpolate_dir, Compute::Gpu))
-                    .transpose()?;
-                Ok::<_, cutlass_vision::VisionError>((enhancer, denoiser, interpolator))
+                    .transpose()
+                    .map_err(text)?;
+                Ok((enhancer, denoiser, interpolator))
             })();
-            let made = loaded.map_err(|error| Some(error.to_string())).and_then(
-                |(enhancer, denoiser, interpolator)| {
+            let made = loaded
+                .map_err(Some)
+                .and_then(|(enhancer, denoiser, interpolator)| {
                     progress.stage("Processing");
                     let models = CopyModels {
                         enhancer: enhancer.as_ref(),
@@ -460,8 +471,7 @@ impl Shell {
                         })?;
                     }
                     Ok(())
-                },
-            );
+                });
             let landing: Landing = Box::new(move |shell: &mut Shell| match made {
                 Ok(()) => {
                     shell.preview_cache.borrow_mut().clear();

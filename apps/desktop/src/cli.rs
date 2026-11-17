@@ -16,6 +16,9 @@ pub enum Command {
     New(Option<PathBuf>),
     /// `cutlass sandbox`: one agent script, started by `sandbox.run`.
     Sandbox,
+    /// `cutlass gpu-check`: try the vision models' GPU path and say whether
+    /// it gave the CPU's answers, started by the editor.
+    GpuCheck,
     /// `--help`, `-h` or `help`: say how to call it.
     Help,
     /// `--version` or `-V`.
@@ -45,6 +48,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Command {
     }
     if first == "sandbox" {
         return Command::Sandbox;
+    }
+    if first == crate::gpu_trust::CHECK_ARGUMENT {
+        return Command::GpuCheck;
     }
     if first == "mcp" {
         return Command::Mcp(rest.map(PathBuf::from));
@@ -154,6 +160,12 @@ mod tests {
             parse(words(&["--halp"])),
             Command::Unknown("--halp".to_owned())
         );
+    }
+
+    #[test]
+    fn the_gpu_check_the_editor_starts_is_its_own_command() {
+        assert_eq!(parse(words(&["gpu-check"])), Command::GpuCheck);
+        assert!(!usage().contains("gpu-check"));
     }
 
     #[test]

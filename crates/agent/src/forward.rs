@@ -9,15 +9,20 @@
 //! in, `{"content","is_error"}` out, with a `picture` when the tool made
 //! one. A call with the wrong token is answered with an error and nothing
 //! runs.
+//!
+//! A call waits in a queue until the app gets to it. A caller that stops
+//! waiting meanwhile, by hanging up or by running out of time, was told
+//! the call failed or never heard of it, so the call is dropped from the
+//! queue and does not run later behind the caller's back.
 
 use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -25,6 +30,9 @@ use crate::{ToolCall, ToolOutcome, ToolSink};
 
 /// How long a forwarded call waits for the app before it gives up.
 const ANSWER_WAIT: Duration = Duration::from_secs(600);
+
+/// How often a waiting call looks whether its caller is still there.
+const CALLER_LOOK: Duration = Duration::from_millis(100);
 
 /// The call a window sends the holder of a project it wants to open: a
 /// host with no window saves, lets the project go and forwards to the
@@ -38,12 +46,24 @@ pub type Wake = Arc<dyn Fn() + Send + Sync>;
 pub struct Forwarded {
     pub call: ToolCall,
     reply: Sender<ToolOutcome>,
+    /// Set once the caller stopped waiting for the answer.
+    left: Arc<AtomicBool>,
 }
 
 impl Forwarded {
     /// Send the outcome back to the caller.
     pub fn answer(self, outcome: ToolOutcome) {
         let _ = self.reply.send(outcome);
+    }
+
+    /// Whether the caller stopped waiting: it hung up, or it waited as
+    /// long as a call may take and was told the call failed. Such a call
+    /// must not run: its caller takes it not to have. An app that works
+    /// through several calls asks this before each one, as a caller may
+    /// leave while the calls ahead of its own run.
+    #[must_use]
+    pub fn caller_left(&self) -> bool {
+        self.left.load(Ordering::Acquire)
     }
 }
 
@@ -59,6 +79,11 @@ impl ProjectSocket {
     /// Listen on a free loopback port. `wake` is called, from another
     /// thread, whenever a call is waiting.
     pub fn open(wake: Wake) -> std::io::Result<Self> {
+        Self::open_waiting(wake, ANSWER_WAIT)
+    }
+
+    /// [`Self::open`], with each call waiting `answer_wait` for the app.
+    fn open_waiting(wake: Wake, answer_wait: Duration) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let address = listener.local_addr()?;
         let token = fresh_token();
@@ -81,7 +106,7 @@ impl ProjectSocket {
                     let token = expected.clone();
                     let _ = thread::Builder::new()
                         .name("project caller".to_owned())
-                        .spawn(move || serve_caller(stream, &token, &sender, &wake));
+                        .spawn(move || serve_caller(stream, &token, &sender, &wake, answer_wait));
                 }
             })?;
         Ok(Self {
@@ -104,12 +129,16 @@ impl ProjectSocket {
         &self.token
     }
 
-    /// The calls waiting now, oldest first.
+    /// The calls waiting now, oldest first, without the ones whose caller
+    /// stopped waiting.
     pub fn take(&self) -> Vec<Forwarded> {
         let Ok(calls) = self.calls.lock() else {
             return Vec::new();
         };
-        calls.try_iter().collect()
+        calls
+            .try_iter()
+            .filter(|call| !call.caller_left())
+            .collect()
     }
 }
 
@@ -121,7 +150,13 @@ impl Drop for ProjectSocket {
     }
 }
 
-fn serve_caller(stream: TcpStream, token: &str, calls: &Sender<Forwarded>, wake: &Wake) {
+fn serve_caller(
+    stream: TcpStream,
+    token: &str,
+    calls: &Sender<Forwarded>,
+    wake: &Wake,
+    answer_wait: Duration,
+) {
     let Ok(mut writer) = stream.try_clone() else {
         return;
     };
@@ -136,17 +171,30 @@ fn serve_caller(stream: TcpStream, token: &str, calls: &Sender<Forwarded>, wake:
             Err(refused) => refused,
             Ok(call) => {
                 let (reply, answer) = channel();
-                if calls.send(Forwarded { call, reply }).is_err() {
+                let left = Arc::new(AtomicBool::new(false));
+                let waiting = Forwarded {
+                    call,
+                    reply,
+                    left: Arc::clone(&left),
+                };
+                if calls.send(waiting).is_err() {
                     return;
                 }
                 wake();
-                answer
-                    .recv_timeout(ANSWER_WAIT)
-                    .unwrap_or_else(|_| ToolOutcome {
-                        content: "the Cutlass window did not answer".to_owned(),
-                        is_error: true,
-                        picture: None,
-                    })
+                match await_answer(&writer, &answer, answer_wait) {
+                    Waited::Answered(outcome) => outcome,
+                    Waited::CallerLeft => {
+                        left.store(true, Ordering::Release);
+                        return;
+                    }
+                    Waited::TooLong => {
+                        // The caller is told it failed, so it must not
+                        // run once the app gets to it.
+                        left.store(true, Ordering::Release);
+                        unanswered()
+                    }
+                    Waited::Dropped => unanswered(),
+                }
             }
         };
         let mut line = json!({"content": outcome.content, "is_error": outcome.is_error});
@@ -159,6 +207,71 @@ fn serve_caller(stream: TcpStream, token: &str, calls: &Sender<Forwarded>, wake:
         {
             return;
         }
+    }
+}
+
+/// What a caller is told when the app did not answer its call.
+fn unanswered() -> ToolOutcome {
+    ToolOutcome {
+        content: "the Cutlass window did not answer".to_owned(),
+        is_error: true,
+        picture: None,
+    }
+}
+
+/// How a call's wait for the app ended.
+enum Waited {
+    /// The app ran the call.
+    Answered(ToolOutcome),
+    /// The caller hung up before the app got to the call.
+    CallerLeft,
+    /// The app did not answer within the time a call may take.
+    TooLong,
+    /// The app let the call go unanswered: it closed the project.
+    Dropped,
+}
+
+/// Wait up to `limit` for the app's answer to a call from `caller`,
+/// looking every [`CALLER_LOOK`] whether the caller is still connected.
+fn await_answer(caller: &TcpStream, answer: &Receiver<ToolOutcome>, limit: Duration) -> Waited {
+    let asked = Instant::now();
+    loop {
+        match answer.recv_timeout(CALLER_LOOK) {
+            Ok(outcome) => return Waited::Answered(outcome),
+            Err(RecvTimeoutError::Disconnected) => return Waited::Dropped,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if hung_up(caller) {
+            return Waited::CallerLeft;
+        }
+        if asked.elapsed() >= limit {
+            return Waited::TooLong;
+        }
+    }
+}
+
+/// Whether the other end of `stream` closed it. Nothing is read: a look
+/// that would wait means the caller is there and quiet, and bytes mean it
+/// has sent its next call.
+fn hung_up(stream: &TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let looked = stream.peek(&mut [0u8; 1]);
+    // This caller's lines are read with waits, as before the look. A
+    // stream that cannot go back to that is of no more use.
+    if stream.set_nonblocking(false).is_err() {
+        return true;
+    }
+    match looked {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::Interrupted
+        ),
     }
 }
 
@@ -334,6 +447,107 @@ mod tests {
         assert_eq!(first.picture, None);
         assert_eq!(second.picture, Some(crate::Picture::jpeg(b"frame")));
         assert!(woken.load(Ordering::Acquire));
+    }
+
+    /// One call as a caller writes it on the wire.
+    fn call_line(token: &str, name: &str) -> String {
+        format!(
+            "{}\n",
+            json!({"token": token, "id": "1", "name": name, "arguments": ""})
+        )
+    }
+
+    /// A socket, and a count of the calls that woke its app.
+    fn counted_socket(
+        answer_wait: Duration,
+    ) -> (ProjectSocket, Arc<std::sync::atomic::AtomicUsize>) {
+        let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&woken);
+        let socket = ProjectSocket::open_waiting(
+            Arc::new(move || {
+                count.fetch_add(1, Ordering::AcqRel);
+            }),
+            answer_wait,
+        )
+        .unwrap();
+        (socket, woken)
+    }
+
+    /// Wait until `done`, or fail saying `what` did not happen.
+    fn until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what}");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn a_call_whose_caller_hung_up_is_not_run() {
+        let (socket, woken) = counted_socket(ANSWER_WAIT);
+        let address: SocketAddr = socket.address().parse().unwrap();
+        // The app has the call in hand when its caller goes, as when it
+        // works through the calls ahead of it: the call says so.
+        let mut caller = TcpStream::connect(address).unwrap();
+        caller
+            .write_all(call_line(socket.token(), YIELD).as_bytes())
+            .unwrap();
+        until("the call did not arrive", || {
+            woken.load(Ordering::Acquire) == 1
+        });
+        let mut waiting = socket.take();
+        assert_eq!(waiting.len(), 1);
+        let held = waiting.remove(0);
+        assert!(!held.caller_left(), "the caller is still there");
+        drop(caller);
+        until("the call did not hear its caller go", || held.caller_left());
+
+        // A call still in the queue when its caller goes never reaches the
+        // app: a window that gave up on its ask does not get the project
+        // dropped for it minutes later.
+        let mut caller = TcpStream::connect(address).unwrap();
+        caller
+            .write_all(call_line(socket.token(), YIELD).as_bytes())
+            .unwrap();
+        until("the second call did not arrive", || {
+            woken.load(Ordering::Acquire) == 2
+        });
+        drop(caller);
+        thread::sleep(CALLER_LOOK * 15);
+        assert!(socket.take().is_empty());
+    }
+
+    #[test]
+    fn a_call_the_app_was_too_slow_for_is_answered_as_failed_and_not_run() {
+        let (socket, woken) = counted_socket(Duration::from_millis(250));
+        let mut forward = Forward::connect(&socket.address(), socket.token()).unwrap();
+        let call = ToolCall {
+            id: "1".to_owned(),
+            name: "draft.apply".to_owned(),
+            arguments: "{}".to_owned(),
+        };
+        // No one takes the call in time: the caller hears that it failed.
+        let outcome = forward.run_tool(&call);
+        assert!(outcome.is_error);
+        assert_eq!(outcome.content, "the Cutlass window did not answer");
+        assert_eq!(woken.load(Ordering::Acquire), 1);
+        // So it is gone from the queue, and does not land later.
+        assert!(socket.take().is_empty());
+        // The caller is still connected, and its next call is served.
+        let caller = thread::spawn(move || forward.run_tool(&call));
+        until("the next call did not arrive", || {
+            woken.load(Ordering::Acquire) == 2
+        });
+        let mut waiting = socket.take();
+        assert_eq!(waiting.len(), 1);
+        waiting.remove(0).answer(ToolOutcome {
+            content: "done".to_owned(),
+            is_error: false,
+            picture: None,
+        });
+        let outcome = caller.join().unwrap();
+        assert_eq!(outcome.content, "done");
+        assert!(!outcome.is_error);
     }
 
     #[test]

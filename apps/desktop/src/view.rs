@@ -8890,8 +8890,10 @@ fn paint_clip_effects(
                 egui::StrokeKind::Inside,
             );
         }
+        // The name stays in sight when the clip starts off the left edge.
+        let from = chip.left().max(shown.left()).min(chip.right() - 15.0);
         let icon = Rect::from_min_size(
-            Pos2::new(chip.left() + 4.0, chip.center().y - 5.5),
+            Pos2::new(from + 4.0, chip.center().y - 5.5),
             Vec2::splat(11.0),
         );
         let _ = icons::paint(&painter, icon, "effects", tokens::CLIP_TEXT);

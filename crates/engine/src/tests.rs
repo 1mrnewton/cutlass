@@ -43,6 +43,8 @@ thread_local! {
     static PLATFORM_OPENS: Cell<u32> = const { Cell::new(0) };
     static RUST_OPENS: Cell<u32> = const { Cell::new(0) };
     static PROBES: Cell<u32> = const { Cell::new(0) };
+    static SCRIPT_OPENS: Cell<u32> = const { Cell::new(0) };
+    static SCRIPT_READS: Cell<u32> = const { Cell::new(0) };
 }
 
 fn reset_counts() {
@@ -967,6 +969,9 @@ struct Scripted {
     cancelled: bool,
     /// Seek to the asked picture, every one a keyframe, instead of the start.
     lands: bool,
+    /// Answer [`Demux::indexed_end`] from the packets, as a file with an
+    /// index does, instead of leaving the reader to read them.
+    indexed: bool,
 }
 
 fn scripted(foreign: usize, pictures: usize) -> Scripted {
@@ -1001,6 +1006,7 @@ fn scripted(foreign: usize, pictures: usize) -> Scripted {
         cursor: 0,
         cancelled: false,
         lands: false,
+        indexed: false,
     }
 }
 
@@ -1038,6 +1044,7 @@ impl Demux for Scripted {
         if self.cancelled {
             return Err(ReadError::Cancelled);
         }
+        SCRIPT_READS.with(|count| count.set(count.get().saturating_add(1)));
         let Some(packet) = self.packets.get(self.cursor) else {
             return Ok(None);
         };
@@ -1088,6 +1095,79 @@ impl Demux for Scripted {
     fn consumed(&self) -> u64 {
         0
     }
+
+    fn indexed_end(&self, track: TrackId) -> Option<i64> {
+        if !self.indexed {
+            return None;
+        }
+        self.packets
+            .iter()
+            .filter(|packet| packet.stream() == track.get())
+            .filter_map(|packet| {
+                let timestamp = packet.timestamp();
+                Some(timestamp.presentation()? + timestamp.duration()?)
+            })
+            .max()
+    }
+}
+
+fn open_counted(indexed: bool) -> Box<dyn Demux> {
+    SCRIPT_OPENS.with(|count| count.set(count.get().saturating_add(1)));
+    let mut script = scripted(4, 30);
+    script.indexed = indexed;
+    Box::new(script)
+}
+
+fn open_indexed(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(open_counted(true))
+}
+
+fn open_unindexed(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(open_counted(false))
+}
+
+fn script_counts() -> (u32, u32) {
+    (
+        SCRIPT_OPENS.with(|count| count.replace(0)),
+        SCRIPT_READS.with(|count| count.replace(0)),
+    )
+}
+
+#[test]
+fn an_indexed_file_opens_once_and_reads_no_packet_for_its_duration() {
+    let path = std::env::temp_dir().join(format!("cutlass-indexed-{}", std::process::id()));
+    std::fs::write(&path, b"x").expect("file");
+    let mut indexed = ReaderFactory::new();
+    indexed.register_container(probe_script, open_indexed);
+    indexed.decoders_mut().register(CodecId::Jpeg, open_token);
+    let mut unindexed = ReaderFactory::new();
+    unindexed.register_container(probe_script, open_unindexed);
+    unindexed.decoders_mut().register(CodecId::Jpeg, open_token);
+    let _ = script_counts();
+
+    // Pictures 4 to 33 at 30 per second, each one tick long: the last ends
+    // at tick 34. The other stream's last packet ends at tick 4.
+    let whole = Some(ticks_to_micros(34, Timescale::new(30)).expect("micros"));
+    let media = indexed.open(&path).expect("open");
+    assert_eq!(media.info().duration, whole);
+    assert_eq!(script_counts(), (1, 0), "one open and no packet read");
+
+    // Without an index the packets are read once, then the file is opened
+    // again to decode. The factory keeps that probe for the next open.
+    let media = unindexed.open(&path).expect("open");
+    assert_eq!(media.info().duration, whole);
+    assert_eq!(script_counts(), (2, 35));
+    let again = unindexed.clone().open(&path).expect("again");
+    assert_eq!(again.info().duration, whole);
+    assert_eq!(script_counts(), (1, 0), "a kept probe reads nothing");
+    assert_eq!(unindexed.probe(&path).expect("probe").duration, whole);
+    assert_eq!(script_counts(), (0, 0));
+
+    // A file that changed is probed again.
+    std::fs::write(&path, b"longer").expect("rewrite");
+    assert_eq!(unindexed.probe(&path).expect("probe").byte_size, 6);
+    assert_eq!(script_counts(), (1, 35));
+    let _ = std::fs::remove_file(&path);
 }
 
 fn open_wav(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
@@ -1280,6 +1360,7 @@ fn open_ramp(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
         cursor: 0,
         cancelled: false,
         lands: true,
+        indexed: false,
     }))
 }
 

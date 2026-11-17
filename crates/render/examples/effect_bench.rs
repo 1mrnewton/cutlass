@@ -13,6 +13,8 @@
 //! cargo run -p cutlass-render --release --example effect_bench -- 1920x1080
 //! ```
 
+#![allow(clippy::print_stdout)]
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::time::{Duration, Instant};
@@ -35,9 +37,11 @@ const REPEAT: usize = 8;
 /// and reveals have settled.
 const AT: Micros = Micros(1_500_000);
 
-/// What is timed: a label, a bundled recipe's id, and controls set over
-/// its defaults.
-const CASES: &[(&str, &str, &[(&str, f32)])] = &[
+/// Controls set over a recipe's defaults, by id.
+type Controls = &'static [(&'static str, f32)];
+
+/// What is timed: a label, a bundled recipe's id, and its controls.
+const CASES: &[(&str, &str, Controls)] = &[
     ("invert", "invert", &[]),
     ("blur", "blur", &[]),
     ("blur x3", "blur", &[("blur", 3.0)]),

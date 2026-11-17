@@ -2,11 +2,14 @@
 //!
 //! The score is the mean absolute difference of a small luma grid, and the
 //! change in that difference, on a 0–100 scale. A cut is a score of at least
-//! [`SCENE_SCORE`]. The file is read forward from the start of the range.
-//! Samples are at least a fifth of a second apart, and there are at most
-//! [`MAX_LOOKS`] of them. A still, or a clip with no change at that step,
-//! returns no cuts.
+//! [`SCENE_SCORE`]. The file is read forward from the start of the range,
+//! sought from sample to sample when they are far apart. Samples are at
+//! least a fifth of a second apart, and there are at most [`MAX_LOOKS`] of
+//! them. A still, or a clip with no change at that step, returns no cuts.
+//! The luma grid reads the first plane of any planar picture: Y, or G for
+//! GBR, at 8, 10 or 12 bits.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use cutlass_codec::access::{BitDepth, ColorType, PixelFormat};
@@ -84,11 +87,18 @@ pub fn scene_cuts(
 ///
 /// `times` and `grids` are paired in order. A short list stops the pair.
 /// The first grid is the reference and is not a cut.
+///
+/// The score is the change, the lesser of the frame difference and how far
+/// it moved from the last one, so steady motion is not a cut at every
+/// sample. Right after a cut that would hide a second cut one sample on,
+/// whose difference matches the first: so there a difference of twice
+/// [`SCENE_SCORE`] is a cut on its own. A fast pan stays well under that.
 #[must_use]
 pub fn cut_times(times: &[i64], grids: &[[u8; SCENE_CELLS]]) -> Vec<i64> {
     let mut cuts = Vec::new();
     let mut previous_mafd = 0.0;
     let mut previous: Option<&[u8; SCENE_CELLS]> = None;
+    let mut after_cut = false;
     for (time, grid) in times.iter().zip(grids) {
         let Some(before) = previous else {
             previous = Some(grid);
@@ -100,9 +110,11 @@ pub fn cut_times(times: &[i64], grids: &[[u8; SCENE_CELLS]]) -> Vec<i64> {
         let difference = (mafd - previous_mafd).abs();
         let score = mafd.min(difference).clamp(0.0, 100.0);
         previous_mafd = mafd;
-        if score >= SCENE_SCORE {
+        let cut = score >= SCENE_SCORE || (after_cut && mafd >= 2.0 * SCENE_SCORE);
+        if cut {
             cuts.push(*time);
         }
+        after_cut = cut;
         previous = Some(grid);
     }
     cuts
@@ -138,18 +150,68 @@ fn luma_grid(frame: &DecodedFrame) -> Option<[u8; SCENE_CELLS]> {
             pixel,
             bytes,
             ..
-        } if *pixel == PixelFormat::Yuv420p => {
-            let y_len = usize::try_from(*width)
-                .ok()?
-                .checked_mul(usize::try_from(*height).ok()?)?;
-            let plane = bytes.get(..y_len)?;
-            downsample(plane, *width, *height)
+        } => {
+            let plane = first_plane(*pixel, *width, *height, bytes)?;
+            downsample(&plane, *width, *height)
         }
         DecodedFrame::Still(image) => still_grid(image),
-        DecodedFrame::Coded { .. }
-        | DecodedFrame::Platform { .. }
-        | DecodedFrame::Surface { .. } => None,
+        DecodedFrame::Platform { .. } | DecodedFrame::Surface { .. } => None,
     }
+}
+
+/// The first plane of a coded picture as 8-bit samples: Y, or G for GBR,
+/// or the luma of packed RGBA. `None` for a layout this scan does not read.
+fn first_plane(pixel: PixelFormat, width: u32, height: u32, bytes: &[u8]) -> Option<Cow<'_, [u8]>> {
+    let samples = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?;
+    let shift = match pixel {
+        PixelFormat::Yuv420p
+        | PixelFormat::Yuv422p
+        | PixelFormat::Yuv440p
+        | PixelFormat::Yuv444p
+        | PixelFormat::Gbrp
+        | PixelFormat::Gray8 => return bytes.get(..samples).map(Cow::Borrowed),
+        PixelFormat::Rgba8 => {
+            let rgba = bytes.get(..samples.checked_mul(4)?)?;
+            return rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| {
+                    rec601(
+                        u16::from(pixel[0]),
+                        u16::from(pixel[1]),
+                        u16::from(pixel[2]),
+                    )
+                })
+                .collect::<Option<Vec<u8>>>()
+                .map(Cow::Owned);
+        }
+        PixelFormat::Yuv420p10
+        | PixelFormat::Yuv422p10
+        | PixelFormat::Yuv440p10
+        | PixelFormat::Yuv444p10
+        | PixelFormat::Gbrp10
+        | PixelFormat::Gray10 => 2,
+        PixelFormat::Yuv420p12
+        | PixelFormat::Yuv422p12
+        | PixelFormat::Yuv440p12
+        | PixelFormat::Yuv444p12
+        | PixelFormat::Gbrp12 => 4,
+        PixelFormat::None => return None,
+    };
+    let wide = bytes.get(..samples.checked_mul(2)?)?;
+    Some(Cow::Owned(
+        wide.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                let sample = u16::from_le_bytes(*pair) >> shift;
+                u8::try_from(sample).unwrap_or(u8::MAX)
+            })
+            .collect(),
+    ))
 }
 
 fn still_grid(image: &StillImage) -> Option<[u8; SCENE_CELLS]> {
@@ -244,6 +306,60 @@ mod tests {
         let cut = [fill(0), fill(0), fill(255)];
         assert_eq!(cut_times(&[0, 200_000, 400_000], &cut), vec![400_000]);
         assert!(cut_times(&[0], &[fill(255)]).is_empty());
+    }
+
+    #[test]
+    fn a_cut_one_sample_after_a_cut_is_found_and_a_pan_is_cut_once() {
+        // A one-sample shot between two others: both of its edges are cuts.
+        let flash = [fill(0), fill(0), fill(255), fill(0), fill(0)];
+        assert_eq!(cut_times(&[0, 1, 2, 3, 4], &flash), vec![2, 3]);
+        // A steady fast pan: luma moves 38 levels a sample, which is a
+        // change at its start and then not.
+        let pan = [fill(0), fill(0), fill(38), fill(76), fill(114)];
+        assert_eq!(cut_times(&[0, 1, 2, 3, 4], &pan), vec![2]);
+    }
+
+    #[test]
+    fn the_grid_reads_the_first_plane_at_any_depth_and_layout() {
+        // 32x32 at a level of 100 (8-bit), as 8-bit 4:2:2, 10-bit 4:2:0,
+        // 12-bit 4:4:4, gray, and packed RGBA.
+        let (width, height) = (32_u32, 32_u32);
+        let samples = (width * height) as usize;
+        let mut eight = vec![100_u8; samples];
+        eight.extend(vec![128_u8; samples]);
+        let wide = |level: u16| -> Vec<u8> {
+            let mut bytes = Vec::new();
+            for _ in 0..samples * 3 {
+                bytes.extend(level.to_le_bytes());
+            }
+            bytes
+        };
+        let rgba: Vec<u8> = (0..samples).flat_map(|_| [100, 100, 100, 255]).collect();
+        for (pixel, bytes) in [
+            (PixelFormat::Yuv422p, eight.clone()),
+            (PixelFormat::Gray8, eight.clone()),
+            (PixelFormat::Yuv420p10, wide(400)),
+            (PixelFormat::Yuv444p12, wide(1_600)),
+            (PixelFormat::Gray10, wide(400)),
+            (PixelFormat::Rgba8, rgba.clone()),
+        ] {
+            let frame = DecodedFrame::Coded {
+                width,
+                height,
+                pixel,
+                primaries: cutlass_codec::access::ColorPrimaries::Bt709,
+                transfer: cutlass_codec::access::Transfer::Bt709,
+                matrix: cutlass_codec::access::ColorMatrix::Bt709,
+                range: cutlass_codec::access::ColorRange::Limited,
+                bytes: std::sync::Arc::new(bytes),
+            };
+            let grid = luma_grid(&frame).unwrap_or_else(|| panic!("{pixel:?}"));
+            assert!(
+                grid.iter().all(|cell| (99..=100).contains(cell)),
+                "{pixel:?}"
+            );
+        }
+        assert!(first_plane(PixelFormat::Yuv420p10, width, height, &[0; 4]).is_none());
     }
 
     #[test]

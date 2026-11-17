@@ -701,6 +701,20 @@ pub const KEY_FULL_SPEED: u8 = 5;
 /// same PSNR-U.)
 pub const REF_SEED_SPEED: u8 = 6;
 
+/// At speeds 4 and 5 with [`super::FrameParams::full_search`] (a fixed
+/// quantizer, a second pass), an inter frame's 16×16 block whose split won
+/// also tries its halves across and down (speeds 0 to 3 try them at every
+/// size, before the split) where two of its quarters side by side share a
+/// prediction (reference and vector): each half tries the best two by SAD
+/// and vector rate of the whole block's and its two quarters' choices, with
+/// no search of its own ([`Tile::rect_cands`]), and the intra modes when
+/// those predict poorly. On `testsrc2`, where half of the splits of 16×16
+/// lose to a half, against FFmpeg's `-crf` at the same PSNR-Y: +12.8% →
+/// +12.0%; halves tried after every split that won (with their own search
+/// and candidates), +11.1% for 1.25 times the time on the README's clip of
+/// three scenes.
+pub const RECT_SPEED: std::ops::RangeInclusive<u8> = 4..=5;
+
 /// The dead zone's offsets at speeds 9 and 10 (0.5 rounds to nearest).
 const DZ_INTRA_ROUND: f32 = 0.42;
 const DZ_INTER_ROUND: f32 = 0.33;
@@ -1065,6 +1079,10 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     /// those coded across (0) or down (1).
     part: [u8; 21],
     rect: [[[Blk; 2]; 21]; 2],
+    /// While a half of a split 16×16 block is tried after it
+    /// ([`RECT_SPEED`]): the choices whose predictions its inter
+    /// candidates take.
+    rect_seeds: Vec<Blk>,
     /// Snapshots: 0 the superblock, then four per level.
     snaps: Vec<Snap<P>>,
     toks: Vec<Tok>,
@@ -1182,6 +1200,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             choice: [Blk::default(); 85],
             part: [PARTITION_NONE; 21],
             rect: [[[Blk::default(); 2]; 21]; 2],
+            rect_seeds: Vec::with_capacity(3),
             snaps,
             toks,
             kept,
@@ -1755,7 +1774,19 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             j += self.rd_node(row + dr, col + dc, level - 1);
         }
         let node = Self::node(row, col, level);
-        if j < best.0 {
+        if j < best.0
+            && level == 1
+            && whole
+            && s.full_search
+            && !s.intra_frame
+            && RECT_SPEED.contains(&s.speed)
+        {
+            self.part[node] = PARTITION_SPLIT;
+            self.save(row, col, (n, n), before + 1);
+            let j = self.halves_after_split(row, col, before, (j, PARTITION_SPLIT));
+            self.restore(before + 1);
+            j
+        } else if j < best.0 {
             self.part[node] = PARTITION_SPLIT;
             j
         } else {
@@ -1763,6 +1794,142 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.part[node] = best.1;
             best.0
         }
+    }
+
+    /// After the split of the 16×16 block at `(row, col)` won at cost
+    /// `best.0` (its state in snapshot `before + 1`, the state before it in
+    /// `before`), its halves across and down where two of its quarters side
+    /// by side share a prediction ([`RECT_SPEED`]). Leaves the winner's
+    /// state in `before + 1`, its partition in `part`, and returns its cost.
+    fn halves_after_split(
+        &mut self,
+        row: usize,
+        col: usize,
+        before: usize,
+        best: (f64, u8),
+    ) -> f64 {
+        let s = self.s;
+        let lam = f64::from(s.rd_lambda * self.lam_at(row, col)) / 256.0;
+        let (level, bsize) = (1, SQUARE[1]);
+        let node = Self::node(row, col, level);
+        let q = [(0, 0), (0, 1), (1, 0), (1, 1)]
+            .map(|(dr, dc)| self.choice[Self::slot(row + dr, col + dc, SQUARE[0])]);
+        let same = |a: &Blk, b: &Blk| {
+            a.refs == b.refs
+                && if a.refs[0] == INTRA_FRAME {
+                    a.mode == b.mode
+                } else {
+                    a.mv == b.mv && (a.refs[1] == INTRA_FRAME || a.mv2 == b.mv2)
+                }
+        };
+        let whole = self.choice[Self::slot(row, col, bsize)];
+        let mut best = best;
+        for (p, k, halves) in [
+            (PARTITION_HORZ, 0usize, [(0, 1), (2, 3)]),
+            (PARTITION_VERT, 1, [(0, 2), (1, 3)]),
+        ] {
+            let sub = geom::subsize(p, bsize);
+            if !halves.iter().any(|&(a, b)| same(&q[a], &q[b]))
+                || !geom::uv_valid(sub, s.h.ss_x, s.h.ss_y)
+            {
+                continue;
+            }
+            self.restore(before);
+            let c0 = self.cost;
+            self.part_symbol(row, col, bsize, p);
+            let mut j = (self.cost - c0) as f64 * lam;
+            let mut picks = [Blk::default(); 2];
+            for (i, (a, b)) in halves.into_iter().enumerate() {
+                if j >= best.0 {
+                    break;
+                }
+                self.rect_seeds.clear();
+                self.rect_seeds.extend([whole, q[a], q[b]]);
+                let (dr, dc) = if k == 0 { (i, 0) } else { (0, i) };
+                let (jb, b) = self.best_block(row + dr, col + dc, sub, before + 2);
+                self.rect_seeds.clear();
+                j += jb;
+                picks[i] = b;
+            }
+            if j < best.0 {
+                self.part_after(row, col, bsize, p);
+                best = (j, p);
+                self.part[node] = p;
+                self.rect[k][node] = picks;
+                self.save(row, col, (2, 2), before + 1);
+            }
+        }
+        best.0
+    }
+
+    /// The inter candidates of a half tried after a split
+    /// ([`RECT_SPEED`]): the predictions of [`Tile::rect_seeds`] (one
+    /// reference each) over the half, the best two by SAD and vector rate
+    /// (as [`Tile::inter_cands`] scores them).
+    fn rect_cands(&mut self, base: &Blk, out: &mut Vec<Blk>) {
+        let s = self.s;
+        let (row, col) = (base.row, base.col);
+        let (x, y) = (col * 8, row * 8);
+        let w = (base.bw * 8).min((s.mi_cols - col) * 8);
+        let h = (base.bh * 8).min((s.mi_rows - row) * 8);
+        let lam = u64::from(s.lambda);
+        let mut scored: Vec<(u64, Blk)> = Vec::with_capacity(3);
+        let seeds = std::mem::take(&mut self.rect_seeds);
+        for q in &seeds {
+            if q.refs[0] == INTRA_FRAME || q.refs[1] != INTRA_FRAME {
+                continue;
+            }
+            let r = usize::from(q.refs[0] - 1);
+            let mut b = Blk {
+                refs: q.refs,
+                interp: q.interp,
+                ..*base
+            };
+            let nearest = self.find_mv(&b, NEAREST);
+            let near = self.find_mv(&b, NEAR);
+            let hp_ok =
+                s.h.allow_hp && nearest.row.unsigned_abs() < 64 && nearest.col.unsigned_abs() < 64;
+            let even = |v: i16| if v & 1 != 0 { v - v.signum() } else { v };
+            let mv = if hp_ok {
+                q.mv
+            } else {
+                Mv {
+                    row: even(q.mv.row),
+                    col: even(q.mv.col),
+                }
+            };
+            if scored.iter().any(|(_, o)| o.refs == b.refs && o.mv == mv) {
+                continue;
+            }
+            b.mv = mv;
+            b.mode = if mv == nearest {
+                NEAREST
+            } else if mv == near {
+                NEAR
+            } else if mv == Mv::ZERO {
+                ZERO
+            } else {
+                NEW
+            };
+            let bits = if b.mode == NEW {
+                lam * u64::from(mv_bits(Mv {
+                    row: mv.row - nearest.row,
+                    col: mv.col - nearest.col,
+                })) / 256
+                    + lam * 2
+            } else {
+                lam
+            };
+            self.cur_ref = r;
+            if let Some(d) = self.sad_sub_exact(x, y, w, h, mv) {
+                scored.push((d + bits + lam * 2 * r as u64, b));
+            }
+        }
+        self.cur_ref = 0;
+        self.rect_seeds = seeds;
+        scored.sort_by_key(|t| t.0);
+        self.last_sad = scored.first().map_or(u64::MAX, |t| t.0);
+        out.extend(scored.iter().take(2).map(|t| t.1));
     }
 
     /// Codes the best of the block's candidate modes (leaving the state
@@ -1775,7 +1942,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.save(row, col, (bw_mi, bh_mi), slot);
         let mut cands: Vec<Blk> = Vec::with_capacity(8);
         let base = self.blk(row, col, bsize);
-        if !s.intra_frame {
+        if !self.rect_seeds.is_empty() {
+            self.rect_cands(&base, &mut cands);
+        } else if !s.intra_frame {
             self.inter_cands(&base, &mut cands);
         }
         let intra_first = cands.len();
@@ -1783,6 +1952,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.intra_cands(&base, &mut cands);
         }
         let intra_first = self.seg_restrict(&base, &mut cands).unwrap_or(intra_first);
+        // (A segment's reference may leave a half tried after a split
+        // nothing: it loses.)
+        if cands.is_empty() {
+            return (f64::INFINITY, base);
+        }
         let mut best = (f64::INFINITY, 0usize);
         let mut last = usize::MAX;
         // The state after the best so far is kept in `slot + 1`.

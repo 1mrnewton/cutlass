@@ -465,3 +465,85 @@ fn a_reference_seed_reaches_past_the_search_range() {
     let speed = super::tile::REF_SEED_SPEED + 1;
     assert!(code(speed, true) == code(speed, false));
 }
+
+/// `pic` with each band of 8 rows moved across: `d` samples, `-d`, then
+/// twice, three and four times as far in the next 16 rows.
+fn banded(pic: &[Vec<u8>; 3], w: usize, h: usize, d: isize) -> [Vec<u8>; 3] {
+    let mut y = pic[0].clone();
+    for r in 0..h {
+        let s = if (r / 8) % 2 == 0 { d } else { -d } * ((r / 16) % 4 + 1) as isize;
+        for c in 0..w {
+            let from = (c as isize - s).clamp(0, w as isize - 1) as usize;
+            y[r * w + c] = pic[0][r * w + from];
+        }
+    }
+    [y, pic[1].clone(), pic[2].clone()]
+}
+
+#[test]
+fn halves_after_a_split_take_bands_that_move_apart() {
+    use crate::dsp::pixel::Pixel;
+    // Bands of 8 rows moving one way and the other: each 16×16 block's
+    // quarters pair up across, and its halves across code it in two
+    // blocks rather than four (`tile::RECT_SPEED`).
+    let (w, h) = (320usize, 192usize);
+    let a = texture(w, h, (50, 30));
+    let b = banded(&a, w, h, 3);
+    let cw = w.div_ceil(2);
+    let code = |speed: u8, full_search: bool| {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 2);
+        let mut dec = Decoder::new();
+        let mut out = Vec::new();
+        for (t, pic) in [&a, &b].into_iter().enumerate() {
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            let coded = enc
+                .encode(FrameParams {
+                    key: t == 0,
+                    golden: false,
+                    hidden: false,
+                    qindex: 100,
+                    speed,
+                    altref_future: false,
+                    aq: false,
+                    second_pass: false,
+                    full_search,
+                    fast_arf: false,
+                    uv_delta: 0,
+                    golden_slot: 1,
+                    also_refresh: 0,
+                    altref_slot: 2,
+                    last_slot: 0,
+                    hidden_slot: 2,
+                    noise: 0.0,
+                })
+                .expect("encode");
+            // Each picture decodes as the encoder reconstructed it.
+            let shown = dec.decode(&coded.data).expect("decode").expect("shown");
+            let rec = enc.last().expect("recon");
+            let (data, stride) = rec.buf.plane(0);
+            for r in 0..h {
+                let want: Vec<u8> = data[r * stride..r * stride + w]
+                    .iter()
+                    .map(|v| v.get() as u8)
+                    .collect();
+                assert_eq!(
+                    &shown.y[r * w..(r + 1) * w],
+                    &want[..],
+                    "speed {speed} row {r}"
+                );
+            }
+            out.push(coded.data);
+        }
+        out[1].len()
+    };
+    // As small as speed 3's, which tries halves at every size (without
+    // them, 9% and 12% over it).
+    let three = code(3, true);
+    for speed in super::tile::RECT_SPEED {
+        let n = code(speed, true);
+        assert!(
+            n * 20 < three * 21,
+            "speed {speed}: {n} bytes, speed 3 {three}"
+        );
+    }
+}

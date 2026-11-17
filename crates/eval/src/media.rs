@@ -1018,10 +1018,9 @@ struct GpuSamples {
 }
 
 /// The samples of a picture the GPU converts as the CPU does: 8-bit 4:2:0
-/// whose matrix is BT.709 (or unnamed), BT.601 or BT.2020, in either
-/// range, or a platform surface, which is studio swing BT.709. `None` for
-/// every other picture: the CPU conversion reads its depth, chroma layout
-/// and matrix.
+/// or a platform surface standing for it, whose matrix is BT.709 (or
+/// unnamed), BT.601 or BT.2020, in either range. `None` for every other
+/// picture: the CPU conversion reads its depth, chroma layout and matrix.
 fn gpu_samples(frame: DecodedFrame) -> Option<GpuSamples> {
     match frame {
         DecodedFrame::Coded {
@@ -1053,16 +1052,24 @@ fn gpu_samples(frame: DecodedFrame) -> Option<GpuSamples> {
             height,
             primaries,
             transfer,
+            matrix,
+            range,
             surface,
-        } => Some(GpuSamples {
-            width,
-            height,
-            primaries,
-            transfer,
-            matrix: Matrix::Bt709,
-            full_range: false,
-            samples: YuvSamples::Surface(surface),
-        }),
+        } => {
+            let matrix = match Matrix::from_matrix(matrix).ok()? {
+                Matrix::Identity => return None,
+                named => named,
+            };
+            Some(GpuSamples {
+                width,
+                height,
+                primaries,
+                transfer,
+                matrix,
+                full_range: range == ColorRange::Full,
+                samples: YuvSamples::Surface(surface),
+            })
+        }
         DecodedFrame::Coded { .. } | DecodedFrame::Platform { .. } | DecodedFrame::Still(_) => None,
     }
 }
@@ -1938,6 +1945,41 @@ mod tests {
             range,
             bytes: vec![0; 6].into(),
         }
+    }
+
+    /// A platform surface standing for a 2x2 4:2:0 picture.
+    #[derive(Debug)]
+    struct HeldSurface;
+
+    impl cutlass_decode::PictureSurface for HeldSurface {
+        fn yuv420p(&self) -> Result<Arc<Vec<u8>>, cutlass_codec::access::CodecError> {
+            Ok(Arc::new(vec![16, 16, 16, 16, 128, 128]))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn a_surface_keeps_its_matrix_and_range_on_the_gpu_and_the_cpu() {
+        use cutlass_color::Matrix;
+        let surface = DecodedFrame::Surface {
+            width: 2,
+            height: 2,
+            primaries: ColorPrimaries::Bt601,
+            transfer: Transfer::Bt709,
+            matrix: ColorMatrix::Bt601,
+            range: ColorRange::Full,
+            surface: cutlass_decode::Surface::new(Arc::new(HeldSurface)),
+        };
+        let cpu = surface.on_cpu().expect("copied out").into_owned();
+        let DecodedFrame::Coded { matrix, range, .. } = cpu else {
+            panic!("not coded");
+        };
+        assert_eq!((matrix, range), (ColorMatrix::Bt601, ColorRange::Full));
+        let gpu = gpu_samples(surface).expect("taken");
+        assert_eq!((gpu.matrix, gpu.full_range), (Matrix::Bt601, true));
     }
 
     #[test]

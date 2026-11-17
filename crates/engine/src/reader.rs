@@ -113,6 +113,10 @@ pub enum DecodedFrame {
         height: u32,
         primaries: ColorPrimaries,
         transfer: Transfer,
+        /// The Y′CbCr matrix the platform names. Unspecified is BT.709.
+        matrix: ColorMatrix,
+        /// The sample range the platform names. Unspecified is studio swing.
+        range: ColorRange,
         surface: Surface,
     },
 }
@@ -128,6 +132,8 @@ impl DecodedFrame {
                 height,
                 primaries,
                 transfer,
+                matrix,
+                range,
                 surface,
             } => Ok(std::borrow::Cow::Owned(Self::Coded {
                 width: *width,
@@ -135,8 +141,8 @@ impl DecodedFrame {
                 pixel: PixelFormat::Yuv420p,
                 primaries: *primaries,
                 transfer: *transfer,
-                matrix: ColorMatrix::Unspecified,
-                range: ColorRange::Unspecified,
+                matrix: *matrix,
+                range: *range,
                 bytes: surface.yuv420p()?,
             })),
             Self::Platform { .. } | Self::Still(_) | Self::Coded { .. } => {
@@ -1294,6 +1300,8 @@ fn frame_from_picture(picture: PictureOutput) -> DecodedFrame {
                 height: info.height,
                 primaries: info.primaries,
                 transfer: info.transfer,
+                matrix: info.matrix,
+                range: info.range,
                 surface: surface.clone(),
             };
         }

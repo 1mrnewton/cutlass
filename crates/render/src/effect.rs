@@ -8,15 +8,16 @@
 //! reflection at its border instead of a hole. A blur runs as two steps,
 //! across and then down.
 //!
-//! The steps run in light. The canvas holds Rec. 709 encoded bytes; a first
-//! pass decodes them into a half-float picture of linear light, and a last
-//! pass encodes the result back into the canvas format. Between the two
-//! nothing is rounded to bytes. Each block says which values its
-//! arithmetic is written for ([`space`]): a blur averages light, so a
-//! bright edge stays bright, while a grade or a colour look was drawn by
-//! eye on encoded values and is handed those, then its result is decoded
-//! again. The curve is the Rec. 709 OETF and its inverse, the one the layer
-//! shader converts transfers with.
+//! The steps run on half floats, so nothing is rounded to bytes between
+//! them, and each block works in the values its arithmetic is written for
+//! ([`space`]). A blur averages linear light, so a bright edge stays
+//! bright; a grade or a colour look was drawn by eye on Rec. 709 encoded
+//! values, as the canvas holds them, and is handed those. The picture is
+//! converted as a whole, once, wherever the chain moves from one to the
+//! other, and once more into the canvas format at the end: a run of colour
+//! blocks costs no more than before, and none of them pays for the curve on
+//! every tap. The curve is the Rec. 709 OETF and its inverse, the one the
+//! layer shader converts transfers with.
 
 use crate::pool::{Bind, TextureKey};
 use cutlass_effects::{Block, Step};
@@ -82,9 +83,9 @@ pub(crate) const fn space(block: Block) -> Space {
     }
 }
 
-/// The curve between the canvas's bytes and light, shared by the passes
-/// in and out of light and by the steps that work on encoded values.
-const CURVE: &str = r"
+/// The passes between the canvas's bytes, encoded values and light: the
+/// picture read texel for texel and converted as a whole.
+const CONVERT: &str = r"
 // Linear light from a Rec. 709 encoded value, and back. Past 1 the power
 // segment carries on, so a highlight past white keeps its place.
 fn to_light(encoded: vec3<f32>) -> vec3<f32> {
@@ -111,10 +112,7 @@ fn encoded_of(c: vec4<f32>) -> vec4<f32> {
     }
     return vec4<f32>(to_encoded(c.rgb / c.a) * c.a, c.a);
 }
-";
 
-/// The passes in and out of light: the picture read texel for texel.
-const CONVERT: &str = r"
 @group(0) @binding(0) var picture: texture_2d<f32>;
 
 struct Out {
@@ -130,23 +128,45 @@ fn vs(@builtin(vertex_index) index: u32) -> Out {
     return out;
 }
 
+fn here(in: Out) -> vec4<f32> {
+    return textureLoad(picture, vec2<i32>(in.position.xy), 0);
+}
+
+// What the canvas can hold: alpha from 0 to 1, no channel above it.
+fn held(c: vec4<f32>) -> vec4<f32> {
+    let a = clamp(c.a, 0.0, 1.0);
+    return vec4<f32>(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(a)), a);
+}
+
 @fragment
 fn fs_decode(in: Out) -> @location(0) vec4<f32> {
-    return light_of(textureLoad(picture, vec2<i32>(in.position.xy), 0));
+    return light_of(here(in));
 }
 
 @fragment
 fn fs_encode(in: Out) -> @location(0) vec4<f32> {
-    let c = textureLoad(picture, vec2<i32>(in.position.xy), 0);
-    let a = clamp(c.a, 0.0, 1.0);
-    return encoded_of(vec4<f32>(min(c.rgb, vec3<f32>(c.a)), a));
+    return encoded_of(here(in));
+}
+
+@fragment
+fn fs_copy(in: Out) -> @location(0) vec4<f32> {
+    return here(in);
+}
+
+@fragment
+fn fs_encode_out(in: Out) -> @location(0) vec4<f32> {
+    return encoded_of(held(here(in)));
+}
+
+@fragment
+fn fs_copy_out(in: Out) -> @location(0) vec4<f32> {
+    return held(here(in));
 }
 ";
 
 const SHADER: &str = r"
 struct Effect {
-    // The block, then the pass: bit 0 is a blur's direction (0 across,
-    // 1 down), bit 1 set when the block works on encoded values.
+    // The block, then for a blur 0 across and 1 down.
     code: vec2<u32>,
     size: vec2<f32>,
     a: vec4<f32>,
@@ -171,18 +191,9 @@ fn vs(@builtin(vertex_index) index: u32) -> Out {
     return out;
 }
 
-// Whether this block works on encoded values rather than light.
-fn on_encoded() -> bool {
-    return (fx.code.y & 2u) != 0u;
-}
-
-// The picture so far at `uv`, in the values the block works on.
+// The picture so far at `uv`, already in the values the block works on.
 fn fetch(uv: vec2<f32>) -> vec4<f32> {
-    let c = textureSampleLevel(source, linear_sampler, uv, 0.0);
-    if (on_encoded()) {
-        return encoded_of(c);
-    }
-    return c;
+    return textureSampleLevel(source, linear_sampler, uv, 0.0);
 }
 
 fn pcg(value: u32) -> u32 {
@@ -243,7 +254,7 @@ fn blur(uv: vec2<f32>) -> vec4<f32> {
         return fetch(uv);
     }
     var direction = vec2<f32>(1.0 / fx.size.x, 0.0);
-    if ((fx.code.y & 1u) == 1u) {
+    if (fx.code.y == 1u) {
         direction = vec2<f32>(0.0, 1.0 / fx.size.y);
     }
     // A tap a pixel or closer apart up to 32 pixels each side, so a wide
@@ -847,14 +858,7 @@ fn prints(uv: vec2<f32>) -> vec4<f32> {
 
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
-    let made = block(in.position.xy / fx.size);
-    if (on_encoded()) {
-        return light_of(made);
-    }
-    return made;
-}
-
-fn block(uv: vec2<f32>) -> vec4<f32> {
+    let uv = in.position.xy / fx.size;
     switch (fx.code.x) {
         case 0u: { return transform(uv); }
         case 1u: { return rgb_split(uv); }
@@ -905,9 +909,15 @@ pub(crate) struct Effects {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    /// Canvas bytes into light, and light back into canvas bytes.
-    decode: wgpu::RenderPipeline,
-    encode: wgpu::RenderPipeline,
+    /// The whole picture between encoded values and light, into a half
+    /// float picture: `into[space]` makes it `space`'s from the other,
+    /// `copy_in` from the canvas as it is.
+    into_light: wgpu::RenderPipeline,
+    into_encoded: wgpu::RenderPipeline,
+    copy_in: wgpu::RenderPipeline,
+    /// The result back into the canvas format, from light or as it is.
+    out_of_light: wgpu::RenderPipeline,
+    out_of_encoded: wgpu::RenderPipeline,
     convert_layout: wgpu::BindGroupLayout,
     pool: std::sync::Arc<crate::pool::Pool>,
 }
@@ -971,7 +981,7 @@ impl Effects {
     pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render effect"),
-            source: wgpu::ShaderSource::Wgsl(format!("{CURVE}{SHADER}").into()),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cutlass-render effect"),
@@ -1005,26 +1015,34 @@ impl Effects {
         );
         let convert = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render effect light"),
-            source: wgpu::ShaderSource::Wgsl(format!("{CURVE}{CONVERT}").into()),
+            source: wgpu::ShaderSource::Wgsl(CONVERT.into()),
         });
         let convert_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cutlass-render effect light"),
             entries: &[texture_entry(0, false)],
         });
-        let decode = full_screen(
-            device,
+        let converting = |label, entry, format| {
+            full_screen(device, label, &convert, &convert_layout, entry, format)
+        };
+        let into_light = converting(
             "cutlass-render effect into light",
-            &convert,
-            &convert_layout,
             "fs_decode",
             LIGHT_FORMAT,
         );
-        let encode = full_screen(
-            device,
-            "cutlass-render effect out of light",
-            &convert,
-            &convert_layout,
+        let into_encoded = converting(
+            "cutlass-render effect into encoded",
             "fs_encode",
+            LIGHT_FORMAT,
+        );
+        let copy_in = converting("cutlass-render effect copy in", "fs_copy", LIGHT_FORMAT);
+        let out_of_light = converting(
+            "cutlass-render effect out of light",
+            "fs_encode_out",
+            CANVAS_FORMAT,
+        );
+        let out_of_encoded = converting(
+            "cutlass-render effect copy out",
+            "fs_copy_out",
             CANVAS_FORMAT,
         );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1040,8 +1058,11 @@ impl Effects {
             pipeline,
             layout,
             sampler,
-            decode,
-            encode,
+            into_light,
+            into_encoded,
+            copy_in,
+            out_of_light,
+            out_of_encoded,
             convert_layout,
         }
     }
@@ -1063,8 +1084,25 @@ impl Effects {
         }
         let mut from = self.light(device, size);
         let mut to = self.light(device, size);
-        self.convert(device, encoder, &self.decode, input, &from);
+        // The canvas holds encoded values: decoded only if the first step
+        // wants light.
+        let mut current = space(steps[0].block);
+        let first = match current {
+            Space::Light => &self.into_light,
+            Space::Display => &self.copy_in,
+        };
+        self.convert(device, encoder, first, input, &from);
         for step in steps {
+            let wanted = space(step.block);
+            if wanted != current {
+                let pipeline = match wanted {
+                    Space::Light => &self.into_light,
+                    Space::Display => &self.into_encoded,
+                };
+                self.convert(device, encoder, pipeline, &from, &to);
+                std::mem::swap(&mut from, &mut to);
+                current = wanted;
+            }
             // A blur runs across, then down.
             let directions: &[u32] = if step.block == Block::Blur {
                 &[0, 1]
@@ -1077,7 +1115,11 @@ impl Effects {
             }
         }
         let output = crate::blur::scratch(&self.pool, device, size);
-        self.convert(device, encoder, &self.encode, &from, &output);
+        let last = match current {
+            Space::Light => &self.out_of_light,
+            Space::Display => &self.out_of_encoded,
+        };
+        self.convert(device, encoder, last, &from, &output);
         output
     }
 
@@ -1145,10 +1187,9 @@ impl Effects {
         step: &Step,
         direction: u32,
     ) {
-        let encoded = u32::from(space(step.block) == Space::Display);
         let mut bytes = Vec::with_capacity(PARAMS as usize);
         bytes.extend_from_slice(&step.block.code().to_le_bytes());
-        bytes.extend_from_slice(&(direction | (encoded << 1)).to_le_bytes());
+        bytes.extend_from_slice(&direction.to_le_bytes());
         for value in [size.0 as f32, size.1 as f32] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
@@ -1326,16 +1367,17 @@ mod tests {
                 scene.extend_from_slice(&[v, v / 2, alpha - v / 3 * u8::from(alpha > 0), alpha]);
             }
         }
-        // A step that moves nothing, in light, and one at rest on
-        // encoded values.
-        for resting in [step(Block::Transform, &[]), step(Block::Grade, &[])] {
-            let got = draw(&renderer, &scene, (width, height), &[resting]);
+        // A step that moves nothing, in light; one at rest on encoded
+        // values; and a chain that goes from one to the other and back.
+        let (moving, grading) = (step(Block::Transform, &[]), step(Block::Grade, &[]));
+        for chain in [
+            vec![moving],
+            vec![grading],
+            vec![moving, grading, moving, grading],
+        ] {
+            let got = draw(&renderer, &scene, (width, height), &chain);
             for (index, (a, b)) in got.iter().zip(&scene).enumerate() {
-                assert!(
-                    a.abs_diff(*b) <= 1,
-                    "{:?}, byte {index}: {a} vs {b}",
-                    resting.block
-                );
+                assert!(a.abs_diff(*b) <= 1, "{chain:?}, byte {index}: {a} vs {b}");
             }
         }
     }

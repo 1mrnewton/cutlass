@@ -1432,6 +1432,72 @@ over (2.6% before), the other two within 1.6% and 3.8% as before. The pan on
 four threads is at 0.81 of FFmpeg's time (0.73 before), the rest at
 0.55 to 0.62.
 
+**Seeded reference searches and halves after a split** (17 November
+2026, after `b564507e`). What was left: the gradient at +10.9% against
+FFmpeg's `-crf`, `testsrc2` at +15.2%.
+
+- The search on ALTREF started from zero and LAST's neighbours' vectors,
+  and an alt-ref's search on LAST from its own; on a pan both stopped in
+  the valleys of smooth pictures and grain, far from where the content
+  stood. With the reference pool (up to speed 6), they now also start
+  from the whole-picture offset the pool tracks between the two pictures
+  (`FrameEncoder::set_ref_seed`), and reach that far past the usual 64
+  samples. Speeds 7 and up write the same streams.
+- At speeds 4 and 5 with a full search (a fixed quantizer, a second
+  pass), an inter frame's 16×16 block whose split won also tries its
+  halves, across or down, where two of its quarters side by side share a
+  reference and vector: libvpx's rectangular partitions, pruned by the
+  split's own choices. Each half takes the best of the whole block's and
+  its quarters' predictions by SAD and vector rate, with no search of its
+  own; only the direction with more matching pairs; intra modes only
+  where the block or a quarter chose intra; 4×4 transforms only where a
+  quarter took them.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y, 15
+to 55, four threads):
+
+| | Before | Seeded searches | And halves |
+| --- | --- | --- | --- |
+| Gradient | +10.9% | +6.0% | +5.8% |
+| `testsrc2` | +15.2% | +12.8% | +11.4% |
+
+On the README's three clips (three scenes / still scene / grainy pan),
+BD-rate Y / U / V / FFmpeg's average / 6:1:1 against the build before:
+
+| Mode | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| Speed 5, 1–4 Mb/s | −1.6 / −2.8 / −3.0 / −2.1 / −1.9 | −5.1 / −9.7 / −9.5 / −7.5 / −6.7 | −7.3 / −14.5 / −14.2 / −11.5 / −10.2 |
+| Speed 6 | −1.4 / −2.9 / −2.8 / −2.0 / −1.8 | −4.2 / −9.8 / −10.0 / −7.4 / −6.2 | −6.8 / −16.2 / −15.9 / −12.3 / −10.6 |
+| Two passes | −2.8 / −2.4 / −2.7 / −2.7 / −2.8 | −3.5 / −3.5 / −3.3 / −3.4 / −3.5 | −6.2 / −5.2 / −5.5 / −5.8 / −5.8 |
+| Fixed q 60–210 | −3.8 / −4.0 / −3.9 / −3.9 / −3.8 | −9.8 / −9.7 / −9.9 / −9.8 / −9.8 | −25.0 / −24.7 / −24.7 / −25.0 / −24.9 |
+
+At the same quantizer the PSNR stays within 0.1 dB and the pan's streams
+take 13–30% fewer bytes. Speed 5 against FFmpeg's default is now −5.7 /
+−5.0 / −8.2 / −6.0 / −5.9 on the three scenes, −26.3 / −41.9 / −42.1 /
+−35.4 / −32.0 on the still scene and −36.2 / −59.7 / −59.7 / −51.1 /
+−46.1 on the pan; speed 6 −3.3 / −4.4 / −6.2 / −4.0 / −3.7, −24.6 /
+−42.3 / −42.7 / −35.0 / −31.1 and −35.2 / −59.9 / −59.7 / −50.8 /
+−45.6.
+
+CPU time on one thread against the build before (30 pictures, median of
+three interleaved runs pinned to one core; three scenes, still scene,
+pan): `q=120` 1.02, 1.12, 0.97; speed 5 at 2 Mb/s 0.97, 0.92, 0.93;
+speed 6 0.94, 0.97, 1.11; two passes 1.01, 1.08, 0.99. The halves cost
+time on the still scene at a fixed quantizer and in two passes, where
+they are tried; the seeded searches end sooner on the pan at speed 5.
+
+Checks: 27 of the 41 configurations of the identity check change (speeds
+2, 5 and 6, two passes and fixed quantizers), none at speeds 7 to 10. FFmpeg's
+`vp9` (threaded and on one thread), libvpx and this decoder agree on 7
+new streams (28 of 28 decodes: the pan at `q=120`, two passes, speed 6,
+4:4:4 at `q=60`, 10-bit at speed 6, `testsrc2` and the gradient at
+`crf=35`, the last on one thread).
+
+Tried and dropped: each half taking the best two candidates in both
+directions (`testsrc2` +12.8% → +12.0%); the single best in the
+direction with more pairs gives +11.9% with fewer trials. What is left:
+`testsrc2` at +11.4%, the gradient at +5.8%.
+
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and
 against the defaults (BD-rate; FFmpeg's time a stream with `-row-mt 1`,

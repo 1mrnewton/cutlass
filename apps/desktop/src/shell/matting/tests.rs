@@ -353,6 +353,49 @@ fn auto_removal_cuts_a_real_clip_in_the_preview() {
         grey(&later, wall.0, wall.1) < 20,
         "the wall is gone past the old end"
     );
+
+    // The export cuts it the same: an H.264 movie of the whole clip, read
+    // back with Cutlass's own decoders.
+    let movie = temp.join("cut.mp4");
+    shell
+        .export(crate::shell::ExportRequest {
+            path: movie.clone(),
+            short_side: 720,
+            ..crate::shell::ExportRequest::default()
+        })
+        .unwrap();
+    let start = std::time::Instant::now();
+    while shell.poll_job() && start.elapsed().as_secs() < 600 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(movie.is_file(), "{:?}", shell.notice());
+    let readers = crate::readers::installed_readers();
+    let mut media = readers.open(&movie).unwrap();
+    for (at, name) in [(500_000, "export-0.5s.png"), (1_300_000, "export-1.3s.png")] {
+        let held = media
+            .decode_at(Micros(at), &TimeRange::new(0, 1_500_000))
+            .unwrap();
+        let Ok(cutlass_picture::Picture::Cpu(picture)) =
+            cutlass_engine::decoded_picture(&held.frame)
+        else {
+            panic!("an exported picture in memory");
+        };
+        let frame = crate::shell::Picture {
+            width: picture.width(),
+            height: picture.height(),
+            rgba: picture.rgba().to_vec(),
+        };
+        keep(&frame, name);
+        assert_eq!((frame.width, frame.height), (720, 1280));
+        assert!(
+            grey(&frame, wall.0, wall.1) < 20,
+            "the export drops the wall at {at}"
+        );
+        assert!(
+            grey(&frame, face.0, face.1) > 60,
+            "the export keeps her at {at}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&temp);
 }
 

@@ -68,6 +68,21 @@ pub struct Painting {
     pub keep: bool,
     /// The brush's size, 0 to 1.
     pub size: f64,
+    /// Each stroke in `brushes` as the preview draws it.
+    pub trails: Vec<Trail>,
+    /// The stroke being drawn, as the preview draws it.
+    pub live_trail: Option<Trail>,
+}
+
+/// A brush stroke in canvas pixels, for drawing over the preview.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trail {
+    /// The path on the canvas.
+    pub points: Vec<(f64, f64)>,
+    /// The brush's radius on the canvas.
+    pub radius: f64,
+    /// Paint the subject in, or erase it.
+    pub keep: bool,
 }
 
 impl Painting {
@@ -473,6 +488,8 @@ impl Shell {
             smart: false,
             keep: true,
             size: 0.3,
+            trails: Vec::new(),
+            live_trail: None,
         });
         Ok(())
     }
@@ -498,41 +515,80 @@ impl Shell {
         }
     }
 
-    /// Paint at canvas pixel `x`, `y`: the first call starts a stroke, and
-    /// each later one carries it on until [`Self::end_stroke`].
-    pub fn paint_at(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
-        let Some(painting) = self.painting.clone() else {
-            return Err(ShellError::Unavailable("not painting".to_owned()));
-        };
-        let draft = self.session_draft()?;
-        let segment = super::placed(draft, &painting.segment_id)
-            .map(|(segment, _)| segment)
-            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
+    /// Where canvas pixel `x`, `y` falls on the painted frame, in unit
+    /// coordinates, and the brush's radius in canvas pixels there.
+    fn brush_at(&self, x: f64, y: f64) -> Option<([f64; 2], f64)> {
+        let painting = self.painting.as_ref()?;
+        let draft = self.draft()?;
+        let (segment, _) = super::placed(draft, &painting.segment_id)?;
         let canvas = (
             u32::try_from(draft.canvas_config.width.max(1)).unwrap_or(1),
             u32::try_from(draft.canvas_config.height.max(1)).unwrap_or(1),
         );
-        let Some(clip) = cutlass_eval::clip_point(draft, segment, painting.time, canvas, x, y)
-        else {
+        let at = |x: f64, y: f64| {
+            cutlass_eval::clip_point(draft, segment, painting.time, canvas, x, y).map(unit_of_clip)
+        };
+        let (u, v) = at(x, y)?;
+        // The radius in frame pixels over how many frame pixels one canvas
+        // pixel spans there.
+        let frame = match draft.materials.get(segment.material_id.as_str()) {
+            Some(MaterialRef::Video(video)) => (
+                f64::from(video.width.max(1)),
+                f64::from(video.height.max(1)),
+            ),
+            _ => (1.0, 1.0),
+        };
+        let span = at(x + 1.0, y).map_or(0.0, |(u1, v1)| {
+            ((u1 - u) * frame.0).hypot((v1 - v) * frame.1)
+        });
+        let on_canvas = if span > 0.0 {
+            painting.radius() * frame.0.min(frame.1) / span
+        } else {
+            0.0
+        };
+        Some(([u, v], on_canvas))
+    }
+
+    /// The brush's radius in canvas pixels at canvas pixel `x`, `y`, while
+    /// painting.
+    #[must_use]
+    pub fn brush_on_canvas(&self, x: f64, y: f64) -> Option<f64> {
+        self.brush_at(x, y).map(|(_, radius)| radius)
+    }
+
+    /// Paint at canvas pixel `x`, `y`: the first call starts a stroke, and
+    /// each later one carries it on until [`Self::end_stroke`].
+    pub fn paint_at(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
+        if self.painting.is_none() {
+            return Err(ShellError::Unavailable("not painting".to_owned()));
+        }
+        self.session_draft()?;
+        let Some((point, on_canvas)) = self.brush_at(x, y) else {
             return Ok(());
         };
-        let (u, v) = unit_of_clip(clip);
-        let point = [u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)];
-        let radius = painting.radius();
         if let Some(painting) = self.painting.as_mut() {
-            match painting.live.as_mut() {
-                Some(live) if live.points.len() < cutlass_effects::matting::MAX_BRUSH_POINTS => {
+            let radius = painting.radius();
+            match (painting.live.as_mut(), painting.live_trail.as_mut()) {
+                (Some(live), Some(trail))
+                    if live.points.len() < cutlass_effects::matting::MAX_BRUSH_POINTS =>
+                {
                     if live.points.last() != Some(&point) {
                         live.points.push(point);
+                        trail.points.push((x, y));
                     }
                 }
-                Some(_) => {}
-                None => {
+                (Some(_), _) => {}
+                (None, _) => {
                     painting.live = Some(Brush {
                         points: vec![point],
                         radius,
                         keep: painting.keep,
                         smart: painting.smart,
+                    });
+                    painting.live_trail = Some(Trail {
+                        points: vec![(x, y)],
+                        radius: on_canvas,
+                        keep: painting.keep,
                     });
                 }
             }
@@ -542,11 +598,18 @@ impl Shell {
 
     /// Finish the stroke being painted.
     pub fn end_stroke(&mut self) {
-        if let Some(painting) = self.painting.as_mut()
-            && let Some(live) = painting.live.take()
-            && painting.brushes.len() < cutlass_effects::matting::MAX_BRUSHES
-        {
-            painting.brushes.push(live);
+        if let Some(painting) = self.painting.as_mut() {
+            let trail = painting.live_trail.take();
+            if let Some(live) = painting.live.take()
+                && painting.brushes.len() < cutlass_effects::matting::MAX_BRUSHES
+            {
+                painting.brushes.push(live);
+                painting.trails.push(trail.unwrap_or(Trail {
+                    points: Vec::new(),
+                    radius: 0.0,
+                    keep: true,
+                }));
+            }
         }
     }
 
@@ -554,6 +617,7 @@ impl Shell {
     pub fn undo_stroke(&mut self) {
         if let Some(painting) = self.painting.as_mut() {
             painting.brushes.pop();
+            painting.trails.pop();
         }
     }
 

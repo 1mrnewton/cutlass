@@ -139,8 +139,20 @@ fn painted_strokes_become_one_pick_on_the_painted_frame() {
     assert!(painting.brushes[0].keep && !painting.brushes[0].smart);
     assert!(!painting.brushes[1].keep && painting.brushes[1].smart);
     assert!((painting.brushes[0].radius - BRUSH_SMALLEST).abs() < 1e-12);
+    // The preview's copy, in canvas pixels: the frame fills the canvas
+    // pixel for pixel, so the brush is its share of 1080.
+    assert_eq!(painting.trails.len(), 2);
+    assert_eq!(
+        painting.trails[0].points,
+        vec![(480.0, 540.0), (960.0, 540.0)]
+    );
+    assert!((painting.trails[0].radius - BRUSH_SMALLEST * 1080.0).abs() < 1e-6);
+    assert!(!painting.trails[1].keep);
+    let reach = shell.brush_on_canvas(960.0, 540.0).unwrap();
+    assert!((reach - BRUSH_SMALLEST * 1080.0).abs() < 1e-6, "{reach}");
     shell.undo_stroke();
     assert_eq!(shell.painting().unwrap().brushes.len(), 1);
+    assert_eq!(shell.painting().unwrap().trails.len(), 1);
 
     let expected = Matting {
         mode: MattingMode::Custom,

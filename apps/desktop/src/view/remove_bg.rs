@@ -1,33 +1,21 @@
 //! A video clip's Remove BG page: Auto removal, Stroke, Custom removal and
 //! Chroma key, laid out as the reference lays them out.
 //!
-//! Chroma key and click-to-select already edit the clip. Every other
-//! control is drawn where it will live, dimmed, with a "Later" mark.
+//! Auto removal and Custom removal cut the clip down to a matte video made
+//! as a job; Feather edge, Clean up edge and Stroke change how the cut
+//! looks without making the matte again.
 
+use cutlass_effects::{Matting, MattingMode, Stroke, StrokeStyle};
 use egui::{RichText, Ui, Vec2};
 
-use crate::shell::{Inspection, KeyedSetting, Shell};
+use crate::shell::{Inspection, KeyedSetting, Shell, auto_model_here, follow_model_here};
 use crate::{tokens, ui};
 
-use super::audio::{later_section, later_slider, later_value, name_tile, right_button};
+use super::audio::{later_slider, later_value, name_tile};
 use super::inspector::{
-    InspectorState, LATER, ROW_GAP, body, color_row, later_badge, none_tile, note, row_label,
-    section, send, setting_row, slider,
+    InspectorState, ROW_GAP, body, color_row, none_tile, note, row_label, section, send,
+    setting_row, slider,
 };
-
-/// The outlines Stroke can draw around what is kept.
-const STROKES: [&str; 7] = [
-    "Paper",
-    "Glow",
-    "Hand-drawn",
-    "Straight",
-    "Solid",
-    "Offset",
-    "Dotted",
-];
-
-/// The tools Custom removal paints with.
-const BRUSHES: [&str; 4] = ["Smart brush", "Smart eraser", "Brush", "Eraser"];
 
 /// A key's strength when it is first switched on, or reset.
 const KEY_STRENGTH: f64 = 0.4;
@@ -38,69 +26,236 @@ pub(super) fn remove_bg_page(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    later_section(
+    let matting = shell.matting();
+    auto_removal(shell, ui, state, matting.as_ref());
+    stroke(shell, ui, state, matting.as_ref());
+    custom_removal(shell, ui, state, inspection, matting.as_ref());
+    chroma_key(shell, ui, state, inspection);
+}
+
+/// How far the matte is, or why the clip draws uncut: shown under whichever
+/// removal is on.
+fn matte_state(shell: &mut Shell, ui: &mut Ui) {
+    if let Some(done) = shell.matte_progress() {
+        note(ui, &format!("Removing the background {:.1}%", done * 100.0));
+    } else if !shell.matte_made() {
+        note(ui, "The clip shows uncut until its matte is made.");
+        ui.horizontal(|ui| {
+            row_label(ui, "");
+            if ui
+                .add(ui::Button::new("Make matte").text_size(12.0))
+                .clicked()
+            {
+                send(shell, Shell::make_matte);
+            }
+        });
+        ui.add_space(ROW_GAP);
+    }
+}
+
+/// Feather edge and Clean up edge, 0 to 100 on the page.
+fn edge_sliders(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, matting: &Matting) {
+    let (feather, clean_up) = (matting.feather, matting.clean_up);
+    if let Some(value) = slider(
+        ui,
+        state,
+        "matting-feather",
+        "Feather edge",
+        (feather * 100.0).round(),
+        0.0..=100.0,
+        |v| format!("{v:.0}"),
+    ) {
+        send(shell, |shell| {
+            shell.set_matting_edge(value / 100.0, clean_up)
+        });
+    }
+    if let Some(value) = slider(
+        ui,
+        state,
+        "matting-clean-up",
+        "Clean up edge",
+        (clean_up * 100.0).round(),
+        0.0..=100.0,
+        |v| format!("{v:.0}"),
+    ) {
+        send(shell, |shell| {
+            shell.set_matting_edge(feather, value / 100.0)
+        });
+    }
+}
+
+/// Auto removal: the switch has a model find the person or object in every
+/// frame and take the background off.
+fn auto_removal(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    matting: Option<&Matting>,
+) {
+    let on = matting.is_some_and(|m| m.mode == MattingMode::Auto);
+    let header = section(
         ui,
         state,
         "auto-removal",
         "Auto removal",
-        Some("Take the background off from behind the person or object."),
-        None,
+        Some((on, on || auto_model_here())),
+        false,
     );
-    later_section(
+    if header.toggled {
+        send(shell, |shell| shell.set_auto_removal(!on));
+    }
+    if !header.open {
+        return;
+    }
+    body(ui, |ui| {
+        if !auto_model_here() {
+            note(ui, "The background model is not on this machine yet.");
+        }
+        let Some(matting) = matting.filter(|_| on) else {
+            note(
+                ui,
+                "Take the background off from behind the person or object.",
+            );
+            return;
+        };
+        matte_state(shell, ui);
+        edge_sliders(shell, ui, state, matting);
+    });
+}
+
+/// Stroke: an outline round what is kept, by style, with its size, gap,
+/// grain and colour.
+fn stroke(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, matting: Option<&Matting>) {
+    let worn = matting.and_then(|m| m.stroke.clone());
+    let header = section(
         ui,
         state,
         "stroke",
         "Stroke",
-        Some("Outline what is kept."),
-        Some(&mut |ui: &mut Ui| {
-            stroke_tiles(ui);
-            later_slider(ui, "Size", 35.0);
-            later_slider(ui, "Spacing", 25.0);
-            later_slider(ui, "Object texture", 60.0);
-        }),
+        Some((worn.is_some(), matting.is_some())),
+        false,
     );
-    custom_removal(shell, ui, state, inspection);
-    chroma_key(shell, ui, state, inspection);
-}
-
-/// None, then each outline, by name.
-fn stroke_tiles(ui: &mut Ui) {
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::splat(8.0);
-        none_tile(ui, true);
-        for name in STROKES {
-            name_tile(ui, name, false);
+    if header.toggled {
+        let next = match worn {
+            Some(_) => None,
+            None => Some(Stroke::new(StrokeStyle::Paper)),
+        };
+        send(shell, |shell| shell.set_matting_stroke(next));
+        return;
+    }
+    if !header.open {
+        return;
+    }
+    body(ui, |ui| {
+        if matting.is_none() {
+            note(
+                ui,
+                "Turn Auto removal or Custom removal on to outline what is kept.",
+            );
+            ui.add_enabled_ui(false, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::splat(8.0);
+                    none_tile(ui, true);
+                    for style in StrokeStyle::ALL {
+                        name_tile(ui, style.label(), false);
+                    }
+                });
+                ui.add_space(ROW_GAP);
+                later_slider(ui, "Size", 35.0);
+                later_slider(ui, "Spacing", 0.0);
+                later_slider(ui, "Object texture", 0.0);
+            });
+            return;
+        }
+        let mut next: Option<Option<Stroke>> = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::splat(8.0);
+            if none_tile(ui, worn.is_none()).clicked() && worn.is_some() {
+                next = Some(None);
+            }
+            for style in StrokeStyle::ALL {
+                let on = worn.as_ref().is_some_and(|s| s.style == style);
+                if name_tile(ui, style.label(), on).clicked() && !on {
+                    // A new style keeps the size, gap and grain chosen.
+                    let picked = match &worn {
+                        Some(old) => Stroke {
+                            style,
+                            color: style.default_color().to_owned(),
+                            ..old.clone()
+                        },
+                        None => Stroke::new(style),
+                    };
+                    next = Some(Some(picked));
+                }
+            }
+        });
+        ui.add_space(ROW_GAP);
+        if let Some(stroke) = &worn {
+            let value = |v: f64| (v * 100.0).round();
+            let rows = [
+                ("stroke-size", "Size", value(stroke.size)),
+                ("stroke-spacing", "Spacing", value(stroke.spacing)),
+                ("stroke-texture", "Object texture", value(stroke.texture)),
+            ];
+            for (index, (key, label, stored)) in rows.into_iter().enumerate() {
+                if let Some(moved) = slider(ui, state, key, label, stored, 0.0..=100.0, |v| {
+                    format!("{v:.0}")
+                }) {
+                    let mut changed = stroke.clone();
+                    let unit = moved / 100.0;
+                    match index {
+                        0 => changed.size = unit,
+                        1 => changed.spacing = unit,
+                        _ => changed.texture = unit,
+                    }
+                    next = Some(Some(changed));
+                }
+            }
+            if let Some(color) = color_row(ui, state, "stroke-color", "Color", &stroke.color) {
+                next = Some(Some(Stroke {
+                    color,
+                    ..stroke.clone()
+                }));
+            }
+        }
+        if let Some(stroke) = next {
+            send(shell, |shell| shell.set_matting_stroke(stroke));
         }
     });
-    ui.add_space(ROW_GAP);
 }
 
-/// Custom removal: click the object on the preview and the clip is cut
-/// down to it; the switch takes the selection off. The brushes that paint
-/// the selection by hand come later.
+/// Custom removal: click the object on the preview, or paint it by hand,
+/// and the clip is cut down to it, followed through the clip. The switch
+/// takes it off.
 fn custom_removal(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,
     inspection: &Inspection,
+    matting: Option<&Matting>,
 ) {
     let picking = shell.picking().is_some();
+    let painting = shell.painting().is_some();
+    let custom = matting.filter(|m| m.mode == MattingMode::Custom);
+    let on = custom.is_some() || inspection.selected || picking || painting;
     let header = section(
         ui,
         state,
         "custom-removal",
         "Custom removal",
-        Some((
-            inspection.selected || picking,
-            inspection.selected || picking || shell.pick_enabled(),
-        )),
+        Some((on, on || shell.pick_enabled())),
         false,
     );
     if header.toggled {
-        if picking {
+        if on {
             shell.stop_picking();
-        } else if inspection.selected {
-            send(shell, Shell::clear_selection);
+            shell.stop_painting();
+            if inspection.selected {
+                send(shell, Shell::clear_selection);
+            }
+            if custom.is_some() {
+                send(shell, Shell::clear_custom_removal);
+            }
         } else {
             send(shell, Shell::start_picking);
         }
@@ -108,6 +263,7 @@ fn custom_removal(
     if !header.open {
         return;
     }
+    let follows = follow_model_here();
     body(ui, |ui| {
         if picking {
             note(
@@ -117,15 +273,31 @@ fn custom_removal(
         } else if !shell.vision_model_ready() {
             note(ui, "The selection model is not on this machine yet.");
         }
+        if !follows {
+            note(
+                ui,
+                "The model that follows the object through the clip is not on this machine yet, so a pick cuts this frame only.",
+            );
+        }
+        if let Some(custom) = custom {
+            let frames = custom.picks.len();
+            let plural = if frames == 1 { "" } else { "s" };
+            note(ui, &format!("Picked on {frames} frame{plural}."));
+            matte_state(shell, ui);
+        }
         ui.horizontal(|ui| {
             row_label(ui, "Select");
             if picking {
                 if ui.add(ui::Button::new("Done").text_size(12.0)).clicked() {
-                    shell.stop_picking();
+                    if follows {
+                        send(shell, Shell::follow_picked);
+                    } else {
+                        shell.stop_picking();
+                    }
                 }
             } else if ui
                 .add_enabled(
-                    shell.pick_enabled(),
+                    shell.pick_enabled() && !painting,
                     ui::Button::new("Select object").text_size(12.0),
                 )
                 .on_disabled_hover_text("Put the playhead on an unlocked video clip.")
@@ -133,36 +305,97 @@ fn custom_removal(
             {
                 send(shell, Shell::start_picking);
             }
+            let clearable = inspection.selected || custom.is_some();
             if ui
-                .add_enabled(
-                    inspection.selected,
-                    ui::Button::new("Clear").text_size(12.0),
-                )
+                .add_enabled(clearable, ui::Button::new("Clear").text_size(12.0))
                 .clicked()
             {
-                send(shell, Shell::clear_selection);
+                if inspection.selected {
+                    send(shell, Shell::clear_selection);
+                }
+                if custom.is_some() {
+                    send(shell, Shell::clear_custom_removal);
+                }
             }
         });
         ui.add_space(ROW_GAP);
-        ui.add_enabled_ui(false, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Paint by hand").size(12.0));
-                later_badge(ui);
-            });
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::splat(6.0);
-                for brush in BRUSHES {
-                    ui.add(ui::Button::new(brush).text_size(11.0));
-                }
-            });
-            ui.add_space(ROW_GAP);
-            later_slider(ui, "Size", 20.0);
-            right_button(ui, "Apply");
-        })
-        .response
-        .on_disabled_hover_text(LATER);
+        paint_by_hand(shell, ui, state, follows);
+        if let Some(custom) = custom {
+            edge_sliders(shell, ui, state, custom);
+        }
     });
+}
+
+/// Paint by hand: brushes that keep or take out, plain or edge-finding,
+/// painted on the preview's frame and followed through the clip on Apply.
+fn paint_by_hand(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, follows: bool) {
+    ui.label(RichText::new("Paint by hand").size(12.0));
+    ui.add_space(4.0);
+    let now = shell
+        .painting()
+        .map(|p| (p.smart, p.keep, p.size, p.brushes.len()));
+    let brushes = [
+        ("Smart brush", true, true),
+        ("Smart eraser", true, false),
+        ("Brush", false, true),
+        ("Eraser", false, false),
+    ];
+    let mut chosen = None;
+    ui.add_enabled_ui(follows, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+            for (name, smart, keep) in brushes {
+                let on = now.is_some_and(|(s, k, _, _)| s == smart && k == keep);
+                let button = ui::Button::new(name).on(on).text_size(11.0);
+                if ui.add(button).clicked() {
+                    chosen = Some((smart, keep));
+                }
+            }
+        });
+    })
+    .response
+    .on_disabled_hover_text("Painting needs the model that follows the object.");
+    if let Some((smart, keep)) = chosen {
+        if now.is_none() {
+            send(shell, Shell::start_painting);
+        }
+        shell.set_brush(smart, keep);
+    }
+    ui.add_space(ROW_GAP);
+    let Some((_, _, size, strokes)) = now else {
+        return;
+    };
+    note(ui, "Paint over the preview.");
+    if let Some(value) = slider(
+        ui,
+        state,
+        "brush-size",
+        "Size",
+        (size * 100.0).round(),
+        0.0..=100.0,
+        |v| format!("{v:.0}"),
+    ) {
+        shell.set_brush_size(value / 100.0);
+    }
+    ui.horizontal(|ui| {
+        row_label(ui, "");
+        if ui
+            .add_enabled(strokes > 0, ui::Button::new("Undo stroke").text_size(12.0))
+            .clicked()
+        {
+            shell.undo_stroke();
+        }
+        if ui.add(ui::Button::new("Cancel").text_size(12.0)).clicked() {
+            shell.stop_painting();
+        }
+        if ui
+            .add_enabled(strokes > 0, ui::Button::new("Apply").text_size(12.0))
+            .clicked()
+        {
+            send(shell, Shell::apply_painting);
+        }
+    });
+    ui.add_space(ROW_GAP);
 }
 
 /// Chroma key: the switch keys green out or takes the key off; the colour,

@@ -276,15 +276,6 @@ pub(super) fn choice_row(ui: &mut Ui, label: Option<&str>, text: &str) {
     ui.add_space(ROW_GAP);
 }
 
-pub(super) fn right_button(ui: &mut Ui, label: &str) {
-    ui.horizontal(|ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add(ui::Button::new(label).text_size(12.0));
-        });
-    });
-    ui.add_space(ROW_GAP);
-}
-
 /// The parts to separate, two to a row.
 fn stem_grid(ui: &mut Ui) {
     let gap = 8.0;

@@ -736,7 +736,10 @@ pub const RECT_SPEED: std::ops::RangeInclusive<u8> = 4..=5;
 const KEY_HALVES: f64 = 1.1;
 
 /// At a fixed quantizer in one pass, a 16×16 block's whole-sample search
-/// on each reference ends with a mesh: every second sample within this
+/// on LAST ends with a mesh, and on GOLDEN and ALTREF where LAST's took
+/// one (on every reference, the grainy pan took 7 to 10% more time, this
+/// way 2 to 4%, for 0.7 points on `testsrc2` and 1.9 on the still scene
+/// at a fixed quantizer): every second sample within this
 /// many of the diamond's choice, measured on every other row, the best
 /// two of the block and of each 8×8 quarter kept (the quarters' for their
 /// own searches, which take no mesh of their own) and measured whole.
@@ -3175,7 +3178,18 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         };
         let r = self.cur_ref;
         let mut mesh = self.mesh[r];
-        let found = search_in(self.s, rp, &self.seeds, r, row, col, bsize, &mut mesh);
+        // GOLDEN and ALTREF take a mesh only where LAST's took one.
+        let may = r == 0 || matches!(self.mesh[0], Some((r0, c0, _)) if (r0, c0) == (row, col));
+        let found = search_in(
+            self.s,
+            rp,
+            &self.seeds,
+            r,
+            row,
+            col,
+            bsize,
+            (&mut mesh, may),
+        );
         self.mesh[r] = mesh;
         found
     }
@@ -5733,7 +5747,7 @@ fn search_in<P: EncPixel>(
     row: usize,
     col: usize,
     bsize: u8,
-    mesh: &mut Mesh,
+    (mesh, may_mesh): (&mut Mesh, bool),
 ) -> (Mv, u64) {
     let src = (s.src.planes[0], s.src.strides[0]);
     let (bw, bh) = MI_WH[usize::from(bsize)];
@@ -5856,10 +5870,14 @@ fn search_in<P: EncPixel>(
     let mut more = [None; 2];
     if s.full_search && !s.second_pass {
         if bsize == geom::BLOCK_16X16 {
-            *mesh = mesh_in(s, src, rp, (x, y, w, h), best, best_sad).map(|(whole, quarters)| {
-                more = whole;
-                (row, col, quarters)
-            });
+            *mesh = if may_mesh {
+                mesh_in(s, src, rp, (x, y, w, h), best, best_sad).map(|(whole, quarters)| {
+                    more = whole;
+                    (row, col, quarters)
+                })
+            } else {
+                None
+            };
         } else if bsize == BLOCK_8X8
             && let Some((r0, c0, quarters)) = *mesh
             && (r0, c0) == (row & !1, col & !1)
@@ -5939,11 +5957,13 @@ fn mesh_in<P: EncPixel>(
         return None;
     }
     let keep = |t: &mut [(u32, (i32, i32)); 2], v: u32, p: (i32, i32)| {
-        if v < t[0].0 {
-            t[1] = t[0];
-            t[0] = (v, p);
-        } else if v < t[1].0 {
-            t[1] = (v, p);
+        if v < t[1].0 {
+            if v < t[0].0 {
+                t[1] = t[0];
+                t[0] = (v, p);
+            } else {
+                t[1] = (v, p);
+            }
         }
     };
     let none = (u32::MAX, c);
@@ -5968,12 +5988,20 @@ fn mesh_in<P: EncPixel>(
             keep(&mut whole, sum[j], p);
         }
     };
-    for dr in (-MESH_RANGE..=MESH_RANGE).step_by(2) {
-        for dc in (-MESH_RANGE..=MESH_RANGE).step_by(2) {
-            let p = (c.0 + dr, c.1 + dc);
-            if (dr.abs() <= 2 && dc.abs() <= 2) || !inside(p) {
+    // The even offsets whose window lies inside the reference.
+    let span = |at: i32, lim: i32| {
+        let lo = (-MESH_RANGE).max(-at);
+        let hi = MESH_RANGE.min(lim - 16 - at);
+        (lo + (lo & 1), hi)
+    };
+    let (r0, r1) = span(y as i32 + c.0, rh);
+    let (c0, c1) = span(x as i32 + c.1, rw);
+    for dr in (r0..=r1).step_by(2) {
+        for dc in (c0..=c1).step_by(2) {
+            if dr.abs() <= 2 && dc.abs() <= 2 {
                 continue;
             }
+            let p = (c.0 + dr, c.1 + dc);
             pts[n] = p;
             n += 1;
             if n == 4 {
@@ -6055,7 +6083,7 @@ fn pre_choose<P: EncPixel>(
     }
     let lam = u64::from(s.lambda);
     let estimate = |seeds: &mut [Mv], pre: &mut Pre, bsize: u8| -> u64 {
-        let (mv, sad) = search_in(s, rp, seeds, 0, row, col, bsize, &mut None);
+        let (mv, sad) = search_in(s, rp, seeds, 0, row, col, bsize, (&mut None, false));
         pre.found[Tile::<P>::slot(row, col, bsize)] = (mv, sad);
         let bw = MI_WH[usize::from(bsize)].0;
         for r in 0..bw.min(s.mi_rows - row) {

@@ -76,6 +76,10 @@ enum Event {
 struct Running {
     events: Receiver<Event>,
     stop: Arc<AtomicBool>,
+    /// The folder of the project the turn was asked in (none, with no
+    /// project open), once the turn has met the window. The turn's calls
+    /// run on that project and on no other.
+    project: Option<Option<PathBuf>>,
 }
 
 /// What a turn did to the project, kept so the user can take the whole
@@ -181,6 +185,9 @@ impl Assistant {
     /// Note the project as a turn that just started finds it.
     fn meet(&mut self, shell: &Shell) {
         self.fresh = false;
+        if let Some(running) = self.running.as_mut() {
+            running.project = Some(shell.project_folder().map(std::path::Path::to_path_buf));
+        }
         self.turn_edits = shell.session().map(|session| TurnEdits {
             project: shell.project_folder().map(std::path::Path::to_path_buf),
             before: session.draft().clone(),
@@ -384,6 +391,7 @@ impl Assistant {
                 self.running = Some(Running {
                     events: received,
                     stop,
+                    project: None,
                 });
                 // The last turn can no longer be taken back on its own.
                 self.turn_edits = None;
@@ -398,6 +406,20 @@ impl Assistant {
     /// Stop the turn running now. What it already changed stays, each
     /// change its own undo step.
     pub fn stop(&mut self) {
+        self.halt("Stopped.");
+    }
+
+    /// The project open now is not the one the running turn was asked in:
+    /// it was closed, or another was opened.
+    fn left_its_project(&self, shell: &Shell) -> bool {
+        self.running
+            .as_ref()
+            .and_then(|running| running.project.as_ref())
+            .is_some_and(|project| project.as_deref() != shell.project_folder())
+    }
+
+    /// [`Self::stop`], saying `notice` in the panel.
+    fn halt(&mut self, notice: &str) {
         self.pending = None;
         for entry in &mut self.entries {
             if let Entry::Ask {
@@ -428,7 +450,7 @@ impl Assistant {
                     *failed = true;
                 }
             }
-            self.entries.push(Entry::Notice("Stopped.".to_owned()));
+            self.entries.push(Entry::Notice(notice.to_owned()));
         }
     }
 
@@ -532,6 +554,14 @@ impl Assistant {
         }
         if self.fresh {
             self.meet(shell);
+        }
+        // A turn edits the project it was asked in. Once that one is
+        // closed or another is opened, its next call would read and write
+        // a project the user never asked about, so the turn ends here.
+        if self.left_its_project(shell) {
+            self.halt(LEFT_PROJECT);
+            self.settle(shell);
+            return false;
         }
         loop {
             let Some(running) = self.running.as_ref() else {
@@ -767,6 +797,10 @@ const PENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// The longest tool result an earlier turn keeps; the rest of a longer one
 /// was used when it was read.
 const OLD_RESULT_LIMIT: usize = 2000;
+
+/// What the panel says when a turn ends because its project is gone.
+const LEFT_PROJECT: &str = "The project changed, so the assistant stopped. What it had already \
+     changed stays in the project it was asked in.";
 
 /// Whether `call` polled a job that is still running.
 pub(crate) fn still_pending(call: &ToolCall, outcome: &ToolOutcome) -> bool {
@@ -1072,6 +1106,94 @@ mod tests {
         assert!(!assistant.can_undo_turn(&shell));
         assert_eq!(clips(&shell), 3);
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_turn_stops_when_its_project_is_closed_or_another_is_opened() {
+        let (mut shell, path) = shell_with_project("switch-from");
+        let (other, other_path) = shell_with_project("switch-to");
+        // Let go of the second project, so the window can open it.
+        drop(other);
+        // The second call is written for the project opened meanwhile, at
+        // the revision it will be at: the worst case, where it would land.
+        let there = 9_000;
+        let model = LocalModel::scripted(vec![
+            completion(
+                "",
+                vec![ToolCall {
+                    id: "read".to_owned(),
+                    name: "draft.query".to_owned(),
+                    arguments: "project".to_owned(),
+                }],
+            ),
+            completion("", split(there, "a", 1_000_000, "b")),
+            completion("Split.", Vec::new()),
+        ]);
+        let mut assistant = Assistant::default();
+        assistant.start(model, 8, "split it");
+        // The turn's first call runs on the project it was asked in.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !assistant.entries.iter().any(|entry| {
+            matches!(entry, Entry::Step { tool, result: Some(_), .. } if tool == "draft.query")
+        }) {
+            assert!(assistant.poll(&mut shell), "the turn ended early");
+            assert!(Instant::now() < deadline, "the first call did not run");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // The user opens another project while the model thinks.
+        shell.open_folder(&other_path).unwrap();
+        let pinned = shell.session().unwrap().clone().starting_at(there);
+        shell.adopt_session(pinned).unwrap();
+        finish(&mut assistant, &mut shell);
+        assert!(!assistant.busy());
+        // Nothing of the turn reached the project that is open now.
+        assert_eq!(clips(&shell), 1);
+        assert_eq!(at(&shell), there);
+        assert_eq!(
+            assistant.entries.last(),
+            Some(&Entry::Notice(super::LEFT_PROJECT.to_owned()))
+        );
+        assert!(!assistant.can_undo_turn(&shell));
+        // What the turn did before is remembered: the ask, the reply that
+        // called the read, and the read's result.
+        assert!(assistant.history.len() >= 3, "{:?}", assistant.history);
+
+        // Closing the project ends a turn the same way.
+        let model = LocalModel::scripted(vec![
+            completion(
+                "",
+                vec![ToolCall {
+                    id: "read-2".to_owned(),
+                    name: "draft.query".to_owned(),
+                    arguments: "project".to_owned(),
+                }],
+            ),
+            completion("", split(there, "a", 1_000_000, "b")),
+        ]);
+        let steps = assistant.entries.len();
+        assistant.start(model, 8, "split it");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !assistant.entries[steps..].iter().any(|entry| {
+            matches!(
+                entry,
+                Entry::Step {
+                    result: Some(_),
+                    ..
+                }
+            )
+        }) {
+            assert!(assistant.poll(&mut shell), "the turn ended early");
+            assert!(Instant::now() < deadline, "the first call did not run");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        shell.close_project().unwrap();
+        finish(&mut assistant, &mut shell);
+        assert_eq!(
+            assistant.entries.last(),
+            Some(&Entry::Notice(super::LEFT_PROJECT.to_owned()))
+        );
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_dir_all(&other_path);
     }
 
     #[test]

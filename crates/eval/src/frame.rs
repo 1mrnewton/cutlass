@@ -1294,12 +1294,14 @@ mod tests {
                 0,
                 &[
                     cutlass_session::Request::AddMask {
+                        art: None,
                         segment_id: clip.clone(),
                         material_id: "band".into(),
                         mask: band,
                         color: false,
                     },
                     cutlass_session::Request::AddMask {
+                        art: None,
                         segment_id: clip.clone(),
                         material_id: "hole".into(),
                         mask: hole,
@@ -1324,6 +1326,7 @@ mod tests {
             .apply(
                 revision,
                 &[cutlass_session::Request::EditMask {
+                    art: None,
                     segment_id: clip.clone(),
                     index: 1,
                     material_id: "unused".into(),

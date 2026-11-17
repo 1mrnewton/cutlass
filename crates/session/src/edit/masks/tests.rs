@@ -89,9 +89,9 @@ fn masks_are_added_changed_moved_and_taken_off_in_order() {
     let circle = mask(MaskShape::Circle, MaskMode::Add);
     let star = mask(MaskShape::Star, MaskMode::Subtract);
     let heart = mask(MaskShape::Heart, MaskMode::Intersect);
-    add_mask(&mut draft, &a(), &id("m1"), &circle, false).unwrap();
-    add_mask(&mut draft, &a(), &id("m2"), &star, false).unwrap();
-    add_mask(&mut draft, &a(), &id("m3"), &heart, false).unwrap();
+    add_mask(&mut draft, &a(), &id("m1"), &circle, None, false).unwrap();
+    add_mask(&mut draft, &a(), &id("m2"), &star, None, false).unwrap();
+    add_mask(&mut draft, &a(), &id("m3"), &heart, None, false).unwrap();
     assert_eq!(
         shapes(&draft),
         [
@@ -101,7 +101,7 @@ fn masks_are_added_changed_moved_and_taken_off_in_order() {
         ]
     );
     // A colour mask is a list of its own beside them.
-    add_mask(&mut draft, &a(), &id("c1"), &star, true).unwrap();
+    add_mask(&mut draft, &a(), &id("c1"), &star, None, true).unwrap();
     assert_eq!(
         segment_color_masks(&draft, &draft.tracks[0].segments[0]).len(),
         1
@@ -114,6 +114,7 @@ fn masks_are_added_changed_moved_and_taken_off_in_order() {
         1,
         &id("unused"),
         &mask(MaskShape::Rectangle, MaskMode::Add),
+        None,
         false,
     )
     .unwrap();
@@ -142,6 +143,7 @@ fn keys_follow_their_mask_as_it_moves_comes_first_or_goes() {
             &a(),
             &id(name),
             &Mask::new(MaskShape::Circle),
+            None,
             false,
         )
         .unwrap();
@@ -182,6 +184,7 @@ fn a_shared_mask_is_copied_for_the_clip_that_changes_it_and_its_keys_come_too() 
         &a(),
         &id("m1"),
         &Mask::new(MaskShape::Circle),
+        None,
         false,
     )
     .unwrap();
@@ -190,6 +193,7 @@ fn a_shared_mask_is_copied_for_the_clip_that_changes_it_and_its_keys_come_too() 
         &a(),
         &id("m2"),
         &Mask::new(MaskShape::Star),
+        None,
         false,
     )
     .unwrap();
@@ -205,7 +209,7 @@ fn a_shared_mask_is_copied_for_the_clip_that_changes_it_and_its_keys_come_too() 
         width: 0.9,
         ..Mask::new(MaskShape::Star)
     };
-    edit_mask(&mut draft, &a(), 1, &id("m2-a"), &wide, false).unwrap();
+    edit_mask(&mut draft, &a(), 1, &id("m2-a"), &wide, None, false).unwrap();
     assert_eq!(ids(&draft), ["m1", "m2-a"]);
     assert_eq!(value(&draft, &mask_key(x, Some("m2-a"))), Some(0.5));
     let other = &draft.tracks[0].segments[1];
@@ -225,6 +229,7 @@ fn a_bad_place_mask_target_or_id_leaves_the_draft() {
         &a(),
         &id("m1"),
         &Mask::new(MaskShape::Circle),
+        None,
         false,
     )
     .unwrap();
@@ -236,23 +241,23 @@ fn a_bad_place_mask_target_or_id_leaves_the_draft() {
     };
     let tries: Vec<(Result<(), EditError>, EditError)> = vec![
         (
-            edit_mask(&mut draft, &a(), 1, &id("x"), &circle, false),
+            edit_mask(&mut draft, &a(), 1, &id("x"), &circle, None, false),
             EditError::MaskList,
         ),
         (
-            edit_mask(&mut draft, &a(), 0, &id("x"), &bad, false),
+            edit_mask(&mut draft, &a(), 0, &id("x"), &bad, None, false),
             EditError::Mask,
         ),
         (
-            add_mask(&mut draft, &a(), &id("y"), &bad, false),
+            add_mask(&mut draft, &a(), &id("y"), &bad, None, false),
             EditError::Mask,
         ),
         (
-            add_mask(&mut draft, &a(), &id("m1"), &circle, false),
+            add_mask(&mut draft, &a(), &id("m1"), &circle, None, false),
             EditError::DuplicateMaterial,
         ),
         (
-            add_mask(&mut draft, &a(), &id(""), &circle, false),
+            add_mask(&mut draft, &a(), &id(""), &circle, None, false),
             EditError::DuplicateMaterial,
         ),
         (remove_mask(&mut draft, &a(), 3, false), EditError::MaskList),
@@ -270,7 +275,7 @@ fn a_bad_place_mask_target_or_id_leaves_the_draft() {
     // An audio clip takes no mask, and a locked row takes no change.
     draft.tracks[0].kind = TrackType::Audio;
     assert_eq!(
-        add_mask(&mut draft, &a(), &id("y"), &circle, false),
+        add_mask(&mut draft, &a(), &id("y"), &circle, None, false),
         Err(EditError::EffectTarget)
     );
     draft.tracks[0].kind = TrackType::Video;
@@ -288,14 +293,22 @@ fn a_clip_takes_eight_masks_of_each_kind() {
     let mut draft = one_clip();
     let circle = Mask::new(MaskShape::Circle);
     for index in 0..MAX_MASKS {
-        add_mask(&mut draft, &a(), &id(&format!("m{index}")), &circle, false).unwrap();
+        add_mask(
+            &mut draft,
+            &a(),
+            &id(&format!("m{index}")),
+            &circle,
+            None,
+            false,
+        )
+        .unwrap();
     }
     assert_eq!(
-        add_mask(&mut draft, &a(), &id("one-more"), &circle, false),
+        add_mask(&mut draft, &a(), &id("one-more"), &circle, None, false),
         Err(EditError::MaskList)
     );
     // The colour masks count on their own.
-    add_mask(&mut draft, &a(), &id("c"), &circle, true).unwrap();
+    add_mask(&mut draft, &a(), &id("c"), &circle, None, true).unwrap();
     assert_eq!(
         draft
             .materials
@@ -315,6 +328,7 @@ fn taking_off_the_first_mask_by_the_one_mask_request_hands_its_names_on() {
         &a(),
         &id("m1"),
         &Mask::new(MaskShape::Circle),
+        None,
         false,
     )
     .unwrap();
@@ -323,6 +337,7 @@ fn taking_off_the_first_mask_by_the_one_mask_request_hands_its_names_on() {
         &a(),
         &id("m2"),
         &Mask::new(MaskShape::Star),
+        None,
         false,
     )
     .unwrap();
@@ -361,4 +376,50 @@ fn the_requests_read_from_json() {
         segment_color_masks(&draft, &draft.tracks[0].segments[0]).len(),
         1
     );
+}
+
+#[test]
+fn a_drawn_mask_keeps_its_drawing_until_it_is_given_another() {
+    use cutlass_effects::{BrushStroke, MaskArt};
+    let mut draft = one_clip();
+    let stroke = |x: f32| MaskArt::Brush {
+        strokes: vec![BrushStroke {
+            points: vec![[x, 0.0], [x + 0.25, 0.5]],
+            size: 0.1,
+            erase: false,
+        }],
+    };
+    let brush = Mask::new(MaskShape::Brush);
+    add_mask(&mut draft, &a(), &id("b"), &brush, Some(&stroke(0.0)), false).unwrap();
+    let art = |draft: &Draft| {
+        segment_masks(draft, &draft.tracks[0].segments[0])
+            .first()
+            .and_then(|listed| listed.art.clone())
+    };
+    assert_eq!(art(&draft), Some(stroke(0.0)));
+    // Moving the box keeps the strokes.
+    let moved = Mask { x: 0.3, ..brush };
+    edit_mask(&mut draft, &a(), 0, &id("b2"), &moved, None, false).unwrap();
+    assert_eq!(art(&draft), Some(stroke(0.0)));
+    edit_mask(&mut draft, &a(), 0, &id("b2"), &moved, Some(&stroke(0.5)), false).unwrap();
+    assert_eq!(art(&draft), Some(stroke(0.5)));
+    // Another shape's drawing, or a drawing on an analytic shape, is
+    // refused and leaves the draft alone.
+    let before = draft.clone();
+    let pen = Mask::new(MaskShape::Pen);
+    assert_eq!(
+        edit_mask(&mut draft, &a(), 0, &id("x"), &pen, Some(&stroke(0.0)), false),
+        Err(EditError::Mask)
+    );
+    let circle = Mask::new(MaskShape::Circle);
+    assert_eq!(
+        add_mask(&mut draft, &a(), &id("y"), &circle, Some(&stroke(0.0)), false),
+        Err(EditError::Mask)
+    );
+    assert_eq!(draft, before);
+    // Turned into a circle, the drawing goes.
+    edit_mask(&mut draft, &a(), 0, &id("b3"), &circle, None, false).unwrap();
+    assert_eq!(art(&draft), None);
+    let raw = &draft.materials.common_mask[0];
+    assert!(!raw.fields.contains_key("art"));
 }

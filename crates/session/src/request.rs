@@ -679,6 +679,9 @@ pub enum Request {
         segment_id: SegmentId,
         material_id: MaterialId,
         mask: cutlass_effects::Mask,
+        /// What a text, brush or pen mask is drawn from.
+        #[serde(default)]
+        art: Option<cutlass_effects::MaskArt>,
         #[serde(default)]
         color: bool,
     },
@@ -690,6 +693,10 @@ pub enum Request {
         index: usize,
         material_id: MaterialId,
         mask: cutlass_effects::Mask,
+        /// A new drawing for a text, brush or pen mask; without one it
+        /// keeps its own.
+        #[serde(default)]
+        art: Option<cutlass_effects::MaskArt>,
         #[serde(default)]
         color: bool,
     },

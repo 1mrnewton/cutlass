@@ -279,6 +279,7 @@ fn a_clips_masks_and_colour_masks_joined_by_their_modes_match() {
         scene(),
         &[
             Request::AddMask {
+                art: None,
                 segment_id: clip(),
                 material_id: "band".into(),
                 mask: Mask {
@@ -290,6 +291,7 @@ fn a_clips_masks_and_colour_masks_joined_by_their_modes_match() {
                 color: false,
             },
             Request::AddMask {
+                art: None,
                 segment_id: clip(),
                 material_id: "hole".into(),
                 mask: Mask {
@@ -302,6 +304,7 @@ fn a_clips_masks_and_colour_masks_joined_by_their_modes_match() {
                 color: false,
             },
             Request::AddMask {
+                art: None,
                 segment_id: clip(),
                 material_id: "meet".into(),
                 mask: Mask {
@@ -323,12 +326,14 @@ fn a_clips_masks_and_colour_masks_joined_by_their_modes_match() {
             },
             adjust("exposure", 0.7, "bright"),
             Request::AddMask {
+                art: None,
                 segment_id: clip(),
                 material_id: "lit".into(),
                 mask: Mask::new(MaskShape::Circle),
                 color: true,
             },
             Request::AddMask {
+                art: None,
                 segment_id: clip(),
                 material_id: "unlit".into(),
                 mask: Mask {

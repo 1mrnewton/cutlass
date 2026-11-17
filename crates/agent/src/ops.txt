@@ -260,10 +260,10 @@ set_chroma: Key a color "#rrggbb" out of a clip on a video or sticker lane with 
 set_mask: Set a clip's first mask on a video or sticker lane, or null to remove it; shape linear, mirror, circle, rectangle, heart or star; x and y -1 to 1 across the clip with y up (-2 to 2 allowed), width and height as parts of the clip's size (0 to 4), rotation -360 to 360 degrees counter-clockwise, feather and round 0 to 1, invert, and mode add, subtract or intersect (optional, add) for how it joins the masks before it.
 {"op":"set_mask","segment_id":"a","material_id":"a-mask","mask":{"shape":"circle","x":0.0,"y":0.0,"width":0.5,"height":0.5,"rotation":0.0,"feather":0.2,"round":0.0,"invert":false}}
 
-add_mask: Put a mask (fields as in set_mask) at the end of a clip's masks, up to eight; masks join in order, each adding to, taking from (subtract) or keeping only where it meets (intersect) what the ones before it keep; color true adds to the masks on the clip's color work instead.
+add_mask: Put a mask (fields as in set_mask) at the end of a clip's masks, up to eight; masks join in order, each adding to, taking from (subtract) or keeping only where it meets (intersect) what the ones before it keep; color true adds to the masks on the clip's color work instead. A pen or brush mask (box 1 by 1 for the whole clip) is drawn from art in its box, -1 to 1 each way, y up: {"kind":"pen","points":[{"at":[x,y],"handle_in":[0,0],"handle_out":[0,0],"round":0},...]} (three or more points, closed), or {"kind":"brush","strokes":[{"points":[[x,y],...],"size":0.1,"erase":false}]} (size a part of the box's width of 2). Text masks are made in the app.
 {"op":"add_mask","segment_id":"a","material_id":"a-mask-2","mask":{"shape":"star","x":0.3,"y":0.0,"width":0.2,"height":0.2,"rotation":0.0,"feather":0.0,"round":0.0,"invert":false,"mode":"subtract"}}
 
-edit_mask: Change the clip's mask at index (0 the first) to mask; material_id names the clip's own copy when another clip shares it; color as in add_mask.
+edit_mask: Change the clip's mask at index (0 the first) to mask; material_id names the clip's own copy when another clip shares it; art (optional) replaces a pen or brush mask's drawing, which it keeps otherwise; color as in add_mask.
 {"op":"edit_mask","segment_id":"a","index":1,"material_id":"a-mask-3","mask":{"shape":"star","x":0.3,"y":0.1,"width":0.25,"height":0.25,"rotation":15.0,"feather":0.1,"round":0.0,"invert":false,"mode":"subtract"}}
 
 remove_mask: Take the clip's mask at index off, with its keys; color as in add_mask.

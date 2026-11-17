@@ -26,7 +26,10 @@ use cutlass_model::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+mod art;
 mod stack;
+
+pub use art::{BrushStroke, MAX_ART_POINTS, MAX_MASK_TEXT, MAX_STROKES, MaskArt, art_fits};
 
 pub use stack::{
     ArtPicture, CanvasMasks, DrawnMask, MAX_STACK, STACK_FLOATS, STACK_WGSL, drawn_coverage,
@@ -582,6 +585,8 @@ pub struct ListedMask {
     /// Whether it is the first of its kind on the clip, keyed under the
     /// plain mask key names.
     pub first: bool,
+    /// What a drawn mask is drawn from, when it has been drawn.
+    pub art: Option<MaskArt>,
 }
 
 impl ListedMask {
@@ -628,10 +633,12 @@ pub fn listed_masks(draft: &Draft, segment: &Segment, kind: &str) -> Vec<ListedM
         let first = seen == 0;
         seen += 1;
         if let Some(mask) = Mask::from_fields(&raw.fields) {
+            let art = MaskArt::from_fields(&raw.fields).filter(|art| art.shape() == mask.shape);
             masks.push(ListedMask {
                 id: id.clone(),
                 mask,
                 first,
+                art,
             });
         }
     }

@@ -8,7 +8,7 @@
 //! another clip stops sharing, or that comes first when the one before it
 //! goes.
 
-use cutlass_effects::{COLOR_MASK, MASK, Mask};
+use cutlass_effects::{COLOR_MASK, MASK, Mask, MaskArt, art_fits};
 use cutlass_model::{
     Draft, MASK_KEYS, MaterialId, MaterialRef, RawMaterial, Segment, SegmentId, TrackType, mask_key,
 };
@@ -36,17 +36,19 @@ fn kind(color: bool) -> (&'static str, &'static [TrackType]) {
     }
 }
 
-/// Put `mask` at the end of `segment_id`'s masks, as record `material_id`.
+/// Put `mask` at the end of `segment_id`'s masks, as record `material_id`,
+/// drawn from `art` when it is a text, brush or pen mask.
 pub fn add_mask(
     draft: &mut Draft,
     segment_id: &SegmentId,
     material_id: &MaterialId,
     mask: &Mask,
+    art: Option<&MaskArt>,
     color: bool,
 ) -> Result<(), EditError> {
     let (kind, tracks) = kind(color);
     let (track, at) = target(draft, segment_id, tracks)?;
-    if !mask.is_valid() {
+    if !mask.is_valid() || !art_fits(mask.shape, art) {
         return Err(EditError::Mask);
     }
     if records(draft, &draft.tracks[track].segments[at], kind).len() >= MAX_MASKS {
@@ -56,7 +58,7 @@ pub fn add_mask(
     draft.materials.common_mask.push(RawMaterial {
         id: material_id.clone(),
         kind: kind.to_owned(),
-        fields: mask.to_fields(),
+        fields: fields(mask, art),
     });
     draft.tracks[track].segments[at]
         .extra_material_refs
@@ -64,26 +66,39 @@ pub fn add_mask(
     Ok(())
 }
 
-/// Make the mask at `index` on `segment_id` into `mask`. A record another
-/// clip shares is left to that clip; this clip gets its own, named
-/// `material_id`, in the same place, and its keys come along.
+/// Make the mask at `index` on `segment_id` into `mask`, drawn from `art`;
+/// with no `art` a drawn mask keeps what it was drawn from while its shape
+/// stays. A record another clip shares is left to that clip; this clip
+/// gets its own, named `material_id`, in the same place, and its keys come
+/// along.
 pub fn edit_mask(
     draft: &mut Draft,
     segment_id: &SegmentId,
     index: usize,
     material_id: &MaterialId,
     mask: &Mask,
+    art: Option<&MaskArt>,
     color: bool,
 ) -> Result<(), EditError> {
     let (kind, tracks) = kind(color);
     let (track, at) = target(draft, segment_id, tracks)?;
-    if !mask.is_valid() {
+    if !mask.is_valid() || !art_fits(mask.shape, art) {
         return Err(EditError::Mask);
     }
     let listed = records(draft, &draft.tracks[track].segments[at], kind);
     let Some(id) = listed.get(index).cloned() else {
         return Err(EditError::MaskList);
     };
+    let kept = art.cloned().or_else(|| {
+        draft
+            .materials
+            .common_mask
+            .iter()
+            .find(|raw| raw.id == id)
+            .and_then(|raw| MaskArt::from_fields(&raw.fields))
+            .filter(|art| art.shape() == mask.shape)
+    });
+    let written = fields(mask, kept.as_ref());
     if !shared(draft, &id) {
         if let Some(raw) = draft
             .materials
@@ -91,7 +106,7 @@ pub fn edit_mask(
             .iter_mut()
             .find(|raw| raw.id == id)
         {
-            raw.fields = mask.to_fields();
+            raw.fields = written;
         }
         return Ok(());
     }
@@ -99,7 +114,7 @@ pub fn edit_mask(
     draft.materials.common_mask.push(RawMaterial {
         id: material_id.clone(),
         kind: kind.to_owned(),
-        fields: mask.to_fields(),
+        fields: written,
     });
     let segment = &mut draft.tracks[track].segments[at];
     if let Some(slot) = segment
@@ -228,6 +243,15 @@ fn target(
         return Err(EditError::EffectTarget);
     }
     Ok((track, at))
+}
+
+/// A record's fields for `mask` drawn from `art`.
+fn fields(mask: &Mask, art: Option<&MaskArt>) -> serde_json::Map<String, serde_json::Value> {
+    let mut fields = mask.to_fields();
+    if let Some(art) = art {
+        art.write(&mut fields);
+    }
+    fields
 }
 
 fn shared(draft: &Draft, id: &MaterialId) -> bool {

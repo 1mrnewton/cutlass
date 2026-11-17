@@ -43,8 +43,8 @@ use cutlass_settings::{SeekDuringPlayback, Settings};
 use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
 use cutlass_transcription::{
-    FileSource, HeardClip, HeardMiss, ParakeetUnified, PcmSource, PrepareError, RecognizeError,
-    Recognizer, caption_requests, columns, fit, words_on_timeline,
+    FileSource, HeardClip, HeardMiss, ParakeetUnified, Pcm, PcmSource, PrepareError,
+    RecognizeError, Recognizer, caption_requests, columns, fit, words_on_timeline,
 };
 
 mod assistant;
@@ -9147,7 +9147,33 @@ fn heard_words(
     source: &mut dyn PcmSource,
     clip: &HeardClip,
 ) -> Result<WordColumns, ShellError> {
-    let pcm = source.read(&clip.range).map_err(prepare_message)?;
+    heard_words_or_silence(recognizer, source, clip)?
+        .ok_or_else(|| prepare_message(PrepareError::NoAudio))
+}
+
+/// [`heard_words`], with `None` for a clip whose file has no sound in it:
+/// that clip was heard, and says nothing. Any other miss is a clip that
+/// may have words and could not be heard.
+fn heard_words_or_silence(
+    recognizer: &dyn Recognizer,
+    source: &mut dyn PcmSource,
+    clip: &HeardClip,
+) -> Result<Option<WordColumns>, ShellError> {
+    let pcm = match source.read(&clip.range) {
+        Ok(pcm) => pcm,
+        Err(PrepareError::NoAudio) => return Ok(None),
+        Err(error) => return Err(prepare_message(error)),
+    };
+    let words = words_of(recognizer, pcm, clip)?;
+    Ok(Some(words))
+}
+
+/// The words in `pcm`, the sound of `clip`, on the timeline clock.
+fn words_of(
+    recognizer: &dyn Recognizer,
+    pcm: Pcm,
+    clip: &HeardClip,
+) -> Result<WordColumns, ShellError> {
     let pcm = fit(pcm, recognizer.sample_rate()).map_err(prepare_message)?;
     let utterances = recognizer.recognize(&pcm).map_err(recognize_message)?;
     let words = columns(&utterances)

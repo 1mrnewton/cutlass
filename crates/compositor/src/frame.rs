@@ -37,8 +37,9 @@ impl<E: std::error::Error> std::error::Error for ComposeError<E> {}
 /// Ask each source for `time`, then clear, draw, and submit one frame.
 ///
 /// An empty source list, and a miss, leave [`ClearColor::TRANSPARENT`].
-/// Sources are drawn in order. The framebuffer is destroyed before this
-/// returns.
+/// Sources are drawn in order. A pass that fails part way is still ended,
+/// so the device is left with no pass open whatever went wrong. The
+/// framebuffer is destroyed before this returns.
 pub fn submit<D: Device>(
     device: &mut D,
     extent: Extent,
@@ -70,13 +71,15 @@ fn composite<D: Device>(
     sources: &[&dyn PictureSource],
 ) -> Result<Frame, ComposeError<D::Error>> {
     let pass = device.begin(framebuffer).map_err(ComposeError::Device)?;
-    device
+    let drawn = device
         .blend(pass, pass_blend())
-        .map_err(ComposeError::Device)?;
-    device
-        .clear(pass, ClearColor::TRANSPARENT)
-        .map_err(ComposeError::Device)?;
-    draw_ready(device, pass, sources, time).map_err(ComposeError::Device)?;
+        .and_then(|()| device.clear(pass, ClearColor::TRANSPARENT))
+        .and_then(|()| draw_ready(device, pass, sources, time));
+    if let Err(error) = drawn {
+        // The draw's error is the one worth reporting; ending is cleanup.
+        let _ = device.end(pass);
+        return Err(ComposeError::Device(error));
+    }
     device.end(pass).map_err(ComposeError::Device)?;
     device.submit(pass).map_err(ComposeError::Device)?;
     let rgba = device
@@ -182,6 +185,83 @@ mod tests {
         let source = Platform;
         let error = submit(&mut device, extent(), Micros(0), &[&source]).unwrap_err();
         assert_eq!(error, ComposeError::Device(SoftwareError::PlatformBuffer));
+    }
+
+    /// The software device, counting passes begun and ended.
+    #[derive(Default)]
+    struct Counted {
+        inner: SoftwareDevice,
+        begun: u32,
+        ended: u32,
+    }
+
+    impl Device for Counted {
+        type Error = SoftwareError;
+
+        fn create_framebuffer(&mut self, extent: Extent) -> Result<Framebuffer, SoftwareError> {
+            self.inner.create_framebuffer(extent)
+        }
+
+        fn destroy_framebuffer(&mut self, framebuffer: Framebuffer) -> Result<(), SoftwareError> {
+            self.inner.destroy_framebuffer(framebuffer)
+        }
+
+        fn begin(&mut self, framebuffer: Framebuffer) -> Result<cutlass_gpu::Pass, SoftwareError> {
+            self.begun += 1;
+            self.inner.begin(framebuffer)
+        }
+
+        fn blend(
+            &mut self,
+            pass: cutlass_gpu::Pass,
+            blend: cutlass_gpu::Blend,
+        ) -> Result<(), SoftwareError> {
+            self.inner.blend(pass, blend)
+        }
+
+        fn clear(
+            &mut self,
+            pass: cutlass_gpu::Pass,
+            color: ClearColor,
+        ) -> Result<(), SoftwareError> {
+            self.inner.clear(pass, color)
+        }
+
+        fn draw(
+            &mut self,
+            pass: cutlass_gpu::Pass,
+            source: cutlass_gpu::TexelSource<'_>,
+        ) -> Result<(), SoftwareError> {
+            self.inner.draw(pass, source)
+        }
+
+        fn end(&mut self, pass: cutlass_gpu::Pass) -> Result<(), SoftwareError> {
+            self.ended += 1;
+            self.inner.end(pass)
+        }
+
+        fn submit(&mut self, pass: cutlass_gpu::Pass) -> Result<(), SoftwareError> {
+            self.inner.submit(pass)
+        }
+
+        fn read_rgba(&self, framebuffer: Framebuffer) -> Result<&[u8], SoftwareError> {
+            self.inner.read_rgba(framebuffer)
+        }
+    }
+
+    #[test]
+    fn a_failed_draw_still_ends_its_pass_and_the_next_frame_draws() {
+        let mut device = Counted::default();
+        let error = submit(&mut device, extent(), Micros(0), &[&Platform]).unwrap_err();
+        assert_eq!(error, ComposeError::Device(SoftwareError::PlatformBuffer));
+        assert_eq!((device.begun, device.ended), (1, 1));
+        let solid = AtTime {
+            time: Micros(0),
+            pixel: [10, 20, 30, 255],
+        };
+        let frame = submit(&mut device, extent(), Micros(0), &[&solid]).expect("next frame");
+        assert_eq!(&frame.rgba[..4], &[10, 20, 30, 255]);
+        assert_eq!((device.begun, device.ended), (2, 2));
     }
 
     #[test]

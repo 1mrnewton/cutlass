@@ -325,7 +325,7 @@ struct Probed {
 
 /// A file's length and modified time: the same pair means the same probe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Stamp {
+pub(crate) struct Stamp {
     len: u64,
     modified: Option<SystemTime>,
 }
@@ -352,8 +352,9 @@ impl ReaderFactory {
         }
     }
 
-    /// The file [`Self::open`] reads for `path`.
-    fn stand_in<'a>(&'a self, path: &'a Path) -> &'a Path {
+    /// The file [`Self::open`] reads for `path`: a proxy standing in for
+    /// it, or `path` itself.
+    pub fn stand_in<'a>(&'a self, path: &'a Path) -> &'a Path {
         if self.stand_ins.is_empty() {
             return path;
         }
@@ -464,6 +465,8 @@ impl ReaderFactory {
             info,
             cursor: None,
             run: None,
+            opened: path.to_path_buf(),
+            stamp,
         })
     }
 
@@ -490,6 +493,10 @@ pub struct Media {
     cursor: Option<Cursor>,
     /// Decoded audio past the last [`Media::audio_from`], for the next one.
     run: Option<AudioRun>,
+    /// The file read, after any stand-in, and its length and modified time
+    /// when it was opened.
+    opened: PathBuf,
+    stamp: Stamp,
 }
 
 /// Decoded audio the next [`Media::audio_from`] continues from.
@@ -547,6 +554,19 @@ impl Media {
     #[must_use]
     pub fn info(&self) -> &MediaInfo {
         &self.info
+    }
+
+    /// The file this reads: the path asked for, or the proxy that stood in.
+    #[must_use]
+    pub fn opened(&self) -> &Path {
+        &self.opened
+    }
+
+    /// Whether the file still has the length and modified time it had when
+    /// it was opened. A file replaced since, or gone, is not.
+    #[must_use]
+    pub fn unchanged(&self) -> bool {
+        file_stamp(&self.opened).is_ok_and(|stamp| stamp == self.stamp)
     }
 
     /// The picture that covers `source`, seeking in the file timescale when the stream has a clock.
@@ -1772,7 +1792,7 @@ fn header_of(path: &Path, len: u64) -> Result<Vec<u8>, EngineError> {
     Ok(buf)
 }
 
-fn file_stamp(path: &Path) -> Result<Stamp, EngineError> {
+pub(crate) fn file_stamp(path: &Path) -> Result<Stamp, EngineError> {
     let file = open_file(path)?;
     let meta = file.metadata().map_err(|error| EngineError::Io {
         message: error.to_string(),

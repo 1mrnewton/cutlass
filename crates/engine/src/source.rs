@@ -16,7 +16,7 @@ use cutlass_color::{Depth, Input, Layout, Matrix, Outcome, Picture as ColorPictu
 use cutlass_container::DisplayQuarter;
 use cutlass_decode::StillImage;
 use cutlass_gpu::Extent;
-use cutlass_model::{Draft, Micros, SegmentId};
+use cutlass_model::{Draft, Micros, Segment, SegmentId};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, PlatformBuffer, Sample, rgba_len};
 
 use crate::ahead::ReadAhead;
@@ -71,6 +71,19 @@ impl VideoSource {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Whether this source reads `plan` from the file `factory` would open
+    /// for it now, unchanged since it was opened. Such a source shows the
+    /// same pictures a new one would, with its decoded pictures and its
+    /// thread already there.
+    #[must_use]
+    pub fn reads(&self, factory: &ReaderFactory, plan: &SegmentPlan) -> bool {
+        let media = self.media.borrow();
+        self.path == plan.path
+            && self.map == plan.map
+            && factory.stand_in(&plan.path) == media.opened()
+            && media.unchanged()
     }
 
     #[must_use]
@@ -289,6 +302,52 @@ pub fn open_segment_in(
     window: usize,
     root: Option<&Path>,
 ) -> Result<VideoSource, EngineError> {
+    open_plan(factory, segment_plan_in(draft, id, root)?, clock, window)
+}
+
+/// The file and the time map a segment's pictures are read with.
+///
+/// Two sources opened from equal plans, on an unchanged file, show the
+/// same pictures. See [`VideoSource::reads`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SegmentPlan {
+    pub path: PathBuf,
+    pub map: TimelineMap,
+}
+
+/// What [`open_segment_in`] opens for segment `id`, without opening it.
+pub fn segment_plan_in(
+    draft: &Draft,
+    id: &SegmentId,
+    root: Option<&Path>,
+) -> Result<SegmentPlan, EngineError> {
+    let segment = media_segment(draft, id)?;
+    let Some(stored) = map::media_path(draft, segment) else {
+        return Err(EngineError::MissingFile {
+            path: PathBuf::new(),
+        });
+    };
+    let path = located_media(root, stored).ok_or_else(|| EngineError::MissingFile {
+        path: PathBuf::from(stored),
+    })?;
+    Ok(SegmentPlan {
+        path,
+        map: map::placement_of(draft, segment)?,
+    })
+}
+
+/// Open the pictures `plan` names.
+pub fn open_plan(
+    factory: &ReaderFactory,
+    plan: SegmentPlan,
+    clock: ClockKind,
+    window: usize,
+) -> Result<VideoSource, EngineError> {
+    open_at(factory, plan.map, clock, window, plan.path)
+}
+
+/// The segment `id` on `draft`, when it is a decoder input.
+fn media_segment<'a>(draft: &'a Draft, id: &SegmentId) -> Result<&'a Segment, EngineError> {
     let segment = draft
         .tracks
         .iter()
@@ -298,21 +357,7 @@ pub fn open_segment_in(
     if map::is_graphic(draft, segment) {
         return Err(EngineError::NotMedia);
     }
-    let Some(stored) = map::media_path(draft, segment) else {
-        return Err(EngineError::MissingFile {
-            path: PathBuf::new(),
-        });
-    };
-    let path = located_media(root, stored).ok_or_else(|| EngineError::MissingFile {
-        path: PathBuf::from(stored),
-    })?;
-    open_at(
-        factory,
-        map::placement_of(draft, segment)?,
-        clock,
-        window,
-        path,
-    )
+    Ok(segment)
 }
 
 /// Opens the pictures of segment `id` from `path`, a file that holds the
@@ -329,15 +374,22 @@ pub fn open_segment_from(
     path: PathBuf,
     held_from: Micros,
 ) -> Result<VideoSource, EngineError> {
-    let segment = draft
-        .tracks
-        .iter()
-        .flat_map(|track| track.segments.iter())
-        .find(|segment| segment.id == *id)
-        .ok_or(EngineError::MissingSegment)?;
-    if map::is_graphic(draft, segment) {
-        return Err(EngineError::NotMedia);
-    }
+    open_plan(
+        factory,
+        segment_plan_from(draft, id, path, held_from)?,
+        clock,
+        window,
+    )
+}
+
+/// What [`open_segment_from`] opens, without opening it.
+pub fn segment_plan_from(
+    draft: &Draft,
+    id: &SegmentId,
+    path: PathBuf,
+    held_from: Micros,
+) -> Result<SegmentPlan, EngineError> {
+    let segment = media_segment(draft, id)?;
     let mut map = map::placement_of(draft, segment)?;
     let shift = |time: Micros| {
         time.0
@@ -348,7 +400,7 @@ pub fn open_segment_from(
     };
     map.source.start = shift(map.source.start)?;
     map.freeze = map.freeze.map(shift).transpose()?;
-    open_at(factory, map, clock, window, path)
+    Ok(SegmentPlan { path, map })
 }
 
 fn open_at(

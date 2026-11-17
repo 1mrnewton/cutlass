@@ -43,8 +43,8 @@ pub use reader::{
 };
 pub use scene::{SCENE_CELLS, SCENE_SCORE, SceneError, cut_times, scene_cuts};
 pub use source::{
-    VideoSource, decoded_picture, media_in_project, open_segment, open_segment_from,
-    open_segment_in,
+    SegmentPlan, VideoSource, decoded_picture, media_in_project, open_plan, open_segment,
+    open_segment_from, open_segment_in, segment_plan_from, segment_plan_in,
 };
 pub use thumbs::{
     MAX_FRAME_ROWS, MAX_FRAMES, MAX_THUMB_BYTES, MAX_THUMBS, THUMB_HEIGHT, Thumb, ThumbCache,

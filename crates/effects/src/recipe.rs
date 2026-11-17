@@ -1466,7 +1466,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 200] = [
+const BUNDLED_FILES: [&str; 205] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -1667,6 +1667,11 @@ const BUNDLED_FILES: [&str; 200] = [
     include_str!("../recipes/liquid.json"),
     include_str!("../recipes/melt.json"),
     include_str!("../recipes/bubble.json"),
+    include_str!("../recipes/daydream.json"),
+    include_str!("../recipes/double-exposure.json"),
+    include_str!("../recipes/ghost.json"),
+    include_str!("../recipes/neon-trace.json"),
+    include_str!("../recipes/watercolor.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.

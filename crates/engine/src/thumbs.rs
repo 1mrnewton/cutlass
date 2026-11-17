@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
-use cutlass_codec::access::PixelFormat;
+use cutlass_codec::access::{ColorMatrix, ColorRange, PixelFormat};
 use cutlass_model::{Micros, TimeRange};
 use cutlass_picture::{Picture, rgba_len};
 
@@ -434,8 +434,8 @@ fn thumb_size(width: u32, height: u32, most: u32) -> Option<(u32, u32)> {
 }
 
 /// `frame` shrunk to at most `rows` rows and turned upright. The height
-/// is counted upright. A planar 4:2:0 picture is averaged in YUV and only
-/// the small result is converted.
+/// is counted upright. A planar 4:2:0 picture in a matrix [`Swing`] knows
+/// is averaged in YUV and only the small result is converted.
 fn shrink(frame: &DecodedFrame, display: DisplayQuarter, rows: u32) -> Result<Thumb, EngineError> {
     let (coded_w, coded_h) = (frame.width(), frame.height());
     let (up_w, up_h) = upright(coded_w, coded_h, display);
@@ -447,10 +447,13 @@ fn shrink(frame: &DecodedFrame, display: DisplayQuarter, rows: u32) -> Result<Th
         width,
         height,
         pixel: PixelFormat::Yuv420p,
+        matrix,
+        range,
         bytes,
         ..
     } = frame
-        && let Some(thumb) = shrink_yuv(*width, *height, bytes, size)
+        && let Some(swing) = Swing::of(*matrix, *range)
+        && let Some(thumb) = shrink_yuv(*width, *height, bytes, size, swing)
     {
         return Ok(turn(thumb, display));
     }
@@ -510,7 +513,13 @@ fn turn(thumb: Thumb, display: DisplayQuarter) -> Thumb {
     }
 }
 
-fn shrink_yuv(width: u32, height: u32, bytes: &[u8], (out_w, out_h): (u32, u32)) -> Option<Thumb> {
+fn shrink_yuv(
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+    (out_w, out_h): (u32, u32),
+    swing: Swing,
+) -> Option<Thumb> {
     let luma = usize::try_from(width).ok()? * usize::try_from(height).ok()?;
     let (chroma_w, chroma_h) = (width / 2, height / 2);
     let chroma = usize::try_from(chroma_w).ok()? * usize::try_from(chroma_h).ok()?;
@@ -527,7 +536,7 @@ fn shrink_yuv(width: u32, height: u32, bytes: &[u8], (out_w, out_h): (u32, u32))
             let luma = average(y_plane, (width, height), 1, 0, cell, size);
             let cb = average(u_plane, (chroma_w, chroma_h), 1, 0, cell, size);
             let cr = average(v_plane, (chroma_w, chroma_h), 1, 0, cell, size);
-            rgba.extend_from_slice(&bt709(luma, cb, cr));
+            rgba.extend_from_slice(&swing.rgba(luma, cb, cr));
         }
     }
     Some(Thumb {
@@ -572,18 +581,56 @@ fn average(
     u8::try_from((sum + count / 2) / count).unwrap_or(u8::MAX)
 }
 
-/// Limited-range BT.709 to RGBA, as the compositor converts.
-fn bt709(luma: u8, cb: u8, cr: u8) -> [u8; 4] {
-    let y = (f32::from(luma) - 16.0) / 219.0;
-    let cb = (f32::from(cb) - 128.0) / 224.0;
-    let cr = (f32::from(cr) - 128.0) / 224.0;
-    let (kr, kb) = (0.2126_f32, 0.0722_f32);
-    let kg = 1.0 - kr - kb;
-    let red = y + 2.0 * (1.0 - kr) * cr;
-    let green = y - 2.0 * kb * (1.0 - kb) / kg * cb - 2.0 * kr * (1.0 - kr) / kg * cr;
-    let blue = y + 2.0 * (1.0 - kb) * cb;
-    let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-    [byte(red), byte(green), byte(blue), 255]
+/// The Y′CbCr weights and sample range a small thumb converts with, as the
+/// compositor's matrix step does. The tone step is left out: a thumb is a
+/// guide, not a grade.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Swing {
+    kr: f32,
+    kb: f32,
+    full: bool,
+}
+
+impl Swing {
+    /// The swing for a stream's matrix and range. Unnamed is BT.709 and
+    /// studio swing, as the compositor reads them. `None` for a matrix it
+    /// has no weights for: the full conversion draws those.
+    fn of(matrix: ColorMatrix, range: ColorRange) -> Option<Self> {
+        let (kr, kb) = match matrix {
+            ColorMatrix::Unspecified | ColorMatrix::Bt709 => (0.2126, 0.0722),
+            ColorMatrix::Bt601 => (0.299, 0.114),
+            ColorMatrix::Bt2020 => (0.2627, 0.0593),
+            _ => return None,
+        };
+        Some(Self {
+            kr,
+            kb,
+            full: range == ColorRange::Full,
+        })
+    }
+
+    fn rgba(self, luma: u8, cb: u8, cr: u8) -> [u8; 4] {
+        let (y, cb, cr) = if self.full {
+            (
+                f32::from(luma) / 255.0,
+                (f32::from(cb) - 128.0) / 255.0,
+                (f32::from(cr) - 128.0) / 255.0,
+            )
+        } else {
+            (
+                (f32::from(luma) - 16.0) / 219.0,
+                (f32::from(cb) - 128.0) / 224.0,
+                (f32::from(cr) - 128.0) / 224.0,
+            )
+        };
+        let (kr, kb) = (self.kr, self.kb);
+        let kg = 1.0 - kr - kb;
+        let red = y + 2.0 * (1.0 - kr) * cr;
+        let green = y - 2.0 * kb * (1.0 - kb) / kg * cb - 2.0 * kr * (1.0 - kr) / kg * cr;
+        let blue = y + 2.0 * (1.0 - kb) * cb;
+        let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        [byte(red), byte(green), byte(blue), 255]
+    }
 }
 
 #[cfg(test)]
@@ -777,11 +824,52 @@ mod tests {
         let (width, height) = (4, 2);
         let mut bytes = vec![235, 235, 16, 16, 235, 235, 16, 16];
         bytes.extend([128, 128, 128, 128]);
-        let thumb = shrink_yuv(width, height, &bytes, (4, 2)).expect("thumb");
+        let studio = Swing::of(ColorMatrix::Unspecified, ColorRange::Unspecified).expect("709");
+        let thumb = shrink_yuv(width, height, &bytes, (4, 2), studio).expect("thumb");
         assert_eq!((thumb.width, thumb.height), (4, 2));
         assert_eq!(&thumb.rgba[..4], &[255, 255, 255, 255]);
         assert_eq!(&thumb.rgba[8..12], &[0, 0, 0, 255]);
-        assert!(shrink_yuv(width, height, &bytes[..10], (4, 2)).is_none());
+        assert!(shrink_yuv(width, height, &bytes[..10], (4, 2), studio).is_none());
+    }
+
+    #[test]
+    fn a_thumb_converts_with_the_streams_matrix_and_range() {
+        // BT.601 studio-swing red, (Y, Cb, Cr) = (81, 90, 240), reads as red
+        // in BT.601 and not in BT.709.
+        let bt601 = Swing::of(ColorMatrix::Bt601, ColorRange::Limited).expect("601");
+        let bt709 = Swing::of(ColorMatrix::Bt709, ColorRange::Limited).expect("709");
+        let red = bt601.rgba(81, 90, 240);
+        assert!(red[0] >= 253 && red[1] <= 2 && red[2] <= 2, "{red:?}");
+        let off = bt709.rgba(81, 90, 240);
+        assert!(off[1] > 20, "{off:?}");
+        // Full swing: 0 is black and 255 white, not crushed and clipped.
+        let full = Swing::of(ColorMatrix::Bt709, ColorRange::Full).expect("full");
+        assert_eq!(full.rgba(255, 128, 128), [255, 255, 255, 255]);
+        assert_eq!(full.rgba(128, 128, 128), [128, 128, 128, 255]);
+        assert_eq!(bt709.rgba(128, 128, 128), [130, 130, 130, 255]);
+        // BT.2020 has its own weights, and a matrix with none is left to the
+        // full conversion.
+        assert_ne!(
+            Swing::of(ColorMatrix::Bt2020, ColorRange::Limited),
+            Some(bt709)
+        );
+        assert!(Swing::of(ColorMatrix::Ycgco, ColorRange::Full).is_none());
+        // The shrink reads them from the frame.
+        let mut bytes = vec![81; 16];
+        bytes.extend([90; 4]);
+        bytes.extend([240; 4]);
+        let frame = DecodedFrame::Coded {
+            width: 4,
+            height: 4,
+            pixel: PixelFormat::Yuv420p,
+            primaries: cutlass_codec::access::ColorPrimaries::Bt601,
+            transfer: cutlass_codec::access::Transfer::Bt709,
+            matrix: ColorMatrix::Bt601,
+            range: ColorRange::Limited,
+            bytes: Arc::new(bytes),
+        };
+        let thumb = shrink(&frame, DisplayQuarter::Zero, 2).expect("thumb");
+        assert_eq!(&thumb.rgba[..4], &red);
     }
 
     #[test]

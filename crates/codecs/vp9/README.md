@@ -1787,6 +1787,145 @@ edge of a bar left in a V_PRED 32×32 block without a residual at `q=55`,
 which libvpx codes at 47, and copied down 200 rows and through every
 picture after); the gradient at +3.6%.
 
+**A key frame's intra search, and the golden frame an overlay kept**
+(17 November 2026, after `cf5a1a10`). What was left: `testsrc2` at +3.1%
+/ +2.2% / −2.9% against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V, `crf=15` to `55`, speed 5, four threads), the gradient at +3.6%. The
+first picture of each coded alone (`crf=10` to `60`) was at +8.1% / +4.9%
+/ +2.2% and +4.3% against libvpx's (speed 0: +6.0% and +2.9%); at the
+same quantizer (68 and 70) libvpx's key frame of `testsrc2` took 9 138
+bytes for 51.84 dB, this encoder's 9 358 for 50.77 dB, with the excess
+error spread over the squares of noise and the rest alike. Decoded with
+each block's modes printed, and the key frame's features turned on one
+at a time, three causes, and in the inter frames a fourth:
+
+- A split 8×8 of a key frame took each 4×4's mode by SATD alone (with a
+  little for leaving DC). libvpx's `rd_pick_intra_sub_8x8_y_mode` codes
+  each and keeps the least RD cost. Now, at a fixed quantizer in one pass
+  up to speed 5 (`KEY_RD_SPEED`), each 4×4 takes the best by RD of the
+  three best by SATD (`KEY_RD_4X4`), its mode's bits counted in the
+  context of the 4×4s above and left of it: the first picture of
+  `testsrc2` +8.1% → +6.5% (all ten modes: +6.1%).
+- A block's luma modes were the four best by SATD; on the smooth
+  gradient SATD ranks the mode that wins fifth or sixth. Six now
+  (`KEY_RD_CANDS`): the gradient's first picture +4.3% → −1.3% (ten: the
+  same), `testsrc2`'s +8.1% → +7.9%.
+- The best intra mode then tried one more chroma mode, the luma's (or TM
+  where that was DC): the chroma mode was mostly DC. A key frame's best
+  now tries the best chroma mode by the SATD of both planes besides DC
+  (`Tile::uv_ranked`): with the two above, `testsrc2`'s first picture
+  +6.4% / +3.9% / +1.9% → +4.6% / +2.5% / −0.4% (every chroma mode: +4.6%
+  / +1.9% / −0.6%, in twice the key frame's time).
+- After an alt-ref's overlay GOLDEN read the overlay and ALTREF the
+  alt-ref, the same picture, and the golden frame before was gone: the
+  overlay was coded into slot 1, over it. libvpx keeps that golden frame
+  as the new ALTREF (`vp9_preserve_existing_gf`). At a fixed quantizer in
+  one pass the overlay is now coded into the alt-ref's slot and becomes
+  GOLDEN, and the golden frame before it, in the other slot, ALTREF; the
+  next alt-ref takes ALTREF's slot (`OVERLAY_KEEPS_GOLDEN`). The pool's
+  pick of GOLDEN (`Core::pick_golden`) started from slot 1 whatever held
+  the golden frame; it starts from its slot.
+
+SATD ranks every intra trial and was a scalar loop: 9.8% of a key frame's
+time on the grainy pan, 3.7% of its first 30 pictures. It runs on AVX2
+now for 8-bit squares (`cutlass_simd::vp9::sad8::satd`: a 16-wide row a
+vector, the last butterfly as `2 max(|p|, |q|)`), the same sums. A 720p
+key frame of the pan (one thread, `q=120`) takes 0.95 s, 0.74 s before.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets with nine points, `crf=15` to `55` by 5, against the same
+five of FFmpeg's):
+
+| | Before | Key frames | And the overlay (now) |
+| --- | --- | --- | --- |
+| `testsrc2` | +3.1 / +2.2 / −2.9% (+5.1 / +3.1 / −2.9%) | +2.8 / +3.4 / −2.8% (+4.7 / +3.5 / −3.0%) | +2.5 / +2.3 / −3.4% (+4.4 / +2.7 / −3.6%) |
+| Gradient | +3.6% (+3.2%) | +2.4% (+1.6%) | +3.0% (+2.6%) |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 324395, 52.76 dB | 323861, 52.78 dB | 13000, 53.05 dB | 13042, 53.24 dB |
+| 25 | 242857, 48.89 dB | 241204, 48.88 dB | 9559, 51.57 dB | 9530, 51.64 dB |
+| 35 | 145479, 43.67 dB | 144495, 43.67 dB | 7196, 49.39 dB | 7128, 49.25 dB |
+| 45 | 61447, 39.00 dB | 61280, 39.03 dB | 5996, 46.71 dB | 5939, 46.51 dB |
+| 55 | 21703, 35.53 dB | 21811, 35.44 dB | 5620, 43.54 dB | 5641, 43.35 dB |
+
+The overlay's change gives back 0.6 points of the gradient's gain (within
+what five points move between builds that differ in little) for a point
+on `testsrc2` and the clips' chroma below. On the README's three clips
+at `q=60` to `210` against the build before (BD-rate Y / U / V / FFmpeg's
+average / 6:1:1):
+
+| Fixed q | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| Key frames | −0.4 / −0.1 / −0.2 / −0.3 / −0.4 | −2.8 / −1.6 / −1.8 / −2.3 / −2.5 | −2.0 / −0.5 / −0.6 / −1.3 / −1.6 |
+| And the overlay (now) | −0.2 / −0.8 / −0.7 / −0.4 / −0.3 | −2.7 / −4.3 / −4.5 / −3.5 / −3.2 | −2.2 / −2.2 / −2.2 / −2.2 / −2.2 |
+
+Every other mode (speeds 5 to 10 at a bitrate, two passes) writes the
+same streams as before.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` (`-threads 4`) and
+the build before, two rounds interleaved, the mean over each one's points
+of the median of the rounds (Cutlass at `q=60` to `210`):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 7.40 s | 4.97 s (0.67) | 5.02 s (0.68) |
+| Still scene | 4.12 s | 3.50 s (0.85) | 3.45 s (0.84) |
+| Grainy pan | 2.84 s | 2.35 s (0.83) | 2.51 s (0.89) |
+
+In three more rounds on the pan alone, 1.02 of the build before (the key
+frame: one in 60 pictures, coded on fewer threads than the rest).
+
+Checks: of the identity check's 41 configurations, the seven at a fixed
+quantizer change, the other 34 (every bitrate, two passes, speeds 6 to 10)
+do not. FFmpeg's `vp9` (threaded and on one thread), libvpx and this
+decoder agree on 10 new streams (40 of 40 decodes: `testsrc2` at
+`crf=35`, at `crf=30` at speed 2 and at `crf=40` on one thread, the
+gradient at `crf=35`, the pan at `q=120` and at 10 bits at `q=100`, the
+still scene at `q=80`, the three scenes at `q=150` on two threads, 4:4:4
+at `q=60`, 4:2:0 at speed 4). New tests: a key frame of horizontal luma
+stripes over vertical chroma ones takes V (or TM) for chroma in one pass
+and never in a second; after an overlay ALTREF reads slot 1 in one pass
+and slot 2 in a second (each fails without its change); `satd` matches its
+scalar twin.
+
+Tried and dropped (BD-rate against FFmpeg's `-crf`, from the build of
+each step; for the first picture alone, as above):
+
+- The key frame's lambda × 0.5 / 0.7 / 1.4: its first picture of
+  `testsrc2` +6.8% / +7.1% / +11.0%, the gradient's +3.6% / +3.3% /
+  +7.2%; × 0.7 with the rest, the still scene's chroma +3.1 points at a
+  fixed quantizer.
+- The key frame's loop filter level × 0.3 / 0.6 / 1.5: first pictures
+  +7.9% / +8.0% / +8.7% (`testsrc2`), +10.2% / +7.1% / +4.0% (gradient).
+  The inter frames' level forced to 4, 8, 12 or 16 (libvpx's are 3 to 10
+  on the gradient, ours 23): the gradient +5.8%, +3.6%, +3.2%, +6.1%, its
+  pictures' decay unchanged.
+- An 8×8 of a key frame in two halves, 8×4 or 4×8, their modes by RD:
+  `testsrc2`'s first picture +4.6% → +4.2%, for 0.3 s of a 0.74 s key
+  frame. Every transform size for every candidate: worse (+6.4%).
+- The overlay into the alt-ref's slot with GOLDEN left on the golden
+  frame before and ALTREF the overlay (the slots not traded): the gradient
+  −3.0%, `testsrc2` +1.6% / +1.4% / −3.9%, but the still scene +1.3 / +2.3
+  / +2.4 points at a fixed quantizer. The gradient's gain is the old
+  picture searched near zero, where it finds the periodic plane's aliases
+  of the content entering at the edges (4% to 26% of the area of the
+  pictures that use it); ALTREF's search starts where the old picture's
+  content stands. Gates on GOLDEN's share before the overlay (10%, 5% and
+  35% on the gradient, `testsrc2` and the still scene), on the picture
+  having moved since, or not jumped since, kept the loss. GOLDEN seeded
+  from where the overlay stands: the gradient +2.4%, `testsrc2` +2.3% /
+  +2.0% / −3.2%.
+
+Not pursued this time: the previous frame's popular vectors as starts
+(the still scene's loss in "A mesh after the diamond").
+
+What is left: `testsrc2` at +2.5% / +2.3% / −3.4%, the gradient at +3.0%.
+Without alt-refs the gradient is at −11.4%, for 5 to 18 points lost on
+the clips; most of that gain is again an old reference's aliases.
+
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and
 against the defaults (BD-rate; FFmpeg's time a stream with `-row-mt 1`,

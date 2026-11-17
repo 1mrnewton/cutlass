@@ -169,18 +169,19 @@ pub fn follow_model_here() -> bool {
 }
 
 impl Shell {
-    /// The selected clip, when it is a movie that can be cut out.
+    /// The selected clip, when it is a movie or a photo that can be cut
+    /// out.
     fn matting_segment(&self) -> Result<SegmentId, ShellError> {
-        let refusal = "only a video clip can have its background removed";
+        let refusal = "only a video or photo clip can have its background removed";
         let segment_id = self.picture_segment(refusal)?;
         let draft = self.session_draft()?;
-        let movie = super::placed(draft, &segment_id).is_some_and(|(segment, _)| {
+        let picture = super::placed(draft, &segment_id).is_some_and(|(segment, _)| {
             matches!(
                 draft.materials.get(segment.material_id.as_str()),
-                Some(MaterialRef::Video(video)) if video.kind != "photo"
+                Some(MaterialRef::Video(_))
             )
         });
-        if !movie {
+        if !picture {
             return Err(ShellError::Unavailable(refusal.to_owned()));
         }
         Ok(segment_id)

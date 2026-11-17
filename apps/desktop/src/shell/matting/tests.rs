@@ -90,10 +90,10 @@ fn auto_removal_with_its_matte_takes_its_edge_and_outline_at_once_and_undo_retur
 }
 
 #[test]
-fn a_photo_nothing_selected_or_an_edge_with_no_removal_is_refused() {
+fn nothing_selected_or_an_edge_with_no_removal_is_refused_and_a_photo_is_taken() {
     let (mut shell, temp) = open("refused");
     shell.select(Some("p".into()));
-    assert!(shell.set_auto_removal(true).is_err());
+    assert_eq!(shell.matting_segment().ok(), Some("p".into()));
     shell.select(None);
     assert!(shell.set_auto_removal(true).is_err());
     shell.select(Some("v".into()));

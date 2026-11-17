@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use cutlass_effects::{Matting, MattingMode, segment_matting, stretch_axis};
-use cutlass_model::{Draft, Micros, SegmentId, TimeRange};
+use cutlass_model::{Draft, MaterialRef, Micros, SegmentId, TimeRange};
 use cutlass_picture::CpuBytes;
 use cutlass_store::{MatteKey, find_matte};
 
@@ -39,6 +39,9 @@ pub struct MatteAsk {
     pub rate: f64,
     /// The clip's settings when the job was asked for.
     pub matting: Matting,
+    /// The file is a still picture: its matte is one picture, made from
+    /// [`Self::range`], its first frame, whatever stretch the clip shows.
+    pub still: bool,
 }
 
 impl MatteAsk {
@@ -103,7 +106,19 @@ pub fn matte_ask_with(
     segment_id: &SegmentId,
     matting: Matting,
 ) -> Result<MatteAsk, EnhanceError> {
-    let (source, range, rate, _) = clip_stretch(draft, root, segment_id, "cut out")?;
+    let (source, range, rate, segment) = clip_stretch(draft, root, segment_id, "cut out")?;
+    let still = matches!(
+        draft.materials.get(segment.material_id.as_str()),
+        Some(MaterialRef::Video(video)) if video.kind == "photo"
+    );
+    // A photo shows one picture however long the clip: one matte cuts it
+    // wherever it is trimmed.
+    #[allow(clippy::cast_possible_truncation)]
+    let range = if still {
+        TimeRange::new(0, (1e6 / rate).ceil().max(1.0) as i64)
+    } else {
+        range
+    };
     if !matting.ready() {
         return Err(EnhanceError::Clip {
             reason: "Custom removal has nothing picked yet".into(),
@@ -114,6 +129,7 @@ pub fn matte_ask_with(
         range,
         rate,
         matting,
+        still,
     })
 }
 

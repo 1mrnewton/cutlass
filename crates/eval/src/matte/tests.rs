@@ -326,3 +326,39 @@ fn cut_out_stretches_the_matte_and_feathers_it() {
     let empty = CpuBytes::new(0, 0, Vec::new()).unwrap();
     assert_eq!(cut_out(picture.clone(), &empty, &Matting::auto()), picture);
 }
+
+#[test]
+fn a_photo_is_cut_by_one_matte_picture_wherever_it_is_trimmed() {
+    let (temp, mut draft) = project(Some(&Matting::auto()));
+    draft.materials.videos[0].kind = "photo".into();
+    let ask = matte_ask(&draft, Some(&temp.0), &"v".into()).unwrap();
+    assert!(ask.still);
+    assert_eq!(ask.range, TimeRange::new(0, 100_000), "its first frame");
+    let file = matte_file(&temp.0, &ask.key(), &ask.range).unwrap();
+    let grey: Vec<u8> = (0..8 * 8)
+        .map(|i| if i % 8 >= 4 { 255 } else { 0 })
+        .collect();
+    fs::write(&file, grey_png(8, 8, &grey)).unwrap();
+
+    let (_, mut plain) = project(None);
+    plain.materials.videos[0].kind = "photo".into();
+    let own = draw(&plain, &temp.0, 2_500_000);
+    for at in [2_000_000, 2_900_000] {
+        let cut = draw(&draft, &temp.0, at);
+        assert_eq!(alpha_at(&cut, 1, 8), 0, "at {at}: the left half is removed");
+        assert_eq!(alpha_at(&cut, 14, 8), alpha_at(&own, 14, 8));
+    }
+    // Trimmed to show another stretch, it needs no new matte.
+    draft.tracks[0].segments[0].source_range = Some(TimeRange::new(3_000_000, 1_500_000));
+    draft.tracks[0].segments[0].target = TimeRange::new(2_000_000, 1_500_000);
+    assert_eq!(
+        matte_ask(&draft, Some(&temp.0), &"v".into()).unwrap().key(),
+        ask.key()
+    );
+    assert_eq!(
+        matte_video(&draft, Some(&temp.0), &"v".into()).map(|(path, _)| path),
+        Some(file)
+    );
+    let cut = draw(&draft, &temp.0, 3_200_000);
+    assert_eq!(alpha_at(&cut, 1, 8), 0, "trimmed, it is still cut");
+}

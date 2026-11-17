@@ -419,6 +419,20 @@ impl EnhanceFrames {
     /// on, the clip's own frames are the file's, found by reading through
     /// the stretch once; otherwise they are the copy's.
     pub fn open(readers: &ReaderFactory, ask: &EnhanceAsk) -> Result<Self, EnhanceError> {
+        Self::open_with(readers, ask, false)
+    }
+
+    /// [`Self::open`], a still picture too: its one picture at each time.
+    /// What Remove BG reads, which cuts a photo out as it cuts a movie.
+    pub fn open_picture(readers: &ReaderFactory, ask: &EnhanceAsk) -> Result<Self, EnhanceError> {
+        Self::open_with(readers, ask, true)
+    }
+
+    fn open_with(
+        readers: &ReaderFactory,
+        ask: &EnhanceAsk,
+        still: bool,
+    ) -> Result<Self, EnhanceError> {
         let copy = source_times(&ask.range, ask.rate).map_err(|error| EnhanceError::Clip {
             reason: error.to_string().replace("steady", "enhance"),
         })?;
@@ -427,7 +441,7 @@ impl EnhanceFrames {
             .map_err(|error| EnhanceError::Frame {
                 reason: format!("the clip's file could not be opened: {error}"),
             })?;
-        if media.info().family == ContainerId::Still {
+        if media.info().family == ContainerId::Still && !still {
             return Err(EnhanceError::Clip {
                 reason: "only a video clip can be enhanced".into(),
             });

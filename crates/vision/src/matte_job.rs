@@ -15,6 +15,9 @@
 //! file decodes forward from its key frames, and keeps its mattes packed
 //! until they are written in order.
 //!
+//! A photo's matte is one picture, a grey PNG where the video would be: it
+//! cuts the photo wherever the clip is trimmed.
+//!
 //! The matte is the frame's size, its short side at most [`MATTE_SIDE`].
 //! The job needs no session and writes no draft, so a shell runs it off the
 //! main thread. A stopped or failed job leaves no matte behind.
@@ -26,8 +29,9 @@ use cutlass_eval::{EnhanceError, EnhanceFrames, MatteAsk, ReaderFactory};
 use cutlass_export::{ExportError, PictureMovie, video_bitrate, write_pictures};
 use cutlass_model::FrameRate;
 use cutlass_store::matte_file;
+use image::codecs::png::PngEncoder;
 use image::imageops::{self, FilterType};
-use image::{GrayImage, ImageBuffer, Luma};
+use image::{ExtendedColorType, GrayImage, ImageBuffer, ImageEncoder, Luma};
 
 use crate::enhance_job::rgb_of;
 use crate::{Click, EnhanceJobError, Follower, Image, Matte, Matter, Prompt, VisionError};
@@ -362,7 +366,12 @@ fn picked_frames(picks: &[Pick], ask: &MatteAsk, count: usize) -> Vec<(usize, Pi
 }
 
 fn open_frames(readers: &ReaderFactory, ask: &MatteAsk) -> Result<EnhanceFrames, EnhanceJobError> {
-    let frames = EnhanceFrames::open(readers, &ask.frames()).map_err(|error| {
+    let open = if ask.still {
+        EnhanceFrames::open_picture
+    } else {
+        EnhanceFrames::open
+    };
+    let frames = open(readers, &ask.frames()).map_err(|error| {
         EnhanceJobError::Clip(match error {
             EnhanceError::Clip { reason } => EnhanceError::Clip {
                 reason: reason.replace("enhanced", "cut out"),
@@ -448,6 +457,11 @@ fn write_mattes(
         }));
     }
     let (width, height) = matte_size(first.width, first.height);
+    if ask.still {
+        let file = write_still(ask, project, &first, (width, height))?;
+        progress(1);
+        return Ok(file);
+    }
     let movie = PictureMovie {
         width,
         height,
@@ -494,6 +508,38 @@ fn write_mattes(
             Err(failed.unwrap_or(EnhanceJobError::Movie(error)))
         }
     }
+}
+
+/// A photo's `matte` at `size`, a grey PNG where `ask`'s matte video would
+/// be. It is written beside and then moved in, so a half-written one is
+/// never found.
+fn write_still(
+    ask: &MatteAsk,
+    project: &Path,
+    matte: &Matte,
+    size: (u32, u32),
+) -> Result<PathBuf, EnhanceJobError> {
+    let grey: Vec<u8> = grey_rgba(matte, size)?
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|pixel| pixel[0])
+        .collect();
+    let mut bytes = Vec::new();
+    PngEncoder::new(&mut bytes)
+        .write_image(&grey, size.0, size.1, ExtendedColorType::L8)
+        .map_err(|error| EnhanceJobError::Store(error.to_string()))?;
+    let file = matte_file(project, &ask.key(), &ask.range)
+        .map_err(|error| EnhanceJobError::Store(error.to_string()))?;
+    let part = file.with_extension("part");
+    let stored =
+        |error: std::io::Error| EnhanceJobError::Store(format!("{}: {error}", file.display()));
+    std::fs::write(&part, &bytes).map_err(stored)?;
+    std::fs::rename(&part, &file).map_err(|error| {
+        let _ = std::fs::remove_file(&part);
+        stored(error)
+    })?;
+    Ok(file)
 }
 
 /// `matte` at `size` as grey RGBA.

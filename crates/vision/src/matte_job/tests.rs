@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cutlass_codec::ContainerId;
-use cutlass_container::{Demux, OpenError, ProbeResult};
+use cutlass_container::{Demux, OpenError, Probe, ProbeResult};
 use cutlass_effects::{MATTING, Matting, MattingMode, PickClick};
 use cutlass_engine::decoded_picture;
 use cutlass_isobmff::IsoBmffFile;
@@ -236,6 +236,89 @@ fn auto_removal_writes_a_grey_matte_video_its_stretch_finds() {
         assert!(row[2] > 230, "{row:?}");
         assert!(row[W as usize - 3] < 25, "{row:?}");
     }
+}
+
+/// Movies and still pictures.
+fn readers_with_stills() -> ReaderFactory {
+    let mut readers = readers();
+    readers.register_container(
+        |header: &[u8]| -> ProbeResult { cutlass_still::StillProbe.probe(header) },
+        |path: &Path| -> Result<Box<dyn Demux>, OpenError> {
+            let file = File::open(path).map_err(|error| OpenError::Source {
+                message: error.to_string(),
+            })?;
+            let len = file
+                .metadata()
+                .map_err(|error| OpenError::Source {
+                    message: error.to_string(),
+                })?
+                .len();
+            Ok(Box::new(cutlass_still::StillDemux::open(
+                cutlass_container::Input::random(file, len, cutlass_still::still_limits()),
+            )?))
+        },
+    );
+    cutlass_png::register_decoders(readers.decoders_mut());
+    readers
+}
+
+#[test]
+fn a_photos_matte_is_one_grey_picture_found_however_the_clip_is_trimmed() {
+    let (temp, mut draft) = project(&Matting::auto());
+    let (w, h) = (W as usize, H as usize);
+    let rgb: Vec<u8> = (0..w * h).flat_map(|_| [90, 120, 150]).collect();
+    let mut png = Vec::new();
+    PngEncoder::new(&mut png)
+        .write_image(&rgb, W, H, ExtendedColorType::Rgb8)
+        .unwrap();
+    fs::write(temp.0.join("photo.png"), png).unwrap();
+    let video = &mut draft.materials.videos[0];
+    video.kind = "photo".into();
+    video.path = "photo.png".into();
+    video.duration = Micros(10_800_000_000);
+    let ask = ask(&temp, &draft);
+    assert!(ask.still);
+    let mut heard = Vec::new();
+    let file = matte_clip(
+        &readers_with_stills(),
+        &encoders(),
+        &mut LeftHalf { wrong_size: false },
+        &ask,
+        &temp.0,
+        &mut |done| {
+            heard.push(done);
+            true
+        },
+    )
+    .unwrap();
+    assert_eq!(heard, vec![1.0], "one picture");
+    assert_eq!(
+        find_matte(&temp.0, &ask.key(), &ask.range).map(|(path, _)| path),
+        Some(file.clone())
+    );
+    let mut media = readers_with_stills().open(&file).unwrap();
+    let held = media.decode_at(Micros(0), &ask.range).unwrap();
+    let Ok(cutlass_picture::Picture::Cpu(picture)) = decoded_picture(&held.frame) else {
+        panic!("not in memory");
+    };
+    assert_eq!((picture.width(), picture.height()), (W, H));
+    let row: Vec<u8> = picture.rgba()[..w * 4].chunks(4).map(|p| p[0]).collect();
+    assert_eq!(row[2], 255, "{row:?}");
+    assert_eq!(row[w - 3], 0, "{row:?}");
+    let leftovers: Vec<_> = fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .collect();
+    assert_eq!(leftovers.len(), 1, "{leftovers:?}");
+
+    draft.tracks[0].segments[0].source_range = Some(TimeRange::new(5_000_000, 2_000_000));
+    assert_eq!(
+        cutlass_eval::matte_ask(&draft, Some(&temp.0), &"v".into())
+            .unwrap()
+            .key(),
+        ask.key()
+    );
 }
 
 #[test]

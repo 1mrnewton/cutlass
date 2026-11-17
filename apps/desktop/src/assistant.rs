@@ -97,6 +97,11 @@ struct TurnEdits {
     end: u64,
     /// The draft the turn left, once the turn is over.
     after: Option<cutlass_model::Draft>,
+    /// Someone else edited the project while the turn ran: the user in
+    /// the window, or another host. Putting the draft back to `before`
+    /// would take that edit with the turn's, so the turn is not offered
+    /// to be taken back.
+    mixed: bool,
 }
 
 /// The conversation and the turn running now.
@@ -197,7 +202,18 @@ impl Assistant {
             start: session.revision(),
             end: session.revision(),
             after: None,
+            mixed: false,
         });
+    }
+
+    /// Before a call of the turn runs: note an edit that is not the
+    /// turn's, made since its last call left the project.
+    fn note_others(&mut self, shell: &Shell) {
+        if let (Some(edits), Some(session)) = (self.turn_edits.as_mut(), shell.session())
+            && session.revision() != edits.end
+        {
+            edits.mixed = true;
+        }
     }
 
     /// Note where a tool call of the turn left the project.
@@ -222,6 +238,7 @@ impl Assistant {
                 shell.project_folder() == edits.project.as_deref()
                     && session.revision() == edits.end
                     && edits.end != edits.start
+                    && !edits.mixed
                     && *session.draft() != edits.before
             })
             .map(|session| session.draft().clone());
@@ -248,6 +265,7 @@ impl Assistant {
         let outcome = if allow {
             let mut allowed = pending.allowed;
             allowed.push(pending.action);
+            self.note_others(shell);
             let run = shell.run_agent_tool(&pending.call, &allowed);
             self.edited(shell);
             if let Some(action) = run.wants {
@@ -634,6 +652,7 @@ impl Assistant {
                     }
                 }
                 Event::Tool { call, answer } => {
+                    self.note_others(shell);
                     let run = shell.run_agent_tool(&call, &[]);
                     self.edited(shell);
                     if let Some(action) = run.wants {
@@ -1402,6 +1421,47 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&path);
         let _ = std::fs::remove_dir_all(&other_path);
+    }
+
+    #[test]
+    fn a_turn_is_not_taken_back_with_an_edit_the_user_made_while_it_ran() {
+        let (mut shell, path) = shell_with_project("undo-mixed");
+        let mut assistant = Assistant::default();
+        let read = |id: &str| ToolCall {
+            id: id.to_owned(),
+            name: "draft.query".to_owned(),
+            arguments: "project".to_owned(),
+        };
+        // The turn splits, and after the user's edit only reads.
+        let model = LocalModel::scripted(vec![
+            completion("", split(at(&shell), "a", 1_000_000, "b")),
+            completion("", vec![read("look")]),
+            completion("Split.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "split it");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while clips(&shell) == 1 {
+            assert!(assistant.poll(&mut shell), "the turn ended early");
+            assert!(Instant::now() < deadline, "the split did not run");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // The user renames the project while the model thinks.
+        shell.set_project_name("named by the user").unwrap();
+        finish(&mut assistant, &mut shell);
+        assert_eq!(clips(&shell), 2);
+        // Taking the turn back would undo the rename with the split, so
+        // it is not offered, and asking for it changes nothing.
+        assert!(!assistant.can_undo_turn(&shell));
+        assistant.undo_turn(&mut shell);
+        assert_eq!(shell.draft().unwrap().name, "named by the user");
+        assert_eq!(clips(&shell), 2);
+        // The user steps back with undo, an edit at a time.
+        shell.undo().unwrap();
+        assert_eq!(clips(&shell), 2);
+        assert_ne!(shell.draft().unwrap().name, "named by the user");
+        shell.undo().unwrap();
+        assert_eq!(clips(&shell), 1);
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]

@@ -10,8 +10,8 @@ use std::path::{Component, Path, PathBuf};
 
 use cutlass_codec::access::{ChannelLayout, Pcm};
 use cutlass_engine::{
-    ClipPcm, EngineError, MapError, Media, ReaderFactory, map_timeline, media_path, placement_of,
-    speed_at,
+    ClipPcm, EngineError, MapError, Media, ReaderFactory, map_timeline, mean_speed, media_path,
+    placement_of,
 };
 use cutlass_model::{Draft, DraftId, Micros, Segment, SegmentId};
 
@@ -91,7 +91,9 @@ impl Heard {
         let Some(path) = media_file(ask.root, stored) else {
             return Ok(ClipPcm::Missing);
         };
-        let Some(at) = source_at(owner, segment, ask.time) else {
+        let span = i64::try_from(u64::from(ask.frames) * 1_000_000 / u64::from(ask.rate.max(1)))
+            .unwrap_or(i64::MAX);
+        let Some(at) = source_at(owner, segment, ask.time, span) else {
             return Ok(ClipPcm::Missing);
         };
         let Ok(media) = self.cached(ask.readers, &path) else {
@@ -191,10 +193,13 @@ struct SourceAt {
     read: Read,
 }
 
-fn source_at(draft: &Draft, segment: &Segment, time: Micros) -> Option<SourceAt> {
+/// Where the window that starts at `time` and runs `span` microseconds
+/// reads. It reads at the span's mean speed, as the mix stretches it, so on
+/// a speed curve the next window starts where this one stops.
+fn source_at(draft: &Draft, segment: &Segment, time: Micros, span: i64) -> Option<SourceAt> {
     match placement_of(draft, segment) {
         Ok(map) => {
-            let speed = speed_at(&map, time).ok()?;
+            let speed = mean_speed(&map, time, Micros(time.0.saturating_add(span))).ok()?;
             let source = map_timeline(&map, time).ok()?;
             let read = if map.freeze.is_some() {
                 Read::Silent

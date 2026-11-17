@@ -80,6 +80,9 @@ struct Running {
     /// project open), once the turn has met the window. The turn's calls
     /// run on that project and on no other.
     project: Option<Option<PathBuf>>,
+    /// Where in the conversation what the turn's model was sent begins:
+    /// the turns before it are kept and were left out to fit.
+    sent_from: usize,
 }
 
 /// What a turn did to the project, kept so the user can take the whole
@@ -300,18 +303,25 @@ impl Assistant {
         // A helper the model hands a look-up to runs on a model of its own,
         // the same kind, made when it is asked for.
         let cap = settings.step_cap;
+        let budget = history_budget(settings);
         let (settings, notes) = (settings.clone(), notes.to_owned());
         let child = move || build_model(&settings, &notes);
         // The model's own account of its last turn no longer holds.
-        let seen = if std::mem::take(&mut self.undone) {
+        let mut seen = if std::mem::take(&mut self.undone) {
             format!("{seen}; the user took back the edits of your last turn")
         } else {
             seen.to_owned()
         };
+        // The model is told when it no longer has the start of the talk.
+        cutlass_agent::shorten_results(&mut self.history, OLD_RESULT_LIMIT);
+        if cutlass_agent::first_sent(&self.history, budget) > 0 {
+            seen.push_str(LEFT_OUT);
+        }
         self.launch(
             model,
             Some(child),
             cap,
+            budget,
             &cutlass_agent::ask_with_view(&ask, &seen),
         );
     }
@@ -319,13 +329,27 @@ impl Assistant {
     /// Run `ask` on `model` on its own thread, with no helper to hand
     /// look-ups to.
     pub fn start<M: Model + Send + 'static>(&mut self, model: M, cap: u32, ask: &str) {
-        self.launch(model, None::<fn() -> Result<M, String>>, cap, ask);
+        self.launch(
+            model,
+            None::<fn() -> Result<M, String>>,
+            cap,
+            usize::MAX,
+            ask,
+        );
     }
 
     /// Run `ask` on `model` on its own thread. With `child`, the model may
-    /// hand a look-up to a helper on a model `child` makes.
-    pub fn launch<M, C, F>(&mut self, model: M, child: Option<F>, cap: u32, ask: &str)
-    where
+    /// hand a look-up to a helper on a model `child` makes. The model is
+    /// sent the newest earlier turns that fit `budget` characters; the
+    /// conversation itself is kept whole.
+    pub fn launch<M, C, F>(
+        &mut self,
+        model: M,
+        child: Option<F>,
+        cap: u32,
+        budget: usize,
+        ask: &str,
+    ) where
         M: Model + Send + 'static,
         C: Model + 'static,
         F: FnMut() -> Result<C, String> + Send + 'static,
@@ -335,7 +359,8 @@ impl Assistant {
         self.turn.clear();
         // Old listings and transcripts are not sent again in full.
         cutlass_agent::shorten_results(&mut self.history, OLD_RESULT_LIMIT);
-        let history = self.history.clone();
+        let sent_from = cutlass_agent::first_sent(&self.history, budget);
+        let history = self.history[sent_from..].to_vec();
         let ask = ask.to_owned();
         let watched = Watched {
             inner: model,
@@ -392,6 +417,7 @@ impl Assistant {
                     events: received,
                     stop,
                     project: None,
+                    sent_from,
                 });
                 // The last turn can no longer be taken back on its own.
                 self.turn_edits = None;
@@ -634,7 +660,10 @@ impl Assistant {
                     let _ = answer.send(outcome);
                 }
                 Event::Finished(result) => {
-                    self.running = None;
+                    let sent_from = self
+                        .running
+                        .take()
+                        .map_or(0, |running| running.sent_from);
                     match result {
                         Ok((text, messages)) => {
                             if text.is_empty() {
@@ -648,7 +677,11 @@ impl Assistant {
                                 self.entries.push(Entry::Said(text));
                             }
                             self.turn.clear();
-                            self.history = messages;
+                            // The turn hands back what it was sent and
+                            // what it added; the turns left out to fit
+                            // stay ahead of them.
+                            self.history.truncate(sent_from);
+                            self.history.extend(messages);
                             // The model looked during the turn; the frames
                             // are not kept, or sent with the next one.
                             cutlass_agent::forget_pictures(&mut self.history);
@@ -845,6 +878,30 @@ const PENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// The longest tool result an earlier turn keeps; the rest of a longer one
 /// was used when it was read.
 const OLD_RESULT_LIMIT: usize = 2000;
+
+/// What a model is told, after what the user looks at, when the start of
+/// the conversation is no longer sent to it.
+const LEFT_OUT: &str = "; the earlier turns of this conversation are no longer sent to you, so \
+     read the project rather than rely on them";
+
+/// The most of the earlier conversation, in characters, a turn sends a
+/// model on this machine. This host does not know a model's context, so
+/// it is a budget and not that limit: local runners commonly serve eight
+/// to thirty-two thousand tokens, a token is about four characters, and
+/// the prompt and the tool list come out of the same room.
+const LOCAL_HISTORY: usize = 40_000;
+
+/// [`LOCAL_HISTORY`] for a cloud model, whose context is far larger.
+const CLOUD_HISTORY: usize = 300_000;
+
+/// How much of the earlier conversation a turn on the model `settings`
+/// choose is sent.
+fn history_budget(settings: &Settings) -> usize {
+    match chosen_model(settings) {
+        Chosen::Cloud => CLOUD_HISTORY,
+        Chosen::Local | Chosen::Neither => LOCAL_HISTORY,
+    }
+}
 
 /// What the panel says when a turn ends because its project is gone.
 const LEFT_PROJECT: &str = "The project changed, so the assistant stopped. What it had already \
@@ -1154,6 +1211,73 @@ mod tests {
         assert!(!assistant.can_undo_turn(&shell));
         assert_eq!(clips(&shell), 3);
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    /// A model that answers each ask in a word and notes how many messages
+    /// it was sent.
+    struct Counting(std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
+
+    impl cutlass_agent::Model for Counting {
+        fn complete(
+            &mut self,
+            request: &cutlass_agent::CompletionRequest,
+        ) -> Result<Completion, cutlass_agent::ModelError> {
+            self.0.lock().unwrap().push(request.messages.len());
+            Ok(completion("Done.", Vec::new()))
+        }
+    }
+
+    #[test]
+    fn a_long_conversation_is_kept_whole_and_sent_only_as_far_back_as_fits() {
+        let (mut shell, path) = shell_with_project("fits");
+        let mut assistant = Assistant::default();
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut ask = |assistant: &mut Assistant, budget: usize, words: &str| {
+            assistant.launch(
+                Counting(std::sync::Arc::clone(&sent)),
+                None::<fn() -> Result<LocalModel, String>>,
+                8,
+                budget,
+                words,
+            );
+            finish(assistant, &mut shell);
+        };
+        // With room for it all, each turn is sent every turn before it.
+        ask(&mut assistant, usize::MAX, "first");
+        ask(&mut assistant, usize::MAX, "second");
+        assert_eq!(*sent.lock().unwrap(), [1, 3]);
+        assert_eq!(assistant.history.len(), 4);
+        // With room for one earlier turn, the first is left out, and with
+        // none, both are: the model gets the ask alone.
+        ask(&mut assistant, 12, "third");
+        ask(&mut assistant, 0, "fourth");
+        assert_eq!(*sent.lock().unwrap(), [1, 3, 3, 1]);
+        // Nothing was dropped from the conversation itself, in order.
+        let asks: Vec<&str> = assistant
+            .history
+            .iter()
+            .filter_map(|message| match message {
+                Message::User { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asks, ["first", "second", "third", "fourth"]);
+        assert_eq!(assistant.history.len(), 8);
+        // And a turn with room again is sent all of it.
+        ask(&mut assistant, usize::MAX, "fifth");
+        assert_eq!(sent.lock().unwrap().last(), Some(&9));
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn the_budget_for_earlier_turns_follows_the_model() {
+        let mut settings = cutlass_settings::Settings::default();
+        settings.model.local = true;
+        settings.model.cloud = false;
+        assert_eq!(super::history_budget(&settings), super::LOCAL_HISTORY);
+        settings.model.cloud = true;
+        assert_eq!(super::history_budget(&settings), super::CLOUD_HISTORY);
+        assert!(super::CLOUD_HISTORY > super::LOCAL_HISTORY);
     }
 
     #[test]
@@ -1593,7 +1717,7 @@ mod tests {
             completion("It is short.", Vec::new()),
         ]));
         let child = move || helper.take().ok_or_else(|| "one helper only".to_owned());
-        assistant.launch(parent, Some(child), 8, "how long?");
+        assistant.launch(parent, Some(child), 8, usize::MAX, "how long?");
         finish(&mut assistant, &mut shell);
         // The helper's read ran on the window; its seek never did.
         assert_eq!(shell.playhead(), Micros(0));

@@ -108,7 +108,7 @@ pub fn fade_window(
         return Ok(input.clone());
     }
     let clip = microseconds_to_frames(span.clip_us, source.rate)?;
-    let start = microseconds_to_frames(span.start_us, source.rate)?;
+    let start = microseconds_to_frame(span.start_us, source.rate)?;
     let fade_in = microseconds_to_frames(fade_in_us, source.rate)?.min(clip);
     let fade_out = microseconds_to_frames(fade_out_us, source.rate)?.min(clip);
     apply(
@@ -195,6 +195,19 @@ fn microseconds_to_frames(duration: i64, rate: u32) -> Result<u64, Error> {
     Ok(u64::try_from(count).unwrap_or(u64::MAX))
 }
 
+/// The frame at `time`, rounded to the nearest. A window's start is a
+/// sample's time, which the caller has already rounded to a microsecond:
+/// rounding down again would put a 44.1 kHz window one frame early in the
+/// fade, and the gain would step back at every window's start. A negative
+/// time is refused.
+fn microseconds_to_frame(time: i64, rate: u32) -> Result<u64, Error> {
+    if time < 0 {
+        return Err(Error::Fade);
+    }
+    let count = (i128::from(time) * i128::from(rate) + 500_000) / 1_000_000;
+    Ok(u64::try_from(count).unwrap_or(u64::MAX))
+}
+
 /// Gain at `index / range`, before silence is scaled to unity.
 ///
 /// `index` runs from 0 at silence toward `range` at unity. The formulas
@@ -224,7 +237,8 @@ fn curve_gain(curve: FadeCurve, index: u64, range: u64) -> f64 {
 mod tests {
     use cutlass_codec::access::{ChannelLayout, Pcm};
 
-    use super::{FadeCurve, FadeSpan, fade, fade_window};
+    use super::{FadeCurve, FadeSpan, fade, fade_window, microseconds_to_frame};
+    use crate::Error;
 
     fn mono(samples: Vec<f32>, rate: u32) -> Pcm {
         match Pcm::from_f32(rate, ChannelLayout::mono(), samples) {
@@ -301,12 +315,9 @@ mod tests {
     #[test]
     fn a_negative_duration_or_unknown_curve_is_refused() {
         let input = mono(vec![0.2], 48_000);
-        assert_eq!(
-            fade(&input, -1, 0, FadeCurve::Linear),
-            Err(crate::Error::Fade)
-        );
-        assert_eq!(FadeCurve::from_type(5), Err(crate::Error::Fade));
-        assert_eq!(FadeCurve::from_type(-1), Err(crate::Error::Fade));
+        assert_eq!(fade(&input, -1, 0, FadeCurve::Linear), Err(Error::Fade));
+        assert_eq!(FadeCurve::from_type(5), Err(Error::Fade));
+        assert_eq!(FadeCurve::from_type(-1), Err(Error::Fade));
         assert_eq!(FadeCurve::from_type(0), Ok(FadeCurve::Skip));
     }
 
@@ -337,6 +348,43 @@ mod tests {
             out.extend_from_slice(data(&faded));
         }
         out
+    }
+
+    #[test]
+    fn a_window_that_starts_on_a_sample_time_rounded_down_is_not_a_frame_early() {
+        // 44.1 kHz windows of 1,024 frames, started where the mix starts
+        // them: at each first sample's time, rounded down to a microsecond
+        // (1,024 frames is 23,219.95 us, so 23,219). Faded one window at a
+        // time, the gains are the whole clip's.
+        let rate = 44_100_u32;
+        let mut gains = Vec::new();
+        for window in 0..10_u64 {
+            let first = window * 1_024;
+            let start_us = i64::try_from(first * 1_000_000 / u64::from(rate)).expect("start");
+            let span = FadeSpan {
+                start_us,
+                clip_us: 232_200,
+            };
+            let faded = fade_window(
+                &mono(vec![1.0; 1_024], rate),
+                span,
+                232_200,
+                0,
+                FadeCurve::Linear,
+            )
+            .expect("window");
+            gains.extend_from_slice(data(&faded));
+        }
+        let whole = fade(
+            &mono(vec![1.0; 10_240], rate),
+            232_200,
+            0,
+            FadeCurve::Linear,
+        )
+        .expect("whole");
+        assert_eq!(gains, data(&whole));
+        assert_eq!(microseconds_to_frame(23_219, rate), Ok(1_024));
+        assert_eq!(microseconds_to_frame(-1, rate), Err(Error::Fade));
     }
 
     #[test]
@@ -421,7 +469,7 @@ mod tests {
         };
         assert_eq!(
             fade_window(&input, before, 10, 10, FadeCurve::Linear),
-            Err(crate::Error::Fade)
+            Err(Error::Fade)
         );
         let negative = FadeSpan {
             start_us: 0,
@@ -429,7 +477,7 @@ mod tests {
         };
         assert_eq!(
             fade_window(&input, negative, 10, 10, FadeCurve::Linear),
-            Err(crate::Error::Fade)
+            Err(Error::Fade)
         );
         assert_eq!(
             fade_window(&input, before, -1, 0, FadeCurve::Skip).as_ref(),

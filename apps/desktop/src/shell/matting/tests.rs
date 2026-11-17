@@ -330,6 +330,29 @@ fn auto_removal_cuts_a_real_clip_in_the_preview() {
     keep(&outlined, "preview-outlined.png");
     assert_ne!(outlined.rgba, cut.rgba);
     eprintln!("the matte job took {took:.2?}");
+
+    // A wider trim: the new stretch has no matte, so one is made by itself
+    // and the frame past the old end is cut too.
+    shell
+        .apply(Request::Trim {
+            segment_id: "v".into(),
+            edge: cutlass_session::TrimEdge::End,
+            time: Micros(1_500_000),
+        })
+        .unwrap();
+    assert!(!shell.matte_made());
+    let start = std::time::Instant::now();
+    while shell.poll_job() && start.elapsed().as_secs() < 600 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(shell.matte_made(), "{:?}", shell.notice());
+    shell.seek(Micros(1_300_000));
+    let later = shell.preview_bytes().unwrap();
+    keep(&later, "preview-after-trim.png");
+    assert!(
+        grey(&later, wall.0, wall.1) < 20,
+        "the wall is gone past the old end"
+    );
     let _ = std::fs::remove_dir_all(&temp);
 }
 
@@ -413,5 +436,49 @@ fn custom_removal_follows_real_clicks_through_a_clip() {
     assert!((0.03..0.3).contains(&share), "{share}");
     assert!(left < w * h / 400, "{left} kept left of her");
     eprintln!("the follow job took {took:.2?}, {share:.3} of the frame kept");
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn a_wider_trim_makes_the_matte_again_once() {
+    let (mut shell, temp) = open("sweep");
+    shell.select(Some("v".into()));
+    let trim = |shell: &mut Shell, end: i64| {
+        shell
+            .apply(Request::Trim {
+                segment_id: "v".into(),
+                edge: cutlass_session::TrimEdge::End,
+                time: Micros(end),
+            })
+            .unwrap();
+    };
+    trim(&mut shell, 1_000_000);
+    keep_matte(&shell, &temp, &Matting::auto());
+    if !auto_model_here() {
+        let _ = std::fs::remove_dir_all(&temp);
+        return;
+    }
+    shell.set_auto_removal(true).unwrap();
+    assert!(shell.job().is_none(), "its matte was there");
+    assert!(!shell.poll_job(), "nothing is missing");
+    // Wider than the matte: the job starts on the next poll, by itself.
+    trim(&mut shell, 2_000_000);
+    assert!(!shell.matte_made());
+    assert!(shell.poll_job(), "the missing matte is being made");
+    assert!(shell.matte_progress().is_some());
+    // The movie here is a few bytes, so the job fails, and is not tried
+    // again on the next edit.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while shell.poll_job() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(shell.job().is_none());
+    shell.set_matting_edge(0.5, 0.0).unwrap();
+    assert!(!shell.poll_job(), "a failed matte waits for the user");
+    shell.make_matte().unwrap();
+    assert!(shell.matte_progress().is_some(), "Make matte tries again");
+    while shell.poll_job() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let _ = std::fs::remove_dir_all(&temp);
 }

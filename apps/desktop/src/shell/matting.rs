@@ -236,6 +236,12 @@ impl Shell {
     /// after a wider trim or a file that changed.
     pub fn make_matte(&mut self) -> Result<(), ShellError> {
         let segment_id = self.matting_segment()?;
+        // Asked for by hand: a matte that failed before is tried again.
+        if let (Some(draft), Some(root)) = (self.draft(), self.path.as_deref())
+            && let Ok(ask) = matte_ask(draft, Some(root), &segment_id)
+        {
+            self.matte_failed.remove(&failure_key(&ask));
+        }
         self.ensure_matte(&segment_id)
     }
 
@@ -312,10 +318,62 @@ impl Shell {
         let draft = self.session_draft()?;
         let ask = matte_ask(draft, Some(&root), segment_id)
             .map_err(|error| ShellError::Unavailable(error.to_string()))?;
-        if find_matte(&root, &ask.key(), &ask.range).is_some() || self.matte_progress().is_some() {
+        if find_matte(&root, &ask.key(), &ask.range).is_some()
+            || self.matte_progress().is_some()
+            || self.matte_failed.contains(&failure_key(&ask))
+        {
             return Ok(());
         }
         self.start_matte(root, ask)
+    }
+
+    /// Start the matte of the first clip with Remove BG the project lacks
+    /// one for, when no job runs: after a wider trim, an edit from the
+    /// assistant, or a project opened on another machine. Looked for once a
+    /// revision; a matte whose job failed is not tried again.
+    pub(super) fn sweep_mattes(&mut self) {
+        if self.job.is_some() || self.picking.is_some() || self.painting.is_some() {
+            return;
+        }
+        let (Some(revision), Some(root)) = (self.revision(), self.path.clone()) else {
+            return;
+        };
+        if self.matte_swept == Some(revision) {
+            return;
+        }
+        self.matte_swept = Some(revision);
+        let Some(ask) = self.missing_matte(&root) else {
+            return;
+        };
+        let tried = failure_key(&ask);
+        if let Err(error) = self.start_matte(root, ask) {
+            self.matte_failed.insert(tried);
+            cutlass_logger::warn!("{MATTE_JOB}: {error}");
+        }
+    }
+
+    /// The first clip's matte the project lacks whose model is here.
+    fn missing_matte(&self, root: &Path) -> Option<MatteAsk> {
+        let draft = self.draft()?;
+        draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .filter_map(|segment| {
+                let matting = segment_matting(draft, segment)?;
+                let here = match matting.mode {
+                    MattingMode::Auto => auto_model_here(),
+                    MattingMode::Custom => follow_model_here(),
+                };
+                if !here {
+                    return None;
+                }
+                matte_ask(draft, Some(root), &segment.id).ok()
+            })
+            .find(|ask| {
+                find_matte(root, &ask.key(), &ask.range).is_none()
+                    && !self.matte_failed.contains(&failure_key(ask))
+            })
     }
 
     /// Make `ask`'s matte on a job, which redraws the preview when it
@@ -337,6 +395,7 @@ impl Shell {
         let encoders = self.encoders.clone();
         let kernels = Shell::home().cache().join("kernels");
         let compute = Compute::best();
+        let tried = failure_key(&ask);
         self.start_job(MATTE_JOB, move |progress| {
             progress.stage("Loading the model");
             if let Err(error) = cutlass_vision::keep_kernels_in(&kernels) {
@@ -380,6 +439,7 @@ impl Shell {
                 Err(None) => Ok(()),
                 Err(Some(reason)) => {
                     cutlass_logger::error!("{MATTE_JOB}: {reason}");
+                    shell.matte_failed.insert(tried);
                     Err(ShellError::Unavailable(format!(
                         "the background could not be removed: {reason}"
                     )))
@@ -649,6 +709,11 @@ impl Shell {
         self.painting = None;
         Ok(())
     }
+}
+
+/// What a matte is made from, as one string, to remember a failed job by.
+fn failure_key(ask: &MatteAsk) -> String {
+    format!("{:?} {:?}", ask.key(), ask.range)
 }
 
 /// Map a point of a clip's picture, -1 to 1 with y up, to unit coordinates

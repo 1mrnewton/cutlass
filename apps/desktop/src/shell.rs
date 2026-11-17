@@ -894,6 +894,13 @@ pub struct Shell {
     /// Brush strokes being painted for Custom removal, while the preview
     /// takes drags.
     painting: Option<Painting>,
+    /// The draft revision mattes were last looked for at, so a trim or an
+    /// edit from the assistant that leaves a clip without its matte starts
+    /// one, once.
+    matte_swept: Option<u64>,
+    /// Mattes whose job failed, by what they would be made from, so they
+    /// are not tried again on every edit.
+    matte_failed: std::collections::HashSet<String>,
     /// A track being set up on the selected clip.
     tracking: Option<follow::Tracking>,
     /// A shape being drawn with the pen, while the preview takes presses.
@@ -1053,6 +1060,8 @@ impl Shell {
             detectors: Vec::new(),
             picking: None,
             painting: None,
+            matte_swept: None,
+            matte_failed: std::collections::HashSet::new(),
             tracking: None,
             pen: None,
             heard: std::collections::HashMap::new(),
@@ -5556,7 +5565,8 @@ impl Shell {
     /// Land the job if it finished. True while one still runs.
     pub fn poll_job(&mut self) -> bool {
         let Some(running) = self.job.as_ref() else {
-            return false;
+            self.sweep_mattes();
+            return self.job.is_some();
         };
         let landing = match running.job.poll() {
             crate::jobs::Poll::Running => return true,
@@ -5568,6 +5578,8 @@ impl Shell {
         let same_project = running.project == self.path;
         let stopping = running.stopping;
         self.job = None;
+        // Another clip may still lack its matte.
+        self.matte_swept = None;
         let result = match landing {
             _ if stopping => Ok(()),
             Some(_) if !same_project => Err(ShellError::Unavailable(format!(

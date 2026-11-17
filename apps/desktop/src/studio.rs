@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use cutlass_effects::{
     Block, CROSS, Control, ControlUnit, Crossing, Curve, Ease, Jitter, MAX_CONTROLS, MAX_KEYS,
-    MAX_PASSES, Param, Pass, Recipe, Refused, Target, TransitionKind, TransitionRecipe, Wave,
-    gap_ease,
+    MAX_PASSES, ORIGINAL, Param, Pass, Recipe, Refused, Target, TransitionKind, TransitionRecipe,
+    Wave, gap_ease,
 };
 
 /// How long an effect's preview plays before it starts again, in seconds,
@@ -610,10 +610,10 @@ impl Studio {
                 poster: None,
                 controls: Vec::new(),
                 passes: vec![Pass {
-                    block: Block::Blur,
                     params: [("radius".to_owned(), Curve::Constant(0.01))]
                         .into_iter()
                         .collect(),
+                    ..Pass::new(Block::Blur)
                 }],
             }),
             None,
@@ -1053,10 +1053,7 @@ impl Studio {
         self.settle();
         self.edit("add pass", |doc| {
             if let Some(passes) = doc.passes_mut(stack) {
-                passes.push(Pass {
-                    block,
-                    params: std::collections::BTreeMap::new(),
-                });
+                passes.push(Pass::new(block));
             }
         });
         self.settle();
@@ -1143,6 +1140,47 @@ impl Studio {
         self.pass = Some(to);
         self.slot = None;
         self.key = None;
+    }
+
+    // Kept pictures.
+
+    /// Keep pass `pass`'s result under `name` for a later blend; an empty
+    /// name keeps it no more. A name that is not one shows as the
+    /// document's problem until it is.
+    pub fn set_save(&mut self, stack: Stack, pass: usize, name: &str) {
+        let name = Some(name.trim()).filter(|name| !name.is_empty());
+        self.edit(&format!("save {stack:?} {pass}"), |doc| {
+            if let Some(found) = doc.passes_mut(stack).and_then(|passes| passes.get_mut(pass)) {
+                found.save = name.map(str::to_owned);
+            }
+        });
+    }
+
+    /// The picture blend pass `pass` lays over, one of
+    /// [`Self::pictures_before`]. [`ORIGINAL`] is written as nothing.
+    pub fn set_with(&mut self, stack: Stack, pass: usize, name: &str) {
+        let name = Some(name).filter(|name| *name != ORIGINAL);
+        self.settle();
+        self.edit("blend picture", |doc| {
+            if let Some(found) = doc.passes_mut(stack).and_then(|passes| passes.get_mut(pass)) {
+                found.with = name.map(str::to_owned);
+            }
+        });
+        self.settle();
+    }
+
+    /// The pictures pass `pass` of `stack` may read: [`ORIGINAL`], then
+    /// each name a pass before it saves, once, in the order first saved.
+    #[must_use]
+    pub fn pictures_before(&self, stack: Stack, pass: usize) -> Vec<String> {
+        let mut names = vec![ORIGINAL.to_owned()];
+        let passes = self.doc.as_ref().map_or(&[][..], |doc| doc.passes(stack));
+        for name in passes.iter().take(pass).filter_map(|pass| pass.save.as_ref()) {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
     }
 
     // Values.
@@ -1643,6 +1681,49 @@ mod tests {
         // A name with no letters is refused by the recipe's own check.
         studio.set_name(" ");
         assert!(studio.problem().is_some());
+    }
+
+    #[test]
+    fn a_pass_keeps_its_picture_and_a_blend_lays_it_back() {
+        let mut studio = Studio::new(None);
+        studio.new_effect();
+        // Blur, kept as soft; a blend over it.
+        studio.set_save(Stack::Effect, 0, " soft ");
+        assert_eq!(studio.add_pass(Stack::Effect, Block::Blend), Some(1));
+        assert_eq!(
+            studio.pictures_before(Stack::Effect, 1),
+            ["original", "soft"]
+        );
+        assert_eq!(studio.pictures_before(Stack::Effect, 0), ["original"]);
+        studio.set_with(Stack::Effect, 1, "soft");
+        let recipe = effect(&studio);
+        assert_eq!(recipe.passes[0].save.as_deref(), Some("soft"));
+        assert_eq!(recipe.passes[1].with.as_deref(), Some("soft"));
+        assert_eq!(studio.problem(), None);
+        // The file is version 3 and reads back as it was.
+        let json = recipe.to_json().unwrap();
+        assert!(json.contains("\"version\": 3"), "{json}");
+        let read = cutlass_effects::Recipe::read(json.as_bytes()).unwrap();
+        assert_eq!(read.passes, recipe.passes);
+        // The original is written as nothing.
+        studio.set_with(Stack::Effect, 1, "original");
+        assert_eq!(effect(&studio).passes[1].with, None);
+        studio.set_with(Stack::Effect, 1, "soft");
+        // A blend moved before what it reads is the document's problem.
+        studio.move_pass(Stack::Effect, 1, 0);
+        let problem = studio.problem().expect("reads before it is saved");
+        assert!(problem.contains("soft"), "{problem}");
+        studio.undo();
+        assert_eq!(studio.problem(), None);
+        // A name that is not one is too, until it is cleared.
+        studio.set_save(Stack::Effect, 0, "Not a name");
+        assert!(studio.problem().is_some());
+        studio.set_save(Stack::Effect, 0, "");
+        assert_eq!(effect(&studio).passes[0].save, None);
+        // The blend still reads soft, which nothing keeps now.
+        assert!(studio.problem().is_some());
+        studio.set_with(Stack::Effect, 1, "original");
+        assert_eq!(studio.problem(), None);
     }
 
     #[test]

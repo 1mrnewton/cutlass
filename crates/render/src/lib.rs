@@ -965,10 +965,10 @@ mod tests {
         // The picture's own upload, at least.
         assert!(alone >= u64::from(width * height * 4), "{alone}");
 
-        let invert = [cutlass_effects::Step {
-            block: cutlass_effects::Block::Invert,
-            values: [0.0; cutlass_effects::MAX_VALUES],
-        }];
+        let invert = [cutlass_effects::Step::new(
+            cutlass_effects::Block::Invert,
+            [0.0; cutlass_effects::MAX_VALUES],
+        )];
         let with_effect = [
             Layer::Rgba(picture, Placement::canvas(width, height)),
             Layer::Effect(&invert, None),

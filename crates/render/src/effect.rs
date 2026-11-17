@@ -18,9 +18,14 @@
 //! blocks costs no more than before, and none of them pays for the curve on
 //! every tap. The curve is the Rec. 709 OETF and its inverse, the one the
 //! layer shader converts transfers with.
+//!
+//! A step may keep its result for a later blend to read. Keeping costs no
+//! copy: the picture is set aside as it is, in whichever values the chain
+//! then holds, and the chain goes on in a new texture. The picture as it
+//! entered the effect is always kept, as the canvas bytes it came in.
 
 use crate::pool::{Bind, TextureKey};
-use cutlass_effects::{Block, MAX_VALUES, Step};
+use cutlass_effects::{Block, MAX_SAVED, MAX_VALUES, Step};
 
 use crate::CANVAS_FORMAT;
 
@@ -42,10 +47,13 @@ pub(crate) enum Space {
 /// The values `block`'s arithmetic is written for.
 pub(crate) const fn space(block: Block) -> Space {
     match block {
-        // Averages of light.
-        Block::Blur | Block::ZoomBlur | Block::MotionBlur | Block::Focus | Block::Glow => {
-            Space::Light
-        }
+        // Averages of light, and light laid over light.
+        Block::Blur
+        | Block::ZoomBlur
+        | Block::MotionBlur
+        | Block::Focus
+        | Block::Glow
+        | Block::Blend => Space::Light,
         // Pixels moved, not mixed.
         Block::Transform
         | Block::RgbSplit
@@ -62,8 +70,7 @@ pub(crate) const fn space(block: Block) -> Space {
         | Block::Kaleido
         | Block::Fringe => Space::Light,
         // Colour tuned by eye, and light whose thresholds and strengths
-        // were tuned on encoded values. A glow's threshold is still a
-        // level as shown, converted to light by its plan.
+        // were tuned on encoded values.
         Block::Grade
         | Block::Flash
         | Block::Vignette
@@ -87,7 +94,7 @@ pub(crate) const fn space(block: Block) -> Space {
 
 /// The passes between the canvas's bytes, encoded values and light: the
 /// picture read texel for texel and converted as a whole.
-const CONVERT: &str = r"
+const LIGHT: &str = r"
 // Linear light from a Rec. 709 encoded value, and back. Past 1 the power
 // segment carries on, so a highlight past white keeps its place.
 fn to_light(encoded: vec3<f32>) -> vec3<f32> {
@@ -114,7 +121,9 @@ fn encoded_of(c: vec4<f32>) -> vec4<f32> {
     }
     return vec4<f32>(to_encoded(c.rgb / c.a) * c.a, c.a);
 }
+";
 
+const CONVERT: &str = r"
 @group(0) @binding(0) var picture: texture_2d<f32>;
 
 struct Out {
@@ -360,6 +369,35 @@ fn glow_add(uv: vec2<f32>) -> vec4<f32> {
     let c = fetch(uv);
     let glow = bspline(other, uv).rgb * fx.a.x * fx.a.yzw;
     return vec4<f32>(c.rgb + glow * c.a, c.a);
+}
+
+// A kept picture, `other`, over the picture so far, both in light; code.y
+// 1 says the kept picture holds encoded values. a.x is the mode: 0 adds,
+// 1 screens, 2 multiplies, 3 keeps the lighter, 4 is the kept picture
+// itself. a.y mixes from the picture so far to the mode's result.
+fn blend(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    var o = textureSampleLevel(other, linear_sampler, uv, 0.0);
+    if (fx.code.y == 1u) {
+        o = light_of(o);
+    }
+    var r = o;
+    switch (u32(round(fx.a.x))) {
+        case 0u: { r = vec4<f32>(c.rgb + o.rgb, c.a); }
+        case 1u: {
+            // Screen, which past white is an add.
+            let lit = clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+            r = vec4<f32>(c.rgb + o.rgb * (1.0 - lit), c.a);
+        }
+        case 2u: {
+            // Where the kept picture is clear the picture so far stays.
+            let top = o.rgb / max(o.a, 1e-6);
+            r = vec4<f32>(c.rgb * mix(vec3<f32>(1.0), top, o.a), c.a);
+        }
+        case 3u: { r = vec4<f32>(max(c.rgb, o.rgb), c.a); }
+        default: {}
+    }
+    return mix(c, r, fx.a.y);
 }
 
 fn grade(uv: vec2<f32>) -> vec4<f32> {
@@ -977,6 +1015,7 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         case 34u: { return rays(uv); }
         case 35u: { return focus(uv); }
         case 36u: { return place(uv); }
+        case 37u: { return blend(uv); }
         case 100u: { return gauss(uv); }
         case 101u: { return halve(uv); }
         case 102u: { return smooth_up(uv); }
@@ -1000,6 +1039,9 @@ pub(crate) enum Picture {
     /// One of the block's own working pictures, by its index in
     /// [`Plan::work`].
     Work(usize),
+    /// A picture the chain kept: 0 the picture as it entered the effect,
+    /// then those steps saved, as [`Step::with`] counts them.
+    Kept(u8),
 }
 
 /// One draw of a block: a full-screen pass of one kernel.
@@ -1082,7 +1124,7 @@ pub(crate) fn plan(step: &Step, size: (u32, u32)) -> Plan {
                 kernel: step.block.code(),
                 arg: 0,
                 read: Picture::Current,
-                other: None,
+                other: step.with.map(Picture::Kept),
                 write: Picture::Current,
                 values: step.values,
             }],
@@ -1324,7 +1366,7 @@ impl Effects {
     pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render effect"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{LIGHT}{SHADER}").into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cutlass-render effect"),
@@ -1359,7 +1401,7 @@ impl Effects {
         );
         let convert = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render effect light"),
-            source: wgpu::ShaderSource::Wgsl(CONVERT.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{LIGHT}{CONVERT}").into()),
         });
         let convert_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cutlass-render effect light"),
@@ -1428,6 +1470,12 @@ impl Effects {
         }
         let mut from = self.light(device, size);
         let mut to = self.light(device, size);
+        // The pictures kept for a blend, each with the values it holds;
+        // the first is the input, as the canvas bytes it is.
+        let mut kept: [Option<(wgpu::TextureView, Space)>; MAX_SAVED + 1] = Default::default();
+        kept[0] = Some((input.clone(), Space::Display));
+        // Whether `from` is kept, so must not be drawn over.
+        let mut held = false;
         // The canvas holds encoded values: decoded only if the first step
         // wants light.
         let mut current = space(steps[0].block);
@@ -1444,7 +1492,7 @@ impl Effects {
                     Space::Display => &self.into_encoded,
                 };
                 self.convert(device, encoder, pipeline, &from, &to);
-                std::mem::swap(&mut from, &mut to);
+                self.turn(device, size, &mut from, &mut to, &mut held);
                 current = wanted;
             }
             let plan = plan(step, size);
@@ -1457,15 +1505,27 @@ impl Effects {
                 })
                 .collect();
             for draw in &plan.draws {
-                let view = |picture: Picture| match picture {
-                    Picture::Current => &from,
+                let mut draw = *draw;
+                let read = match draw.read {
                     Picture::Work(index) => &work[index].0,
+                    _ => &from,
                 };
-                let read = view(draw.read);
-                let other = draw.other.map_or(read, view);
+                let other = match draw.other {
+                    Some(Picture::Work(index)) => &work[index].0,
+                    Some(Picture::Kept(slot)) => match kept.get(usize::from(slot)) {
+                        Some(Some((view, space))) => {
+                            // Tell the kernel when it reads encoded values.
+                            draw.arg = u32::from(*space == Space::Display);
+                            view
+                        }
+                        _ => &from,
+                    },
+                    Some(Picture::Current) => &from,
+                    None => read,
+                };
                 let (target, target_size) = match draw.write {
-                    Picture::Current => (&to, size),
                     Picture::Work(index) => (&work[index].0, work[index].1),
+                    _ => (&to, size),
                 };
                 self.pass(
                     device,
@@ -1475,11 +1535,16 @@ impl Effects {
                     other,
                     target,
                     target_size,
-                    draw,
+                    &draw,
                 );
                 if draw.write == Picture::Current {
-                    std::mem::swap(&mut from, &mut to);
+                    self.turn(device, size, &mut from, &mut to, &mut held);
                 }
+            }
+            if let Some(slot) = step.save.and_then(|slot| kept.get_mut(usize::from(slot))) {
+                // Set aside as it is; the chain goes on in a new texture.
+                *slot = Some((from.clone(), current));
+                held = true;
             }
         }
         let output = crate::blur::scratch(&self.pool, device, size);
@@ -1489,6 +1554,23 @@ impl Effects {
         };
         self.convert(device, encoder, last, &from, &output);
         output
+    }
+
+    /// Make what was just drawn into `to` the picture so far, and hand
+    /// the old one back to be drawn into next, unless it is kept.
+    fn turn(
+        &self,
+        device: &wgpu::Device,
+        size: (u32, u32),
+        from: &mut wgpu::TextureView,
+        to: &mut wgpu::TextureView,
+        held: &mut bool,
+    ) {
+        std::mem::swap(from, to);
+        if *held {
+            *to = self.light(device, size);
+            *held = false;
+        }
     }
 
     /// A `size` half-float picture the steps take turns drawing into.
@@ -1630,7 +1712,7 @@ mod tests {
         for (index, value) in set {
             values[*index] = *value;
         }
-        Step { block, values }
+        Step::new(block, values)
     }
 
     /// Red, green, blue, white, all opaque.
@@ -1825,7 +1907,7 @@ mod tests {
                     for (slot, param) in values.iter_mut().zip(block.params()) {
                         *slot = param.min + (param.max - param.min) * at;
                     }
-                    let plan = super::plan(&Step { block, values }, size);
+                    let plan = super::plan(&Step::new(block, values), size);
                     check_plan(&plan, &format!("{block:?} at {at} on {size:?}"));
                 }
             }
@@ -2270,6 +2352,142 @@ mod tests {
             &dim,
         );
     }
+
+    /// A blend of mode `mode` and `amount` over the kept picture `with`.
+    fn blend(mode: f32, amount: f32, with: u8) -> Step {
+        let mut blend = step(Block::Blend, &[(0, mode), (1, amount)]);
+        blend.with = Some(with);
+        blend
+    }
+
+    /// `block` with `set`, keeping its result in `slot`.
+    fn saving(block: Block, set: &[(usize, f32)], slot: u8) -> Step {
+        let mut saving = step(block, set);
+        saving.save = Some(slot);
+        saving
+    }
+
+    /// Black, a mid grey and white, with a dim red, in one row.
+    const LEVELS: [u8; 16] = [0, 0, 0, 255, 128, 128, 128, 255, 255, 255, 255, 255, 90, 20, 20, 255];
+
+    #[test]
+    fn a_blend_lays_the_original_back_by_its_mode_and_amount() {
+        let Some(renderer) = renderer() else { return };
+        let size = (4u32, 1u32);
+        let invert = step(Block::Invert, &[(0, 1.0)]);
+        let inverted = draw(&renderer, &LEVELS, size, &[invert]);
+        // At amount 0 the picture so far; mixing all the way, the original.
+        for mode in 0..=4 {
+            let got = draw(&renderer, &LEVELS, size, &[invert, blend(mode as f32, 0.0, 0)]);
+            close(&got, &inverted);
+        }
+        close(&draw(&renderer, &LEVELS, size, &[invert, blend(4.0, 1.0, 0)]), &LEVELS);
+        // Each mode in light, against the inverted picture below.
+        let by_mode = |mode: f32| draw(&renderer, &LEVELS, size, &[invert, blend(mode, 1.0, 0)]);
+        let (added, screened, multiplied, lighter) =
+            (by_mode(0.0), by_mode(1.0), by_mode(2.0), by_mode(3.0));
+        for channel in (0..16).filter(|index| index % 4 != 3) {
+            let (below, laid) = (light(inverted[channel]), light(LEVELS[channel]));
+            let near = |got: u8, want: f64, what: &str| {
+                let want = want.min(1.0);
+                assert!(
+                    (light(got) - want).abs() < 0.01 + want * 0.03,
+                    "{what} channel {channel}: {} vs {want}",
+                    light(got)
+                );
+            };
+            near(added[channel], below + laid, "add");
+            near(screened[channel], below + laid * (1.0 - below), "screen");
+            near(multiplied[channel], below * laid, "multiply");
+            near(lighter[channel], below.max(laid), "lighten");
+        }
+        // Alpha is the picture so far's.
+        assert!(added.chunks(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    fn a_kept_picture_outlasts_the_steps_after_it_in_either_space() {
+        let Some(renderer) = renderer() else { return };
+        let size = (16u32, 8u32);
+        let scene: Vec<u8> = (0..size.0 * size.1)
+            .flat_map(|index| {
+                let (x, y) = (index % size.0, index / size.0);
+                [(x * 16) as u8, (y * 32) as u8, 200, 255]
+            })
+            .collect();
+        let soft = [(0, 0.2)];
+        // Kept in light, by a blur.
+        let blurred = draw(&renderer, &scene, size, &[step(Block::Blur, &soft)]);
+        let invert = step(Block::Invert, &[(0, 1.0)]);
+        let swirl = step(Block::Swirl, &[(0, 2.0)]);
+        let kept_light = [
+            saving(Block::Blur, &soft, 1),
+            invert,
+            swirl,
+            invert,
+            swirl,
+            blend(4.0, 1.0, 1),
+        ];
+        close(&draw(&renderer, &scene, size, &kept_light), &blurred);
+        // Kept as encoded values, by an invert, and blended in light.
+        let inverted = draw(&renderer, &scene, size, &[invert]);
+        let kept_encoded = [
+            saving(Block::Invert, &[(0, 1.0)], 2),
+            step(Block::Blur, &soft),
+            invert,
+            blend(4.0, 1.0, 2),
+        ];
+        close(&draw(&renderer, &scene, size, &kept_encoded), &inverted);
+        // Two kept at once, and the original besides.
+        let both = [
+            saving(Block::Blur, &soft, 1),
+            saving(Block::Invert, &[(0, 1.0)], 2),
+            swirl,
+            blend(4.0, 1.0, 1),
+            blend(4.0, 0.0, 2),
+        ];
+        close(&draw(&renderer, &scene, size, &both), &blurred);
+        let back = [saving(Block::Invert, &[(0, 1.0)], 1), swirl, blend(4.0, 1.0, 0)];
+        close(&draw(&renderer, &scene, size, &back), &scene);
+    }
+
+    #[test]
+    fn a_recipe_screens_a_soft_copy_over_the_sharp_picture() {
+        let Some(renderer) = renderer() else { return };
+        let recipe = cutlass_effects::Recipe::read(
+            br#"{"version":3,"id":"a","name":"A","passes":[
+                {"block":"blur","params":{"radius":0.1},"save":"soft"},
+                {"block":"blend","params":{"mode":4}},
+                {"block":"blend","params":{"mode":1,"amount":0.5},"with":"soft"}]}"#,
+        )
+        .expect("a version 3 recipe");
+        let steps = recipe.steps_at(Micros(0));
+        let size = (16u32, 16u32);
+        let got = draw(&renderer, &SPOT16, size, &steps);
+        // The sharp picture is back, with soft light around the spot.
+        let middle = ((8 * size.0 + 8) * 4) as usize;
+        assert!(got[middle] >= 250, "{}", got[middle]);
+        let beside = ((8 * size.0 + 12) * 4) as usize;
+        assert!(got[beside] > 0 && got[beside] < got[middle]);
+        assert_eq!(got[3], 255);
+    }
+
+    /// A white spot four pixels square in the middle of 16 by 16 black.
+    const SPOT16: [u8; 1024] = {
+        let mut bytes = [0u8; 1024];
+        let mut index = 0;
+        while index < 256 {
+            let (x, y) = (index % 16, index / 16);
+            let lit = x >= 6 && x < 10 && y >= 6 && y < 10;
+            let v = if lit { 255 } else { 0 };
+            bytes[index * 4] = v;
+            bytes[index * 4 + 1] = v;
+            bytes[index * 4 + 2] = v;
+            bytes[index * 4 + 3] = 255;
+            index += 1;
+        }
+        bytes
+    };
 
     #[test]
     fn a_light_leak_only_brightens_and_edges_alone_leave_flat_colour_black() {

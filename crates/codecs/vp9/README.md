@@ -1926,6 +1926,177 @@ What is left: `testsrc2` at +2.5% / +2.3% / −3.4%, the gradient at +3.0%.
 Without alt-refs the gradient is at −11.4%, for 5 to 18 points lost on
 the clips; most of that gain is again an old reference's aliases.
 
+**The alt-ref's reference prune, the previous frame's vectors, and
+drawn pictures** (17 November 2026, after `b2982b7d`). What was left:
+`testsrc2` at +2.5% / +2.3% / −3.4% against FFmpeg's `-crf` (BD-rate at
+the same PSNR-Y / U / V, `crf=15` to `55`, speed 5, four threads), the
+gradient at +3.0%. Three findings, and three changes:
+
+- The previous frame's most common vectors as starts of the search had
+  taken the gradient to +1.0% (in "A mesh after the diamond"), but cost
+  the still scene 0.7 to 2.5 points of PSNR-Y at a fixed quantizer, for
+  no reason found then. At `q=120` its stream grew by 6.5 kB, and all of
+  it was one hidden alt-ref (after the golden frame of the second jump):
+  19 818 bytes before, 26 277 with the starts. Decoded with each block's
+  reference and vector printed, the alt-ref before coded its 64×64 blocks
+  from ALTREF at (−84, −76) samples without a residual (the scene had
+  come back to an earlier place); with the starts it never searched
+  ALTREF. ALTREF had predicted under 1% of every inter frame before it in
+  both builds, and from speed 5 such a reference is left out of the
+  search but every fourth frame (`REF_PRUNE_SPEED`); the starts' own
+  ALTREF wins (128 samples of the frame before) moved that count by a
+  frame, and the alt-ref fell on a frame that left ALTREF out. Not a
+  worse RD choice, nor the vectors' context or the probabilities: the
+  phase of the prune. An alt-ref (one frame in a dozen, coded finer, and
+  read by every frame up to its overlay) at a fixed quantizer in one
+  pass now searches every reference: the still scene −2.1 / −1.9 / −1.7
+  points (BD-rate at the same PSNR-Y / U / V), the other clips and the
+  synthetic sources as before. Then the starts (`tile::POP_STARTS`, the
+  two most common whole-sample vectors other than zero, each of two 8×8
+  blocks or more, on each reference) take the gradient to +0.4% with no
+  loss on the clips (four starts: +0.5%, and on the clips' PSNR-U and V
+  up to 0.7 points less, on the pan 0.3 points less of PSNR-Y).
+- libvpx's `-crf` (one pass, a constant quantizer) on both sources codes
+  no alt-ref: LAST only, a key frame at 0.25 of the step (`testsrc2` at
+  `-crf 45`: 99, ours 121; at `55`: 145, ours 164), and the inter frames
+  at 0.5 / 1 / 0.85 / 1 / 0.7 / 1 / 0.85 / 1 of it by the frame's index in
+  eights (142, 180, 172, 180, 161, …). At `crf=45` ours spent a fifth of
+  `testsrc2`'s bits on its four alt-refs (3.0 to 3.4 kB each, five times
+  an inter frame). libvpx's cycle here (from +2.5% / +3.0%): `testsrc2`
+  +5.4%, the gradient +4.0%; with no alt-ref too, +5.3% and −10.3%; no
+  alt-ref alone, +3.5% and −11.4% (the gradient's gain is the key frame's
+  periodic aliases, kept as ALTREF). At the same bits (FFmpeg's `-crf 55`,
+  33 071 bytes, ours `crf=51`, 33 167) the squared error of `testsrc2`'s
+  luma, libvpx's and ours: blocks whose source did not change 9.1 and 14.6
+  million, blocks that changed 152 and 164; the key frame alone
+  (quantizers 145 and 147) 4 788 bytes at 43.07 dB and 4 197 at 40.98,
+  libvpx's with more coefficients (14 016 against 11 117) and halves of
+  8×8 to 32×32 blocks.
+- Drawn pictures (graphics, animation, screen content) repeat the
+  picture before exactly where they stand still or move as a whole; a
+  camera's never do. At a fixed quantizer in one pass a picture of which
+  half the 16×16 blocks or more repeat the one before, at the vector the
+  whole picture moved by (`arf::exact_share`: `testsrc2` 0.66, the
+  gradient 0.92, the grainy pan 0; the three scenes' `testsrc2` and a
+  drawn pan at the end of the still scene, 0.93 and 0.97), or whose next
+  picture repeats as much, is drawn (`DRAWN_SHARE`). Its key frame,
+  whose blocks the frames after keep for as long as the picture stands,
+  takes 0.3 of the inter step (not 0.35) and searches as speeds 0 to 3:
+  halves at every size, trials quantized by RD (`tile::Shared::drawn_key`);
+  its golden frames and alt-refs, which have no noise to average, take
+  0.6 (not 0.5). libvpx's two passes size a key frame's boost from its
+  share of still blocks, and search more in pictures they find drawn
+  (`FC_GRAPHICS_ANIMATION`).
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets with nine points, `crf=15` to `55` by 5, against the same
+five of FFmpeg's):
+
+| | Before | The alt-ref's prune and the starts | And drawn pictures (now) |
+| --- | --- | --- | --- |
+| `testsrc2` | +2.5 / +2.3 / −3.4% (+4.4 / +2.7 / −3.6%) | +2.1 / +2.2 / −3.2% (+4.1 / +2.7 / −3.8%) | +1.0 / +0.9 / −3.9% (+3.1 / +1.2 / −4.4%) |
+| Gradient | +3.0% (+2.6%) | +0.4% (−0.1%) | −0.3% (−0.7%) |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 323861, 52.78 dB | 321071, 52.65 dB | 13042, 53.24 dB | 12696, 53.38 dB |
+| 25 | 241204, 48.88 dB | 240212, 48.84 dB | 9530, 51.64 dB | 9267, 51.89 dB |
+| 35 | 144495, 43.67 dB | 142966, 43.62 dB | 7128, 49.25 dB | 7141, 49.57 dB |
+| 45 | 61280, 39.03 dB | 58143, 39.03 dB | 5939, 46.51 dB | 5984, 46.62 dB |
+| 55 | 21811, 35.44 dB | 21057, 35.48 dB | 5641, 43.35 dB | 5360, 43.72 dB |
+
+On the README's three clips at `q=60` to `210` against the build before
+(BD-rate Y / U / V / FFmpeg's average / 6:1:1):
+
+| Fixed q | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| The alt-ref's prune | 0.0 / 0.0 / 0.0 / 0.0 / 0.0 | −2.1 / −1.9 / −1.7 / −1.9 / −2.0 | the same streams |
+| And the starts | −0.1 / 0.0 / 0.0 / 0.0 / −0.1 | −2.1 / −2.4 / −2.2 / −2.2 / −2.2 | −0.7 / −0.9 / −1.0 / −0.9 / −0.8 |
+| And drawn pictures (now) | −1.1 / −0.1 / −0.6 / −0.8 / −0.9 | −3.0 / −2.5 / −2.3 / −2.7 / −2.8 | −0.7 / −0.9 / −1.0 / −0.9 / −0.8 |
+
+Every other mode (speeds 5 to 10 at a bitrate, two passes, speeds 6 to
+8 at a fixed quantizer) writes the same streams as before.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` (`-threads 4`) and
+the build before, three rounds interleaved, the mean over each one's
+points of the median of the rounds (Cutlass at `q=60` to `210`):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 7.34 s | 5.13 s (0.70) | 5.19 s (0.71) |
+| Still scene | 4.53 s | 3.68 s (0.81) | 3.63 s (0.80) |
+| Grainy pan | 2.95 s | 2.64 s (0.90) | 2.58 s (0.87) |
+
+Runs a few minutes apart moved these ratios by up to 0.04 (the still
+scene before: 0.81 to 0.86, with FFmpeg's own time 3.9 to 4.7 s); in
+pairs at `q=120` the starts cost 0.5% on the pan and 2% on the other
+two clips.
+
+Checks: of the identity check's 41 configurations, the seven at a fixed
+quantizer change, the other 34 do not. FFmpeg's `vp9` (threaded and on
+one thread), libvpx and this decoder agree on 10 new streams (40 of 40
+decodes: `testsrc2` at `crf=35` and `55`, at `crf=30` at speed 2 and at
+`crf=40` on one thread, the gradient at `crf=35`, the still scene at
+`q=80`, the three scenes at `q=150` on two threads, the pan at `q=120`
+and at 10 bits at `q=100`, 4:4:4 at `q=60`). New tests: after frames
+that never predict from ALTREF, a hidden alt-ref of the picture ALTREF
+holds codes from it wherever the prune's count stood; a band that starts
+to move by 48 samples (past the diamond and the mesh) takes the vector
+the rest of the picture took the frame before; a drawn picture's key
+frame takes 0.3 of the step and its alt-refs 0.6, a noisy one's key
+frame 0.35; a drawn key frame takes halves under 64×64 (each fails
+without its change).
+
+Tried and dropped (BD-rate on `testsrc2` / the gradient against FFmpeg's
+`-crf`, from +2.1% / +0.4% after the starts, unless said):
+
+- RD quantization's lambda on key frames × 0.5 and × 0.25, on every
+  frame × 0.7 and × 0.5, the RD lambda of key frames × 0.5 and of every
+  frame × 0.8: `testsrc2` +2.0% at best (+3.7% at × 0.5 on every
+  frame). libvpx's speed 5 does not optimize its coefficients at all;
+  ours keeping fewer of them is not where the loss is.
+- Key frames at 0.2, 0.25 or 0.3 of the step on every picture (not only
+  drawn ones): `testsrc2` +2.0%, +2.2% and +1.6%, the gradient +0.6%,
+  +1.0% and +0.6%. Golden frames and alt-refs at 0.4, 0.6 or 0.7 (before
+  the starts, from +2.5% / +3.0%): +3.1%, +2.1% and +1.9%, the gradient
+  +3.9%, +2.5% and +2.9%. libvpx's cycle of inter steps with ours: above.
+  Only `testsrc2`'s background stays from the key frame: 15% of its 16×16
+  blocks over the 60 pictures (87% from one picture to the next).
+- Speed 4's trials at speed 5 (on every picture): the candidates' margin
+  `testsrc2` +1.7%, the smaller transform after a block without a
+  residual +1.5% (12% of the time on the pan), trials quantized by RD
+  +1.5% (the gradient −0.5%), no reference prune (the gradient −0.2%);
+  all four +0.7% / −1.0% in 1.21 to 1.24 times the time. Halves at
+  every size (speeds 0 to 3): +0.4% alone in twice the time; with the
+  four, −0.6% / −1.6%. Speed 4 itself: +0.1% / 0.0%; speed 3: −2.1% /
+  +4.3%; speed 2: −2.6% / −4.8%.
+- On drawn pictures' inter frames (with the quantizers above unless
+  said): halves at every block that changed, with the margin and the
+  dead-zone trials left out there, the quantizers as before: +0.4% /
+  −0.7%, in 1.35 times the time on the three scenes and 1.11 on the
+  still scene at `q=120` (a third of each is drawn). Halves only where a
+  block covers both blocks that changed and blocks that did not, with a
+  drawn key frame's search on the alt-refs too: −0.1% / −1.5%, the
+  three scenes −1.1 points more, but 0.90 and 0.91 of FFmpeg's time on
+  the still scene in two measures (0.85 and 0.86 before). Halves only in
+  the direction that parts what changed from what did not: −0.1% /
+  −1.4%, 0.97; the margin and the dead-zone trials alone where blocks
+  changed: +0.6% / −0.3%, 0.95 (the trials quantized by RD at `q=60`
+  most of it).
+  Halves after a split at 32×32 and 64×64 (as `RECT_SPEED` at 16×16, the
+  quarters' vectors, no search): +0.8%. The alt-refs' halves and
+  trials as a drawn key frame's: +0.7% / −0.7% in one measure, 4% more
+  time on the still scene in it.
+
+What is left: `testsrc2` at +1.0% / +0.9% / −3.9% (nine points: +3.1%),
+most of it at the low rates (at FFmpeg's `-crf 55`, 0.36 dB of PSNR-Y
+under at the same bits; within 0.11 dB at the other points), the gradient
+at −0.3% (nine points −0.7%). The halves and the trials that would take
+`testsrc2` past libvpx cost more time than the still scene's drawn pan
+allows.
+
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and
 against the defaults (BD-rate; FFmpeg's time a stream with `-row-mt 1`,

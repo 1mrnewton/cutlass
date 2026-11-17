@@ -1,5 +1,7 @@
 use cutlass_model::{Draft, MetaType, TrackFlag, TrackId, TrackType};
 
+use crate::effect_shelf::carries_clip_effects;
+
 /// A row drawn for a track. The draft does not store one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lane {
@@ -26,11 +28,17 @@ pub fn lanes(draft: &Draft) -> Vec<Lane> {
 /// Rows for the tracks, with an empty one kept as a row when `empty` is on.
 /// A screen that lets people add and remove tracks keeps them; one that
 /// does not leaves them out, as [`lanes`] does.
+///
+/// An effect row whose every clip rides on a clip gets no row either way:
+/// those effects are drawn on the clips they run over.
 #[must_use]
 pub fn lanes_for(draft: &Draft, empty: bool) -> Vec<Lane> {
     let mut rows = Vec::new();
     for (track_index, track) in draft.tracks.iter().enumerate() {
         if !empty && track.segments.is_empty() && !track.is_main() {
+            continue;
+        }
+        if carries_clip_effects(draft, track) {
             continue;
         }
         let row = rows.len();
@@ -213,5 +221,55 @@ mod tests {
         let kept = lanes_for(&draft, true);
         assert_eq!(kept.len(), 65);
         assert_eq!((kept[64].row, kept[64].track_index), (64, 64));
+    }
+
+    /// An effect row's id and its `(segment id, the clip it is bound to)`.
+    type EffectRow<'a> = (&'a str, &'a [(&'a str, Option<&'a str>)]);
+
+    /// Main holds `clip`; each row in `rows` is an effect row.
+    fn effect_rows(rows: &[EffectRow<'_>]) -> Draft {
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = "main".into();
+        draft.tracks[0].segments.push(segment("clip"));
+        for (id, effects) in rows {
+            let mut track = Track::main(*id);
+            track.kind = TrackType::Effect;
+            for (effect, on) in *effects {
+                let mut effect = segment(effect);
+                effect.bind_to(on.map(cutlass_model::SegmentId::new).as_ref());
+                track.segments.push(effect);
+            }
+            draft.tracks.push(track);
+        }
+        draft
+    }
+
+    #[test]
+    fn a_row_of_effects_riding_on_clips_gets_no_row_in_either_mode() {
+        let draft = effect_rows(&[
+            ("riding", &[("on-clip", Some("clip"))]),
+            (
+                "mixed",
+                &[("over-all", None), ("also-on-clip", Some("clip"))],
+            ),
+            ("orphan", &[("on-gone", Some("gone"))]),
+        ]);
+        for empty in [false, true] {
+            let rows: Vec<String> = lanes_for(&draft, empty)
+                .iter()
+                .map(|lane| lane.track_id.as_str().to_owned())
+                .collect();
+            // A row with an effect over every picture stays, and one bound
+            // to a clip that is gone stays so it can be found.
+            assert_eq!(rows, ["main", "mixed", "orphan"]);
+        }
+        // Rows count up with nothing missing where the hidden one was.
+        let rows = lanes(&draft);
+        assert_eq!(
+            rows.iter()
+                .map(|lane| (lane.row, lane.track_index))
+                .collect::<Vec<_>>(),
+            [(0, 0), (1, 2), (2, 3)]
+        );
     }
 }

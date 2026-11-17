@@ -7,6 +7,7 @@
 
 use cutlass_model::{Draft, MetaType, Micros, Track, TrackAttribute, TrackId, TrackType};
 
+use crate::effect_shelf::carries_clip_effects;
 use crate::lane::lane_category;
 
 /// The lane an appended clip lands on.
@@ -27,7 +28,9 @@ pub struct Append {
 
 /// The first unlocked `kind` row with nothing between `at` and `at +
 /// length`, or `None` when a new row must open. A clip added at the
-/// playhead, such as a title or an effect, goes here.
+/// playhead, such as a title or an effect, goes here. An effect row the
+/// timeline draws no row for, as it carries only effects riding on clips,
+/// is passed over.
 #[must_use]
 pub fn free_row(draft: &Draft, kind: TrackType, at: Micros, length: Micros) -> Option<TrackId> {
     let at = at.0.max(0);
@@ -38,6 +41,7 @@ pub fn free_row(draft: &Draft, kind: TrackType, at: Micros, length: Micros) -> O
         .find(|track| {
             track.kind == kind
                 && !track.attribute.contains(TrackAttribute::LOCK)
+                && !carries_clip_effects(draft, track)
                 && track.segments.iter().all(|segment| {
                     let start = segment.target.start.0;
                     let stop = start.saturating_add(segment.target.duration.0);
@@ -87,7 +91,7 @@ pub fn append_placement(draft: &Draft, kind: TrackType) -> Append {
             .tracks
             .iter()
             .filter(open)
-            .find(|track| track.kind == kind)
+            .find(|track| track.kind == kind && !carries_clip_effects(draft, track))
     });
     match target {
         Some(track) => Append {

@@ -72,9 +72,9 @@ pub use clipboard::{ClipboardMiss, CopiedClip, copy_clips, paste_requests, rehom
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
 pub use effect_shelf::{
     ADJUSTMENT_CARD, ClipEffect, EFFECT_CARD_PREFIX, EFFECT_LENGTH, EffectCard, EffectPlace,
-    FILTER_CARD_PREFIX, effect_cards, effect_categories, effect_of_card, effect_requests,
-    effect_row_for, effect_target, effect_title, effects_on, filter_cards, filter_categories,
-    filter_of_card,
+    FILTER_CARD_PREFIX, carries_clip_effects, effect_cards, effect_categories, effect_of_card,
+    effect_requests, effect_row_for, effect_target, effect_title, effects_by_clip, effects_on,
+    filter_cards, filter_categories, filter_of_card, rides_on_clip,
 };
 pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
 pub use fling::{

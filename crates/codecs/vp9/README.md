@@ -1498,6 +1498,141 @@ directions (`testsrc2` +12.8% → +12.0%); the single best in the
 direction with more pairs gives +11.9% with fewer trials. What is left:
 `testsrc2` at +11.4%, the gradient at +5.8%.
 
+**Small objects, the loop filter and key frames at a fixed quantizer**
+(17 November 2026, after `9c3ecf54`). What was left: `testsrc2` at
++11.4% against FFmpeg's `-crf` (+9.9% / +6.9% at the same PSNR-U / V),
+the gradient at +5.8%. Coded at `-crf 35`, libvpx's `testsrc2` has no
+alt-ref: LAST alone, a golden frame every 10 pictures, and quantizers 140
+/ 131 / 120 / 98 by the picture's place in 8. Measured by region at the
+same size (FFmpeg's `-crf 35` against `crf=32` here), the squares of
+noise (3% of the picture, two thirds of the error) are as good in both;
+the 8×8 blocks that hold a row of that noise (it starts a row below an
+8×8 edge) were 1.5 dB under libvpx's, and the rest of the picture (94%)
+2 dB under. Three causes:
+
+- The partition search's stop for a whole block that needs no residual
+  (under a full search: its error under the quantizer's step squared over
+  24 a sample) summed the block's error, which hid a small object (a
+  moving square, a figure of the clock, a row of noise) in a block that
+  predicted the rest exactly; the object went uncoded. At a fixed
+  quantizer the stop now also needs every 8×8's luma error under the same
+  bound (`Tile::peak_sse`). Not in a second pass, where the still scene
+  lost 0.4 points of PSNR-Y; second passes write the same streams.
+- The loop filter's search (`pick_level`) measures the frame it filters
+  alone. On pictures that stand still, whose blocks keep their reference
+  whole and have their edges filtered again each picture, the levels it
+  found blurred the pictures after it (libvpx's on `testsrc2` are 1 to
+  14, ours were 6 to 21). At a fixed quantizer in one pass an inter
+  frame now takes 0.6 of the level found (`LF_FIXED_SCALE`).
+- A key frame of a smooth picture codes a gradient in 64×32 and 32×64
+  halves for less than in four 32×32 blocks; speeds 0 to 3 try halves at
+  every size, speed 5 at none. The first picture of the gradient alone
+  was +6.5% against libvpx's at the same PSNR-Y (speed 3: +2.7%). From
+  speed 4 at a fixed quantizer in one pass, a key frame's 64×64 block
+  whose whole cost came within 1.1 times the best of whole and split now
+  tries its halves after the split (`KEY_HALVES`, `Tile::try_halves`):
+  +5.2%.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y, and
+for `testsrc2` U / V, 15 to 55, four threads):
+
+| | Before | 8×8 peak | And the level | And key halves |
+| --- | --- | --- | --- | --- |
+| `testsrc2` | +11.4 / +9.9 / +6.9% | +10.0 / +9.1 / +3.2% | +8.8 / +8.0 / +2.9% | +8.7 / +8.0 / +2.7% |
+| Gradient | +5.8% | +6.2% | +4.3% | +3.6% |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, FFmpeg | Before | Now | Gradient, FFmpeg | Before | Now |
+| --- | --- | --- | --- | --- | --- | --- |
+| 15 | 357003, 54.36 dB | 333587, 52.49 dB | 333472, 52.72 dB | 17767, 55.10 dB | 12926, 53.01 dB | 12916, 53.06 dB |
+| 25 | 272682, 50.37 dB | 248888, 48.58 dB | 250075, 48.80 dB | 14431, 53.64 dB | 9636, 51.56 dB | 9557, 51.57 dB |
+| 35 | 175644, 45.59 dB | 150636, 43.46 dB | 150857, 43.60 dB | 8704, 51.31 dB | 7311, 49.25 dB | 7238, 49.42 dB |
+| 45 | 87402, 40.61 dB | 64038, 38.56 dB | 64750, 38.83 dB | 6428, 48.40 dB | 6161, 46.58 dB | 5996, 46.71 dB |
+| 55 | 33071, 37.41 dB | 20929, 34.67 dB | 22915, 35.27 dB | 5395, 45.09 dB | 5534, 43.58 dB | 5620, 43.54 dB |
+
+Speed 2 at `crf=` (the peak and the level; key halves are from speed 4):
+`testsrc2` +3.1 / −1.8 / −7.4% → +2.0 / −2.6 / −7.7%, the gradient
+−0.7% → −1.4%. On the README's three clips at `q=60` to `210` against the
+build before (BD-rate Y / U / V / FFmpeg's average / 6:1:1):
+
+| Fixed q | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| 8×8 peak | −1.3 / −0.3 / −0.7 / −1.0 / −1.1 | −0.6 / −2.3 / −2.3 / −1.5 / −1.1 | −0.0 / −0.1 / −0.0 / −0.1 / −0.0 |
+| All three | −1.4 / −0.9 / −1.0 / −1.3 / −1.3 | −0.4 / −2.2 / −2.2 / −1.3 / −0.9 | −0.3 / −0.8 / −0.5 / −0.5 / −0.4 |
+
+Against FFmpeg's `-crf` there: −9.3 / −20.4 / −21.4 / −14.2 / −12.4 on the
+three scenes, −17.8 / −49.3 / −49.2 / −39.4 / −31.7 on the still scene and
+−45.9 / −60.5 / −60.5 / −54.9 / −51.2 on the pan (−8.1, −16.6 and −45.7
+at the same PSNR-Y before). Every other mode (speeds 5 to 10 at a bitrate,
+two passes) writes the same streams as before.
+
+CPU time on one thread against the build before (30 pictures, medians of
+five interleaved runs pinned to one core; three scenes, still scene,
+pan): `q=120` 0.96, 1.11 and 0.98, `q=80` 1.06, 1.08 and 0.97 (1.015 and
+1.034 on average). The still scene, with its two jumps, pays most: its
+key frames' halves and the peak's splits.
+
+Checks: of the identity check's 41 configurations, those at a fixed
+quantizer at speeds 2 and 5 (and the still scene at `q=120`) change, the
+other 36 (every bitrate, two passes, speeds 6 to 10) do not. FFmpeg's `vp9`
+(threaded and on one thread), libvpx and this decoder agree on 10 new
+streams (40 of 40 decodes: `testsrc2` at `crf=35` at speeds 5 and 4, at
+`crf=30` at speed 2 and at `crf=40` on one thread, the gradient at
+`crf=35`, a 4:2:0 picture at `crf=25` on two threads, the pan at `q=120`,
+the still scene at `q=80`, the pan at 10 bits at `q=100`, 4:4:4 at
+`q=60`). New tests: a 2×2 square in a flat 64×64 block that predicts whole
+is coded; inter frames take `LF_FIXED_SCALE` of the searched level in one
+pass only; a smooth key frame codes 64×64 blocks in halves in one pass
+and none in a second (each fails without its change).
+
+Tried and dropped (BD-rate on `testsrc2` / the gradient at speed 5 against
+FFmpeg's `-crf`, from the build of each step):
+
+- Halves after a winning split at 32×32, and at 32×32 and 64×64 too (the
+  quarters' pairing prune): +11.9% and +12.1% from +11.4%. Halves after
+  a split that lost, or in both directions without the pairing: +9.1%,
+  +8.2% from +8.8%.
+- Halves before the split at every size, with their own search, as speeds
+  0 to 3 try them: +6.8% from +11.4%, in twice the time; at 16×16 only,
+  +6.7% from +8.8%, in 1.34 to 1.67 times the time on the README's clips.
+  Pruned to whole blocks that code a residual, to the direction their
+  error is the more uneven, or to the halves' seeds without a search (the
+  whole block's choice and each reference's NEAREST and NEAR), the gain
+  went with the time (+8.1% to +9.7%, at 1.14 to 1.22 times).
+- libvpx's structure: layered alt-refs (`arf_layers=2`, `3`: +14.3%,
+  +15.5%); its quantizers by place in 8 (0.5 / 0.71 / 0.86 of the step):
+  +15.2% (+12.6% without alt-refs); key frames at 0.25 and 0.2 of the step
+  (+12.2%, +13.0%), golden frames at 0.4 and 0.6 (+13.0%, +11.5%).
+- Lambda: the trials' × 0.7 and × 1.4 (+12.3%, +15.0%), RD quantization's
+  (+11.9%, +14.4%); chroma's error weighed 1 rather than 2: +10.9% at the
+  same PSNR-Y for +14.5% / +11.9% at PSNR-U / V.
+- Each of speed 5's prunes set back to speed 4's alone: neutral or worse
+  on `testsrc2` (one candidate at 32×32 and up +13.2%, the subpixel
+  diagonals +11.9%, the dead zone's trials +12.4%); a transform cap of
+  16×16 or 8×8 for inter blocks, sub-8×8 inter blocks: +11.2% to +11.5%.
+- The 8×8 peak with chroma's error in it as the trials weigh it:
+  `testsrc2` +10.1 / +5.6 / −0.7%, but 1.6 to 2.5 points of PSNR-Y lost on
+  the still scene and the pan at fixed quantizers. With the bound doubled:
+  +10.6% on `testsrc2` for +5.8% on the gradient. No stop at all: +9.8%
+  for 1.46 times the time.
+- The level's scale at 0.45 (the still scene a point worse) and 0.7 (half
+  the gain); the search's level kept without its 1% margin (`testsrc2`
+  +9.1%, the gradient +4.6%, the still scene's chroma worse); the scale on
+  key frames (+9.1% / +4.8%), in a second pass (the pan 1.7 points worse),
+  at a bitrate (0.1 to 1.4 points of PSNR-Y lost).
+- Key frames' halves at every size with RD-quantized trials: the gradient
+  +3.6% with them alone, but 1.2 to 1.8 times the time on 30 pictures;
+  RD-quantized trials alone 1.0 to 1.2 times. Inter frames' 64×64 halves
+  where whole came close: nothing.
+- Candidates past the first without the margin at a fixed quantizer: the
+  gradient +2.8%, `testsrc2` +8.5%, for 1.03 to 1.08 times the time; three
+  intra candidates in inter frames: `testsrc2` +8.0%, 1.05 to 1.19 times.
+
+What is left: `testsrc2` at +8.7% (speed 4: +7.1%, speed 2: +2.0%), the
+gradient at +3.6% (speed 4: +2.3%). Most of `testsrc2`'s is halves before
+the split, which cost more time than speed 5 has.
+
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and
 against the defaults (BD-rate; FFmpeg's time a stream with `-row-mt 1`,

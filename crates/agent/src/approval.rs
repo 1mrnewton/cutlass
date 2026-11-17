@@ -56,6 +56,14 @@ pub enum ApprovalAction {
         /// The service the requests would go to.
         address: String,
     },
+    /// Let a turn run more rounds than the user set. Each round is a
+    /// request to the model, and a cloud model charges for each.
+    RaiseStepCap {
+        /// The rounds a turn may run now.
+        from: u32,
+        /// The rounds it would be allowed.
+        to: u32,
+    },
 }
 
 impl ApprovalAction {
@@ -105,6 +113,10 @@ impl ApprovalAction {
                  kept for that service go there.",
                 shown_address(address)
             ),
+            Self::RaiseStepCap { from, to } => format!(
+                "Let the assistant run up to {to} rounds a turn, up from {from}? Each round \
+                 is a request to the model, and a cloud model charges for each."
+            ),
         }
     }
 
@@ -120,6 +132,7 @@ impl ApprovalAction {
             Self::AddExternalSkill { .. } => "adding an external skill folder",
             Self::RunLocalMcp { .. } => "adding a program to run as a local MCP server",
             Self::ChangeCloudAddress { .. } => "changing where the cloud model's requests go",
+            Self::RaiseStepCap { .. } => "letting a turn run more rounds",
         }
     }
 
@@ -253,6 +266,13 @@ mod tests {
         assert_eq!(asked.matches('\n').count(), 1, "{asked}");
         assert!(asked.contains("notes  Allowed"), "{asked}");
         assert!(asked.ends_with("sh -c    rm -rf"), "{asked}");
+        let more = ApprovalAction::RaiseStepCap { from: 32, to: 500 };
+        assert!(
+            more.prompt().contains("up to 500 rounds"),
+            "{}",
+            more.prompt()
+        );
+        assert!(more.prompt().contains("up from 32"), "{}", more.prompt());
         let unset = ApprovalAction::EnableRemoteMcp {
             server: "far".to_owned(),
             url: "  ".to_owned(),

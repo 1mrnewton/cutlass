@@ -1656,13 +1656,13 @@ mod tests {
             .send(call_line(
                 4,
                 "settings_set",
-                json!({"expected_generation": written, "changes": {"step_cap": 40}}),
+                json!({"expected_generation": written, "changes": {"step_cap": 16}}),
             ))
             .unwrap();
         let set = heard.answer(4, || {});
         assert_eq!(set["result"]["isError"], false, "{}", said(&set));
         let kept = cutlass_settings::load(&settings).unwrap().settings;
-        assert_eq!(kept.step_cap, 40);
+        assert_eq!(kept.step_cap, 16);
         assert!(!kept.sandbox.local, "the window's change is kept");
         drop(client);
         host.join().unwrap().unwrap();

@@ -945,8 +945,8 @@ fn description(name: &str) -> &'static str {
              only the entries to add or change, each with its name, path or action, and \
              {\"name\":\"x\",\"remove\":true} to take one out. Turning on the cloud model, the \
              online sandbox or a remote MCP server, changing a server's address or the cloud \
-             service, adding a program as a local server, or adding a skill folder asks the \
-             user first."
+             service, adding a program as a local server, adding a skill folder, or raising \
+             step_cap asks the user first."
         }
         "player.seek" => {
             "Move the open player to a time in microseconds; a .png export draws that frame."
@@ -1366,10 +1366,11 @@ pub fn pending_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAct
 }
 
 /// The approvals a change the assistant (or another MCP client) asks for
-/// needs: [`pending_approvals`], and three more that the user's own
+/// needs: [`pending_approvals`], and four more that the user's own
 /// Settings window does without, since there the user typed them. A new
 /// program to run as a local server, a new address for a remote server
-/// that is on, and a new service for the cloud model's requests and key.
+/// that is on, a new service for the cloud model's requests and key, and
+/// more rounds for a turn than the user set.
 #[must_use]
 pub fn assistant_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAction> {
     let mut actions = pending_approvals(current, next);
@@ -1410,6 +1411,14 @@ pub fn assistant_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalA
                 command,
             });
         }
+    }
+    // The user sets how long a turn may run; a turn does not give itself
+    // more. Fewer rounds, or the same, is no one's loss.
+    if next.step_cap > current.step_cap {
+        actions.push(ApprovalAction::RaiseStepCap {
+            from: current.step_cap,
+            to: next.step_cap,
+        });
     }
     let (now, then) = (&next.model, &current.model);
     if now.cloud_provider != then.cloud_provider || now.cloud_url != then.cloud_url {
@@ -3548,7 +3557,7 @@ mod tests {
         // Turning on a program the user already named does not ask, and
         // neither does a plain setting or a shortcut.
         let mut next = registry.settings.settings().clone();
-        next.step_cap = 40;
+        next.step_cap = 24;
         next.shortcuts.push(Shortcut {
             action: "split".to_owned(),
             keys: "s".to_owned(),
@@ -3564,7 +3573,7 @@ mod tests {
         assert_eq!(text, "generation=2");
         assert!(registry.approver.actions.is_empty());
         let loaded = SettingsTool::open(registry.settings.path()).unwrap();
-        assert_eq!(loaded.settings().step_cap, 40);
+        assert_eq!(loaded.settings().step_cap, 24);
         assert_eq!(loaded.settings().shortcuts[0].action, "split");
         assert!(loaded.settings().mcp_servers[1].enabled);
         // A program the settings do not hold asks, on or off, and so does
@@ -3706,7 +3715,7 @@ mod tests {
             assert!(refused.is_error, "{changes}");
             assert!(refused.content.contains(named), "{}", refused.content);
         }
-        let kept = call(r#"{"expected_generation":0,"changes":{"step_cap":1000}}"#);
+        let kept = call(r#"{"expected_generation":0,"changes":{"step_cap":1}}"#);
         assert!(!kept.is_error, "{}", kept.content);
         assert_eq!(registry.settings.generation(), 1);
         assert!(registry.settings.settings().rest.is_empty());
@@ -4247,17 +4256,17 @@ mod tests {
         };
         let set = call(
             &mut registry,
-            r#"{"expected_generation":0,"changes":{"step_cap":48,"playback":{"loop_playback":true}}}"#,
+            r#"{"expected_generation":0,"changes":{"step_cap":24,"playback":{"loop_playback":true}}}"#,
         );
         assert!(!set.is_error, "{}", set.content);
-        assert_eq!(registry.settings.settings().step_cap, 48);
+        assert_eq!(registry.settings.settings().step_cap, 24);
         assert!(registry.settings.settings().playback.loop_playback);
         let stale = call(
             &mut registry,
             r#"{"expected_generation":0,"changes":{"step_cap":12}}"#,
         );
         assert!(stale.is_error, "a stale generation is refused");
-        assert_eq!(registry.settings.settings().step_cap, 48);
+        assert_eq!(registry.settings.settings().step_cap, 24);
         // Turning the cloud model on asks; refused, nothing is written.
         let generation = registry.settings.generation();
         let cloud = call(
@@ -4283,6 +4292,63 @@ mod tests {
             "{}",
             broken.content
         );
+    }
+
+    #[test]
+    fn a_turn_does_not_give_itself_more_rounds_without_the_users_allow() {
+        let set = |registry: &mut TestRegistry, cap: u32| {
+            let generation = registry.settings.generation();
+            ToolSink::run_tool(
+                registry,
+                &ToolCall {
+                    id: "cap".to_owned(),
+                    name: "settings.set".to_owned(),
+                    arguments: format!(
+                        r#"{{"expected_generation":{generation},"changes":{{"step_cap":{cap}}}}}"#
+                    ),
+                },
+            )
+        };
+        let start = cutlass_settings::DEFAULT_STEP_CAP;
+        // Refused: the cap stays, nothing is written, and the question
+        // named both numbers.
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let more = set(&mut registry, 1000);
+        assert!(more.is_error);
+        assert!(more.content.contains("refused"), "{}", more.content);
+        assert!(more.content.contains("more rounds"), "{}", more.content);
+        assert_eq!(registry.settings.settings().step_cap, start);
+        assert_eq!(registry.settings.generation(), 0);
+        assert_eq!(
+            registry.approver.actions,
+            vec![ApprovalAction::RaiseStepCap {
+                from: start,
+                to: 1000
+            }]
+        );
+        // Fewer rounds, or the same, is not asked about.
+        let fewer = set(&mut registry, start - 1);
+        assert!(!fewer.is_error, "{}", fewer.content);
+        let same = set(&mut registry, start - 1);
+        assert!(!same.is_error, "{}", same.content);
+        assert_eq!(registry.approver.actions.len(), 1);
+        // One round more than now asks again, even below where it began.
+        assert!(set(&mut registry, start).is_error);
+        assert_eq!(registry.settings.settings().step_cap, start - 1);
+        // Allowed, it is written.
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::allow());
+        let more = set(&mut registry, 1000);
+        assert!(!more.is_error, "{}", more.content);
+        assert_eq!(registry.settings.settings().step_cap, 1000);
+        // The Settings window, where the user types the number, does not
+        // ask for it.
+        let typed = Settings {
+            step_cap: 1000,
+            ..Settings::default()
+        };
+        assert!(super::pending_approvals(&Settings::default(), &typed).is_empty());
     }
 
     #[test]

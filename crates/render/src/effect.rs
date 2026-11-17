@@ -43,7 +43,9 @@ pub(crate) enum Space {
 pub(crate) const fn space(block: Block) -> Space {
     match block {
         // Averages of light.
-        Block::Blur | Block::ZoomBlur | Block::MotionBlur | Block::Focus => Space::Light,
+        Block::Blur | Block::ZoomBlur | Block::MotionBlur | Block::Focus | Block::Glow => {
+            Space::Light
+        }
         // Pixels moved, not mixed.
         Block::Transform
         | Block::RgbSplit
@@ -60,14 +62,14 @@ pub(crate) const fn space(block: Block) -> Space {
         | Block::Kaleido
         | Block::Fringe => Space::Light,
         // Colour tuned by eye, and light whose thresholds and strengths
-        // were tuned on encoded values.
+        // were tuned on encoded values. A glow's threshold is still a
+        // level as shown, converted to light by its plan.
         Block::Grade
         | Block::Flash
         | Block::Vignette
         | Block::Noise
         | Block::Scanlines
         | Block::Invert
-        | Block::Glow
         | Block::LightLeak
         | Block::Hue
         | Block::Posterize
@@ -292,10 +294,11 @@ fn halve(uv: vec2<f32>) -> vec4<f32> {
         + fetch(uv + vec2<f32>(-d.x, d.y)) + fetch(uv + vec2<f32>(d.x, d.y))) * 0.25;
 }
 
-// A smaller picture brought up to this size through a cubic B-spline,
-// four bilinear samples, so no seam of its texels shows.
-fn smooth_up(uv: vec2<f32>) -> vec4<f32> {
-    let dims = vec2<f32>(textureDimensions(source));
+// `picture`, smaller than the one drawn, at `uv` through a cubic B-spline:
+// four bilinear samples, so no seam of its texels shows when it is
+// brought up to size.
+fn bspline(picture: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(picture));
     let p = uv * dims - vec2<f32>(0.5);
     let i = floor(p);
     let f = p - i;
@@ -309,8 +312,54 @@ fn smooth_up(uv: vec2<f32>) -> vec4<f32> {
     let g1 = w2 + w3;
     let low = (i - vec2<f32>(1.0) + w1 / g0 + vec2<f32>(0.5)) / dims;
     let high = (i + vec2<f32>(1.0) + w3 / g1 + vec2<f32>(0.5)) / dims;
-    return (fetch(vec2<f32>(low.x, low.y)) * g0.x + fetch(vec2<f32>(high.x, low.y)) * g1.x) * g0.y
-        + (fetch(vec2<f32>(low.x, high.y)) * g0.x + fetch(vec2<f32>(high.x, high.y)) * g1.x) * g1.y;
+    return (textureSampleLevel(picture, linear_sampler, vec2<f32>(low.x, low.y), 0.0) * g0.x
+        + textureSampleLevel(picture, linear_sampler, vec2<f32>(high.x, low.y), 0.0) * g1.x) * g0.y
+        + (textureSampleLevel(picture, linear_sampler, vec2<f32>(low.x, high.y), 0.0) * g0.x
+        + textureSampleLevel(picture, linear_sampler, vec2<f32>(high.x, high.y), 0.0) * g1.x) * g1.y;
+}
+
+// The picture read, smaller than the one drawn, brought up to its size.
+fn smooth_up(uv: vec2<f32>) -> vec4<f32> {
+    return bspline(source, uv);
+}
+
+// How much of a colour in light spreads as glow: the part of its
+// brightest channel above `threshold`, eased in over `knee` either side
+// of it, the colour's hue kept.
+fn bright_part(c: vec4<f32>, threshold: f32, knee: f32) -> vec4<f32> {
+    let top = max(c.r, max(c.g, c.b));
+    let soft = clamp(top - threshold + knee, 0.0, 2.0 * knee);
+    let eased = soft * soft / (4.0 * knee + 0.00001);
+    let over = max(eased, top - threshold);
+    return vec4<f32>(c.rgb * (over / max(top, 0.00001)), 0.0);
+}
+
+// The glow's first picture: the picture's bright part, `fx.code.y` times
+// smaller, each of four samples thresholded before they are averaged so a
+// lone bright pixel does not flicker as it moves.
+fn glow_bright(uv: vec2<f32>) -> vec4<f32> {
+    let step = 0.25 * f32(fx.code.y) / vec2<f32>(textureDimensions(source));
+    var sum = vec4<f32>(0.0);
+    for (var k = 0u; k < 4u; k = k + 1u) {
+        let corner = vec2<f32>(f32(k & 1u), f32(k >> 1u)) * 2.0 - vec2<f32>(1.0);
+        sum = sum + bright_part(fetch(uv + corner * step), fx.a.x, fx.a.y);
+    }
+    return sum * 0.25;
+}
+
+// One level of the glow on its way back up: the coarser levels, brought
+// up and weighed by `fx.a.y`, and this level's own, weighed by `fx.a.x`.
+fn glow_up(uv: vec2<f32>) -> vec4<f32> {
+    return bspline(source, uv) * fx.a.y + textureSampleLevel(other, linear_sampler, uv, 0.0) * fx.a.x;
+}
+
+// The glow laid over the picture: its levels, brought up to size, scaled
+// by `fx.a.x` and tinted by `fx.a.yzw`. Light is added; nothing is
+// clipped until the picture leaves the chain.
+fn glow_add(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    let glow = bspline(other, uv).rgb * fx.a.x * fx.a.yzw;
+    return vec4<f32>(c.rgb + glow * c.a, c.a);
 }
 
 fn grade(uv: vec2<f32>) -> vec4<f32> {
@@ -456,21 +505,6 @@ fn bulge(uv: vec2<f32>) -> vec4<f32> {
     }
     let pull = 1.0 - fx.a.x * (1.0 - n * n);
     return fetch(to_uv(p * pull, point));
-}
-
-fn glow(uv: vec2<f32>) -> vec4<f32> {
-    let base = fetch(uv);
-    let reach = fx.a.y * min(fx.size.x, fx.size.y) / fx.size;
-    var light = vec3<f32>(0.0);
-    // A disc of taps laid out on the golden angle, so none line up.
-    for (var k = 0; k < 48; k = k + 1) {
-        let r = sqrt((f32(k) + 0.5) / 48.0);
-        let turn = f32(k) * 2.3999632;
-        let c = fetch(uv + vec2<f32>(cos(turn), sin(turn)) * r * reach);
-        light = light + max(straight(c) - vec3<f32>(fx.a.z), vec3<f32>(0.0)) * c.a;
-    }
-    let rgb = base.rgb + light / 48.0 * fx.a.x;
-    return vec4<f32>(min(rgb, vec3<f32>(base.a)), base.a);
 }
 
 fn light_leak(uv: vec2<f32>) -> vec4<f32> {
@@ -922,7 +956,8 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         case 14u: { return swirl(uv); }
         case 15u: { return ripple(uv); }
         case 16u: { return bulge(uv); }
-        case 17u: { return glow(uv); }
+        // 17, the glow, is drawn by its plan: GLOW_BRIGHT, HALVE, GLOW_UP
+        // and GLOW_ADD.
         case 18u: { return light_leak(uv); }
         case 19u: { return hue(uv); }
         case 20u: { return tile(uv); }
@@ -945,6 +980,9 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         case 100u: { return gauss(uv); }
         case 101u: { return halve(uv); }
         case 102u: { return smooth_up(uv); }
+        case 103u: { return glow_bright(uv); }
+        case 104u: { return glow_up(uv); }
+        case 105u: { return glow_add(uv); }
         default: { return fetch(uv); }
     }
 }
@@ -1005,6 +1043,23 @@ pub(crate) fn shrunk_size(size: (u32, u32), shrink: u32) -> (u32, u32) {
 const GAUSS: u32 = 100;
 const HALVE: u32 = 101;
 const SMOOTH_UP: u32 = 102;
+const GLOW_BRIGHT: u32 = 103;
+const GLOW_UP: u32 = 104;
+const GLOW_ADD: u32 = 105;
+
+/// The short side, in pixels, at which a glow's finest level is the
+/// picture's own pixels. Its levels are set by this share of the short
+/// side, not by pixels, so a glow is the same share of the picture at
+/// every size: a larger picture starts on a smaller copy, and a smaller
+/// one folds the levels finer than its pixels into its finest.
+const GLOW_FINEST: f32 = 540.0;
+
+/// The fewest texels across a glow level's short side.
+const GLOW_SMALLEST: u32 = 2;
+
+/// How strong a glow's added light is at `amount` 1: the bright part's own
+/// light, spread, times this.
+const GLOW_GAIN: f32 = 0.6;
 
 /// The most times smaller than the picture a working picture is.
 pub(crate) const MAX_SHRINK: u32 = 64;
@@ -1020,6 +1075,7 @@ pub(crate) fn plan(step: &Step, size: (u32, u32)) -> Plan {
             let short = size.0.min(size.1) as f32;
             blur_plan(step.values[0] * short)
         }
+        Block::Glow => glow_plan(&step.values, size),
         _ => Plan {
             work: Vec::new(),
             draws: vec![Draw {
@@ -1046,6 +1102,100 @@ fn kernel(kernel: u32, arg: u32, read: Picture, write: Picture, first: &[f32]) -
         write,
         values,
     }
+}
+
+/// Linear light of a Rec. 709 encoded level, as the shader's `to_light`.
+fn to_light(encoded: f32) -> f32 {
+    let e = encoded.max(0.0);
+    if e < 0.081 {
+        e / 4.5
+    } else {
+        ((e + 0.099) / 1.099).powf(1.0 / 0.45)
+    }
+}
+
+/// A glow: the light of the picture above a threshold, spread by a stack
+/// of ever smaller and softer copies of itself and added back. Each level
+/// is half the last; their sum falls off fast near a highlight and lasts
+/// far from it, as light scattered in a lens does. The levels reach as far
+/// as `radius` of the short side, the last weighed by how far of the way
+/// to the next it gets, so the reach grows smoothly with the knob.
+///
+/// The levels sit at fixed shares of the short side, the finest at a
+/// [`GLOW_FINEST`]th of it, so the stack is the same at every size. Where
+/// that is finer than a pixel the finest level stands in for the levels
+/// it cannot hold, and carries their weight.
+fn glow_plan(values: &[f32; MAX_VALUES], size: (u32, u32)) -> Plan {
+    let [amount, radius, threshold, knee, red, green, blue, ..] = *values;
+    let short = size.0.min(size.1);
+    let reach = radius * short as f32;
+    if amount <= 0.0 || reach < 0.5 {
+        return Plan::default();
+    }
+    // Shrinks as powers of two: where the finest level would sit, where
+    // the picture's finest level does, and where the top level sits.
+    let nominal = (short as f32 / GLOW_FINEST).log2();
+    let finest = nominal.round().max(0.0);
+    let top = nominal + (radius * GLOW_FINEST / 2.0).max(1.0).log2();
+    // The most halvings that keep a level GLOW_SMALLEST texels across.
+    let room = (short / GLOW_SMALLEST).max(1).ilog2().saturating_sub(finest as u32);
+    let halvings = ((top - finest).ceil().max(0.0) as u32).min(room);
+    // The finest level carries the levels finer than it, the top one its
+    // share of the way to the next.
+    let finest_weight = (1.0 + finest - nominal).max(0.5);
+    let top_weight = (top - finest - (halvings as f32 - 1.0)).clamp(0.0, 1.0);
+    let total = if halvings == 0 {
+        1.0
+    } else {
+        finest_weight + (halvings - 1) as f32 + top_weight
+    };
+    let finest = 1u32 << finest as u32;
+    let level = |index: u32| finest << index;
+    let threshold = to_light(threshold);
+    let mut work = vec![level(0)];
+    let mut draws = vec![kernel(
+        GLOW_BRIGHT,
+        finest,
+        Picture::Current,
+        Picture::Work(0),
+        &[threshold, knee * threshold],
+    )];
+    for index in 1..=halvings {
+        work.push(level(index));
+        draws.push(kernel(
+            HALVE,
+            0,
+            Picture::Work(index as usize - 1),
+            Picture::Work(index as usize),
+            &[],
+        ));
+    }
+    // Back up: each level's own light and the coarser ones brought up.
+    let mut coarser = Picture::Work(halvings as usize);
+    for index in (0..halvings).rev() {
+        work.push(level(index));
+        let sum = Picture::Work(work.len() - 1);
+        let own = if index == 0 { finest_weight } else { 1.0 };
+        let brought = if index + 1 == halvings {
+            top_weight
+        } else {
+            1.0
+        };
+        let mut up = kernel(GLOW_UP, 0, coarser, sum, &[own, brought]);
+        up.other = Some(Picture::Work(index as usize));
+        draws.push(up);
+        coarser = sum;
+    }
+    let mut add = kernel(
+        GLOW_ADD,
+        0,
+        Picture::Current,
+        Picture::Current,
+        &[amount * GLOW_GAIN / total, red, green, blue],
+    );
+    add.other = Some(coarser);
+    draws.push(add);
+    Plan { work, draws }
 }
 
 /// A Gaussian blur as wide as a box of `reach` pixels each side: the same
@@ -1659,7 +1809,7 @@ mod tests {
         );
         for shrink in &plan.work {
             assert!(
-                shrink.is_power_of_two() && *shrink <= super::MAX_SHRINK,
+                shrink.is_power_of_two() && *shrink <= 4096,
                 "{what}"
             );
         }
@@ -1702,6 +1852,127 @@ mod tests {
         assert!(super::blur_plan(0.0).draws.is_empty());
     }
 
+    #[test]
+    fn a_glow_plan_stays_small_on_every_picture() {
+        let widest = Block::Glow.params()[1].max;
+        for size in [(1, 1), (64, 64), (1920, 1080), (3840, 2160), (7680, 4320)] {
+            for radius in [0.0, 0.01, 0.05, widest] {
+                let mut values = [0.0; MAX_VALUES];
+                values[..7].copy_from_slice(&[1.0, radius, 0.6, 0.5, 1.0, 1.0, 1.0]);
+                let plan = super::glow_plan(&values, size);
+                // Bright part, halvings, the way back up, the add.
+                assert!(plan.draws.len() <= 14, "{size:?} {radius}: {plan:?}");
+                assert!(plan.work.len() <= 13, "{size:?} {radius}: {plan:?}");
+                // No level is smaller than two texels across.
+                let short = size.0.min(size.1);
+                assert!(
+                    plan.work.iter().all(|shrink| short / shrink >= 2 || *shrink == 1),
+                    "{size:?} {radius}: {plan:?}"
+                );
+            }
+        }
+        let mut off = [0.0; MAX_VALUES];
+        off[1] = 0.05;
+        assert!(super::glow_plan(&off, (1920, 1080)).draws.is_empty());
+    }
+
+    /// The light a strong glow adds to a white square a tenth of the
+    /// picture wide, at points a fortieth and a twentieth of the picture
+    /// beside it.
+    fn glow_beside(renderer: &Renderer, side: u32) -> [f64; 2] {
+        let square = side / 10;
+        let start = side / 2 - square / 2;
+        let inside = |v: u32| v >= start && v < start + square;
+        let scene: Vec<u8> = (0..side * side)
+            .flat_map(|index| {
+                if inside(index % side) && inside(index / side) {
+                    [255, 255, 255, 255]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            })
+            .collect();
+        let glow = step(Block::Glow, &[(0, 3.0), (1, 0.2)]);
+        let got = draw(renderer, &scene, (side, side), &[glow]);
+        let middle = side / 2;
+        let edge = start + square;
+        [side / 40, side / 20].map(|away| {
+            let x = edge + away;
+            light(got[((middle * side + x) * 4) as usize])
+        })
+    }
+
+    #[test]
+    fn a_glow_spreads_alike_at_every_size() {
+        let Some(renderer) = renderer() else { return };
+        // The small picture glows on its own pixels; the large one from a
+        // halved copy, as a 4K frame does.
+        let small = glow_beside(&renderer, 200);
+        let large = glow_beside(&renderer, 1200);
+        for (s, l) in small.iter().zip(&large) {
+            assert!(*s > 0.01 && *l > 0.01, "{small:?} {large:?}");
+            assert!((s / l - 1.0).abs() < 0.25, "{small:?} {large:?}");
+        }
+        // It falls off away from the light.
+        assert!(small[1] < small[0] && large[1] < large[0]);
+    }
+
+    #[test]
+    fn a_glow_grows_with_brightness_and_holds_back_below_its_threshold() {
+        let Some(renderer) = renderer() else { return };
+        let size = (32u32, 32u32);
+        // The glow beside a patch in the middle, as linear light.
+        let beside = |level: u8, threshold: f32| {
+            let scene: Vec<u8> = (0..size.0 * size.1)
+                .flat_map(|index| {
+                    let (x, y) = (index % size.0, index / size.0);
+                    let v = if (12..20).contains(&x) && (12..20).contains(&y) {
+                        level
+                    } else {
+                        0
+                    };
+                    [v, v, v, 255]
+                })
+                .collect();
+            let glow = step(Block::Glow, &[(0, 1.0), (1, 0.2), (2, threshold)]);
+            let got = draw(&renderer, &scene, size, &[glow]);
+            light(got[((16 * size.0 + 22) * 4) as usize])
+        };
+        let white = beside(255, 0.6);
+        let light_grey = beside(220, 0.6);
+        assert!(white > light_grey && light_grey > 0.0, "{white} {light_grey}");
+        // Below the knee nothing glows; a higher threshold glows less.
+        assert_eq!(beside(90, 0.6), 0.0);
+        assert!(beside(255, 0.9) < white);
+    }
+
+    #[test]
+    fn a_glow_takes_its_tint() {
+        let Some(renderer) = renderer() else { return };
+        let size = (16u32, 16u32);
+        let spot: Vec<u8> = (0..size.0 * size.1)
+            .flat_map(|index| {
+                let (x, y) = (index % size.0, index / size.0);
+                let v = if (6..10).contains(&x) && (6..10).contains(&y) {
+                    255
+                } else {
+                    0
+                };
+                [v, v, v, 255]
+            })
+            .collect();
+        // A red glow from white light.
+        let red = step(
+            Block::Glow,
+            &[(0, 2.0), (1, 0.3), (4, 1.0), (5, 0.0), (6, 0.0)],
+        );
+        let got = draw(&renderer, &spot, size, &[red]);
+        let beside = ((8 * size.0 + 12) * 4) as usize;
+        assert!(got[beside] > 0, "{:?}", &got[beside..beside + 4]);
+        assert_eq!(got[beside + 1], 0);
+        assert_eq!(got[beside + 2], 0);
+    }
+
     /// The blocks that average light work in light; the ones tuned by eye
     /// on encoded values are handed encoded values.
     #[test]
@@ -1712,6 +1983,7 @@ mod tests {
             Block::ZoomBlur,
             Block::MotionBlur,
             Block::Focus,
+            Block::Glow,
         ] {
             assert_eq!(space(block), Space::Light, "{block:?}");
         }
@@ -1720,7 +1992,6 @@ mod tests {
             Block::Hue,
             Block::Posterize,
             Block::GradientMap,
-            Block::Glow,
             Block::Rays,
             Block::LightLeak,
         ] {

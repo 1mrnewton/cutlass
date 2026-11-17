@@ -1224,7 +1224,10 @@ fn glow_plan(values: &[f32; MAX_VALUES], size: (u32, u32)) -> Plan {
     let finest = nominal.round().max(0.0);
     let top = nominal + (radius * GLOW_FINEST / 2.0).max(1.0).log2();
     // The most halvings that keep a level GLOW_SMALLEST texels across.
-    let room = (short / GLOW_SMALLEST).max(1).ilog2().saturating_sub(finest as u32);
+    let room = (short / GLOW_SMALLEST)
+        .max(1)
+        .ilog2()
+        .saturating_sub(finest as u32);
     let halvings = ((top - finest).ceil().max(0.0) as u32).min(room);
     // The finest level carries the levels finer than it, the top one its
     // share of the way to the next.
@@ -2010,10 +2013,7 @@ mod tests {
             "{what}: a working picture never drawn"
         );
         for shrink in &plan.work {
-            assert!(
-                shrink.is_power_of_two() && *shrink <= 4096,
-                "{what}"
-            );
+            assert!(shrink.is_power_of_two() && *shrink <= 4096, "{what}");
         }
     }
 
@@ -2068,7 +2068,9 @@ mod tests {
                 // No level is smaller than two texels across.
                 let short = size.0.min(size.1);
                 assert!(
-                    plan.work.iter().all(|shrink| short / shrink >= 2 || *shrink == 1),
+                    plan.work
+                        .iter()
+                        .all(|shrink| short / shrink >= 2 || *shrink == 1),
                     "{size:?} {radius}: {plan:?}"
                 );
             }
@@ -2142,7 +2144,10 @@ mod tests {
         };
         let white = beside(255, 0.6);
         let light_grey = beside(220, 0.6);
-        assert!(white > light_grey && light_grey > 0.0, "{white} {light_grey}");
+        assert!(
+            white > light_grey && light_grey > 0.0,
+            "{white} {light_grey}"
+        );
         // Below the knee nothing glows; a higher threshold glows less.
         assert_eq!(beside(90, 0.6), 0.0);
         assert!(beside(255, 0.9) < white);
@@ -2200,7 +2205,12 @@ mod tests {
         ] {
             assert_eq!(space(block), Some(Space::Display), "{block:?}");
         }
-        for block in [Block::Transform, Block::Swirl, Block::Slices, Block::RgbSplit] {
+        for block in [
+            Block::Transform,
+            Block::Swirl,
+            Block::Slices,
+            Block::RgbSplit,
+        ] {
             assert_eq!(space(block), None, "{block:?}");
         }
     }
@@ -2512,7 +2522,9 @@ mod tests {
     }
 
     /// Black, a mid grey and white, with a dim red, in one row.
-    const LEVELS: [u8; 16] = [0, 0, 0, 255, 128, 128, 128, 255, 255, 255, 255, 255, 90, 20, 20, 255];
+    const LEVELS: [u8; 16] = [
+        0, 0, 0, 255, 128, 128, 128, 255, 255, 255, 255, 255, 90, 20, 20, 255,
+    ];
 
     #[test]
     fn a_blend_lays_the_original_back_by_its_mode_and_amount() {
@@ -2522,10 +2534,18 @@ mod tests {
         let inverted = draw(&renderer, &LEVELS, size, &[invert]);
         // At amount 0 the picture so far; mixing all the way, the original.
         for mode in 0..=4 {
-            let got = draw(&renderer, &LEVELS, size, &[invert, blend(mode as f32, 0.0, 0)]);
+            let got = draw(
+                &renderer,
+                &LEVELS,
+                size,
+                &[invert, blend(mode as f32, 0.0, 0)],
+            );
             close(&got, &inverted);
         }
-        close(&draw(&renderer, &LEVELS, size, &[invert, blend(4.0, 1.0, 0)]), &LEVELS);
+        close(
+            &draw(&renderer, &LEVELS, size, &[invert, blend(4.0, 1.0, 0)]),
+            &LEVELS,
+        );
         // Each mode in light, against the inverted picture below.
         let by_mode = |mode: f32| draw(&renderer, &LEVELS, size, &[invert, blend(mode, 1.0, 0)]);
         let (added, screened, multiplied, lighter) =
@@ -2591,7 +2611,11 @@ mod tests {
             blend(4.0, 0.0, 2),
         ];
         close(&draw(&renderer, &scene, size, &both), &blurred);
-        let back = [saving(Block::Invert, &[(0, 1.0)], 1), swirl, blend(4.0, 1.0, 0)];
+        let back = [
+            saving(Block::Invert, &[(0, 1.0)], 1),
+            swirl,
+            blend(4.0, 1.0, 0),
+        ];
         close(&draw(&renderer, &scene, size, &back), &scene);
     }
 

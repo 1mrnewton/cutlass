@@ -1332,7 +1332,10 @@ impl<'a> Kept<'a> {
         let refuse = |reason: String| Err(RecipeError::Picture(reason));
         if let Some(with) = pass.with.as_deref() {
             if pass.block != Block::Blend {
-                return refuse(format!("only a blend reads a picture, not {:?}", pass.block));
+                return refuse(format!(
+                    "only a blend reads a picture, not {:?}",
+                    pass.block
+                ));
             }
             if self.slot(with).is_none() {
                 return refuse(format!("{with} is read before it is saved"));
@@ -1359,7 +1362,10 @@ impl<'a> Kept<'a> {
 fn picture_name_ok(name: &str) -> bool {
     name.len() <= 16
         && name != ORIGINAL
-        && name.bytes().next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase())
         && name
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
@@ -2103,7 +2109,10 @@ mod tests {
         }
         let plain = kept(r#"{"block":"blur"}"#).unwrap().to_json().unwrap();
         assert!(plain.contains("\"version\": 1"), "{plain}");
-        assert!(!plain.contains("save") && !plain.contains("with"), "{plain}");
+        assert!(
+            !plain.contains("save") && !plain.contains("with"),
+            "{plain}"
+        );
     }
 
     #[test]

@@ -1,13 +1,15 @@
-//! The cut passes: a clip's mask or selection keeps part of the picture
-//! drawn so far and clears the rest, as `cutlass_effects::Mask::apply` and
+//! The cut passes: a clip's masks or selection keep part of the picture
+//! drawn so far and clear the rest, as `cutlass_effects::apply_masks` and
 //! `Selection::apply` multiply it on the CPU.
 //!
-//! A mask's shape is `cutlass_effects`'s WGSL `mask_coverage`. A selection
-//! is its one-byte-a-pixel picture, read bilinearly at the clip point each
+//! The masks are `cutlass_effects`'s WGSL `mask_stack`: each shape, or a
+//! drawn mask's picture from the atlas, joined by its mode. A selection is
+//! its one-byte-a-pixel picture, read bilinearly at the clip point each
 //! canvas pixel shows, as the CPU reads it.
 
 use crate::pool::Bind;
-use cutlass_effects::{CanvasMask, MASK_WGSL};
+use crate::stack::{STACK_BYTES, alpha_view, atlas_view, stack_bytes};
+use cutlass_effects::{CanvasMasks, MASK_WGSL, STACK_WGSL};
 
 use crate::CANVAS_FORMAT;
 
@@ -29,12 +31,6 @@ fn vs(@builtin(vertex_index) index: u32) -> Out {
     var out: Out;
     out.position = vec4<f32>(x, y, 0.0, 1.0);
     return out;
-}
-
-@fragment
-fn fs_mask(in: Out) -> @location(0) vec4<f32> {
-    let c = textureLoad(picture, vec2<i32>(in.position.xy), 0);
-    return c * clamp(mask_coverage(mask, in.position.xy), 0.0, 1.0);
 }
 
 fn selected(x: i32, y: i32) -> f32 {
@@ -74,8 +70,35 @@ fn fs_select(in: Out) -> @location(0) vec4<f32> {
 }
 ";
 
-/// Bytes in the uniform block.
+/// Bytes in the selection's uniform block.
 const PARAMS: u64 = 64;
+
+/// The mask stack's pass: the picture, the drawn masks' atlas, and the
+/// stack.
+const STACK_SHADER: &str = r"
+@group(0) @binding(0) var picture: texture_2d<f32>;
+@group(0) @binding(1) var atlas: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> stack: MaskStack;
+
+struct Out {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) index: u32) -> Out {
+    let x = f32((index << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(index & 2u) * 2.0 - 1.0;
+    var out: Out;
+    out.position = vec4<f32>(x, y, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_stack(in: Out) -> @location(0) vec4<f32> {
+    let c = textureLoad(picture, vec2<i32>(in.position.xy), 0);
+    return c * mask_stack(stack, atlas, in.position.xy);
+}
+";
 
 /// A selection placed on the canvas: its pixels, one byte each and nonzero
 /// selected, and `frame`, which takes a canvas pixel centre to the clip
@@ -92,10 +115,9 @@ pub struct Selected<'a> {
 
 pub(crate) struct Cuts {
     mask: wgpu::RenderPipeline,
+    mask_layout: wgpu::BindGroupLayout,
     select: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
-    /// Bound in place of a selection by the mask pass.
-    none: wgpu::TextureView,
     pool: std::sync::Arc<crate::pool::Pool>,
 }
 
@@ -116,40 +138,52 @@ impl Cuts {
             },
             count: None,
         };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("cutlass-render cut"),
-            entries: &[
-                texture(0),
-                texture(1),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(PARAMS),
+        let layout_with = |bytes: u64| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("cutlass-render cut"),
+                entries: &[
+                    texture(0),
+                    texture(1),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(bytes),
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
+                ],
+            })
+        };
+        let layout = layout_with(PARAMS);
+        let mask_layout = layout_with(STACK_BYTES);
+        let stack_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cutlass-render cut stack"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{STACK_SHADER}\n{MASK_WGSL}\n{STACK_WGSL}").into(),
+            ),
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("cutlass-render cut"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = |entry: &str| {
+        let pipeline = |module: &wgpu::ShaderModule,
+                        layout: &wgpu::BindGroupLayout,
+                        entry: &str| {
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("cutlass-render cut"),
+                bind_group_layouts: &[Some(layout)],
+                immediate_size: 0,
+            });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("cutlass-render cut"),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
-                    module: &module,
+                    module,
                     entry_point: Some("vs"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     buffers: &[],
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &module,
+                    module,
                     entry_point: Some(entry),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
@@ -165,18 +199,17 @@ impl Cuts {
                 cache: None,
             })
         };
-        let none =
-            selection_texture(device, 1, 1).create_view(&wgpu::TextureViewDescriptor::default());
         Self {
             pool,
-            mask: pipeline("fs_mask"),
-            select: pipeline("fs_select"),
+            mask: pipeline(&stack_module, &mask_layout, "fs_stack"),
+            select: pipeline(&module, &layout, "fs_select"),
+            mask_layout,
             layout,
-            none,
         }
     }
 
-    /// `from` kept as much as `mask` keeps, into `to`.
+    /// `from` kept as much as `masks` keep, into `to`. Drawn masks whose
+    /// pictures are larger than the device's textures are refused.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn mask(
         &self,
@@ -185,16 +218,21 @@ impl Cuts {
         encoder: &mut wgpu::CommandEncoder,
         from: &wgpu::TextureView,
         to: &wgpu::TextureView,
-        mask: &CanvasMask,
-    ) {
-        let uniform: Vec<u8> = mask
-            .uniform()
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect();
+        masks: &CanvasMasks,
+    ) -> Result<(), crate::RenderError> {
+        let atlas = atlas_view(&self.pool, device, queue, masks)?;
+        let uniform = stack_bytes(masks);
         self.draw(
-            device, queue, encoder, &self.mask, from, &self.none, to, &uniform,
+            device,
+            queue,
+            encoder,
+            (&self.mask, &self.mask_layout, STACK_BYTES),
+            from,
+            &atlas,
+            to,
+            &uniform,
         );
+        Ok(())
     }
 
     /// `from` kept only where `selected` is, into `to`. A selection larger
@@ -210,38 +248,7 @@ impl Cuts {
         selected: &Selected<'_>,
     ) -> Result<(), crate::RenderError> {
         let (width, height) = (selected.width, selected.height);
-        let limit = device.limits().max_texture_dimension_2d;
-        if width == 0 || height == 0 || width > limit || height > limit {
-            return Err(crate::RenderError::Size { width, height });
-        }
-        let expected = width as usize * height as usize;
-        if selected.alpha.len() != expected {
-            return Err(crate::RenderError::Bytes {
-                expected,
-                actual: selected.alpha.len(),
-            });
-        }
-        let texture = selection_texture(device, width, height);
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            selected.alpha,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = alpha_view(&self.pool, device, queue, width, height, selected.alpha)?;
         let [a, b, c, d, e, f] = selected.frame;
         #[allow(clippy::cast_precision_loss)]
         let values = [
@@ -270,7 +277,7 @@ impl Cuts {
             device,
             queue,
             encoder,
-            &self.select,
+            (&self.select, &self.layout, PARAMS),
             from,
             &view,
             to,
@@ -285,7 +292,7 @@ impl Cuts {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        pipeline: &wgpu::RenderPipeline,
+        (pipeline, layout, bytes): (&wgpu::RenderPipeline, &wgpu::BindGroupLayout, u64),
         from: &wgpu::TextureView,
         selection: &wgpu::TextureView,
         to: &wgpu::TextureView,
@@ -293,11 +300,11 @@ impl Cuts {
     ) {
         let buffer = self
             .pool
-            .uniform(device, queue, "cutlass-render cut params", PARAMS, uniform);
+            .uniform(device, queue, "cutlass-render cut params", bytes, uniform);
         let group = self.pool.group(
             device,
             "cutlass-render cut",
-            &self.layout,
+            layout,
             &[
                 (0, Bind::View(from)),
                 (1, Bind::View(selection)),
@@ -324,23 +331,6 @@ impl Cuts {
         pass.set_bind_group(0, &group, &[]);
         pass.draw(0..3, 0..1);
     }
-}
-
-fn selection_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("cutlass-render selection"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    })
 }
 
 #[cfg(test)]

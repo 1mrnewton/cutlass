@@ -11,10 +11,29 @@
 //! A `color_mask` record has the same fields but cuts nothing: it limits
 //! where the clip's colour work (adjust, curves, wheels, HSL, LUT) shows,
 //! and on an adjustment layer where on the canvas the layer acts.
+//!
+//! A clip may list several masks of a kind. They join in the order the
+//! clip lists them, each by its [`MaskMode`]: what the first keeps starts
+//! the picture (or, when the first takes away or meets, all of the clip
+//! does), and each one after adds to it, takes from it, or keeps only
+//! where both meet. The first mask keys under the plain mask key names;
+//! each later one under names marked with its record
+//! ([`cutlass_model::mask_key`]).
 
-use cutlass_model::{Draft, KeyframeGraph, MASK_KEYS, MaterialRef, Micros, Segment, sample};
+use cutlass_model::{
+    Draft, KeyframeGraph, MASK_KEYS, MaterialId, MaterialRef, Micros, Segment, mask_key, sample,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+
+mod art;
+mod stack;
+
+pub use art::{BrushStroke, MAX_ART_POINTS, MAX_MASK_TEXT, MAX_STROKES, MaskArt, art_fits};
+
+pub use stack::{
+    ArtPicture, CanvasMasks, DrawnMask, MAX_STACK, STACK_FLOATS, STACK_WGSL, drawn_coverage,
+};
 
 /// The material `type` of a mask.
 pub const MASK: &str = "mask";
@@ -34,9 +53,17 @@ pub enum MaskShape {
     Rectangle,
     Heart,
     Star,
+    /// Letters: the clip shows through the words of its text.
+    Text,
+    /// Painted strokes.
+    Brush,
+    /// A drawn outline of curves.
+    Pen,
 }
 
 impl MaskShape {
+    /// The shapes worked out from their numbers alone, in the order the
+    /// GPU numbers them.
     pub const ALL: [Self; 6] = [
         Self::Linear,
         Self::Mirror,
@@ -45,6 +72,16 @@ impl MaskShape {
         Self::Heart,
         Self::Star,
     ];
+
+    /// The shapes drawn from a picture of their own: what the record keeps
+    /// as its art (their art).
+    pub const DRAWN: [Self; 3] = [Self::Text, Self::Brush, Self::Pen];
+
+    /// Whether the shape is drawn from art rather than its numbers.
+    #[must_use]
+    pub fn is_drawn(self) -> bool {
+        Self::DRAWN.contains(&self)
+    }
 
     #[must_use]
     pub fn key(self) -> &'static str {
@@ -55,6 +92,9 @@ impl MaskShape {
             Self::Rectangle => "rectangle",
             Self::Heart => "heart",
             Self::Star => "star",
+            Self::Text => "text",
+            Self::Brush => "brush",
+            Self::Pen => "pen",
         }
     }
 
@@ -67,12 +107,79 @@ impl MaskShape {
             Self::Rectangle => "Rectangle",
             Self::Heart => "Heart",
             Self::Star => "Star",
+            Self::Text => "Text",
+            Self::Brush => "Brush",
+            Self::Pen => "Pen",
         }
     }
 
     #[must_use]
     pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|shape| shape.key() == key)
+        Self::ALL
+            .into_iter()
+            .chain(Self::DRAWN)
+            .find(|shape| shape.key() == key)
+    }
+}
+
+/// How a mask joins the masks listed before it on the same clip.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskMode {
+    /// Keeps what it covers as well as what was kept.
+    #[default]
+    Add,
+    /// Takes what it covers away from what was kept.
+    Subtract,
+    /// Keeps only where it and what was kept meet.
+    Intersect,
+}
+
+impl MaskMode {
+    pub const ALL: [Self; 3] = [Self::Add, Self::Subtract, Self::Intersect];
+
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Subtract => "subtract",
+            Self::Intersect => "intersect",
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Add => "Add",
+            Self::Subtract => "Subtract",
+            Self::Intersect => "Intersect",
+        }
+    }
+
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.key() == key)
+    }
+
+    /// What is kept once a mask keeping `coverage` joins `kept`.
+    #[must_use]
+    pub fn combine(self, kept: f32, coverage: f32) -> f32 {
+        match self {
+            Self::Add => kept + coverage - kept * coverage,
+            Self::Subtract => kept * (1.0 - coverage),
+            Self::Intersect => kept * coverage,
+        }
+    }
+
+    /// What is kept before the first mask joins, when it is this mode:
+    /// nothing before one that adds, all of the clip before one that takes
+    /// away or meets.
+    #[must_use]
+    pub fn start(self) -> f32 {
+        match self {
+            Self::Add => 0.0,
+            Self::Subtract | Self::Intersect => 1.0,
+        }
     }
 }
 
@@ -88,22 +195,34 @@ pub struct Mask {
     pub feather: f32,
     pub round: f32,
     pub invert: bool,
+    /// How it joins the masks before it; a clip's only mask keeps what it
+    /// covers when it adds, and all but that when it takes away.
+    #[serde(default)]
+    pub mode: MaskMode,
 }
 
 impl Mask {
-    /// A new mask of `shape`, centred, half the clip's size.
+    /// A new mask of `shape`, centred, half the clip's size; a brush or pen
+    /// mask's box is the whole clip, so what is drawn lands where it is
+    /// drawn.
     #[must_use]
     pub fn new(shape: MaskShape) -> Self {
+        let size = if matches!(shape, MaskShape::Brush | MaskShape::Pen) {
+            1.0
+        } else {
+            0.5
+        };
         Self {
             shape,
             x: 0.0,
             y: 0.0,
-            width: 0.5,
-            height: 0.5,
+            width: size,
+            height: size,
             rotation: 0.0,
             feather: 0.0,
             round: 0.0,
             invert: false,
+            mode: MaskMode::Add,
         }
     }
 
@@ -169,6 +288,9 @@ impl Mask {
                 let reach = 0.45 + 0.55 * into;
                 edge(radius / reach, soft / half_w.min(half_h))
             }
+            // Drawn from their art (see `DrawnMask`); alone they keep
+            // nothing.
+            MaskShape::Text | MaskShape::Brush | MaskShape::Pen => 0.0,
         };
         if self.invert { 1.0 - keep } else { keep }
     }
@@ -178,10 +300,24 @@ impl Mask {
     /// stay. A key that does not read leaves its number as set.
     #[must_use]
     pub fn at(&self, segment: &Segment, graphs: &[KeyframeGraph], time: Micros) -> Self {
+        self.keyed(segment, graphs, time, None)
+    }
+
+    /// This mask as the keys named for mask record `record` move it, or the
+    /// plain mask keys for `None` (a clip's first mask), as [`Mask::at`].
+    #[must_use]
+    pub fn keyed(
+        &self,
+        segment: &Segment,
+        graphs: &[KeyframeGraph],
+        time: Micros,
+        record: Option<&str>,
+    ) -> Self {
         let groups = &segment.common_keyframes;
+        let names = MASK_KEYS.map(|name| mask_key(name, record));
         if !groups
             .iter()
-            .any(|group| MASK_KEYS.contains(&group.property_type.as_str()))
+            .any(|group| names.contains(&group.property_type))
         {
             return *self;
         }
@@ -196,8 +332,8 @@ impl Mask {
             &mut mask.feather,
             &mut mask.round,
         ];
-        for (name, field) in MASK_KEYS.iter().zip(fields) {
-            if let Some(Some(value)) = sample(groups, graphs, &[name], offset) {
+        for (name, field) in names.iter().zip(fields) {
+            if let Some(Some(value)) = sample(groups, graphs, &[name.as_str()], offset) {
                 #[allow(clippy::cast_possible_truncation)]
                 let value = value as f32;
                 *field = value;
@@ -227,6 +363,7 @@ impl Mask {
             fields.insert(name.to_owned(), json!(value));
         }
         fields.insert("invert".to_owned(), json!(self.invert));
+        fields.insert("mode".to_owned(), json!(self.mode.key()));
         fields
     }
 
@@ -256,6 +393,10 @@ impl Mask {
                 .get("invert")
                 .and_then(Value::as_bool)
                 .unwrap_or_default(),
+            mode: match fields.get("mode") {
+                None | Some(Value::Null) => MaskMode::Add,
+                Some(mode) => MaskMode::from_key(mode.as_str()?)?,
+            },
         };
         mask.is_valid().then_some(mask)
     }
@@ -268,25 +409,70 @@ impl Mask {
         width: u32,
         to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
     ) {
-        let width = width as usize;
-        if width == 0 {
-            return;
+        apply_masks(std::slice::from_ref(self), rgba, width, to_clip);
+    }
+}
+
+/// How much of the clip `masks` keep at clip point `u`, `v`, joined in
+/// order by their modes; everything when there are none.
+#[must_use]
+pub fn stack_coverage(masks: &[Mask], u: f32, v: f32) -> f32 {
+    let Some(first) = masks.first() else {
+        return 1.0;
+    };
+    masks
+        .iter()
+        .fold(first.mode.start(), |kept, mask| {
+            mask.mode.combine(kept, mask.coverage(u, v).clamp(0.0, 1.0))
+        })
+        .clamp(0.0, 1.0)
+}
+
+/// Multiply premultiplied RGBA by what `masks` keep, as [`Mask::apply`].
+pub fn apply_masks(
+    masks: &[Mask],
+    rgba: &mut [u8],
+    width: u32,
+    to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
+) {
+    apply_cover(rgba, width, to_clip, |u, v| stack_coverage(masks, u, v));
+}
+
+/// Multiply premultiplied RGBA by what `masks`, shapes and drawn pictures,
+/// keep, as [`apply_masks`].
+pub fn apply_drawn(
+    masks: &[DrawnMask],
+    rgba: &mut [u8],
+    width: u32,
+    to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
+) {
+    apply_cover(rgba, width, to_clip, |u, v| drawn_coverage(masks, u, v));
+}
+
+fn apply_cover(
+    rgba: &mut [u8],
+    width: u32,
+    to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
+    cover: impl Fn(f32, f32) -> f32,
+) {
+    let width = width as usize;
+    if width == 0 {
+        return;
+    }
+    for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        if pixel[3] == 0 {
+            continue;
         }
-        for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            if pixel[3] == 0 {
-                continue;
-            }
-            #[allow(clippy::cast_precision_loss)]
-            let (x, y) = ((index % width) as f32 + 0.5, (index / width) as f32 + 0.5);
-            let keep = to_clip(x, y).map_or(0.0, |(u, v)| self.coverage(u, v));
-            if keep >= 1.0 {
-                continue;
-            }
-            for channel in pixel.iter_mut() {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let value = (f32::from(*channel) * keep.max(0.0)).round() as u8;
-                *channel = value;
-            }
+        #[allow(clippy::cast_precision_loss)]
+        let (x, y) = ((index % width) as f32 + 0.5, (index / width) as f32 + 0.5);
+        let keep = to_clip(x, y).map_or(0.0, |(u, v)| cover(u, v));
+        if keep >= 1.0 {
+            continue;
+        }
+        for channel in pixel.iter_mut() {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let value = (f32::from(*channel) * keep.max(0.0)).round() as u8;
+            *channel = value;
         }
     }
 }
@@ -301,33 +487,71 @@ impl Mask {
         width: u32,
         to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
     ) {
-        let width = width as usize;
-        if width == 0 || before.len() != after.len() {
-            return;
+        limit_masks(std::slice::from_ref(self), before, after, width, to_clip);
+    }
+}
+
+/// Keep `after` where `masks` keep and `before` where they do not, as
+/// [`Mask::limit`].
+pub fn limit_masks(
+    masks: &[Mask],
+    before: &[u8],
+    after: &mut [u8],
+    width: u32,
+    to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
+) {
+    limit_cover(before, after, width, to_clip, |u, v| {
+        stack_coverage(masks, u, v)
+    });
+}
+
+/// Keep `after` where `masks`, shapes and drawn pictures, keep and
+/// `before` where they do not, as [`limit_masks`].
+pub fn limit_drawn(
+    masks: &[DrawnMask],
+    before: &[u8],
+    after: &mut [u8],
+    width: u32,
+    to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
+) {
+    limit_cover(before, after, width, to_clip, |u, v| {
+        drawn_coverage(masks, u, v)
+    });
+}
+
+fn limit_cover(
+    before: &[u8],
+    after: &mut [u8],
+    width: u32,
+    to_clip: impl Fn(f32, f32) -> Option<(f32, f32)>,
+    cover: impl Fn(f32, f32) -> f32,
+) {
+    let width = width as usize;
+    if width == 0 || before.len() != after.len() {
+        return;
+    }
+    let pairs = after
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(before.as_chunks::<4>().0);
+    for (index, (pixel, old)) in pairs.enumerate() {
+        if pixel == old {
+            continue;
         }
-        let pairs = after
-            .as_chunks_mut::<4>()
-            .0
-            .iter_mut()
-            .zip(before.as_chunks::<4>().0);
-        for (index, (pixel, old)) in pairs.enumerate() {
-            if pixel == old {
-                continue;
-            }
-            #[allow(clippy::cast_precision_loss)]
-            let (x, y) = ((index % width) as f32 + 0.5, (index / width) as f32 + 0.5);
-            let keep = to_clip(x, y)
-                .map_or(0.0, |(u, v)| self.coverage(u, v))
-                .clamp(0.0, 1.0);
-            if keep >= 1.0 {
-                continue;
-            }
-            for (channel, old) in pixel.iter_mut().zip(old) {
-                let mixed = f32::from(*old) + (f32::from(*channel) - f32::from(*old)) * keep;
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let value = mixed.round().clamp(0.0, 255.0) as u8;
-                *channel = value;
-            }
+        #[allow(clippy::cast_precision_loss)]
+        let (x, y) = ((index % width) as f32 + 0.5, (index / width) as f32 + 0.5);
+        let keep = to_clip(x, y)
+            .map_or(0.0, |(u, v)| cover(u, v))
+            .clamp(0.0, 1.0);
+        if keep >= 1.0 {
+            continue;
+        }
+        for (channel, old) in pixel.iter_mut().zip(old) {
+            let mixed = f32::from(*old) + (f32::from(*channel) - f32::from(*old)) * keep;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let value = mixed.round().clamp(0.0, 255.0) as u8;
+            *channel = value;
         }
     }
 }
@@ -347,12 +571,88 @@ pub fn segment_color_mask(draft: &Draft, segment: &Segment) -> Option<Mask> {
 /// The first mask of `kind` that `segment` lists.
 #[must_use]
 pub fn listed_mask(draft: &Draft, segment: &Segment, kind: &str) -> Option<Mask> {
-    segment.extra_material_refs.iter().find_map(|id| {
+    listed_masks(draft, segment, kind)
+        .into_iter()
+        .next()
+        .map(|listed| listed.mask)
+}
+
+/// A mask a clip lists, with the record it is stored in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListedMask {
+    pub id: MaterialId,
+    pub mask: Mask,
+    /// Whether it is the clip's first clip mask, keyed under the plain
+    /// mask key names. A colour mask never is.
+    pub first: bool,
+    /// What a drawn mask is drawn from, when it has been drawn.
+    pub art: Option<MaskArt>,
+}
+
+impl ListedMask {
+    /// The record its keys are named for, `None` for the first mask.
+    #[must_use]
+    pub fn key_record(&self) -> Option<&str> {
+        (!self.first).then_some(self.id.as_str())
+    }
+
+    /// The mask as its keys move it at timeline `time`.
+    #[must_use]
+    pub fn at(&self, segment: &Segment, graphs: &[KeyframeGraph], time: Micros) -> Mask {
+        self.mask.keyed(segment, graphs, time, self.key_record())
+    }
+}
+
+/// The clip masks `segment` lists, in order.
+#[must_use]
+pub fn segment_masks(draft: &Draft, segment: &Segment) -> Vec<ListedMask> {
+    listed_masks(draft, segment, MASK)
+}
+
+/// The masks on `segment`'s colour work, in order.
+#[must_use]
+pub fn segment_color_masks(draft: &Draft, segment: &Segment) -> Vec<ListedMask> {
+    listed_masks(draft, segment, COLOR_MASK)
+}
+
+/// Every mask of `kind` that `segment` lists, in its order. A record whose
+/// fields do not read is left out, and still holds its place for keys.
+#[must_use]
+pub fn listed_masks(draft: &Draft, segment: &Segment, kind: &str) -> Vec<ListedMask> {
+    let mut masks = Vec::new();
+    let mut seen = 0_usize;
+    for id in &segment.extra_material_refs {
         let Some(MaterialRef::Other(raw)) = draft.materials.get(id.as_str()) else {
-            return None;
+            continue;
         };
-        (raw.kind == kind).then(|| Mask::from_fields(&raw.fields))?
-    })
+        if raw.kind != kind {
+            continue;
+        }
+        // The first clip mask keys under the plain names, read or not, as
+        // the requests count places. Colour masks always key under their
+        // records, so they never take a clip mask's keys.
+        let first = seen == 0 && kind == MASK;
+        seen += 1;
+        if let Some(mask) = Mask::from_fields(&raw.fields) {
+            let art = MaskArt::from_fields(&raw.fields).filter(|art| art.shape() == mask.shape);
+            masks.push(ListedMask {
+                id: id.clone(),
+                mask,
+                first,
+                art,
+            });
+        }
+    }
+    masks
+}
+
+/// `segment`'s masks of `kind` as their keys move them at timeline `time`.
+#[must_use]
+pub fn masks_at(draft: &Draft, segment: &Segment, kind: &str, time: Micros) -> Vec<Mask> {
+    listed_masks(draft, segment, kind)
+        .iter()
+        .map(|listed| listed.at(segment, &draft.keyframe_graph_list, time))
+        .collect()
 }
 
 /// 1 inside a shape whose edge is at `value` 1, soft for `soft` past it.
@@ -495,7 +795,42 @@ fn mask_coverage(m: CanvasMask, pixel: vec2<f32>) -> f32 {
 mod tests {
     use cutlass_model::{Draft, MaterialId, RawMaterial, Segment, TimeRange};
 
-    use super::{COLOR_MASK, MASK, Mask, MaskShape, segment_color_mask, segment_mask};
+    use cutlass_model::{CommonKeyframe, CommonKeyframeGroup, MASK_KEYS, Micros, mask_key};
+    use serde_json::json;
+
+    use super::{
+        COLOR_MASK, MASK, Mask, MaskMode, MaskShape, apply_masks, masks_at, segment_color_mask,
+        segment_mask, segment_masks, stack_coverage,
+    };
+
+    /// A draft whose clip `s` lists `masks` as records `m0`, `m1`, …
+    fn listing(masks: &[Mask]) -> (Draft, Segment) {
+        let mut draft = Draft::empty("D");
+        let mut segment = Segment::new("s", "x", TimeRange::new(0, 1_000_000));
+        for (index, mask) in masks.iter().enumerate() {
+            let id = MaterialId::new(format!("m{index}"));
+            draft.materials.common_mask.push(RawMaterial {
+                id: id.clone(),
+                kind: MASK.to_owned(),
+                fields: mask.to_fields(),
+            });
+            segment.extra_material_refs.push(id);
+        }
+        (draft, segment)
+    }
+
+    fn key(name: &str, offset: i64, value: f64) -> CommonKeyframeGroup {
+        CommonKeyframeGroup {
+            property_type: name.to_owned(),
+            keyframe_list: vec![CommonKeyframe {
+                id: format!("k-{name}"),
+                time_offset: Micros(offset),
+                values: vec![value],
+                ..CommonKeyframe::default()
+            }],
+            ..CommonKeyframeGroup::default()
+        }
+    }
 
     #[test]
     fn each_shape_keeps_its_middle_and_drops_its_corner() {
@@ -598,5 +933,139 @@ mod tests {
         });
         assert_eq!(&after[..4], &[200, 50, 0, 255]);
         assert_eq!(&after[4..], &[100, 100, 100, 255]);
+    }
+
+    #[test]
+    fn masks_join_in_order_by_their_modes() {
+        // Two circles side by side, half the clip apart.
+        let left = Mask {
+            x: -0.5,
+            width: 0.3,
+            height: 0.3,
+            ..Mask::new(MaskShape::Circle)
+        };
+        let right = Mask { x: 0.5, ..left };
+        let both = Mask {
+            width: 0.9,
+            height: 0.3,
+            ..Mask::new(MaskShape::Rectangle)
+        };
+        let at = |masks: &[Mask], u: f32| stack_coverage(masks, u, 0.0);
+        // None keeps all; one that adds keeps itself.
+        assert_eq!(at(&[], 0.9), 1.0);
+        assert!(at(&[left], -0.5) > 0.99 && at(&[left], 0.5) < 0.01);
+        // Add: both circles.
+        let added = [left, right];
+        assert!(at(&added, -0.5) > 0.99 && at(&added, 0.5) > 0.99);
+        assert!(at(&added, 0.0) < 0.01);
+        // Subtract: the wide box less the right circle.
+        let taken = [
+            both,
+            Mask {
+                mode: MaskMode::Subtract,
+                ..right
+            },
+        ];
+        assert!(at(&taken, -0.5) > 0.99 && at(&taken, 0.0) > 0.99);
+        assert!(at(&taken, 0.5) < 0.01);
+        // Intersect: only where the box and the left circle meet.
+        let met = [
+            both,
+            Mask {
+                mode: MaskMode::Intersect,
+                ..left
+            },
+        ];
+        assert!(at(&met, -0.5) > 0.99);
+        assert!(at(&met, 0.0) < 0.01 && at(&met, 0.5) < 0.01);
+        // Order counts: taking away first, then adding, keeps the circle
+        // the subtraction took.
+        let reordered = [
+            Mask {
+                mode: MaskMode::Subtract,
+                ..right
+            },
+            Mask {
+                mode: MaskMode::Add,
+                ..right
+            },
+        ];
+        assert!(at(&reordered, 0.5) > 0.99);
+        // A first mask that takes away keeps all of the clip but itself.
+        let alone = [Mask {
+            mode: MaskMode::Subtract,
+            ..left
+        }];
+        assert!(at(&alone, -0.5) < 0.01 && at(&alone, 0.5) > 0.99);
+        // Through the picture, as one mask did.
+        let mut rgba = [200, 100, 50, 255].repeat(3);
+        apply_masks(&added, &mut rgba, 3, |x, _| {
+            Some(([-0.5, 0.0, 0.5][x as usize], 0.0))
+        });
+        assert_eq!(
+            rgba,
+            [[200, 100, 50, 255], [0, 0, 0, 0], [200, 100, 50, 255]].concat()
+        );
+    }
+
+    #[test]
+    fn a_clip_lists_its_masks_in_order_and_each_keys_on_its_own() {
+        let first = Mask::new(MaskShape::Circle);
+        let second = Mask {
+            mode: MaskMode::Subtract,
+            ..Mask::new(MaskShape::Star)
+        };
+        let (mut draft, mut segment) = listing(&[first, second]);
+        // A record that does not read sits between and is left out.
+        draft.materials.common_mask.push(RawMaterial {
+            id: MaterialId::new("bad"),
+            kind: MASK.to_owned(),
+            fields: serde_json::Map::from_iter([("shape".to_owned(), json!("blob"))]),
+        });
+        segment
+            .extra_material_refs
+            .insert(1, MaterialId::new("bad"));
+        let listed = segment_masks(&draft, &segment);
+        assert_eq!(listed.len(), 2);
+        assert_eq!((listed[0].mask, listed[0].first), (first, true));
+        assert_eq!((listed[1].mask, listed[1].first), (second, false));
+        assert_eq!(listed[0].key_record(), None);
+        assert_eq!(listed[1].key_record(), Some("m1"));
+        assert_eq!(segment_mask(&draft, &segment), Some(first));
+
+        // The plain keys move the first; the marked ones the second.
+        let x = MASK_KEYS[0];
+        segment.common_keyframes.push(key(x, 0, 0.25));
+        segment
+            .common_keyframes
+            .push(key(&mask_key(x, Some("m1")), 0, -0.75));
+        let moved = masks_at(&draft, &segment, MASK, Micros(0));
+        assert_eq!(moved.len(), 2);
+        assert!((moved[0].x - 0.25).abs() < 1e-6);
+        assert!((moved[1].x + 0.75).abs() < 1e-6);
+        assert_eq!(moved[1].mode, MaskMode::Subtract);
+    }
+
+    #[test]
+    fn a_record_without_a_mode_adds_and_a_mode_that_does_not_read_is_refused() {
+        let mask = Mask::new(MaskShape::Rectangle);
+        let mut fields = mask.to_fields();
+        assert_eq!(fields.get("mode"), Some(&json!("add")));
+        fields.remove("mode");
+        assert_eq!(Mask::from_fields(&fields), Some(mask));
+        fields.insert("mode".to_owned(), json!("intersect"));
+        assert_eq!(
+            Mask::from_fields(&fields).map(|mask| mask.mode),
+            Some(MaskMode::Intersect)
+        );
+        fields.insert("mode".to_owned(), json!("blend"));
+        assert_eq!(Mask::from_fields(&fields), None);
+        // The request's JSON may leave the mode out.
+        let read: Mask = serde_json::from_value(json!({
+            "shape": "circle", "x": 0.0, "y": 0.0, "width": 0.5, "height": 0.5,
+            "rotation": 0.0, "feather": 0.0, "round": 0.0, "invert": false
+        }))
+        .unwrap();
+        assert_eq!(read.mode, MaskMode::Add);
     }
 }

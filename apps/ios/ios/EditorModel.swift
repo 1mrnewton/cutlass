@@ -59,6 +59,22 @@ final class EditorModel {
     private(set) var clipFilter: ClipFilter?
     /// The selected picture's or adjustment layer's sliders.
     private(set) var adjustSliders: [AdjustSlider]?
+    /// The selected clip's masks at the playhead, in order.
+    private(set) var masks: [ClipMask] = []
+    /// The mask the Mask panel has in hand, by its place in `masks`.
+    var maskIndex = 0 {
+        didSet { if maskIndex != oldValue { refreshMaskHandles() } }
+    }
+    /// Where the mask in hand's handles are on the canvas.
+    private(set) var maskHandles: MaskHandles?
+    /// What a finger on the preview does while the Mask panel is open.
+    var maskTool: MaskTool = .handles
+    /// A brush mask's stroke width, in canvas pixels.
+    var maskBrushSize: Double = 40
+    /// The corners of a pen outline being put down, in canvas pixels.
+    var penPoints: [CGPoint] = []
+    /// The Mask panel's shapes; they never change.
+    let maskShapeList = maskShapes()
     /// Filter tile pictures by filter id, drawn by Rust once each.
     private(set) var posters: [String: CGImage] = [:]
 
@@ -798,6 +814,123 @@ final class EditorModel {
         clipState = selectedClip.flatMap { clip in try? editor?.clipState(clipId: clip, atUs: at) }
         clipFilter = selectedClip.flatMap { clip in try? editor?.clipFilter(clipId: clip) }
         adjustSliders = selectedClip.flatMap { clip in try? editor?.adjustSliders(clipId: clip) }
+        masks = selectedClip.flatMap { clip in try? editor?.masks(clipId: clip, color: false, atUs: at) } ?? []
+        refreshMaskHandles()
+    }
+
+    // MARK: Masks
+
+    /// The mask in hand, kept inside the list.
+    var maskInHand: ClipMask? {
+        masks.indices.contains(maskIndex) ? masks[maskIndex] : nil
+    }
+
+    private func refreshMaskHandles() {
+        if !masks.isEmpty, maskIndex >= masks.count { maskIndex = masks.count - 1 }
+        let at = playheadUs
+        let index = UInt32(max(maskIndex, 0))
+        maskHandles = selectedClip.flatMap { clip in
+            masks.isEmpty ? nil : (try? editor?.maskHandles(clipId: clip, color: false, index: index, atUs: at)) ?? nil
+        }
+    }
+
+    /// Put a new mask of `shape` at the end of the list and take it in hand.
+    func addMask(_ shape: String) {
+        guard let editor, let clip = selectedClip else { return }
+        pause()
+        do {
+            let index = try editor.addMask(clipId: clip, color: false, shape: shape, atUs: playheadUs)
+            try editor.save()
+            reload()
+            maskIndex = Int(index)
+        } catch {
+            show(error)
+            reload()
+        }
+    }
+
+    /// Make the mask in hand `mask`. Changes while `live` join one undo
+    /// step and are saved when the last one, not live, arrives.
+    func editMask(_ mask: ClipMask, live: Bool) {
+        guard let clip = selectedClip else { return }
+        let index = UInt32(maskIndex)
+        let at = playheadUs
+        edit(save: !live) {
+            try $0.editMask(clipId: clip, color: false, index: index, atUs: at, mask: mask, live: live)
+        }
+    }
+
+    func removeMask() {
+        guard let clip = selectedClip, maskInHand != nil else { return }
+        let index = UInt32(maskIndex)
+        edit { try $0.removeMask(clipId: clip, color: false, index: index) }
+    }
+
+    /// Move the mask in hand one place up the list (earlier), or down.
+    func moveMask(up: Bool) {
+        guard let clip = selectedClip else { return }
+        let to = up ? maskIndex - 1 : maskIndex + 1
+        guard maskInHand != nil, masks.indices.contains(to) else { return }
+        let from = UInt32(maskIndex)
+        edit { try $0.moveMask(clipId: clip, color: false, from: from, to: UInt32(to)) }
+        maskIndex = to
+    }
+
+    func setMaskText(_ text: String) {
+        guard let clip = selectedClip else { return }
+        let index = UInt32(maskIndex)
+        edit { try $0.setMaskText(clipId: clip, color: false, index: index, text: text) }
+    }
+
+    /// Paint, or rub out, a stroke `size` canvas pixels wide through
+    /// canvas points on the brush mask in hand.
+    func paintMask(_ points: [CGPoint], size: Double, erase: Bool) {
+        guard let clip = selectedClip else { return }
+        let index = UInt32(maskIndex)
+        let at = playheadUs
+        let trace = points.flatMap { [Double($0.x), Double($0.y)] }
+        edit {
+            try $0.paintMask(
+                clipId: clip, color: false, index: index, atUs: at, trace: trace, size: size, erase: erase)
+        }
+    }
+
+    /// Make the pen mask in hand the outline through canvas points.
+    func drawMaskOutline(_ points: [CGPoint]) {
+        guard let clip = selectedClip else { return }
+        let index = UInt32(maskIndex)
+        let at = playheadUs
+        let corners = points.flatMap { [Double($0.x), Double($0.y)] }
+        edit { try $0.drawMaskOutline(clipId: clip, color: false, index: index, atUs: at, corners: corners) }
+    }
+
+    /// Take hold of a handle of the mask in hand at a canvas point. False
+    /// when none is there.
+    func beginMaskDrag(at point: CGPoint) -> Bool {
+        guard let editor, let clip = selectedClip, maskInHand != nil else { return false }
+        pause()
+        return (try? editor.maskBegin(
+            clipId: clip, color: false, index: UInt32(maskIndex), atUs: playheadUs,
+            x: point.x, y: point.y)) ?? false
+    }
+
+    /// Move the handle held to a canvas point. Rust keeps one undo step.
+    func dragMask(to point: CGPoint) {
+        guard let editor else { return }
+        do {
+            _ = try editor.maskDrag(x: point.x, y: point.y)
+        } catch {
+            show(error)
+            return
+        }
+        refreshStage()
+        draw()
+    }
+
+    /// End the mask drag and save.
+    func endMaskDrag() {
+        guard let editor else { return }
+        edit { _ in try editor.maskEnd() }
     }
 
     /// The keyframe button: remove the keyframe under the playhead, else key

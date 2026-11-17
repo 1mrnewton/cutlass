@@ -31,6 +31,7 @@ mod mix;
 mod package;
 mod pool;
 mod relight;
+mod stack;
 mod target;
 mod transition;
 mod vector;
@@ -488,7 +489,7 @@ impl Renderer {
                         let kept = blur::scratch(&self.pool, device, size);
                         let mask = scaled_mask(mask, scale);
                         self.keep
-                            .run(device, queue, encoder, &before, &result, &kept, &mask);
+                            .run(device, queue, encoder, &before, &result, &kept, &mask)?;
                         result = kept;
                     }
                     bound.clear();
@@ -505,7 +506,8 @@ impl Renderer {
                     Self::paint(&self.layers, encoder, &first, &bound);
                     let kept = blur::scratch(&self.pool, device, size);
                     let mask = scaled_mask(mask, scale);
-                    self.cuts.mask(device, queue, encoder, &first, &kept, &mask);
+                    self.cuts
+                        .mask(device, queue, encoder, &first, &kept, &mask)?;
                     bound.clear();
                     bound.push(self.layers.bind(
                         &self.pool,
@@ -590,7 +592,7 @@ impl Renderer {
                         let kept = blur::scratch(&self.pool, device, size);
                         let mask = scaled_mask(mask, scale);
                         self.keep
-                            .run(device, queue, encoder, &before, &result, &kept, &mask);
+                            .run(device, queue, encoder, &before, &result, &kept, &mask)?;
                         result = kept;
                     }
                     let uploaded = layer::Uploaded {
@@ -773,20 +775,16 @@ fn shrunk(placement: Placement, scale: (f64, f64)) -> Placement {
     }
 }
 
-/// `mask`, laid out on a full-size canvas, for a canvas `scale` times that
-/// size each way: a target pixel centre at `p` is the canvas point
+/// `masks`, laid out on a full-size canvas, for a canvas `scale` times
+/// that size each way: a target pixel centre at `p` is the canvas point
 /// `p / scale`.
 fn scaled_mask(
-    mask: &cutlass_effects::CanvasMask,
+    masks: &cutlass_effects::CanvasMasks,
     scale: (f64, f64),
-) -> cutlass_effects::CanvasMask {
-    let (sx, sy) = scale;
-    if sx == 1.0 && sy == 1.0 {
-        return *mask;
-    }
-    cutlass_effects::CanvasMask {
-        frame: scaled_frame(mask.frame, scale),
-        ..*mask
+) -> cutlass_effects::CanvasMasks {
+    cutlass_effects::CanvasMasks {
+        frame: scaled_frame(masks.frame, scale),
+        masks: masks.masks.clone(),
     }
 }
 

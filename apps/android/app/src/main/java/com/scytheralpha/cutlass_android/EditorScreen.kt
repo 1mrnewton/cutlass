@@ -93,6 +93,7 @@ sealed interface Panel {
     data object Animations : Panel
     data object Fade : Panel
     data object Opacity : Panel
+    data object Mask : Panel
 
     /** Add text, or change the text clip with this id. */
     data class Text(val clip: String?) : Panel
@@ -230,11 +231,11 @@ fun EditorScreen(project: ProjectSummary, home: () -> Unit) {
             val configuration = LocalConfiguration.current
             if (configuration.screenWidthDp > configuration.screenHeightDp) {
                 Row(Modifier.weight(1f).fillMaxWidth()) {
-                    Preview(model, Modifier.weight(0.42f).fillMaxHeight()) { panel = Panel.Text(it) }
+                    Preview(model, Modifier.weight(0.42f).fillMaxHeight(), panel == Panel.Mask) { panel = Panel.Text(it) }
                     Column(Modifier.weight(0.58f).fillMaxHeight(), content = controls)
                 }
             } else {
-                Preview(model) { panel = Panel.Text(it) }
+                Preview(model, masking = panel == Panel.Mask) { panel = Panel.Text(it) }
                 controls()
             }
         }
@@ -252,7 +253,12 @@ fun EditorScreen(project: ProjectSummary, home: () -> Unit) {
  * either way.
  */
 @Composable
-private fun Preview(model: EditorModel, area: Modifier? = null, editText: (String) -> Unit) {
+private fun Preview(
+    model: EditorModel,
+    area: Modifier? = null,
+    masking: Boolean = false,
+    editText: (String) -> Unit,
+) {
     val tallest = (LocalConfiguration.current.screenHeightDp * 0.45f).dp
     BoxWithConstraints(area ?: Modifier.fillMaxWidth()) {
         val canvasFirst = area == null && model.canvasAspect < 1.6f ||
@@ -280,7 +286,9 @@ private fun Preview(model: EditorModel, area: Modifier? = null, editText: (Strin
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
-                if (!model.isPlaying) {
+                if (masking) {
+                    MaskOverlay(model)
+                } else if (!model.isPlaying) {
                     StageOverlay(model = model, editText = editText)
                 }
             }
@@ -418,6 +426,7 @@ private fun Bottom(
             panel == Panel.Speed && selection != null -> SpeedPanel(model, selection, done)
             panel == Panel.Fade && selection != null -> FadePanel(model, selection, done)
             panel == Panel.Opacity && selection != null -> OpacityPanel(model, selection, done)
+            panel == Panel.Mask && selection != null -> MaskPanel(model, done)
             selectionBar != null -> ToolBarView(
                 tools = toolBar(selectionBar),
                 back = { model.selectedClip = null },
@@ -467,6 +476,11 @@ private fun useTool(
         ToolKind.SPLICE -> model.selectedClip?.let(model::toMain)
         ToolKind.FADE -> setPanel(Panel.Fade)
         ToolKind.OPACITY -> setPanel(Panel.Opacity)
+        ToolKind.MASK -> {
+            model.pause()
+            model.maskTool = MaskTool.HANDLES
+            setPanel(Panel.Mask)
+        }
         ToolKind.DUPLICATE -> model.selectedClip?.let(model::duplicate)
         ToolKind.ADD_OVERLAY -> pick(Pick.OVERLAY)
         ToolKind.IMPORT_SOUND -> pick(Pick.SOUND)
@@ -568,6 +582,7 @@ val ToolKind.icon: String
         ToolKind.EXTRACT_AUDIO -> "extractAudio"
         ToolKind.FADE -> "fade"
         ToolKind.OPACITY -> "opacity"
+        ToolKind.MASK -> "mask"
         ToolKind.BEATS -> "beat"
         ToolKind.UNLINK -> "unlink"
         ToolKind.SPLICE -> "splice"

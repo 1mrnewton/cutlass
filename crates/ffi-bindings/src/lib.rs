@@ -720,6 +720,122 @@ pub fn graph_curves() -> Vec<GraphCurve> {
         .collect()
 }
 
+/// One mask of a clip's list, as its keys have it at the time asked for.
+/// `shape` is a key from [`mask_shapes`]; `mode` is `add`, `subtract` or
+/// `intersect`. The box is in the clip's own frame, -1 to 1 each way with
+/// y up; `rotation` is degrees anticlockwise.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct ClipMask {
+    pub shape: String,
+    pub mode: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub rotation: f64,
+    pub feather: f64,
+    pub round: f64,
+    pub invert: bool,
+    /// Its numbers have keys, so a change keys them at the time shown.
+    pub keyed: bool,
+    /// What a text mask says.
+    pub text: Option<String>,
+}
+
+impl From<cutlass_ffi::PhoneMask> for ClipMask {
+    fn from(mask: cutlass_ffi::PhoneMask) -> Self {
+        Self {
+            shape: mask.shape,
+            mode: mask.mode,
+            x: mask.x,
+            y: mask.y,
+            width: mask.width,
+            height: mask.height,
+            rotation: mask.rotation,
+            feather: mask.feather,
+            round: mask.round,
+            invert: mask.invert,
+            keyed: mask.keyed,
+            text: mask.text,
+        }
+    }
+}
+
+impl From<ClipMask> for cutlass_ffi::PhoneMask {
+    fn from(mask: ClipMask) -> Self {
+        Self {
+            shape: mask.shape,
+            mode: mask.mode,
+            x: mask.x,
+            y: mask.y,
+            width: mask.width,
+            height: mask.height,
+            rotation: mask.rotation,
+            feather: mask.feather,
+            round: mask.round,
+            invert: mask.invert,
+            keyed: mask.keyed,
+            text: mask.text,
+        }
+    }
+}
+
+/// A mask's handles on the canvas, in canvas pixels with y down. `corners`
+/// and `line` are x, y pairs; `line` is empty unless the mask is a line or
+/// a mirror. `reach` is how far from a knob a finger still takes it.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct MaskHandles {
+    pub canvas_width: f64,
+    pub canvas_height: f64,
+    pub middle_x: f64,
+    pub middle_y: f64,
+    pub corners: Vec<f64>,
+    pub turn_x: f64,
+    pub turn_y: f64,
+    pub feather_x: f64,
+    pub feather_y: f64,
+    pub line: Vec<f64>,
+    pub reach: f64,
+}
+
+impl From<cutlass_ffi::PhoneMaskHandles> for MaskHandles {
+    fn from(handles: cutlass_ffi::PhoneMaskHandles) -> Self {
+        Self {
+            canvas_width: handles.canvas_width,
+            canvas_height: handles.canvas_height,
+            middle_x: handles.middle_x,
+            middle_y: handles.middle_y,
+            corners: handles.corners,
+            turn_x: handles.turn_x,
+            turn_y: handles.turn_y,
+            feather_x: handles.feather_x,
+            feather_y: handles.feather_y,
+            line: handles.line,
+            reach: handles.reach,
+        }
+    }
+}
+
+/// A shape a mask can take: the key `add_mask` takes, and a tile's name.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MaskShapeChoice {
+    pub key: String,
+    pub label: String,
+}
+
+/// Every mask shape in the order the Mask panel shows them.
+#[uniffi::export]
+#[must_use]
+pub fn mask_shapes() -> Vec<MaskShapeChoice> {
+    cutlass_ffi::mask_shapes()
+        .into_iter()
+        .map(|shape| MaskShapeChoice {
+            key: shape.key,
+            label: shape.label,
+        })
+        .collect()
+}
+
 impl From<cutlass_ffi::PhoneStage> for Stage {
     fn from(stage: cutlass_ffi::PhoneStage) -> Self {
         Self {
@@ -1152,6 +1268,7 @@ pub enum ToolKind {
     Draw,
     VideoEffects,
     ShapeStyle,
+    Mask,
 }
 
 /// A tool as a bar shows it. `ready` says it works on the phone today;
@@ -1257,6 +1374,7 @@ fn tool_kind(id: cutlass_ffi::ToolId) -> ToolKind {
         T::Draw => ToolKind::Draw,
         T::VideoEffects => ToolKind::VideoEffects,
         T::ShapeStyle => ToolKind::ShapeStyle,
+        T::Mask => ToolKind::Mask,
     }
 }
 
@@ -2249,6 +2367,175 @@ impl Editor {
     /// End the preview gesture.
     pub fn stage_end(&self) -> Result<(), EditorError> {
         self.run(PhoneHost::stage_end)
+    }
+
+    /// `clip_id`'s clip masks, or with `color` its colour masks, in order,
+    /// each as its keys have it at `at_us`.
+    pub fn masks(
+        &self,
+        clip_id: String,
+        color: bool,
+        at_us: i64,
+    ) -> Result<Vec<ClipMask>, EditorError> {
+        let masks =
+            self.run(move |host| host.masks(&SegmentId::new(clip_id), color, Micros(at_us)))?;
+        Ok(masks.into_iter().map(ClipMask::from).collect())
+    }
+
+    /// Where the handles of the mask at `index` are on the canvas at
+    /// `at_us`; `None` when there is no such mask or the clip is not shown.
+    pub fn mask_handles(
+        &self,
+        clip_id: String,
+        color: bool,
+        index: u32,
+        at_us: i64,
+    ) -> Result<Option<MaskHandles>, EditorError> {
+        let handles = self.run(move |host| {
+            host.mask_handles(&SegmentId::new(clip_id), color, index, Micros(at_us))
+        })?;
+        Ok(handles.map(MaskHandles::from))
+    }
+
+    /// Put a new mask of `shape`, a key from [`mask_shapes`], at the end of
+    /// the list, and give back its place. One undo step.
+    pub fn add_mask(
+        &self,
+        clip_id: String,
+        color: bool,
+        shape: String,
+        at_us: i64,
+    ) -> Result<u32, EditorError> {
+        self.run(move |host| host.add_mask(&SegmentId::new(clip_id), color, &shape, Micros(at_us)))?
+            .map_err(EditorError::from)
+    }
+
+    /// Make the mask at `index` into `mask` at `at_us`; a keyed mask is
+    /// keyed there. Changes made while `live` join one undo step, so a
+    /// slider drag is one step; its last change passes `live` false.
+    pub fn edit_mask(
+        &self,
+        clip_id: String,
+        color: bool,
+        index: u32,
+        at_us: i64,
+        mask: ClipMask,
+        live: bool,
+    ) -> Result<(), EditorError> {
+        self.edit(move |host| {
+            host.edit_mask(
+                &SegmentId::new(clip_id),
+                color,
+                index,
+                Micros(at_us),
+                &mask.into(),
+                live,
+            )
+        })
+    }
+
+    /// Take the mask at `index` off. One undo step.
+    pub fn remove_mask(&self, clip_id: String, color: bool, index: u32) -> Result<(), EditorError> {
+        self.edit(move |host| host.remove_mask(&SegmentId::new(clip_id), color, index))
+    }
+
+    /// Move the mask at `from` to `to` in the list. One undo step.
+    pub fn move_mask(
+        &self,
+        clip_id: String,
+        color: bool,
+        from: u32,
+        to: u32,
+    ) -> Result<(), EditorError> {
+        self.edit(move |host| host.move_mask(&SegmentId::new(clip_id), color, from, to))
+    }
+
+    /// Spell the text mask at `index` `text`. One undo step.
+    pub fn set_mask_text(
+        &self,
+        clip_id: String,
+        color: bool,
+        index: u32,
+        text: String,
+    ) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_mask_text(&SegmentId::new(clip_id), color, index, &text))
+    }
+
+    /// Paint, or with `erase` rub out, a stroke `size` canvas pixels wide
+    /// through the canvas points `trace` (x, y pairs) on the brush mask at
+    /// `index`. One undo step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_mask(
+        &self,
+        clip_id: String,
+        color: bool,
+        index: u32,
+        at_us: i64,
+        trace: Vec<f64>,
+        size: f64,
+        erase: bool,
+    ) -> Result<(), EditorError> {
+        self.edit(move |host| {
+            host.paint_mask(
+                &SegmentId::new(clip_id),
+                color,
+                index,
+                Micros(at_us),
+                &trace,
+                cutlass_ffi::PhoneBrush { size, erase },
+            )
+        })
+    }
+
+    /// Make the pen mask at `index` the outline through the canvas points
+    /// `corners` (x, y pairs), closed on the first. One undo step.
+    pub fn draw_mask_outline(
+        &self,
+        clip_id: String,
+        color: bool,
+        index: u32,
+        at_us: i64,
+        corners: Vec<f64>,
+    ) -> Result<(), EditorError> {
+        self.edit(move |host| {
+            host.draw_mask_outline(
+                &SegmentId::new(clip_id),
+                color,
+                index,
+                Micros(at_us),
+                &corners,
+            )
+        })
+    }
+
+    /// Take hold of the handle of the mask at `index` under canvas point
+    /// `(x, y)` at `at_us`; `false` when none is there.
+    pub fn mask_begin(
+        &self,
+        clip_id: String,
+        color: bool,
+        index: u32,
+        at_us: i64,
+        x: f64,
+        y: f64,
+    ) -> Result<bool, EditorError> {
+        self.run(move |host| {
+            host.mask_begin(&SegmentId::new(clip_id), color, index, Micros(at_us), x, y)
+        })?
+        .map_err(EditorError::from)
+    }
+
+    /// Move the handle taken hold of to canvas point `(x, y)`. The whole
+    /// drag is one undo step.
+    pub fn mask_drag(&self, x: f64, y: f64) -> Result<ClipMask, EditorError> {
+        self.run(move |host| host.mask_drag(x, y))?
+            .map(ClipMask::from)
+            .map_err(EditorError::from)
+    }
+
+    /// End the mask drag.
+    pub fn mask_end(&self) -> Result<(), EditorError> {
+        self.run(PhoneHost::mask_end)
     }
 
     /// The canvas ratios, Original first.

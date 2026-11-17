@@ -1,13 +1,14 @@
 //! A clip's mask (see `cutlass_effects::mask`).
 
-use cutlass_effects::{COLOR_MASK, MASK, Mask, SELECTION, Selection};
+use cutlass_effects::{Mask, SELECTION, Selection};
 use cutlass_model::{Draft, MaterialId, MaterialRef, RawMaterial, SegmentId, TrackType};
 use serde_json::{Map, Value};
 
-use super::{EditError, ensure_unlocked};
+use super::{EditError, ensure_unlocked, masks};
 
-/// Mask `segment_id` with `mask`, or take its mask off with `None`. A mask
-/// another clip shares is left to that clip; this clip gets its own, named
+/// Mask `segment_id` with `mask`, or take its mask off with `None`: the
+/// clip's first mask, the others staying as they are. A mask another clip
+/// shares is left to that clip; this clip gets its own, named
 /// `material_id`.
 pub fn set_mask(
     draft: &mut Draft,
@@ -15,38 +16,40 @@ pub fn set_mask(
     material_id: &MaterialId,
     mask: Option<&Mask>,
 ) -> Result<(), EditError> {
-    set_listed(
-        draft,
-        segment_id,
-        material_id,
-        shape_fields(mask)?,
-        MASK,
-        &[TrackType::Video, TrackType::Sticker],
-    )
+    set_first(draft, segment_id, material_id, mask, false)
 }
 
 /// Limit `segment_id`'s colour work to `mask`, or take that limit off with
-/// `None`. On an adjustment layer or an effect the mask is where on the
-/// canvas the layer acts.
+/// `None`, as [`set_mask`] for the first of its colour masks. On an
+/// adjustment layer or an effect the mask is where on the canvas the
+/// layer acts.
 pub fn set_color_mask(
     draft: &mut Draft,
     segment_id: &SegmentId,
     material_id: &MaterialId,
     mask: Option<&Mask>,
 ) -> Result<(), EditError> {
-    set_listed(
-        draft,
-        segment_id,
-        material_id,
-        shape_fields(mask)?,
-        COLOR_MASK,
-        &[
-            TrackType::Video,
-            TrackType::Sticker,
-            TrackType::Adjust,
-            TrackType::Effect,
-        ],
-    )
+    set_first(draft, segment_id, material_id, mask, true)
+}
+
+/// Set, change or take off the clip's first mask of its kind, by the list
+/// edits, so its place and its keys stay right.
+fn set_first(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    material_id: &MaterialId,
+    mask: Option<&Mask>,
+    color: bool,
+) -> Result<(), EditError> {
+    let count = masks::count(draft, segment_id, color)?;
+    match (mask, count > 0) {
+        (Some(mask), true) => {
+            masks::edit_mask(draft, segment_id, 0, material_id, mask, None, color)
+        }
+        (Some(mask), false) => masks::add_mask(draft, segment_id, material_id, mask, None, color),
+        (None, true) => masks::remove_mask(draft, segment_id, 0, color),
+        (None, false) => Ok(()),
+    }
 }
 
 /// Cut `segment_id`, a video clip, down to `selection`, or take its
@@ -68,13 +71,6 @@ pub fn set_selection(
         SELECTION,
         &[TrackType::Video],
     )
-}
-
-fn shape_fields(mask: Option<&Mask>) -> Result<Option<Map<String, Value>>, EditError> {
-    match mask {
-        Some(mask) if !mask.is_valid() => Err(EditError::Mask),
-        mask => Ok(mask.map(Mask::to_fields)),
-    }
 }
 
 fn set_listed(

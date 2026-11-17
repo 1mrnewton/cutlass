@@ -265,7 +265,7 @@ fn video_panel(
                 return;
             }
             if state.page == 2 {
-                super::mask::mask_page(shell, ui, state, inspection.mask, false);
+                super::mask::mask_page(shell, ui, state, false);
                 return;
             }
             if state.page == 3 {
@@ -579,7 +579,7 @@ fn effect_panel(
     filter: bool,
 ) {
     if !filter && let Some(controls) = shell.effect_controls() {
-        recipe_pages(shell, ui, state, inspection, &controls);
+        recipe_pages(shell, ui, state, &controls);
         return;
     }
     note(ui, &shell.effect_name().unwrap_or_default());
@@ -618,12 +618,11 @@ fn recipe_pages(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,
-    inspection: &Inspection,
     controls: &[(cutlass_effects::Control, f32)],
 ) {
     pages(ui, &["Basic", "Mask"], &mut state.page);
     if state.page != 0 {
-        super::mask::mask_page(shell, ui, state, inspection.color_mask, true);
+        super::mask::mask_page(shell, ui, state, true);
         return;
     }
     note(ui, &shell.effect_name().unwrap_or_default());
@@ -1839,7 +1838,7 @@ fn colour_page(
         1 => super::grade::hsl_page(shell, ui, state, inspection),
         2 => super::grade::curves_page(shell, ui, state, inspection),
         3 => super::grade::wheels_page(shell, ui, state, inspection),
-        _ => super::mask::mask_page(shell, ui, state, inspection.color_mask, true),
+        _ => super::mask::mask_page(shell, ui, state, true),
     }
     true
 }

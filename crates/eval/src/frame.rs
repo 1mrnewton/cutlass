@@ -316,8 +316,10 @@ fn gpu_layers(
                 .filter(|mark| mark.bound == Some((layer.key.1, layer.key.2)))
                 .map(|mark| {
                     effect(RecipeMark {
+                        key: mark.key,
                         steps: mark.steps.clone(),
-                        ..*mark
+                        bound: mark.bound,
+                        mask: mark.mask.clone(),
                     })
                 }),
         );
@@ -1257,6 +1259,90 @@ mod tests {
     }
 
     #[test]
+    fn a_clips_masks_join_by_their_modes_and_each_moves_by_its_own_keys() {
+        use cutlass_effects::{Mask, MaskMode, MaskShape};
+
+        let mut draft = color_clip("0xFFFF0000", false);
+        draft.canvas_config.width = 8;
+        draft.canvas_config.height = 8;
+        draft.canvas_config.background = Some("#808080".to_owned());
+        let duration = draft.tracks[0].segments[0].target.duration.0;
+        let mut session = cutlass_session::Session::open(draft);
+        let clip = cutlass_model::SegmentId::new("segment");
+        // The whole middle row kept, less a square on the right, which a
+        // second square then moves away from by its own keys.
+        let band = Mask {
+            width: 0.9,
+            height: 0.2,
+            ..Mask::new(MaskShape::Rectangle)
+        };
+        let hole = Mask {
+            x: 0.5,
+            width: 0.2,
+            height: 0.3,
+            mode: MaskMode::Subtract,
+            ..Mask::new(MaskShape::Rectangle)
+        };
+        let x = cutlass_model::mask_key(cutlass_model::MASK_KEYS[0], Some("hole"));
+        let key = |offset: i64, value: f64| cutlass_session::Request::KeyValues {
+            segment_id: clip.clone(),
+            offset: cutlass_model::Micros(offset),
+            values: vec![(x.clone(), value)],
+        };
+        session
+            .apply(
+                0,
+                &[
+                    cutlass_session::Request::AddMask {
+                        art: None,
+                        segment_id: clip.clone(),
+                        material_id: "band".into(),
+                        mask: band,
+                        color: false,
+                    },
+                    cutlass_session::Request::AddMask {
+                        art: None,
+                        segment_id: clip.clone(),
+                        material_id: "hole".into(),
+                        mask: hole,
+                        color: false,
+                    },
+                    key(0, 0.5),
+                    key(duration, -0.5),
+                ],
+            )
+            .unwrap();
+        let red = |frame: &[u8], x: usize, y: usize| frame[(y * 8 + x) * 4 + 1] == 0;
+        let start = pixels(session.draft(), 0);
+        assert!(red(&start, 1, 4) && red(&start, 3, 4));
+        assert!(!red(&start, 6, 4), "the hole takes the right away");
+        assert!(!red(&start, 4, 0), "outside the band");
+        let end = pixels(session.draft(), duration - 1);
+        assert!(red(&end, 6, 4) && !red(&end, 1, 4), "the hole moved left");
+
+        // Meeting instead of taking away keeps only the overlap.
+        let revision = session.revision();
+        session
+            .apply(
+                revision,
+                &[cutlass_session::Request::EditMask {
+                    art: None,
+                    segment_id: clip.clone(),
+                    index: 1,
+                    material_id: "unused".into(),
+                    mask: Mask {
+                        mode: MaskMode::Intersect,
+                        ..hole
+                    },
+                    color: false,
+                }],
+            )
+            .unwrap();
+        let start = pixels(session.draft(), 0);
+        assert!(red(&start, 6, 4) && !red(&start, 1, 4) && !red(&start, 3, 4));
+    }
+
+    #[test]
     fn a_selected_clip_keeps_the_object_and_shows_the_canvas_around_it() {
         let mut draft = color_clip("0xFFFF0000", false);
         draft.canvas_config.width = 8;
@@ -2093,7 +2179,7 @@ mod recipe_tests {
         else {
             panic!("no masked effect layer");
         };
-        assert_eq!(mask.mask, shape);
+        assert_eq!(mask.masks, [cutlass_effects::DrawnMask::shape(shape)]);
         // The canvas is 4 by 2; its middle is the shape's middle, and a
         // corner is outside a circle half the canvas across.
         assert!(mask.coverage_at(2.0, 1.0) > 0.99);

@@ -825,7 +825,7 @@ where
             let clip_path = self.tracking.clip_path(draft, id, &path).ok_or_else(|| {
                 ToolError::Host(format!("clip {id} is not on the canvas along the track"))
             })?;
-            masks.push((id.clone(), clip_path));
+            masks.push((id.clone(), clip_path).into());
         }
         let result = self
             .draft

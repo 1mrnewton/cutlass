@@ -463,6 +463,36 @@ pub const MASK_KEYS: [&str; 7] = [
     "KFTypeCommonMaskRoundCorner",
 ];
 
+/// What joins a [`MASK_KEYS`] name to the mask record it keys, for every
+/// mask on a clip but the first: `KFTypeCommonMaskFeather@mask-2`. The
+/// first mask's keys keep the plain names, as a clip with one mask has
+/// always stored them.
+pub const MASK_KEY_MARK: char = '@';
+
+/// The key name for [`MASK_KEYS`] `name` on mask record `mask`, or the
+/// plain name for the clip's first mask (`None`).
+#[must_use]
+pub fn mask_key(name: &str, mask: Option<&str>) -> String {
+    match mask {
+        Some(mask) => format!("{name}{MASK_KEY_MARK}{mask}"),
+        None => name.to_owned(),
+    }
+}
+
+/// The [`MASK_KEYS`] name and the mask record of a mask key, `None` for the
+/// record when it is the first mask's plain name; `None` for anything that
+/// is not a mask key.
+#[must_use]
+pub fn mask_key_parts(property: &str) -> Option<(&'static str, Option<&str>)> {
+    let (base, mask) = match property.split_once(MASK_KEY_MARK) {
+        Some((base, mask)) if !mask.is_empty() => (base, Some(mask)),
+        Some(_) => return None,
+        None => (property, None),
+    };
+    let base = MASK_KEYS.iter().find(|name| **name == base)?;
+    Some((base, mask))
+}
+
 /// Each part of the mask that keys on its own, a share of [`MASK_KEYS`].
 pub const MASK_POSITION_KEYS: [&str; 2] =
     ["KFTypeCommonMaskPositionX", "KFTypeCommonMaskPositionY"];
@@ -714,7 +744,7 @@ pub fn effect_control_id(property: &str) -> Option<&str> {
 pub fn is_keyable(property: &str) -> bool {
     is_pose_key(property)
         || matches!(property, VOLUME_KEY | "volume")
-        || MASK_KEYS.contains(&property)
+        || mask_key_parts(property).is_some()
         || TEXT_COLOR_KEYS.contains(&property)
         || ADJUST_KEYS.contains(&property)
         || HSL_KEYS.contains(&property)
@@ -1015,6 +1045,22 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(parts, MASK_KEYS);
+    }
+
+    #[test]
+    fn a_second_mask_keys_under_its_own_name_and_the_first_keeps_the_plain_one() {
+        let feather = MASK_KEYS[5];
+        assert_eq!(mask_key(feather, None), feather);
+        let named = mask_key(feather, Some("mask-2"));
+        assert_eq!(named, "KFTypeCommonMaskFeather@mask-2");
+        assert_eq!(mask_key_parts(&named), Some((feather, Some("mask-2"))));
+        assert_eq!(mask_key_parts(feather), Some((feather, None)));
+        assert!(is_keyable(&named));
+        // A name that is not a mask key, or names no record, is not one.
+        for odd in ["KFTypeCommonMaskFeather@", "KFTypeVolume@mask-2", "Mask@x"] {
+            assert_eq!(mask_key_parts(odd), None, "{odd}");
+            assert!(!is_keyable(odd), "{odd}");
+        }
     }
 
     #[test]

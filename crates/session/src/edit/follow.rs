@@ -8,14 +8,16 @@
 //! `video_tracking` record that each follower lists. A clip's mask can
 //! follow instead, from the path in that clip's own frame.
 
-use cutlass_effects::{Mask, MaskShape};
+use cutlass_effects::{COLOR_MASK, MASK, Mask, MaskShape};
 use cutlass_model::{
     Draft, MASK_KEYS, MaterialId, MaterialRef, Micros, POSE_KEYS, RawMaterial, Segment, SegmentId,
-    TrackPath, TrackType, VIDEO_TRACKING, clip_at, put_key,
+    TrackPath, TrackType, VIDEO_TRACKING, clip_at, mask_key, put_key,
 };
+
+use crate::TrackedMask;
 use serde_json::{Map, Value, json};
 
-use super::{EditError, ensure_unlocked, locate};
+use super::{EditError, ensure_unlocked, locate, masks as mask_list};
 
 /// The most frames a path may hold: an hour at 60 frames a second.
 pub const MAX_TRACK_SAMPLES: usize = 216_000;
@@ -33,20 +35,20 @@ const SCALE_TOLERANCE: f64 = 0.005;
 
 /// Make `followers` follow `target` along `path`, each keeping its offset
 /// from the target at `anchor`, and keep the path as the `video_tracking`
-/// record `tracking_id`. Each of `masks` is a clip whose mask follows
-/// instead, and the path in that clip's own frame.
+/// record `tracking_id`. Each of `masks` is a clip's mask that follows
+/// instead, with the path in that clip's own frame.
 pub fn track(
     draft: &mut Draft,
     target: &SegmentId,
     followers: &[SegmentId],
-    masks: &[(SegmentId, TrackPath)],
+    masks: &[TrackedMask],
     tracking_id: &MaterialId,
     anchor: Micros,
     path: &TrackPath,
 ) -> Result<(), EditError> {
     check_path(path)?;
-    for (_, clip_path) in masks {
-        check_path(clip_path)?;
+    for tracked in masks {
+        check_path(&tracked.path)?;
     }
     let (track_index, segment_index) = locate(draft, target)?;
     let target_segment = &draft.tracks[track_index].segments[segment_index];
@@ -99,14 +101,26 @@ pub fn track(
         }
         placed.push((t, s));
     }
-    for (i, (id, _)) in masks.iter().enumerate() {
-        if followers.contains(id) || masks[..i].iter().any(|(other, _)| other == id) {
+    for (i, tracked) in masks.iter().enumerate() {
+        let id = &tracked.segment_id;
+        let same = |other: &TrackedMask| {
+            other.segment_id == *id && other.index == tracked.index && other.color == tracked.color
+        };
+        if followers.contains(id) || masks[..i].iter().any(same) {
             return Err(EditError::Track);
         }
         let (t, s) = locate(draft, id)?;
         let track = &draft.tracks[t];
         ensure_unlocked(track.attribute)?;
-        if !matches!(track.kind, TrackType::Video | TrackType::Sticker) {
+        let takes = if tracked.color {
+            matches!(
+                track.kind,
+                TrackType::Video | TrackType::Sticker | TrackType::Adjust | TrackType::Effect
+            )
+        } else {
+            matches!(track.kind, TrackType::Video | TrackType::Sticker)
+        };
+        if !takes {
             return Err(EditError::Track);
         }
         let range = track.segments[s].target.clone();
@@ -124,18 +138,19 @@ pub fn track(
         follow(segment, &graphs, path, &poses, anchor_index, canvas)?;
         list_record(segment, &draft.materials.video_trackings, tracking_id);
     }
-    for (index, (id, clip_path)) in masks.iter().enumerate() {
+    let mut followed = Vec::with_capacity(masks.len());
+    for (index, tracked) in masks.iter().enumerate() {
         let mask_id = MaterialId::new(format!("{}-mask-{index}", tracking_id.as_str()));
-        follow_mask(draft, id, clip_path, anchor, &mask_id)?;
-        let (t, s) = locate(draft, id)?;
+        let record_id = follow_mask(draft, tracked, anchor, &mask_id)?;
+        let (t, s) = locate(draft, &tracked.segment_id)?;
         let segment = &mut draft.tracks[t].segments[s];
         list_record(segment, &draft.materials.video_trackings, tracking_id);
+        followed.push((&tracked.segment_id, record_id));
     }
-    let mask_ids: Vec<&SegmentId> = masks.iter().map(|(id, _)| id).collect();
     draft
         .materials
         .video_trackings
-        .push(record(tracking_id, target, anchor, path, &mask_ids));
+        .push(record(tracking_id, target, anchor, path, &followed));
     // A record no clip lists any more goes.
     let listed: Vec<MaterialId> = draft
         .tracks
@@ -196,17 +211,18 @@ fn box_poses(path: &TrackPath) -> Option<Vec<BoxPose>> {
     Some(poses)
 }
 
-/// Key clip `id`'s mask along `clip_path`, the target's box in the clip's
+/// Key `tracked`'s mask along its path, the target's box in the clip's
 /// own frame, keeping the mask's place, size and turn relative to the box
-/// at `anchor`. A clip with no mask gets a rectangle the size of the box,
-/// stored as `mask_id`.
+/// at `anchor`. A clip with no mask of the kind gets a rectangle the size
+/// of the box, stored as `mask_id`. Gives the mask's record.
 fn follow_mask(
     draft: &mut Draft,
-    id: &SegmentId,
-    clip_path: &TrackPath,
+    tracked: &TrackedMask,
     anchor: Micros,
     mask_id: &MaterialId,
-) -> Result<(), EditError> {
+) -> Result<MaterialId, EditError> {
+    let (id, clip_path) = (&tracked.segment_id, &tracked.path);
+    let kind = if tracked.color { COLOR_MASK } else { MASK };
     let poses = box_poses(clip_path).ok_or(EditError::Track)?;
     let at = poses[nearest(clip_path, anchor)];
     let (t, s) = locate(draft, id)?;
@@ -215,21 +231,38 @@ fn follow_mask(
     let anchor_time = anchor
         .0
         .clamp(start.0, end.0.saturating_sub(1).max(start.0));
-    let graphs = draft.keyframe_graph_list.clone();
-    let existing = cutlass_effects::segment_mask(draft, segment)
-        .map(|mask| mask.at(segment, &graphs, Micros(anchor_time)));
+    let records = mask_list::records(draft, segment, kind);
+    let existing = match records.get(tracked.index) {
+        Some(record) => {
+            let listed = cutlass_effects::listed_masks(draft, segment, kind)
+                .into_iter()
+                .find(|listed| listed.id == *record)
+                .ok_or(EditError::Track)?;
+            Some((
+                record.clone(),
+                listed.at(segment, &draft.keyframe_graph_list, Micros(anchor_time)),
+            ))
+        }
+        None if records.is_empty() && tracked.index == 0 => None,
+        None => return Err(EditError::MaskList),
+    };
     #[allow(clippy::cast_possible_truncation)]
-    let base = existing.unwrap_or(Mask {
-        x: at.middle.0 as f32,
-        y: at.middle.1 as f32,
-        width: at.half.0 as f32,
-        height: at.half.1 as f32,
-        rotation: at.turn as f32,
-        ..Mask::new(MaskShape::Rectangle)
-    });
-    if existing.is_none() {
-        super::mask::set_mask(draft, id, mask_id, Some(&base))?;
-    }
+    let (record, base) = match existing {
+        Some(found) => found,
+        None => {
+            let base = Mask {
+                x: at.middle.0 as f32,
+                y: at.middle.1 as f32,
+                width: at.half.0 as f32,
+                height: at.half.1 as f32,
+                rotation: at.turn as f32,
+                ..Mask::new(MaskShape::Rectangle)
+            };
+            mask_list::add_mask(draft, id, mask_id, &base, None, tracked.color)?;
+            (mask_id.clone(), base)
+        }
+    };
+    let key_record = mask_list::key_record(kind, tracked.index, record.as_str());
     // The mask's middle in the box's own turned, unit frame at the anchor.
     let (sin0, cos0) = at.turn.to_radians().sin_cos();
     let (dx, dy) = (
@@ -259,7 +292,11 @@ fn follow_mask(
             ],
         ));
     }
-    let names = &MASK_KEYS[..5];
+    let names: Vec<String> = MASK_KEYS[..5]
+        .iter()
+        .map(|name| mask_key(name, key_record))
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let tolerances = [
         PLACE_TOLERANCE,
         PLACE_TOLERANCE,
@@ -267,7 +304,8 @@ fn follow_mask(
         PLACE_TOLERANCE,
         TURN_TOLERANCE,
     ];
-    key_rows(segment, &rows, names, &tolerances, anchor_time - start.0)
+    key_rows(segment, &rows, &names, &tolerances, anchor_time - start.0)?;
+    Ok(record)
 }
 
 /// Key `rows` (offset and values) on `names`, thinned per value within
@@ -554,7 +592,7 @@ fn record(
     target: &SegmentId,
     anchor: Micros,
     path: &TrackPath,
-    masks: &[&SegmentId],
+    masks: &[(&SegmentId, MaterialId)],
 ) -> RawMaterial {
     let (first, last) = span(path);
     let points: Vec<Value> = path
@@ -581,8 +619,19 @@ fn record(
     fields.insert("segment_id".into(), json!(target.as_str()));
     fields.insert("anchor".into(), json!(anchor.0));
     if !masks.is_empty() {
-        let ids: Vec<&str> = masks.iter().map(|id| id.as_str()).collect();
+        let mut ids: Vec<&str> = Vec::new();
+        for (id, _) in masks {
+            if !ids.contains(&id.as_str()) {
+                ids.push(id.as_str());
+            }
+        }
         fields.insert("masks".into(), json!(ids));
+        // Which of each clip's masks follow, by their records.
+        let records: Vec<[&str; 2]> = masks
+            .iter()
+            .map(|(id, record)| [id.as_str(), record.as_str()])
+            .collect();
+        fields.insert("mask_records".into(), json!(records));
     }
     fields.insert("path".into(), Value::Array(points));
     RawMaterial {
@@ -590,6 +639,47 @@ fn record(
         kind: VIDEO_TRACKING.to_owned(),
         fields,
     }
+}
+
+/// The key names of clip `id`'s masks that follow `record`, each by the
+/// name its mask keys under now. A record from before masks were named
+/// had the clip's first clip mask follow.
+fn followed_keys(
+    draft: &Draft,
+    segment: &Segment,
+    record: &RawMaterial,
+    id: &SegmentId,
+) -> Vec<String> {
+    let named: Vec<&str> = record
+        .fields
+        .get("mask_records")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|pair| {
+            let pair = pair.as_array()?;
+            (pair.first()?.as_str()? == id.as_str()).then_some(pair.get(1)?.as_str()?)
+        })
+        .collect();
+    if named.is_empty() && record.fields.get("mask_records").is_none() {
+        return MASK_KEYS[..5]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+    }
+    let mut names = Vec::new();
+    for mask in named {
+        let Some(MaterialRef::Other(raw)) = draft.materials.get(mask) else {
+            continue;
+        };
+        let records = mask_list::records(draft, segment, &raw.kind);
+        let Some(index) = records.iter().position(|other| other.as_str() == mask) else {
+            continue;
+        };
+        let key_record = mask_list::key_record(&raw.kind, index, mask);
+        names.extend(MASK_KEYS[..5].iter().map(|name| mask_key(name, key_record)));
+    }
+    names
 }
 
 /// Stop clip `id` following the track it lists. The keys the track wrote
@@ -625,10 +715,10 @@ pub fn untrack(draft: &mut Draft, id: &SegmentId) -> Result<(), EditError> {
         .get("masks")
         .and_then(Value::as_array)
         .is_some_and(|ids| ids.iter().any(|v| v.as_str() == Some(id.as_str())));
-    let names: &[&str] = if by_mask {
-        &MASK_KEYS[..5]
+    let names: Vec<String> = if by_mask {
+        followed_keys(draft, segment, record, id)
     } else {
-        &[
+        [
             POSE_KEYS[0],
             POSE_KEYS[1],
             POSE_KEYS[2],
@@ -636,12 +726,14 @@ pub fn untrack(draft: &mut Draft, id: &SegmentId) -> Result<(), EditError> {
             POSE_KEYS[4],
             "KFTypeScale",
         ]
+        .map(str::to_owned)
+        .to_vec()
     };
     let segment = &mut draft.tracks[t].segments[s];
     let start = segment.target.start.0;
     let (from, to) = (first - start, first + length - start);
     for group in &mut segment.common_keyframes {
-        if names.contains(&group.property_type.as_str()) {
+        if names.contains(&group.property_type) {
             group
                 .keyframe_list
                 .retain(|key| key.time_offset.0 < from || key.time_offset.0 > to);

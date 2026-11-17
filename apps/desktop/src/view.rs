@@ -225,6 +225,10 @@ pub struct ViewState {
     track_drag: Option<(f64, f64)>,
     /// A move, scale or turn of a clip on the preview in flight.
     stage_drag: Option<StageDrag>,
+    /// A drag on a handle of the mask in hand.
+    mask_drag: Option<cutlass_editor::MaskGesture>,
+    /// The canvas pixels a brush has gone through in this stroke.
+    brush_trace: Vec<(f64, f64)>,
     /// The selected clips' boxes as each recent revision of the draft
     /// placed them, newest last, so the box drawn matches the picture on
     /// the canvas and never runs ahead of it.
@@ -345,6 +349,8 @@ impl Default for ViewState {
             preview_frame: Rect::NOTHING,
             track_drag: None,
             stage_drag: None,
+            mask_drag: None,
+            brush_trace: Vec::new(),
             stage_seen: Vec::new(),
             preview_guides: false,
             preview_full: false,
@@ -4006,7 +4012,11 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     preview_wheel(ui, view, frame);
     // The preview drag lands before the canvas is drawn, on the canvas
     // where it was last drawn, so this frame's picture already has it.
-    let staging = shell.picking().is_none() && shell.tracking().is_none() && shell.pen().is_none();
+    let masking = shell.mask_page_showing();
+    let staging = shell.picking().is_none()
+        && shell.tracking().is_none()
+        && shell.pen().is_none()
+        && !masking;
     let hover = match (view.preview_canvas, canvas) {
         (Some(placed), Some(size)) if staging => stage_input(shell, ui, view, frame, placed, size),
         _ => {
@@ -4082,6 +4092,14 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         pick_layer(shell, ui, frame, placed, size);
         track_layer(shell, ui, view, frame, placed, size);
         pen_layer(shell, ui, frame, placed, size);
+    }
+    if shell.take_mask_page()
+        && let (Some(placed), Some(size)) = (view.preview_canvas, canvas)
+    {
+        mask::mask_layer(shell, ui, view, frame, placed, size);
+    } else {
+        view.mask_drag = None;
+        view.brush_trace.clear();
     }
     transport_bar(shell, ui, view, transport);
 }
@@ -11729,10 +11747,16 @@ mod tests {
             "Invert",
             "Track mask",
             "Direction",
-            "Later",
+            "Brush",
+            "Pen",
+            "Combine",
+            "Subtract",
+            "Intersect",
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
+        // Every shape is live now; nothing on the page waits for later.
+        assert!(!lines.iter().any(|line| line == "Later"), "{lines:?}");
         assert!(!lines.iter().any(|line| line == "Round corners"));
         shell
             .set_mask(Some(cutlass_effects::Mask {

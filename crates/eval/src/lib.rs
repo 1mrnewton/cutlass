@@ -25,6 +25,7 @@ mod freeze;
 mod gpu;
 mod heard;
 mod lottie;
+mod mask_art;
 mod media;
 mod nest;
 mod reframe;
@@ -58,6 +59,7 @@ pub use freeze::{
 };
 pub use gpu::{FrameLayers, GpuBackdrop, GpuLayer, GpuSource, SelectionCut, YuvSamples};
 pub use heard::{ClipAsk, Heard};
+pub use mask_art::text_mask_art;
 pub use media::OpenClips;
 pub use reframe::{REFRAME_MODEL, REFRAME_RATE, ReframeAsk, reframe_ask};
 pub use relight::{RELIGHT_MODEL, RelightAsk, relight_ask};
@@ -111,6 +113,19 @@ pub fn clip_point(
     y: f64,
 ) -> Option<(f64, f64)> {
     Some(media::clip_frame(draft, segment, time, canvas)?.apply(x, y))
+}
+
+/// The map from a canvas pixel to `segment`'s own picture (-1 to 1 each
+/// way, y up) at `time`, as `(a·x + b·y + c, d·x + e·y + f)`: the frame a
+/// mask is measured in. `None` when the clip is not drawn then.
+#[must_use]
+pub fn clip_frame(
+    draft: &cutlass_model::Draft,
+    segment: &cutlass_model::Segment,
+    time: Micros,
+    canvas: (u32, u32),
+) -> Option<[f64; 6]> {
+    Some(media::clip_frame(draft, segment, time, canvas)?.0)
 }
 
 #[cfg(test)]

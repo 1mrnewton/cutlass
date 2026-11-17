@@ -733,6 +733,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_list_projects(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_mask_shapes(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_notice_text(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_notices(
@@ -775,6 +777,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_filter(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_mask(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_shape(
@@ -799,6 +803,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_cuts(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_mask_outline(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_stroke(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_duplicate(
@@ -806,6 +812,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_ease_keyframes(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_edit_mask(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_export(
     ): Int
@@ -837,7 +845,21 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_linkage_enabled(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_begin(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_drag(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_end(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_handles(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_masks(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_move_clip(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_move_mask(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_paint_mask(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_pause(
     ): Int
@@ -850,6 +872,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_redo(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_remove(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_remove_mask(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_remove_transition(
     ): Int
@@ -878,6 +902,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_linkage_enabled(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_mask_text(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_opacity(
     ): Int
@@ -994,6 +1020,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_filter(`ptr`: Long,`filterId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_mask(`ptr`: Long,`clipId`: RustBuffer.ByValue,`color`: Byte,`shape`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_overlay(`ptr`: Long,`materialId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_shape(`ptr`: Long,`shapeId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1018,6 +1046,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_cuts(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_draw_mask_outline(`ptr`: Long,`clipId`: RustBuffer.ByValue,`color`: Byte,`index`: Int,`atUs`: Long,`corners`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_draw_stroke(`ptr`: Long,`trace`: RustBuffer.ByValue,`atUs`: Long,`color`: RustBuffer.ByValue,`width`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_duplicate(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1025,6 +1055,8 @@ internal object UniffiLib {
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_duration_us(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_ease_keyframes(`ptr`: Long,`clipId`: RustBuffer.ByValue,`atUs`: Long,`graph`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_edit_mask(`ptr`: Long,`clipId`: RustBuffer.ByValue,`color`: Byte,`index`: Int,`atUs`: Long,`mask`: RustBuffer.ByValue,`live`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_export(`ptr`: Long,`path`: RustBuffer.ByValue,`shortSide`: Int,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1056,8 +1088,22 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_linkage_enabled(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_mask_begin(`ptr`: Long,`clipId`: RustBuffer.ByValue,`color`: Byte,`index`: Int,`atUs`: Long,`x`: Double,`y`: Double,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_mask_drag(`ptr`: Long,`x`: Double,`y`: Double,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_mask_end(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_mask_handles(`ptr`: Long,`clipId`: RustBuffer.ByValue,`color`: Byte,`index`: Int,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_masks(`ptr`: Long,`clipId`: RustBuffer.ByValue,`color`: Byte,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_move_clip(`ptr`: Long,`clipId`: RustBuffer.ByValue,`row`: Int,`startUs`: Long,`snapUs`: Long,`playheadUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_move_mask(`ptr`: Long,`clipId`: RustBuffer.ByValue,`color`: Byte,`from`: Int,`to`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_paint_mask(`ptr`: Long,`clipId`: RustBuffer.ByValue,`color`: Byte,`index`: Int,`atUs`: Long,`trace`: RustBuffer.ByValue,`size`: Double,`erase`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_pause(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_play(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1069,6 +1115,8 @@ internal object UniffiLib {
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_redo(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_remove(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_remove_mask(`ptr`: Long,`clipId`: RustBuffer.ByValue,`color`: Byte,`index`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_remove_transition(`ptr`: Long,`outgoingId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1097,6 +1145,8 @@ internal object UniffiLib {
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_font_folders(`ptr`: Long,`folders`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_linkage_enabled(`ptr`: Long,`on`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_mask_text(`ptr`: Long,`clipId`: RustBuffer.ByValue,`color`: Byte,`index`: Int,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_opacity(`ptr`: Long,`clipId`: RustBuffer.ByValue,`opacity`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1217,6 +1267,8 @@ internal object UniffiLib {
     external fun uniffi_cutlass_ffi_bindings_fn_func_graph_curves(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_list_projects(`root`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_mask_shapes(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_notice_text(`index`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1425,6 +1477,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_list_projects() and 0xFFFF) != 22684) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_mask_shapes() and 0xFFFF) != 62227) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_notice_text() and 0xFFFF) != 58668) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1488,6 +1543,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_filter() and 0xFFFF) != 22333) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_mask() and 0xFFFF) != 55507) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay() and 0xFFFF) != 34969) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1524,6 +1582,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_cuts() and 0xFFFF) != 46999) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_mask_outline() and 0xFFFF) != 15175) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_stroke() and 0xFFFF) != 40878) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1534,6 +1595,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_ease_keyframes() and 0xFFFF) != 37443) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_edit_mask() and 0xFFFF) != 15780) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_export() and 0xFFFF) != 5234) {
@@ -1581,7 +1645,28 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_linkage_enabled() and 0xFFFF) != 52789) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_begin() and 0xFFFF) != 2691) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_drag() and 0xFFFF) != 24809) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_end() and 0xFFFF) != 39803) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_handles() and 0xFFFF) != 25845) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_masks() and 0xFFFF) != 3880) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_move_clip() and 0xFFFF) != 64054) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_move_mask() and 0xFFFF) != 57008) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_paint_mask() and 0xFFFF) != 19993) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_pause() and 0xFFFF) != 24082) {
@@ -1600,6 +1685,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_remove() and 0xFFFF) != 65039) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_remove_mask() and 0xFFFF) != 59234) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_remove_transition() and 0xFFFF) != 61176) {
@@ -1642,6 +1730,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_linkage_enabled() and 0xFFFF) != 48699) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_mask_text() and 0xFFFF) != 63790) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_opacity() and 0xFFFF) != 19016) {
@@ -2320,6 +2411,12 @@ public interface EditorInterface {
     fun `addFilter`(`filterId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
     
     /**
+     * Put a new mask of `shape`, a key from [`mask_shapes`], at the end of
+     * the list, and give back its place. One undo step.
+     */
+    fun `addMask`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `shape`: kotlin.String, `atUs`: kotlin.Long): kotlin.UInt
+    
+    /**
      * Put a library picture at `at_us` on a row above main. Returns the clip.
      */
     fun `addOverlay`(`materialId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
@@ -2387,6 +2484,12 @@ public interface EditorInterface {
     fun `cuts`(): List<Cut>
     
     /**
+     * Make the pen mask at `index` the outline through the canvas points
+     * `corners` (x, y pairs), closed on the first. One undo step.
+     */
+    fun `drawMaskOutline`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `atUs`: kotlin.Long, `corners`: List<kotlin.Double>)
+    
+    /**
      * Put a freehand stroke through `trace` at `at_us` as a smooth line on
      * a sticker row, `color` (`#RRGGBB`) and `width` canvas pixels wide.
      * One undo step. Returns the clip's id.
@@ -2408,6 +2511,13 @@ public interface EditorInterface {
      * curve `graph`, or make it straight with an empty name. One undo step.
      */
     fun `easeKeyframes`(`clipId`: kotlin.String, `atUs`: kotlin.Long, `graph`: kotlin.String)
+    
+    /**
+     * Make the mask at `index` into `mask` at `at_us`; a keyed mask is
+     * keyed there. Changes made while `live` join one undo step, so a
+     * slider drag is one step; its last change passes `live` false.
+     */
+    fun `editMask`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `atUs`: kotlin.Long, `mask`: ClipMask, `live`: kotlin.Boolean)
     
     /**
      * Write the whole cut to `path` as an MP4, `short_side` pixels on its
@@ -2499,11 +2609,52 @@ public interface EditorInterface {
     fun `linkageEnabled`(): kotlin.Boolean
     
     /**
+     * Take hold of the handle of the mask at `index` under canvas point
+     * `(x, y)` at `at_us`; `false` when none is there.
+     */
+    fun `maskBegin`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `atUs`: kotlin.Long, `x`: kotlin.Double, `y`: kotlin.Double): kotlin.Boolean
+    
+    /**
+     * Move the handle taken hold of to canvas point `(x, y)`. The whole
+     * drag is one undo step.
+     */
+    fun `maskDrag`(`x`: kotlin.Double, `y`: kotlin.Double): ClipMask
+    
+    /**
+     * End the mask drag.
+     */
+    fun `maskEnd`()
+    
+    /**
+     * Where the handles of the mask at `index` are on the canvas at
+     * `at_us`; `None` when there is no such mask or the clip is not shown.
+     */
+    fun `maskHandles`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `atUs`: kotlin.Long): MaskHandles?
+    
+    /**
+     * `clip_id`'s clip masks, or with `color` its colour masks, in order,
+     * each as its keys have it at `at_us`.
+     */
+    fun `masks`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `atUs`: kotlin.Long): List<ClipMask>
+    
+    /**
      * Move a clip to `row` (top is 0) starting near `start_us`, as one undo
      * step. It snaps to a cut or the playhead within `snap_us`. Returns the
      * start it landed on.
      */
     fun `moveClip`(`clipId`: kotlin.String, `row`: kotlin.UInt, `startUs`: kotlin.Long, `snapUs`: kotlin.Long, `playheadUs`: kotlin.Long): kotlin.Long
+    
+    /**
+     * Move the mask at `from` to `to` in the list. One undo step.
+     */
+    fun `moveMask`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `from`: kotlin.UInt, `to`: kotlin.UInt)
+    
+    /**
+     * Paint, or with `erase` rub out, a stroke `size` canvas pixels wide
+     * through the canvas points `trace` (x, y pairs) on the brush mask at
+     * `index`. One undo step.
+     */
+    fun `paintMask`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `atUs`: kotlin.Long, `trace`: List<kotlin.Double>, `size`: kotlin.Double, `erase`: kotlin.Boolean)
     
     fun `pause`()
     
@@ -2525,6 +2676,11 @@ public interface EditorInterface {
     fun `redo`()
     
     fun `remove`(`clipId`: kotlin.String)
+    
+    /**
+     * Take the mask at `index` off. One undo step.
+     */
+    fun `removeMask`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt)
     
     /**
      * Take the transition off the cut after `outgoing_id`. One undo step.
@@ -2606,6 +2762,11 @@ public interface EditorInterface {
      * Turn linkage on or off. Not an undo step; kept with the project.
      */
     fun `setLinkageEnabled`(`on`: kotlin.Boolean)
+    
+    /**
+     * Spell the text mask at `index` `text`. One undo step.
+     */
+    fun `setMaskText`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `text`: kotlin.String)
     
     /**
      * Make the picture `opacity` solid, 0 to 1. One undo step.
@@ -3015,6 +3176,28 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Put a new mask of `shape`, a key from [`mask_shapes`], at the end of
+     * the list, and give back its place. One undo step.
+     */
+    @Throws(EditorException::class)override fun `addMask`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `shape`: kotlin.String, `atUs`: kotlin.Long): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_add_mask(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterBoolean.lower(`color`),
+        FfiConverterString.lower(`shape`),
+        FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Put a library picture at `at_us` on a row above main. Returns the clip.
      */
     @Throws(EditorException::class)override fun `addOverlay`(`materialId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String {
@@ -3242,6 +3425,28 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Make the pen mask at `index` the outline through the canvas points
+     * `corners` (x, y pairs), closed on the first. One undo step.
+     */
+    @Throws(EditorException::class)override fun `drawMaskOutline`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `atUs`: kotlin.Long, `corners`: List<kotlin.Double>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_draw_mask_outline(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterBoolean.lower(`color`),
+        FfiConverterUInt.lower(`index`),
+        FfiConverterLong.lower(`atUs`),
+        FfiConverterSequenceDouble.lower(`corners`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Put a freehand stroke through `trace` at `at_us` as a smooth line on
      * a sticker row, `color` (`#RRGGBB`) and `width` canvas pixels wide.
      * One undo step. Returns the clip's id.
@@ -3313,6 +3518,30 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         FfiConverterString.lower(`clipId`),
         FfiConverterLong.lower(`atUs`),
         FfiConverterString.lower(`graph`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Make the mask at `index` into `mask` at `at_us`; a keyed mask is
+     * keyed there. Changes made while `live` join one undo step, so a
+     * slider drag is one step; its last change passes `live` false.
+     */
+    @Throws(EditorException::class)override fun `editMask`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `atUs`: kotlin.Long, `mask`: ClipMask, `live`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_edit_mask(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterBoolean.lower(`color`),
+        FfiConverterUInt.lower(`index`),
+        FfiConverterLong.lower(`atUs`),
+        FfiConverterTypeClipMask.lower(`mask`),
+        FfiConverterBoolean.lower(`live`),_status)
 }
     }
     
@@ -3608,6 +3837,109 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Take hold of the handle of the mask at `index` under canvas point
+     * `(x, y)` at `at_us`; `false` when none is there.
+     */
+    @Throws(EditorException::class)override fun `maskBegin`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `atUs`: kotlin.Long, `x`: kotlin.Double, `y`: kotlin.Double): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_mask_begin(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterBoolean.lower(`color`),
+        FfiConverterUInt.lower(`index`),
+        FfiConverterLong.lower(`atUs`),
+        FfiConverterDouble.lower(`x`),
+        FfiConverterDouble.lower(`y`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Move the handle taken hold of to canvas point `(x, y)`. The whole
+     * drag is one undo step.
+     */
+    @Throws(EditorException::class)override fun `maskDrag`(`x`: kotlin.Double, `y`: kotlin.Double): ClipMask {
+            return FfiConverterTypeClipMask.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_mask_drag(
+        it,
+        
+        FfiConverterDouble.lower(`x`),
+        FfiConverterDouble.lower(`y`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * End the mask drag.
+     */
+    @Throws(EditorException::class)override fun `maskEnd`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_mask_end(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Where the handles of the mask at `index` are on the canvas at
+     * `at_us`; `None` when there is no such mask or the clip is not shown.
+     */
+    @Throws(EditorException::class)override fun `maskHandles`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `atUs`: kotlin.Long): MaskHandles? {
+            return FfiConverterOptionalTypeMaskHandles.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_mask_handles(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterBoolean.lower(`color`),
+        FfiConverterUInt.lower(`index`),
+        FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * `clip_id`'s clip masks, or with `color` its colour masks, in order,
+     * each as its keys have it at `at_us`.
+     */
+    @Throws(EditorException::class)override fun `masks`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `atUs`: kotlin.Long): List<ClipMask> {
+            return FfiConverterSequenceTypeClipMask.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_masks(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterBoolean.lower(`color`),
+        FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Move a clip to `row` (top is 0) starting near `start_us`, as one undo
      * step. It snaps to a cut or the playhead within `snap_us`. Returns the
      * start it landed on.
@@ -3628,6 +3960,51 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
     }
     )
     }
+    
+
+    
+    /**
+     * Move the mask at `from` to `to` in the list. One undo step.
+     */
+    @Throws(EditorException::class)override fun `moveMask`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `from`: kotlin.UInt, `to`: kotlin.UInt)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_move_mask(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterBoolean.lower(`color`),
+        FfiConverterUInt.lower(`from`),
+        FfiConverterUInt.lower(`to`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Paint, or with `erase` rub out, a stroke `size` canvas pixels wide
+     * through the canvas points `trace` (x, y pairs) on the brush mask at
+     * `index`. One undo step.
+     */
+    @Throws(EditorException::class)override fun `paintMask`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `atUs`: kotlin.Long, `trace`: List<kotlin.Double>, `size`: kotlin.Double, `erase`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_paint_mask(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterBoolean.lower(`color`),
+        FfiConverterUInt.lower(`index`),
+        FfiConverterLong.lower(`atUs`),
+        FfiConverterSequenceDouble.lower(`trace`),
+        FfiConverterDouble.lower(`size`),
+        FfiConverterBoolean.lower(`erase`),_status)
+}
+    }
+    
     
 
     
@@ -3715,6 +4092,25 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         it,
         
         FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Take the mask at `index` off. One undo step.
+     */
+    @Throws(EditorException::class)override fun `removeMask`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_remove_mask(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterBoolean.lower(`color`),
+        FfiConverterUInt.lower(`index`),_status)
 }
     }
     
@@ -3978,6 +4374,26 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         it,
         
         FfiConverterBoolean.lower(`on`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Spell the text mask at `index` `text`. One undo step.
+     */
+    @Throws(EditorException::class)override fun `setMaskText`(`clipId`: kotlin.String, `color`: kotlin.Boolean, `index`: kotlin.UInt, `text`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_mask_text(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterBoolean.lower(`color`),
+        FfiConverterUInt.lower(`index`),
+        FfiConverterString.lower(`text`),_status)
 }
     }
     
@@ -5480,6 +5896,106 @@ public object FfiConverterTypeClipFilter: FfiConverterRustBuffer<ClipFilter> {
 
 
 /**
+ * One mask of a clip's list, as its keys have it at the time asked for.
+ * `shape` is a key from [`mask_shapes`]; `mode` is `add`, `subtract` or
+ * `intersect`. The box is in the clip's own frame, -1 to 1 each way with
+ * y up; `rotation` is degrees anticlockwise.
+ */
+data class ClipMask (
+    var `shape`: kotlin.String
+    , 
+    var `mode`: kotlin.String
+    , 
+    var `x`: kotlin.Double
+    , 
+    var `y`: kotlin.Double
+    , 
+    var `width`: kotlin.Double
+    , 
+    var `height`: kotlin.Double
+    , 
+    var `rotation`: kotlin.Double
+    , 
+    var `feather`: kotlin.Double
+    , 
+    var `round`: kotlin.Double
+    , 
+    var `invert`: kotlin.Boolean
+    , 
+    /**
+     * Its numbers have keys, so a change keys them at the time shown.
+     */
+    var `keyed`: kotlin.Boolean
+    , 
+    /**
+     * What a text mask says.
+     */
+    var `text`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeClipMask: FfiConverterRustBuffer<ClipMask> {
+    override fun read(buf: ByteBuffer): ClipMask {
+        return ClipMask(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ClipMask) = (
+            FfiConverterString.allocationSize(value.`shape`) +
+            FfiConverterString.allocationSize(value.`mode`) +
+            FfiConverterDouble.allocationSize(value.`x`) +
+            FfiConverterDouble.allocationSize(value.`y`) +
+            FfiConverterDouble.allocationSize(value.`width`) +
+            FfiConverterDouble.allocationSize(value.`height`) +
+            FfiConverterDouble.allocationSize(value.`rotation`) +
+            FfiConverterDouble.allocationSize(value.`feather`) +
+            FfiConverterDouble.allocationSize(value.`round`) +
+            FfiConverterBoolean.allocationSize(value.`invert`) +
+            FfiConverterBoolean.allocationSize(value.`keyed`) +
+            FfiConverterOptionalString.allocationSize(value.`text`)
+    )
+
+    override fun write(value: ClipMask, buf: ByteBuffer) {
+            FfiConverterString.write(value.`shape`, buf)
+            FfiConverterString.write(value.`mode`, buf)
+            FfiConverterDouble.write(value.`x`, buf)
+            FfiConverterDouble.write(value.`y`, buf)
+            FfiConverterDouble.write(value.`width`, buf)
+            FfiConverterDouble.write(value.`height`, buf)
+            FfiConverterDouble.write(value.`rotation`, buf)
+            FfiConverterDouble.write(value.`feather`, buf)
+            FfiConverterDouble.write(value.`round`, buf)
+            FfiConverterBoolean.write(value.`invert`, buf)
+            FfiConverterBoolean.write(value.`keyed`, buf)
+            FfiConverterOptionalString.write(value.`text`, buf)
+    }
+}
+
+
+
+/**
  * How a selected clip stands, and which clip tools can change it.
  */
 data class ClipState (
@@ -6296,6 +6812,135 @@ public object FfiConverterTypeLane: FfiConverterRustBuffer<Lane> {
             FfiConverterBoolean.write(value.`locked`, buf)
             FfiConverterBoolean.write(value.`muted`, buf)
             FfiConverterSequenceTypeClip.write(value.`clips`, buf)
+    }
+}
+
+
+
+/**
+ * A mask's handles on the canvas, in canvas pixels with y down. `corners`
+ * and `line` are x, y pairs; `line` is empty unless the mask is a line or
+ * a mirror. `reach` is how far from a knob a finger still takes it.
+ */
+data class MaskHandles (
+    var `canvasWidth`: kotlin.Double
+    , 
+    var `canvasHeight`: kotlin.Double
+    , 
+    var `middleX`: kotlin.Double
+    , 
+    var `middleY`: kotlin.Double
+    , 
+    var `corners`: List<kotlin.Double>
+    , 
+    var `turnX`: kotlin.Double
+    , 
+    var `turnY`: kotlin.Double
+    , 
+    var `featherX`: kotlin.Double
+    , 
+    var `featherY`: kotlin.Double
+    , 
+    var `line`: List<kotlin.Double>
+    , 
+    var `reach`: kotlin.Double
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMaskHandles: FfiConverterRustBuffer<MaskHandles> {
+    override fun read(buf: ByteBuffer): MaskHandles {
+        return MaskHandles(
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterSequenceDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterSequenceDouble.read(buf),
+            FfiConverterDouble.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MaskHandles) = (
+            FfiConverterDouble.allocationSize(value.`canvasWidth`) +
+            FfiConverterDouble.allocationSize(value.`canvasHeight`) +
+            FfiConverterDouble.allocationSize(value.`middleX`) +
+            FfiConverterDouble.allocationSize(value.`middleY`) +
+            FfiConverterSequenceDouble.allocationSize(value.`corners`) +
+            FfiConverterDouble.allocationSize(value.`turnX`) +
+            FfiConverterDouble.allocationSize(value.`turnY`) +
+            FfiConverterDouble.allocationSize(value.`featherX`) +
+            FfiConverterDouble.allocationSize(value.`featherY`) +
+            FfiConverterSequenceDouble.allocationSize(value.`line`) +
+            FfiConverterDouble.allocationSize(value.`reach`)
+    )
+
+    override fun write(value: MaskHandles, buf: ByteBuffer) {
+            FfiConverterDouble.write(value.`canvasWidth`, buf)
+            FfiConverterDouble.write(value.`canvasHeight`, buf)
+            FfiConverterDouble.write(value.`middleX`, buf)
+            FfiConverterDouble.write(value.`middleY`, buf)
+            FfiConverterSequenceDouble.write(value.`corners`, buf)
+            FfiConverterDouble.write(value.`turnX`, buf)
+            FfiConverterDouble.write(value.`turnY`, buf)
+            FfiConverterDouble.write(value.`featherX`, buf)
+            FfiConverterDouble.write(value.`featherY`, buf)
+            FfiConverterSequenceDouble.write(value.`line`, buf)
+            FfiConverterDouble.write(value.`reach`, buf)
+    }
+}
+
+
+
+/**
+ * A shape a mask can take: the key `add_mask` takes, and a tile's name.
+ */
+data class MaskShapeChoice (
+    var `key`: kotlin.String
+    , 
+    var `label`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMaskShapeChoice: FfiConverterRustBuffer<MaskShapeChoice> {
+    override fun read(buf: ByteBuffer): MaskShapeChoice {
+        return MaskShapeChoice(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MaskShapeChoice) = (
+            FfiConverterString.allocationSize(value.`key`) +
+            FfiConverterString.allocationSize(value.`label`)
+    )
+
+    override fun write(value: MaskShapeChoice, buf: ByteBuffer) {
+            FfiConverterString.write(value.`key`, buf)
+            FfiConverterString.write(value.`label`, buf)
     }
 }
 
@@ -8199,7 +8844,8 @@ enum class ToolKind {
     EDIT_TEXT,
     DRAW,
     VIDEO_EFFECTS,
-    SHAPE_STYLE;
+    SHAPE_STYLE,
+    MASK;
 
     
 
@@ -8447,6 +9093,38 @@ public object FfiConverterOptionalTypeKeyframes: FfiConverterRustBuffer<Keyframe
         } else {
             buf.put(1)
             FfiConverterTypeKeyframes.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeMaskHandles: FfiConverterRustBuffer<MaskHandles?> {
+    override fun read(buf: ByteBuffer): MaskHandles? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeMaskHandles.read(buf)
+    }
+
+    override fun allocationSize(value: MaskHandles?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeMaskHandles.allocationSize(value)
+        }
+    }
+
+    override fun write(value: MaskHandles?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeMaskHandles.write(value, buf)
         }
     }
 }
@@ -8929,6 +9607,34 @@ public object FfiConverterSequenceTypeClip: FfiConverterRustBuffer<List<Clip>> {
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeClipMask: FfiConverterRustBuffer<List<ClipMask>> {
+    override fun read(buf: ByteBuffer): List<ClipMask> {
+        val len = buf.getInt()
+        return List<ClipMask>(len) {
+            FfiConverterTypeClipMask.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ClipMask>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeClipMask.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ClipMask>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeClipMask.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeCut: FfiConverterRustBuffer<List<Cut>> {
     override fun read(buf: ByteBuffer): List<Cut> {
         val len = buf.getInt()
@@ -9143,6 +9849,34 @@ public object FfiConverterSequenceTypeLane: FfiConverterRustBuffer<List<Lane>> {
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeLane.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeMaskShapeChoice: FfiConverterRustBuffer<List<MaskShapeChoice>> {
+    override fun read(buf: ByteBuffer): List<MaskShapeChoice> {
+        val len = buf.getInt()
+        return List<MaskShapeChoice>(len) {
+            FfiConverterTypeMaskShapeChoice.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<MaskShapeChoice>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeMaskShapeChoice.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<MaskShapeChoice>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeMaskShapeChoice.write(it, buf)
         }
     }
 }
@@ -9650,6 +10384,19 @@ public object FfiConverterSequenceTypeWave: FfiConverterRustBuffer<List<Wave>> {
     
         
         FfiConverterString.lower(`root`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Every mask shape in the order the Mask panel shows them.
+         */ fun `maskShapes`(): List<MaskShapeChoice> {
+            return FfiConverterSequenceTypeMaskShapeChoice.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_mask_shapes(
+    
+        _status)
 }
     )
     }

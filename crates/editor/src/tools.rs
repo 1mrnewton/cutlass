@@ -74,6 +74,7 @@ pub enum ToolId {
     Draw,
     VideoEffects,
     ShapeStyle,
+    Mask,
 }
 
 /// A tool as a bar shows it.
@@ -130,6 +131,7 @@ const MAIN_CLIP: &[Tool] = &[
     ready(T::Delete, "Delete"),
     ready(T::Duplicate, "Duplicate"),
     ready(T::Crop, "Crop"),
+    ready(T::Mask, "Mask"),
     ready(T::Mirror, "Mirror"),
     ready(T::Rotate, "Rotate"),
     ready(T::Opacity, "Opacity"),
@@ -152,6 +154,7 @@ const OVERLAY_CLIP: &[Tool] = &[
     ready(T::Delete, "Delete"),
     ready(T::Duplicate, "Duplicate"),
     ready(T::Crop, "Crop"),
+    ready(T::Mask, "Mask"),
     ready(T::Mirror, "Mirror"),
     ready(T::Rotate, "Rotate"),
     ready(T::Opacity, "Opacity"),

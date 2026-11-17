@@ -30,9 +30,9 @@ pub use cutlass_container::DisplayQuarter;
 pub use error::EngineError;
 pub use filmstrip::{MAX_EDGE, MAX_STRIP, StripCell};
 pub use map::{
-    MapError, MapSpeed, TimelineMap, contributes_sound, is_graphic, map_timeline, media_path,
-    micros_to_ticks, original_sound_is_separate, placement_of, speed_at, ticks_to_micros,
-    timeline_for_source,
+    MapError, MapSpeed, TimelineMap, contributes_sound, is_graphic, map_timeline, mean_speed,
+    media_path, micros_to_ticks, original_sound_is_separate, placement_of, speed_at,
+    ticks_to_micros, timeline_for_source,
 };
 pub use mix::{
     AudioSample, ClipPart, ClipPcm, ClipRole, Mix, MixClip, MixResult, MixSpan, clip_part,

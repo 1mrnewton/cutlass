@@ -153,7 +153,17 @@ impl Default for Stream {
 pub const COMPOUND_SPEED: u8 = 6;
 
 /// From this speed a reference that predicted almost nothing of the last
-/// inter frame is not searched (see [`FrameEncoder::tiles`]).
+/// inter frame is not searched (see [`FrameEncoder::tiles`]), but for a
+/// hidden alt-ref at a fixed quantizer in one pass, which searches every
+/// reference. The prune tries a left-out reference again every fourth
+/// frame, so whether an alt-ref (one frame in a dozen, coded fine, and
+/// read by every frame up to its overlay) searched ALTREF was the phase
+/// of that count. On the README's still scene at `q=120` an alt-ref after
+/// the second jump, where the scene came back to an earlier place, coded
+/// its 64×64 blocks on ALTREF without a residual in 19 818 bytes, and in
+/// 26 277 on a build whose count was a frame out (ALTREF left out): at
+/// `q=60` to `210` the still scene −2.1 / −1.9 / −1.7 points (BD-rate at
+/// the same PSNR-Y / U / V), the other two clips the same streams.
 pub const REF_PRUNE_SPEED: u8 = 5;
 
 /// From this speed each tile column's rows are coded on one thread (as
@@ -882,7 +892,8 @@ impl<P: EncPixel> FrameEncoder<P> {
         ];
         // From REF_PRUNE_SPEED, GOLDEN and ALTREF are left out of the
         // search while the same picture predicted under 1% of the last
-        // inter frame that searched it, but tried again every fourth frame.
+        // inter frame that searched it, but tried again every fourth frame
+        // (and always by an alt-ref at a fixed quantizer in one pass).
         let ids = refs.map(|r| r.map_or(0, |p| std::ptr::from_ref(p) as usize));
         if let Some((_, refs)) = self.layer {
             for (r, live) in refs_live.iter_mut().enumerate() {
@@ -890,7 +901,8 @@ impl<P: EncPixel> FrameEncoder<P> {
             }
         }
         let searched_before = refs_live;
-        if !h.is_intra() && fp.speed >= REF_PRUNE_SPEED && !fp.altref_future {
+        let arf_all = fp.hidden && fp.full_search && !fp.second_pass;
+        if !h.is_intra() && fp.speed >= REF_PRUNE_SPEED && !fp.altref_future && !arf_all {
             for r in 1..3 {
                 let (id, share, out) = &mut self.ref_use[r];
                 if refs_live[r] && *id == ids[r] && *share < 10 && *out < 3 {

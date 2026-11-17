@@ -832,3 +832,48 @@ fn a_key_frame_tries_the_chroma_mode_satd_ranks_first() {
     assert!(vertical(false) > 0);
     assert_eq!(vertical(true), 0);
 }
+
+#[test]
+fn an_alt_ref_searches_altref_however_little_the_frames_before_used_it() {
+    // A key frame of one picture, then a golden frame and inter frames of
+    // another: ALTREF (the key frame) predicts none of them, so from speed
+    // 5 it is left out of the search but every fourth frame. Then a hidden
+    // alt-ref of the first picture again: at a fixed quantizer in one pass
+    // it searches every reference (`REF_PRUNE_SPEED`), and codes its
+    // blocks from ALTREF, wherever the count stood.
+    let (w, h) = (128usize, 128usize);
+    let cw = w.div_ceil(2);
+    let a = texture(w, h, (0, 0));
+    let b = texture(w, h, (500, 300));
+    for before in 2..=6 {
+        let mut enc = FrameEncoder::new(w as u32, h as u32, 2);
+        let mut dec = Decoder::new();
+        for t in 0..=before {
+            let pic = if t == 0 { &a } else { &b };
+            enc.load([(&pic[0], w), (&pic[1], cw), (&pic[2], cw)]);
+            let coded = enc
+                .encode(FrameParams {
+                    golden: t == 1,
+                    ..fixed_params(t, 120, 5, false)
+                })
+                .expect("encode");
+            dec.decode(&coded.data).expect("decode");
+        }
+        enc.load([(&a[0], w), (&a[1], cw), (&a[2], cw)]);
+        let coded = enc
+            .encode(FrameParams {
+                hidden: true,
+                hidden_slot: 3,
+                ..fixed_params(before + 1, 120, 5, false)
+            })
+            .expect("encode");
+        dec.decode(&coded.data).expect("decode");
+        let (all, altref) = dec.last_blocks().fold((0, 0), |(n, k), blk| {
+            (n + 1, k + usize::from(blk.refs[0] == 3))
+        });
+        assert!(
+            altref * 2 > all,
+            "after {before} frames: {altref} of {all} blocks on ALTREF"
+        );
+    }
+}

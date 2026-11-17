@@ -442,6 +442,20 @@ struct Blk {
 /// A sub-block mode to choose while coding.
 const AUTO: u8 = 255;
 
+/// The ten intra modes.
+const INTRA_MODES: [u8; 10] = [
+    geom::DC,
+    geom::V,
+    geom::H,
+    geom::TM,
+    geom::D45,
+    geom::D135,
+    geom::D117,
+    geom::D153,
+    geom::D207,
+    geom::D63,
+];
+
 /// Which sub-block of a neighbour under 8×8 gives sub-block `i`'s
 /// candidate: `[i][from above]` (libvpx `idx_n_column_to_subblock`).
 const SUBBLOCK: [[u8; 2]; 4] = [[1, 2], [1, 3], [3, 2], [3, 3]];
@@ -685,6 +699,23 @@ const DZ_TRIAL_SPEED: u8 = 5;
 /// one pass, where the key frame's size moves the rate control: the
 /// grainy pan's chroma lost 2 points at the same PSNR for its luma's 2.5.
 pub const KEY_FULL_SPEED: u8 = 5;
+
+/// Up to this speed at a fixed quantizer in one pass
+/// ([`super::FrameParams::full_search`]), a key frame searches its intra
+/// modes more as libvpx's do (`rd_pick_intra_sub_8x8_y_mode`,
+/// `rd_pick_intra_sbuv_mode`): a block tries the [`KEY_RD_CANDS`] best
+/// luma modes by SATD (not four); its best then tries the best chroma mode
+/// by SATD besides DC (not the luma's mode, which SATD may rank last);
+/// and each 4×4 of a split 8×8 takes the best by RD of the
+/// [`KEY_RD_4X4`] best by SATD (not the best by SATD), its mode's bits in
+/// the context of the 4×4s above and left of it.
+pub const KEY_RD_SPEED: u8 = 5;
+
+/// See [`KEY_RD_SPEED`].
+const KEY_RD_CANDS: usize = 6;
+
+/// See [`KEY_RD_SPEED`].
+const KEY_RD_4X4: usize = 3;
 
 /// Up to this speed the search on a reference starts also where its
 /// picture stands from this one ([`Shared::ref_seeds`]) and reaches that
@@ -1455,6 +1486,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     // Partition decision --------------------------------------------------
 
     /// Speed 6 in one pass: speed 5's search (see [`SIX_TX_BITS`]).
+    /// A key frame's fuller search of its intra modes ([`KEY_RD_SPEED`]).
+    fn key_rd(&self) -> bool {
+        let s = self.s;
+        s.intra_frame && s.full_search && !s.second_pass && s.speed <= KEY_RD_SPEED
+    }
+
     fn six(&self) -> bool {
         self.s.speed == 6 && !self.s.second_pass
     }
@@ -2108,7 +2145,13 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         {
             let b0 = cands[best.1];
             let mut more = Vec::new();
-            for uv in [b0.mode, geom::TM, geom::V, geom::H] {
+            // (A key frame's: by SATD, [`KEY_RD_SPEED`].)
+            let order = if self.key_rd() {
+                self.uv_ranked(&b0)
+            } else {
+                [b0.mode, geom::TM, geom::V, geom::H]
+            };
+            for uv in order {
                 if uv != b0.uv
                     && !more.iter().any(|m: &Blk| m.uv == uv)
                     && more.len() < if s.speed < 4 { 3 } else { 1 }
@@ -2472,6 +2515,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.last_satd = scored.first().map_or(u64::MAX, |t| t.0);
         let k = match s.speed {
             0..=3 => 4,
+            _ if self.key_rd() => KEY_RD_CANDS,
             _ if s.intra_frame && s.full_search && s.speed <= KEY_FULL_SPEED => 4,
             4 => 3,
             // (Inter frames' intra blocks seldom win: 4 to 15% of the
@@ -3770,6 +3814,98 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         best.1
     }
 
+    /// The intra mode of the 4×4 luma block at `(x, y)` by RD
+    /// ([`KEY_RD_SPEED`]): the [`KEY_RD_4X4`] best by SATD each predicted,
+    /// quantized and reconstructed, costed with its bits in the context
+    /// `(above, left)` of the modes beside it.
+    #[allow(clippy::too_many_arguments)]
+    fn pick_4x4_rd(
+        &mut self,
+        x: usize,
+        y: usize,
+        have_left: bool,
+        have_above: bool,
+        have_right: bool,
+        ctx: (u8, u8),
+    ) -> u8 {
+        let s = self.s;
+        let modes = self.ranked_4x4(x, y, have_left, have_above, have_right);
+        let lam = s.rd_lambda * self.lam_mul / 256.0;
+        let probs = &KF_Y_MODE_PROB[usize::from(ctx.0)][usize::from(ctx.1)];
+        let mut best = (f32::INFINITY, modes[0]);
+        for m in modes.into_iter().take(KEY_RD_4X4) {
+            self.rec
+                .predict_intra(0, m, 0, x, y, have_left, have_above, have_right);
+            let kind = if s.h.lossless {
+                0
+            } else {
+                geom::intra_tx_type(m)
+            };
+            let (levels, _) = self.quantize(0, 0, kind, x, y, true);
+            self.pool.push(levels);
+            let mut c = Cost(0);
+            tree_to(&mut c, &prob::INTRA_TREE, probs, m);
+            let j = self.rd.coded + lam * c.0 as f32;
+            if j < best.0 {
+                best = (j, m);
+            }
+        }
+        best.1
+    }
+
+    /// The ten intra modes of the 4×4 luma block at `(x, y)`, best first
+    /// by SATD (as [`Self::pick_4x4`] scores them).
+    fn ranked_4x4(
+        &mut self,
+        x: usize,
+        y: usize,
+        have_left: bool,
+        have_above: bool,
+        have_right: bool,
+    ) -> [u8; 10] {
+        let s = self.s;
+        let e = self
+            .rec
+            .intra_edges(0, 0, x, y, have_left, have_above, have_right);
+        let (src, ss) = (s.src.planes[0], s.src.strides[0]);
+        let lam = u64::from(s.lambda);
+        let mut ranked = [(0u64, 0u8); 10];
+        for (r, m) in ranked.iter_mut().zip(INTRA_MODES) {
+            ipred::predict(m, 4, &mut self.pred, 4, &e, u32::from(s.h.bit_depth));
+            let d = satd(&src[y * ss + x..], ss, &self.pred, 4, 4);
+            *r = (d + lam * u64::from(m != geom::DC), m);
+        }
+        ranked.sort_unstable();
+        ranked.map(|r| r.1)
+    }
+
+    /// The four chroma modes of intra block `b` best by the SATD of both
+    /// planes' prediction of their top left square (the block's, up to
+    /// 32×32), with a little for leaving DC.
+    fn uv_ranked(&mut self, b: &Blk) -> [u8; 4] {
+        let s = self.s;
+        let (sx, sy) = plane_ss(s, 1);
+        let (w, h) = ((b.bw * 8) >> sx, (b.bh * 8) >> sy);
+        let n = w.min(h).clamp(4, 32);
+        let tx = (n.trailing_zeros() - 2) as u8;
+        let (x, y) = ((b.col * 8) >> sx, (b.row * 8) >> sy);
+        let (have_left, have_above) = (b.col > self.col0, b.row > 0);
+        let lam = u64::from(s.lambda);
+        let mut ranked = INTRA_MODES.map(|m| (lam * u64::from(m != geom::DC), m));
+        for p in 1..3 {
+            let e = self
+                .rec
+                .intra_edges(p, tx, x, y, have_left, have_above, false);
+            let (src, ss) = (s.src.planes[p], s.src.strides[p]);
+            for r in &mut ranked {
+                ipred::predict(r.1, n, &mut self.pred, n, &e, u32::from(s.h.bit_depth));
+                r.0 += satd(&src[y * ss + x..], ss, &self.pred, n, n);
+            }
+        }
+        ranked.sort_unstable();
+        [ranked[0].1, ranked[1].1, ranked[2].1, ranked[3].1]
+    }
+
     fn uv_tx(&self, b: &Blk) -> u8 {
         let (sx, sy) = plane_ss(self.s, 1);
         geom::uv_tx(b.bsize, b.tx, sx as u32, sy as u32)
@@ -3811,7 +3947,34 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                             b.uv
                         } else if b.bsize < BLOCK_8X8 {
                             let k = r * 2 + c;
-                            if b.bmode[k] == AUTO {
+                            if b.bmode[k] == AUTO && self.trial && self.key_rd() {
+                                // ([`KEY_RD_SPEED`]: by RD, in the context of
+                                // the modes above and left of it.)
+                                let a = if r > 0 {
+                                    self.sub[k - 2]
+                                } else {
+                                    match self.above_nb(b) {
+                                        Some(n) if n.refs[0] == INTRA_FRAME => n.bmode[c + 2],
+                                        _ => geom::DC,
+                                    }
+                                };
+                                let l = if c > 0 {
+                                    self.sub[k - 1]
+                                } else {
+                                    match self.left_nb(b) {
+                                        Some(n) if n.refs[0] == INTRA_FRAME => n.bmode[r * 2 + 1],
+                                        _ => geom::DC,
+                                    }
+                                };
+                                self.sub[k] = self.pick_4x4_rd(
+                                    x,
+                                    y,
+                                    have_left_of(c, b, self.col0),
+                                    r > 0 || b.row > 0,
+                                    c + step < n4w,
+                                    (a, l),
+                                );
+                            } else if b.bmode[k] == AUTO {
                                 // The 4×4's mode from its own edges, by SATD.
                                 self.sub[k] = self.pick_4x4(
                                     x,
@@ -5549,7 +5712,14 @@ fn scan_pair(tx: u8, kind: u8) -> (&'static [u16], &'static [u16]) {
 
 /// The sum of absolute 4×4 Hadamard coefficients of `src - pred` over an
 /// `w`×`h` block (`pred` rows `w` apart).
-fn satd<P: Pixel>(src: &[P], ss: usize, pred: &[P], w: usize, h: usize) -> u64 {
+fn satd<P: EncPixel>(src: &[P], ss: usize, pred: &[P], w: usize, h: usize) -> u64 {
+    P::satd(src, ss, pred, w, w, h)
+}
+
+/// The SATD of `src` against `pred` (rows `w` apart), `w`×`h` of whole
+/// 4×4s: the sum of the absolute values of each 4×4's Walsh-Hadamard
+/// transform of the differences, over two.
+pub fn satd_px<P: Pixel>(src: &[P], ss: usize, pred: &[P], w: usize, h: usize) -> u64 {
     let mut total = 0u64;
     for by in (0..h).step_by(4) {
         for bx in (0..w).step_by(4) {

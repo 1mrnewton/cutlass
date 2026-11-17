@@ -213,9 +213,25 @@ pub trait EncPixel: Store {
         fy: u32,
         fx: u32,
     ) -> u32;
+    /// The SATD of `a` against `b` (`b`'s rows `sb` apart, which must be
+    /// `w`), as [`tile::satd_px`].
+    fn satd(a: &[Self], sa: usize, b: &[Self], sb: usize, w: usize, h: usize) -> u64 {
+        debug_assert_eq!(sb, w);
+        tile::satd_px(a, sa, b, w, h)
+    }
 }
 
 impl EncPixel for u8 {
+    #[inline(always)]
+    fn satd(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u64 {
+        match (w == h && sb == w)
+            .then(|| cutlass_simd::vp9::sad8::satd(a, sa, b, sb, w))
+            .flatten()
+        {
+            Some(v) => v,
+            None => tile::satd_px(a, sa, b, sb, h),
+        }
+    }
     #[inline(always)]
     fn sad(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 {
         crate::dsp::sad::sad(a, sa, b, sb, w, h)

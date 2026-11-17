@@ -804,3 +804,31 @@ fn a_fixed_quantizer_tries_a_second_smaller_transform() {
     assert!(two_under(false) > 0);
     assert_eq!(two_under(true), 0);
 }
+
+#[test]
+fn a_key_frame_tries_the_chroma_mode_satd_ranks_first() {
+    // Luma in horizontal stripes, chroma in vertical ones: the luma's best
+    // mode is H, and the one chroma mode a key frame's best tried after DC
+    // was the luma's. At a fixed quantizer in one pass it tries the best by
+    // SATD besides DC (`tile::KEY_RD_SPEED`), V; a second pass takes DC or
+    // H.
+    let (w, h) = (128usize, 128usize);
+    let (cw, ch) = (w / 2, h / 2);
+    let luma: Vec<u8> = (0..w * h)
+        .map(|i| if (i / w) % 8 < 4 { 70 } else { 150 })
+        .collect();
+    let stripes: Vec<u8> = (0..cw * ch)
+        .map(|i| if (i % cw) % 8 < 4 { 90 } else { 170 })
+        .collect();
+    let pic = [luma, stripes.clone(), stripes];
+    let vertical = |second_pass: bool| {
+        let (out, _) = code_checked(std::slice::from_ref(&pic), (w, h), 60, 5, second_pass);
+        let mut dec = Decoder::new();
+        dec.decode(&out[0]).expect("decode");
+        dec.last_blocks()
+            .filter(|b| b.uv == crate::geom::V || b.uv == crate::geom::TM)
+            .count()
+    };
+    assert!(vertical(false) > 0);
+    assert_eq!(vertical(true), 0);
+}

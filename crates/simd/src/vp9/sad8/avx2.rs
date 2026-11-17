@@ -11,13 +11,22 @@
 //! Loads are unaligned vector moves of `W` samples (or 8, or 16) from the
 //! start of each of the `h` rows that [`fits`](super::fits) checked lie in
 //! the slice.
+//!
+//! SATDs widen the differences to 16 bits, a row of 16 a vector (two rows
+//! of 8, or one of 4), and take the Walsh-Hadamard of each 4×4 down the
+//! four rows' vectors, then along each group of four lanes; the last
+//! step's `|p + q| + |p − q|` is `2 max(|p|, |q|)`, so each group ends as
+//! the larger of its two sums plus the larger of its two differences (at
+//! most 4080 a lane), repeated in its four lanes.
 
 use core::arch::x86_64::{
-    __m128i, __m256i, _mm_add_epi32, _mm_add_epi64, _mm_cvtsi128_si32, _mm_cvtsi128_si64,
-    _mm_loadl_epi64, _mm_loadu_si128, _mm_sad_epu8, _mm_setzero_si128, _mm_shuffle_epi32,
-    _mm_unpackhi_epi64, _mm_unpacklo_epi64, _mm256_add_epi32, _mm256_add_epi64,
-    _mm256_castsi256_si128, _mm256_cvtepu8_epi16, _mm256_extracti128_si256, _mm256_loadu_si256,
-    _mm256_madd_epi16, _mm256_sad_epu8, _mm256_set_m128i, _mm256_setzero_si256, _mm256_sub_epi16,
+    __m128i, __m256i, _mm_add_epi32, _mm_add_epi64, _mm_cvtsi32_si128, _mm_cvtsi128_si32,
+    _mm_cvtsi128_si64, _mm_loadl_epi64, _mm_loadu_si128, _mm_sad_epu8, _mm_setzero_si128,
+    _mm_shuffle_epi32, _mm_unpackhi_epi64, _mm_unpacklo_epi64, _mm256_abs_epi16, _mm256_add_epi16,
+    _mm256_add_epi32, _mm256_add_epi64, _mm256_broadcastsi128_si256, _mm256_castsi256_si128,
+    _mm256_cvtepu8_epi16, _mm256_extracti128_si256, _mm256_loadu_si256, _mm256_madd_epi16,
+    _mm256_max_epi16, _mm256_sad_epu8, _mm256_set_m128i, _mm256_set1_epi16, _mm256_setzero_si256,
+    _mm256_shuffle_epi8, _mm256_shuffle_epi32, _mm256_sub_epi16,
 };
 
 /// # Safety
@@ -337,4 +346,85 @@ fn sse_w<const W: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize, h: usize) -> 
         }
     }
     u64::from(hsum32(acc))
+}
+
+/// The bytes that swap each pair of 16-bit lanes.
+const PAIR_SWAP: [i8; 16] = [2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13];
+
+/// The four rows' differences `d` of 4×4s side by side (16 lanes a row)
+/// into `acc` (32-bit lanes: four times each 4×4's SATD over two).
+#[inline]
+#[target_feature(enable = "avx2")]
+fn wht4(d: [__m256i; 4], acc: __m256i, swap: __m256i) -> __m256i {
+    let a0 = _mm256_add_epi16(d[0], d[1]);
+    let a1 = _mm256_sub_epi16(d[0], d[1]);
+    let a2 = _mm256_add_epi16(d[2], d[3]);
+    let a3 = _mm256_sub_epi16(d[2], d[3]);
+    let mut acc = acc;
+    for v in [
+        _mm256_add_epi16(a0, a2),
+        _mm256_sub_epi16(a0, a2),
+        _mm256_add_epi16(a1, a3),
+        _mm256_sub_epi16(a1, a3),
+    ] {
+        let x = _mm256_shuffle_epi8(v, swap);
+        let s = _mm256_abs_epi16(_mm256_add_epi16(v, x));
+        let t = _mm256_abs_epi16(_mm256_sub_epi16(v, x));
+        let s = _mm256_max_epi16(s, _mm256_shuffle_epi32::<0b1011_0001>(s));
+        let t = _mm256_max_epi16(t, _mm256_shuffle_epi32::<0b1011_0001>(t));
+        let m = _mm256_madd_epi16(_mm256_add_epi16(s, t), _mm256_set1_epi16(1));
+        acc = _mm256_add_epi32(acc, m);
+    }
+    acc
+}
+
+/// Rows `o` and `o4` of a block 8 wide in one vector.
+///
+/// # Safety
+/// Both rows hold 8 samples.
+#[inline]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn two8(s: &[u8], o: usize, o4: usize) -> __m128i {
+    // SAFETY: the caller proves both rows lie in `s`.
+    unsafe { _mm_unpacklo_epi64(l64(s, o), l64(s, o4)) }
+}
+
+/// See [`super::satd`].
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+pub(super) fn satd(a: &[u8], sa: usize, b: &[u8], sb: usize, n: usize) -> u64 {
+    // SAFETY: `PAIR_SWAP` holds 16 bytes.
+    let swap = unsafe { _mm256_broadcastsi128_si256(_mm_loadu_si128(PAIR_SWAP.as_ptr().cast())) };
+    let diff =
+        |x: __m128i, y: __m128i| _mm256_sub_epi16(_mm256_cvtepu8_epi16(x), _mm256_cvtepu8_epi16(y));
+    let mut acc = _mm256_setzero_si256();
+    match n {
+        4 => {
+            let row = |s: &[u8], o: usize| {
+                _mm_cvtsi32_si128(i32::from_le_bytes([s[o], s[o + 1], s[o + 2], s[o + 3]]))
+            };
+            let d = core::array::from_fn(|r| diff(row(a, r * sa), row(b, r * sb)));
+            acc = wht4(d, acc, swap);
+        }
+        8 => {
+            // SAFETY: rows `0..8` of both blocks hold 8 samples (`satd`).
+            let d = core::array::from_fn(|r| unsafe {
+                diff(two8(a, r * sa, (r + 4) * sa), two8(b, r * sb, (r + 4) * sb))
+            });
+            acc = wht4(d, acc, swap);
+        }
+        _ => {
+            for by in (0..n).step_by(4) {
+                for bx in (0..n).step_by(16) {
+                    // SAFETY: rows `0..n` of both blocks hold `n` samples.
+                    let d = core::array::from_fn(|r| unsafe {
+                        diff(l128(a, (by + r) * sa + bx), l128(b, (by + r) * sb + bx))
+                    });
+                    acc = wht4(d, acc, swap);
+                }
+            }
+        }
+    }
+    u64::from(hsum32(acc)) / 4
 }

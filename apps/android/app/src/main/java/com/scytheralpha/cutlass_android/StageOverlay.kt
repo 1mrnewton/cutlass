@@ -352,7 +352,7 @@ private fun Density.boxSize(stage: Stage, scale: Float): Size {
 }
 
 /** The canvas fitted in the overlay, as the picture is drawn. */
-private fun fitted(canvas: Pair<Double, Double>, width: Float, height: Float): Rect {
+internal fun fitted(canvas: Pair<Double, Double>, width: Float, height: Float): Rect {
     val scale = min(width / canvas.first, height / canvas.second)
     val fittedWidth = (canvas.first * scale).toFloat()
     val fittedHeight = (canvas.second * scale).toFloat()

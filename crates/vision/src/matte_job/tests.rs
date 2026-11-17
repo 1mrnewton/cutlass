@@ -515,3 +515,75 @@ fn picks_land_on_the_nearest_frame_and_two_on_one_keep_the_later() {
     let kept = &frames[0].1.pick.clicks[0];
     assert!((kept.x - 0.2).abs() < 1e-9);
 }
+
+/// BiRefNet_lite on a second of a real clip: three children in a busy room.
+/// Slow, so run by hand with `--ignored`; set `CUTLASS_MATTE_OUT` to a
+/// folder to keep the matte video and look at it.
+#[test]
+#[ignore = "reads a real clip and runs the real model"]
+fn birefnet_mattes_a_real_clip() {
+    let local = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    let clip = local.join("7150172-hd_720_1280_50fps.mp4");
+    let weights = local.join("models/matting");
+    if !clip.is_file() || !weights.join(crate::MATTING_WEIGHTS).is_file() {
+        return;
+    }
+    let temp = Temp::new();
+    fs::copy(&clip, temp.0.join("party.mp4")).unwrap();
+    let mut draft = Draft::empty("D");
+    draft.fps = 25.0;
+    draft.materials.videos.push(MaterialVideo {
+        id: "m".into(),
+        kind: "video".into(),
+        path: "party.mp4".into(),
+        width: 720,
+        height: 1280,
+        duration: Micros(7_820_000),
+        ..MaterialVideo::default()
+    });
+    draft.materials.common_mask.push(RawMaterial {
+        id: "r".into(),
+        kind: MATTING.into(),
+        fields: Matting::auto().to_fields(),
+    });
+    let mut segment = Segment::new("v", "m", TimeRange::new(0, 1_000_000));
+    segment.source_range = Some(TimeRange::new(2_000_000, 1_000_000));
+    segment.extra_material_refs.push("r".into());
+    draft.tracks[0].segments.push(segment);
+    let ask = cutlass_eval::matte_ask(&draft, Some(&temp.0), &"v".into()).unwrap();
+    let compute = if crate::gpu_available() {
+        crate::Compute::Gpu
+    } else {
+        crate::Compute::Cpu
+    };
+    let mut model = crate::Matting::load(&weights, compute).unwrap();
+    assert_eq!(model.id(), ask.model());
+    let start = std::time::Instant::now();
+    let file = matte_clip(
+        &readers(),
+        &encoders(),
+        &mut model,
+        &ask,
+        &temp.0,
+        &mut |_| true,
+    )
+    .unwrap();
+    let took = start.elapsed();
+    // Every tenth of a second's first row.
+    let frames = read_back(&file, 10);
+    // The children fill the middle and lower frame; the wall above them
+    // does not.
+    let kept = |row: &[u8]| row.iter().filter(|g| **g > 128).count();
+    let first = &frames[0];
+    assert!(
+        kept(first) < first.len() / 4,
+        "the wall's top row is dropped"
+    );
+    eprintln!(
+        "25 frames in {took:.2?} on {compute:?}, {:.0} ms a frame",
+        took.as_secs_f64() * 40.0
+    );
+    if let Some(out) = std::env::var_os("CUTLASS_MATTE_OUT") {
+        fs::copy(&file, Path::new(&out).join("party-matte.mp4")).unwrap();
+    }
+}

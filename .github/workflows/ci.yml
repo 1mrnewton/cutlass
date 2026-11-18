@@ -466,8 +466,19 @@ jobs:
       - name: NSIS
         shell: bash
         run: |
-          command -v makensis || choco install nsis -y --no-progress
-          echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+          # A self-hosted runner's account is not an administrator, so
+          # NSIS must already be installed there; only GitHub's runner
+          # installs it.
+          nsis="C:/Program Files (x86)/NSIS"
+          if ! command -v makensis && [ ! -x "$nsis/makensis.exe" ]; then
+            if [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
+              choco install nsis -y --no-progress
+            else
+              echo "::error::NSIS is not installed on this runner; install it once as an administrator (choco install nsis)"
+              exit 1
+            fi
+          fi
+          echo "$nsis" >> "$GITHUB_PATH"
       - name: Package
         run: python scripts/windows_installer.py ${{ env.CARGO_TARGET_DIR || 'target' }}/release/cutlass.exe dist/Cutlass-setup.exe
       - name: Install, smoke test and uninstall

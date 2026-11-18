@@ -24,6 +24,7 @@ mod cover;
 mod follow;
 mod grade;
 mod inspector;
+mod markdown;
 mod mask;
 mod motion_blur;
 mod reframe;
@@ -33,6 +34,8 @@ mod retouch;
 mod shape;
 mod speed;
 mod studio;
+
+pub(crate) use markdown::install_fonts;
 
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
@@ -1024,6 +1027,7 @@ fn sizes(shell: &Shell, window: Vec2) -> Sizes {
 
 fn style(ui: &mut Ui) {
     ui.ctx().set_theme(egui::ThemePreference::Dark);
+    install_fonts(ui.ctx());
     ui.style_mut().interaction.selectable_labels = false;
     ui.ctx().global_style_mut(install_style);
     ui.ctx().style_mut_of(egui::Theme::Dark, install_style);

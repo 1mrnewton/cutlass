@@ -1418,12 +1418,7 @@ fn copy_planar(
 ) -> Result<PictureOutput, CodecError> {
     let (width, height) = nv12_size(image)?;
     let bytes = copy_nv12(image)?;
-    PictureOutput::cpu(
-        buffer_info(image, width, height),
-        bytes,
-        pts,
-        timescale,
-    )
+    PictureOutput::cpu(buffer_info(image, width, height), bytes, pts, timescale)
 }
 
 /// Keep an IOSurface-backed NV12 buffer as a [`Surface`]. A buffer that is

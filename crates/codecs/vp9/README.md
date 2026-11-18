@@ -3136,8 +3136,9 @@ came at 124 and 100 (192 and 168 with `max_q=160`). Now (FFmpeg `-b:v
 
 **Frame dropping** (`drop_frame_pct`, FFmpeg's `-drop-threshold`). One
 pass at a bitrate keeps libvpx's buffer model beside its own: the buffer
-starts at 4/6 of its size (`cbr_buffer_ms`, or libvpx's 6 s at a
-variable bitrate), takes each frame's share of the rate in and its bits
+(`cbr_buffer_ms`, or libvpx's 6 s at a variable bitrate) starts at
+`rc_init_occupancy_ms` (unset, three quarters of `cbr_buffer_ms`, as
+FFmpeg sets it, or libvpx's 4 of its 6 s), takes each frame's share of the rate in and its bits
 out, and holds at most its size. While it is under the threshold (in
 percent of its optimal level, 5/6 of its size) every other inter frame is
 dropped, and one frame in 1 + the decimation factor is coded while it
@@ -3147,7 +3148,9 @@ A dropped frame gives no packet (`push_planes` returns nothing for it,
 after it, and they predict from the frame coded before it. Key frames,
 golden frames, cuts and the frame an alt-ref comes with are never
 dropped, nor a frame of two passes. libvpx drops in one-pass CBR only.
-Constant bitrate with a 1 s buffer, `drop=30` against FFmpeg's
+Measured before the rate buffer below planned the first key frame (it
+started at 4/6 of a constant bitrate's buffer then). Constant bitrate
+with a 1 s buffer, `drop=30` against FFmpeg's
 `-deadline realtime -cpu-used 8 -b:v R -minrate R -maxrate R -bufsize R
 -drop-threshold 30`, four threads, the README's three clips (packets,
 rate, the most a 1 s buffer held past the rate, PSNR-Y with each dropped

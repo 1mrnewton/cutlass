@@ -913,7 +913,22 @@ impl Vp9Encoder {
     /// apart. A cut takes a key frame's quantizer, and blocks that code
     /// much also try a smaller transform.
     pub fn set_second_pass(&mut self, first_bits: &[u64], first_q: u8) {
-        on_lane!(self, c => c.set_second_pass(first_bits, first_q));
+        on_lane!(self, c => c.set_second_pass(first_bits, first_q, &[]));
+    }
+
+    /// [`Self::set_second_pass`] for a second pass with key frames forced
+    /// on the pictures `keys` (counted from the first pushed, 0; each
+    /// pushed after [`Self::force_keyframe`], in the first pass as in this
+    /// one): as libvpx's two passes, the plan ends the key-frame and golden
+    /// groups there and budgets each such key frame from the first pass's
+    /// bits at a key frame's class, and plans the scenes the first pass
+    /// shows, all before any picture is coded. A key frame forced inside a
+    /// scene does not start one: it and the pictures after it keep the
+    /// scene's step (one forced on a cut starts a scene, as a cut does).
+    /// The inter step then rises at most by half from one frame to the
+    /// next.
+    pub fn set_second_pass_with_keys(&mut self, first_bits: &[u64], first_q: u8, keys: &[u64]) {
+        on_lane!(self, c => c.set_second_pass(first_bits, first_q, keys));
     }
 
     /// The quantizer index a first pass should code at for this encoder's
@@ -1272,13 +1287,19 @@ impl<P: EncPixel> Core<P> {
         }
     }
 
-    fn set_second_pass(&mut self, first_bits: &[u64], first_q: u8) {
+    fn set_second_pass(&mut self, first_bits: &[u64], first_q: u8, keys: &[u64]) {
         self.rc.pass2 = Some(Pass2::new(
             first_bits,
             first_q,
             self.opts.keyint,
             self.opts.gf_range().1,
+            keys,
         ));
+        if !keys.is_empty()
+            && let Some(p) = &mut self.rc.pass2
+        {
+            p.plan_scenes();
+        }
         if self.opts.corpus_complexity > 0 {
             // libvpx's `vp9_init_second_pass`: the bitrate times the mean of
             // the pictures' normalized scores, each the square root of its
@@ -1841,6 +1862,11 @@ impl<P: EncPixel> Core<P> {
         // (In temporal layers a cut is an inter frame: a golden frame
         // would refresh slots another layer reads.)
         let layered = self.opts.layered();
+        // Two passes: a key frame forced inside a scene (not on a cut, nor
+        // on the first picture) keeps the scene's step
+        // ([`Vp9Encoder::set_second_pass_with_keys`]).
+        let asked = self.force_key && self.rc.frames > 0 && self.rc.pass2.is_some() && !layered;
+        let inside = asked && !cut.unwrap_or_else(|| self.is_cut(planes[0]));
         let cut = !forced && !layered && cut.unwrap_or_else(|| self.is_cut(planes[0]));
         // What looks a cut may be the picture moved far ([`super::arf::jump`]):
         // then it is an inter frame whose blocks also search there.
@@ -1856,7 +1882,8 @@ impl<P: EncPixel> Core<P> {
         let min = self.opts.keyint_min;
         let auto = min > 0 || (self.rc.pass2.is_some() && !layered);
         let key = forced || (cut && auto && self.since_key >= min);
-        self.rc.scene_key = key && !forced;
+        self.rc.scene_key = key && (!forced || (asked && !inside));
+        self.rc.inside_key = inside;
         let cut = cut && !key;
         // A golden frame every `GF_INTERVAL` frames, coded finer: the
         // frames after it predict from it. After an alt-ref, the golden
@@ -2417,8 +2444,25 @@ impl<P: EncPixel> Core<P> {
     /// away (at most `GF_INTERVAL`, at least [`GF_MIN_INTERVAL`]), so that
     /// the alt-ref and golden frames the pictures between predict from
     /// stay near (libvpx's two passes end a golden group sooner as the
-    /// motion grows, too).
-    fn next_golden(&self, at: u32, (y, stride): (&[P], usize)) -> u32 {
+    /// motion grows, too). Two passes end the group at the picture before
+    /// a key frame forced to come (as libvpx's), where the plan or the
+    /// lookahead knows of one.
+    fn next_golden(&self, at: u32, luma: (&[P], usize)) -> u32 {
+        let next = self.next_golden_free(at, luma);
+        let Some(p) = &self.rc.pass2 else {
+            return next;
+        };
+        let now = self.rc.frames as usize;
+        let planned = p.next_forced(now).map(|k| k - now);
+        let queued = self.queue.iter().position(|q| q.force).map(|j| j + 1);
+        match planned.into_iter().chain(queued).min() {
+            Some(d) if d >= 3 => next.min(at + d as u32 - 1),
+            _ => next,
+        }
+    }
+
+    /// [`Self::next_golden`] with no key frame forced to come.
+    fn next_golden_free(&self, at: u32, (y, stride): (&[P], usize)) -> u32 {
         // ([`Vp9Options::min_gf_interval`] sets them.)
         let (least, most) = self.opts.gf_range();
         let fixed = (at / most + 1) * most;
@@ -2951,7 +2995,23 @@ struct Pass2 {
     scale: f64,
     /// The first pass's golden interval.
     gf: usize,
+    /// The inter step chosen last.
+    last_base: f64,
+    /// The pictures with a key frame forced on them
+    /// ([`Vp9Encoder::set_second_pass_with_keys`]), those at a key frame's
+    /// place (forced, or `keyint` after the one before), and the first-pass
+    /// golden places (every `gf` after each key frame).
+    forced: Vec<bool>,
+    key: Vec<bool>,
+    gold: Vec<bool>,
 }
+
+/// Two passes with forced key frames: the most the inter step rises from
+/// one frame to the next. A key frame forced late in a cheap scene that
+/// takes more than planned leaves the frames after it little; without
+/// the bound they sat at the coarsest quantizer (libvpx bounds how far a
+/// frame's target moves for what was spent, too).
+const FORCED_STEP_RISE: f64 = 1.5;
 
 /// The share of a golden picture's first-pass bits its overlay keeps
 /// when an alt-ref stands for it.
@@ -2998,20 +3058,35 @@ const SCENE_END_BITS: f64 = 2.5;
 const END_FRAMES: f64 = 10.0;
 
 impl Pass2 {
-    fn new(bits: &[u64], q: u8, keyint: u32, gf: u32) -> Self {
+    fn new(bits: &[u64], q: u8, keyint: u32, gf: u32, keys: &[u64]) -> Self {
         let keyint = keyint.max(1) as usize;
         let gf = gf.max(1) as usize;
         let b: Vec<f64> = bits.iter().map(|&b| b as f64).collect();
+        let mut forced = vec![false; b.len()];
+        for &k in keys {
+            if let Some(f) = usize::try_from(k).ok().and_then(|k| forced.get_mut(k)) {
+                *f = true;
+            }
+        }
+        // Each picture's place from the key frame before it (key frames
+        // every `keyint`, counted again from each forced one), and so the
+        // key frames and the first pass's golden places.
+        let mut since = vec![0usize; b.len()];
+        for i in 1..b.len() {
+            let s = since[i - 1] + 1;
+            since[i] = if forced[i] || s >= keyint { 0 } else { s };
+        }
+        let gold: Vec<bool> = since
+            .iter()
+            .map(|&s| s != 0 && s.is_multiple_of(gf))
+            .collect();
         // The first pass codes a golden frame every `GF_INTERVAL` at its
         // finer step. For when the second pass places its golden frames
         // elsewhere (`golden_at`): each picture's bits as an inter frame's
         // (at a first-pass golden place, the median of the six around),
         // and what a golden frame there would take over that, as the
         // nearest first-pass golden frame took over its neighbours.
-        let is_gold = |i: usize| {
-            let at = i % keyint;
-            at != 0 && at.is_multiple_of(gf)
-        };
+        let is_gold = |i: usize| gold[i];
         let inter: Vec<f64> = (0..b.len())
             .map(|i| {
                 if !is_gold(i) {
@@ -3039,11 +3114,10 @@ impl Pass2 {
             .collect();
         let first: Vec<(f64, usize)> = (0..b.len())
             .map(|i| {
-                let at = i % keyint;
-                if at == 0 {
+                if since[i] == 0 {
                     return (b[i], 1);
                 }
-                if at.is_multiple_of(gf) {
+                if gold[i] {
                     return (b[i], 2);
                 }
                 let mut near: Vec<f64> = (i.saturating_sub(3)..(i + 4).min(b.len()))
@@ -3075,7 +3149,16 @@ impl Pass2 {
             key_ratio: 0.0,
             scale: 1.0,
             gf,
+            last_base: 0.0,
+            forced,
+            key: since.iter().map(|&s| s == 0).collect(),
+            gold,
         }
+    }
+
+    /// The picture after `at` a key frame is forced on, if any.
+    fn next_forced(&self, at: usize) -> Option<usize> {
+        (at + 1..self.forced.len()).find(|&i| self.forced[i])
     }
 
     /// How well the scene from picture `at` (a key frame or a cut)
@@ -3096,9 +3179,13 @@ impl Pass2 {
     /// frames), and at a first-pass golden place also twice the one
     /// before (golden frames take more anyway).
     fn scene_end(&self, at: usize) -> usize {
-        let gold = |j: usize| j.is_multiple_of(self.gf);
+        let gold = |j: usize| self.gold[j];
         (at + 2..self.first.len())
             .find(|&j| {
+                // (A key frame forced inside a scene does not end it.)
+                if self.forced[j] {
+                    return false;
+                }
                 if self.first[j].1 == 1 {
                     return true;
                 }
@@ -3129,6 +3216,14 @@ impl Pass2 {
         } else {
             1.0
         };
+        self.weigh_from(at);
+    }
+
+    /// The pictures from `at` to where the first pass's bits show the
+    /// scene end weigh as the scene's step scale makes them (also from a
+    /// key frame forced inside the scene, where the scene goes on at its
+    /// step: the first pass's bits may show the scene end before it).
+    fn weigh_from(&mut self, at: usize) {
         let w = self.scale.powf(-EXP);
         for i in at..self.scene_end(at) {
             let (b, c) = self.first[i];
@@ -3137,18 +3232,44 @@ impl Pass2 {
         }
     }
 
+    /// With forced key frames, before any picture is coded: the scenes
+    /// the first pass shows (its cuts) and the forced key frames inside
+    /// them, so that what the scenes after weigh is known from the start
+    /// (a key frame forced in a scene coded finer costs as that scene's
+    /// key frame does).
+    fn plan_scenes(&mut self) {
+        let marks: Vec<usize> = (1..self.first.len())
+            .filter(|&i| self.first[i].1 == 1)
+            .collect();
+        self.scene_at(0, true);
+        for i in marks {
+            if self.forced[i] {
+                self.weigh_from(i);
+            } else {
+                self.scene_at(i, self.key[i]);
+            }
+        }
+        self.key_ratio = 0.0;
+        self.scale = 1.0;
+    }
+
     /// The next golden place is picture `at`, `n` after the one coded
-    /// now: it and the places every `n` after it (as far as is known) take
-    /// the golden class (an alt-ref will take their bits), and no other
-    /// picture still to code does.
+    /// now: it and the places every `n` after it (as far as is known;
+    /// counted again from each forced key frame) take the golden class (an
+    /// alt-ref will take their bits), and no other picture still to code
+    /// does.
     fn golden_at(&mut self, at: usize, n: usize) {
+        let mut from = at;
         for i in at.saturating_sub(n) + 1..self.first.len() {
+            if i > at && self.forced[i] {
+                from = i;
+            }
             let w = self.w[i];
             let t = &mut self.first[i];
             if t.1 == 1 {
                 continue;
             }
-            let c = if i >= at && (i - at).is_multiple_of(n.max(1)) {
+            let c = if i >= at && (i - from).is_multiple_of(n.max(1)) {
                 2
             } else {
                 0
@@ -3217,6 +3338,9 @@ struct Rate {
     /// there): its scene is scaled against the first key frame's as a
     /// cut's is ([`SCENE_BETA`]).
     scene_key: bool,
+    /// The frame coded next is a key frame forced inside a scene, which
+    /// goes on through it (see [`Vp9Encoder::set_second_pass_with_keys`]).
+    inside_key: bool,
     layer_model: [Option<f64>; 3],
     layer_q: [Option<u8>; 3],
     /// Two passes with [`Vp9Options::corpus_complexity`]: the clip's
@@ -3319,6 +3443,7 @@ impl Rate {
             layer: None,
             drawn: false,
             scene_key: false,
+            inside_key: false,
             layer_model: [None; 3],
             layer_q: [None; 3],
             budget: 1.0,
@@ -3482,8 +3607,12 @@ impl Rate {
             // as a fixed quantizer does, and a cut a key frame's.
             let frames = p.first.len().max(1);
             if (kind == 0 || cut) && (self.frames as usize) < p.first.len() {
-                // (A key frame on a cut starts a scene as a cut does.)
-                p.scene_at(self.frames as usize, kind == 0 && !self.scene_key);
+                if self.inside_key {
+                    p.weigh_from(self.frames as usize);
+                } else {
+                    // (A key frame on a cut starts a scene as a cut does.)
+                    p.scene_at(self.frames as usize, kind == 0 && !self.scene_key);
+                }
             }
             let s1 = step_of(p.q, self.opts.bit_depth);
             let total =
@@ -3517,7 +3646,12 @@ impl Rate {
             let left = (total - spent_now)
                 .max(total * 0.02 * (frames - done) as f64 / frames as f64)
                 + total / frames as f64 * more;
-            let base = s1 * (need.max(1.0) / left.max(1.0)).powf(1.0 / EXP);
+            let mut base = s1 * (need.max(1.0) / left.max(1.0)).powf(1.0 / EXP);
+            if p.forced.iter().any(|&f| f) && p.last_base > 0.0 {
+                // (With forced key frames, see [`FORCED_STEP_RISE`].)
+                base = base.min(p.last_base * FORCED_STEP_RISE);
+            }
+            p.last_base = base;
             p.base = base;
             let class = if cut { 0 } else { kind };
             let q = q_of_step(base * STEP_SCALE[class] * p.scale, self.opts.bit_depth)
@@ -3823,6 +3957,7 @@ impl Rate {
         }
         if seconds > 0.0 {
             // A shown picture: its budget; a hidden one only spends.
+            self.inside_key = false;
             self.frames = self.frames.saturating_add(1);
             self.per_frame = f64::from(self.opts.bitrate) * seconds;
             self.debt -= self.per_frame;

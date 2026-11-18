@@ -253,7 +253,8 @@ fn main() -> Result<(), String> {
         }
         // (The clip's complexity, for a corpus's `corpus=`.)
         eprintln!("complexity {}", enc.first_pass_complexity(&bits, first_q));
-        enc.set_second_pass(&bits, first_q);
+        let keys: Vec<u64> = force.iter().map(|&k| k as u64).collect();
+        enc.set_second_pass_with_keys(&bits, first_q, &keys);
         input = std::fs::File::open(&args[1]).map_err(|e| e.to_string())?;
     }
     let mut alpha_in = match &alpha_path {

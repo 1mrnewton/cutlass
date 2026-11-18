@@ -3014,8 +3014,8 @@ brackets). "Added" is new in this round; each has a test in
 | `-drop-threshold` | `drop-frame` | `drop_frame_pct` (`drop=`, added): one pass at a bitrate, at a variable bitrate too (libvpx drops in CBR only: an intentional difference); see "Options measured" |
 | `-g` | `kf-max-dist` | `keyint` |
 | `-keyint_min` | `kf-min-dist` | `keyint_min`: a cut that far from the last key frame is one (added; in two passes every cut that far, by default every cut); intervals are fixed as with `-keyint_min` = `-g` |
-| `-force_key_frames` | `VPX_EFLAG_FORCE_KF` | `Vp9Encoder::force_keyframe` (the engine's `force_keyframe`; `force_keyframes=N,N,...` in pictures, added): the picture pushed next is the key frame, with the lookahead too, and no alt-ref spans it |
-| `-pass 1` / `-pass 2` | `g_pass`, stats | `Vp9Encoder::first_pass_qindex`, `set_second_pass` (`twopass=1`): a key frame on each scene cut, as libvpx's two passes put one (added); see "Options measured" |
+| `-force_key_frames` | `VPX_EFLAG_FORCE_KF` | `Vp9Encoder::force_keyframe` (the engine's `force_keyframe`; `force_keyframes=N,N,...` in pictures, added): the picture pushed next is the key frame, with the lookahead too, and no alt-ref spans it; in two passes `set_second_pass_with_keys` plans them before coding (key-frame and golden groups end there), as libvpx's two passes; see "Options measured" |
+| `-pass 1` / `-pass 2` | `g_pass`, stats | `Vp9Encoder::first_pass_qindex`, `set_second_pass` (`twopass=1`): a key frame on each scene cut, as libvpx's two passes put one (added); with forced key frames `set_second_pass_with_keys` (added); see "Options measured" |
 | `-deadline` best / good / realtime, `-cpu-used` (`-speed`, `-quality`) | | `speed` 0–10 (`speed=`); see the speeds below |
 | `-lag-in-frames` (`-rc_lookahead`) | `g_lag_in_frames` | `lag` (`lag=`) |
 | `-auto-alt-ref` 0 / 1 | `enable-auto-alt-ref` | `alt_ref` (`alt_ref=0`, added) |
@@ -3475,11 +3475,37 @@ BD-rate against before (two passes at 1 to 4 Mb/s, four threads, PSNR-Y
 and 60) −0.9 / −0.0 / +0.0 / −0.6%; the still scene and the pan (no
 cuts) the same streams. Against libvpx's two passes (`-pass 1/2`,
 cpu-used 1, four threads): −11.6 / −5.6 / −10.3 / −10.3%, −39.4 /
-−35.6 / −35.4 / −37.3%, −20.1 / −33.2 / −32.8 / −26.7%. A key frame
-forced (`force_keyframe`) mid-scene in two passes is not in the first
-pass's plan as such: with the cut at 30 and keys forced at 15 and 45,
-the stream came 5% over the rate and the five frames after 45 at the
-coarsest quantizer (left as it is).
+−35.6 / −35.4 / −37.3%, −20.1 / −33.2 / −32.8 / −26.7%.
+
+**Forced key frames in two passes** (`set_second_pass_with_keys`;
+`force_keyframes=` with `twopass=1`). libvpx's two passes take a forced
+key frame as the end of the key-frame and golden groups before it, and
+budget it and its group from the first pass. Here the second pass is
+told the forced pictures before it codes: the first pass's key frames
+and golden places are counted from each (they were taken every `keyint`
+and every golden interval from 0), each is a key frame's class in the
+plan, the golden group before one ends at the picture before it, and
+the scenes the first pass shows are planned from the start. A key frame
+forced inside a scene keeps the scene: it and the pictures after it take
+the scene's step (it started a scene of its own before, at the first key
+frame's step, so that the still scene after the cut went from its finer
+step to a coarser one at 45, its cost found only there), and the inter
+step rises at most by half from one frame to the next. The three scenes
+(60 frames, a cut at 30) at 1.5 Mb/s with key frames forced at 15 and
+45, kb/s / quantizers / PSNR-Y: libvpx key frames 0, 15, 30 and 45,
+1503 / 72–178 / 39.99 dB; before the same key frames, 1573 / 61–236
+(five frames after 45 at 236) / 40.01; now 1481 / 63–179 / 40.24
+(without forced key frames 1477 / 62–169). Forced at 45 alone: libvpx
+1530, before 1563 (67–236), now 1483 (59–175). Other places and clips,
+two passes, rate over the target with forced key frames (without):
+the three scenes at 15 and 45, 0.8 Mb/s +4.3% (+15.9%; the pictures
+after 45 still reach 236, as without forced key frames), 3 Mb/s −9.2%
+(−6.8%); at 10 and 40 +1.0%, at 20 and 50 −1.6% (before +2.8% with ten
+frames at 236, and +6.9%); the grainy pan at 20 and 40 +1.2% (+0.6%);
+the still scene and jumps (90 frames) at 15, 45 and 75 at 1 Mb/s +0.3%
+(+5.1%), the three scenes (90 frames) at 20, 50 and 70 at 2 Mb/s +2.0%
+(+2.7%). libvpx at the same: +1.5% at 0.8 Mb/s, 0.0% at 10 and 40,
++2.2% at 21 and 51. Streams without forced key frames are unchanged.
 
 **Temporal dependency model** (`enable_tpl`, `-enable-tpl`). libvpx's
 `vp9_tpl_model.c` over the source pictures of an alt-ref's golden group

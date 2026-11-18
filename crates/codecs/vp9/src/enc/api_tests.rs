@@ -3952,3 +3952,98 @@ fn two_passes_put_a_key_frame_on_a_cut() {
         assert_eq!(keys, want, "keyint_min {min}");
     }
 }
+
+/// Two passes over `n` pictures of `clip` with key frames forced on
+/// `keys` in both, the second told of them (as `vp9enc`'s
+/// `force_keyframes=` does).
+fn two_pass_forced(
+    opts: super::Vp9Options,
+    (w, h): (u32, u32),
+    n: u32,
+    clip: &dyn Fn(u32) -> VideoFrame,
+    keys: &[u32],
+) -> Vec<Packet> {
+    let probe = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let q = probe.first_pass_qindex(1.0 / 30.0);
+    let first_opts = super::Vp9Options {
+        bitrate: 0,
+        qindex: q,
+        speed: 10,
+        ..opts
+    };
+    let run = |encoder: &mut Vp9Encoder| {
+        let mut packets = Vec::new();
+        for i in 0..n {
+            if keys.contains(&i) {
+                encoder.force_keyframe();
+            }
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: clip(i),
+                        pts: i64::from(i),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(encoder).expect("drain"));
+        packets
+    };
+    let mut first = Vp9Encoder::with_options(w, h, first_opts).expect("encoder");
+    let bits: Vec<u64> = run(&mut first)
+        .iter()
+        .map(|p| p.data.len() as u64 * 8)
+        .collect();
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let at: Vec<u64> = keys.iter().map(|&k| u64::from(k)).collect();
+    encoder.set_second_pass_with_keys(&bits, q, &at);
+    run(&mut encoder)
+}
+
+#[test]
+fn two_passes_plan_key_frames_forced_inside_scenes() {
+    // A moving scene, then a cut to a still one, with key frames forced
+    // inside both (the second late in the still scene, which codes little
+    // between key frames): as libvpx's two passes, the key frames fall on
+    // the forced pictures (and the cut), and the stream keeps to the rate
+    // as it does without them (it went a third over: the still scene was
+    // started afresh at the forced key frame, and its cost found late).
+    let (w, h) = (256u32, 128u32);
+    let clip = |i: u32| {
+        if i < 30 {
+            return noisy(w, h, 2 * i, i);
+        }
+        let mut f = moving(w, h, 0);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let (r, c) = (k / 256, k % 256);
+            *v = (30 + (r * 7 + c * 3) % 190) as u8;
+        }
+        f
+    };
+    let opts = super::Vp9Options {
+        bitrate: 120_000,
+        speed: 6,
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let n = 60;
+    let rate = |packets: &[Packet]| {
+        packet_bytes(packets) as f64 * 8.0 * 30.0 / f64::from(n) / f64::from(opts.bitrate)
+    };
+    let free = rate(&two_pass_forced(opts, (w, h), n, &clip, &[]));
+    let packets = two_pass_forced(opts, (w, h), n, &clip, &[15, 45]);
+    assert_decodes(&packets, (w, h), n as usize);
+    let keys: Vec<i64> = packets
+        .iter()
+        .filter(|p| p.keyframe)
+        .map(|p| p.pts)
+        .collect();
+    assert_eq!(keys, vec![0, 15, 30, 45]);
+    let forced = rate(&packets);
+    assert!(
+        (forced - free).abs() < 0.05,
+        "rate {forced:.3} of the target, {free:.3} without forced key frames"
+    );
+}

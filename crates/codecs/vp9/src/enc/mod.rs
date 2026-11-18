@@ -13,8 +13,10 @@
 pub mod api;
 pub mod aq;
 pub mod arf;
+pub mod denoise;
 pub mod probs;
 pub mod tile;
+pub mod tpl;
 pub mod tx;
 
 use std::sync::Arc;
@@ -35,6 +37,7 @@ use crate::geom;
 use crate::header::{self, Parsed};
 use crate::lpf;
 use crate::prob::{self, FrameContext};
+use crate::tables::PARETO8;
 
 use self::tile::{Shared, Source, Tile};
 
@@ -61,11 +64,38 @@ pub struct FrameParams {
     /// 5 do (see [`tile::TX_TRIAL_BITS`]), and the best inter candidates
     /// are ranked with their chroma too (see [`tile::UV_RANK`]).
     pub second_pass: bool,
+    /// The partition search's breakouts at a whole block that codes a
+    /// residual under half the quantizer's error, or none at 16×16 and
+    /// 32×32 or still, are left out, and inter trials are reconstructed
+    /// rather than measured on their coefficients ([`tile`]'s
+    /// `BREAKOUT_SPEED`, `TX_DOMAIN_SPEED`): a second pass, and a fixed
+    /// quantizer at speed 5 (see [`api`]'s `FULL_SEARCH_SPEED`). In two
+    /// passes on the README's three scenes, 1.7 points fewer bits at the
+    /// same PSNR-Y and 3.6 to 5.2 at PSNR-U and V, in 1.1 to 1.25 times the
+    /// time (a third of libvpx's).
+    pub full_search: bool,
+    /// An alt-ref of a stream at speed 8 or more, coded at speed 6 (see
+    /// [`api`]'s `ARF_SPEED`): chroma is weighed as at speed 8, past
+    /// [`tile::CHROMA_SPEED`], and the partition search's stop at a block
+    /// that codes a little takes the thresholds it had before the
+    /// reference pool came to one pass (`tile::CHEAP_FAST_ARF`).
+    pub fast_arf: bool,
+    /// The chroma quantizers' offset from `qindex` (the header's
+    /// `delta_q_uv_dc` and `delta_q_uv_ac`; 0 in a lossless frame): see
+    /// [`super::api`]'s `RT_UV_DELTA`.
+    pub uv_delta: i8,
     /// The slot GOLDEN reads (1 but with [`super::api`]'s reference pool:
     /// two passes, and one pass up to speed 7).
     pub golden_slot: u8,
     /// Slots this frame also refreshes, besides its type's.
     pub also_refresh: u8,
+    /// The slot ALTREF reads (2 but with layered alt-refs: see
+    /// [`super::api`]'s `Vp9Options::alt_ref_layers`).
+    pub altref_slot: u8,
+    /// The slot LAST reads (0 but after a layered alt-ref was shown).
+    pub last_slot: u8,
+    /// The slot a hidden frame refreshes (2 but with layered alt-refs).
+    pub hidden_slot: u8,
     /// With the reference pool: the error a luma sample of the picture
     /// keeps from its best reference picture (its noise), 0 when unknown.
     pub noise: f32,
@@ -94,6 +124,13 @@ pub struct Stream {
     /// libvpx's `static-thresh`: an inter block whose prediction error is
     /// under this threshold (scaled to its size) codes no residual.
     pub static_thresh: u32,
+    /// Screen content (libvpx's `tune-content=screen`): see
+    /// [`tile::Shared::screen`].
+    pub screen: bool,
+    /// Film (libvpx's `tune-content=film`): see [`tile::Shared::film`].
+    pub film: bool,
+    /// libvpx's `tune=ssim`: see [`tile::Shared::ssim`].
+    pub ssim: bool,
 }
 
 impl Default for Stream {
@@ -106,6 +143,9 @@ impl Default for Stream {
             error_resilient: false,
             frame_parallel: false,
             static_thresh: 0,
+            screen: false,
+            film: false,
+            ssim: false,
         }
     }
 }
@@ -115,7 +155,17 @@ impl Default for Stream {
 pub const COMPOUND_SPEED: u8 = 6;
 
 /// From this speed a reference that predicted almost nothing of the last
-/// inter frame is not searched (see [`FrameEncoder::tiles`]).
+/// inter frame is not searched (see [`FrameEncoder::tiles`]), but for a
+/// hidden alt-ref at a fixed quantizer in one pass, which searches every
+/// reference. The prune tries a left-out reference again every fourth
+/// frame, so whether an alt-ref (one frame in a dozen, coded fine, and
+/// read by every frame up to its overlay) searched ALTREF was the phase
+/// of that count. On the README's still scene at `q=120` an alt-ref after
+/// the second jump, where the scene came back to an earlier place, coded
+/// its 64×64 blocks on ALTREF without a residual in 19 818 bytes, and in
+/// 26 277 on a build whose count was a frame out (ALTREF left out): at
+/// `q=60` to `210` the still scene −2.1 / −1.9 / −1.7 points (BD-rate at
+/// the same PSNR-Y / U / V), the other two clips the same streams.
 pub const REF_PRUNE_SPEED: u8 = 5;
 
 /// From this speed each tile column's rows are coded on one thread (as
@@ -154,6 +204,16 @@ pub trait EncPixel: Store {
     fn sad(a: &[Self], sa: usize, b: &[Self], sb: usize, w: usize, h: usize) -> u32;
     fn sad4(a: &[Self], sa: usize, b: [&[Self]; 4], sb: usize, w: usize, h: usize) -> [u32; 4];
     fn sse(a: &[Self], sa: usize, b: &[Self], sb: usize, w: usize, h: usize) -> u64;
+    /// The SADs of the left and right halves (8 samples each) of a block
+    /// 16 wide and `h` rows against four others.
+    fn halves4(a: &[Self], sa: usize, b: [&[Self]; 4], sb: usize, h: usize) -> [[u32; 2]; 4] {
+        b.map(|b| {
+            [
+                Self::sad(a, sa, b, sb, 8, h),
+                Self::sad(&a[8..], sa, &b[8..], sb, 8, h),
+            ]
+        })
+    }
     #[allow(clippy::too_many_arguments)]
     fn sad_bilinear(
         a: &[Self],
@@ -165,9 +225,25 @@ pub trait EncPixel: Store {
         fy: u32,
         fx: u32,
     ) -> u32;
+    /// The SATD of `a` against `b` (`b`'s rows `sb` apart, which must be
+    /// `w`), as [`tile::satd_px`].
+    fn satd(a: &[Self], sa: usize, b: &[Self], sb: usize, w: usize, h: usize) -> u64 {
+        debug_assert_eq!(sb, w);
+        tile::satd_px(a, sa, b, w, h)
+    }
 }
 
 impl EncPixel for u8 {
+    #[inline(always)]
+    fn satd(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u64 {
+        match (w == h && sb == w)
+            .then(|| cutlass_simd::vp9::sad8::satd(a, sa, b, sb, w))
+            .flatten()
+        {
+            Some(v) => v,
+            None => tile::satd_px(a, sa, b, sb, h),
+        }
+    }
     #[inline(always)]
     fn sad(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 {
         crate::dsp::sad::sad(a, sa, b, sb, w, h)
@@ -179,6 +255,11 @@ impl EncPixel for u8 {
     #[inline(always)]
     fn sse(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u64 {
         crate::dsp::sad::sse(a, sa, b, sb, w, h)
+    }
+    #[inline(always)]
+    fn halves4(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, h: usize) -> [[u32; 2]; 4] {
+        cutlass_simd::vp9::sad8::halves4(a, sa, b, sb, h)
+            .unwrap_or_else(|| cutlass_simd::vp9::sad8::halves4_scalar(a, sa, b, sb, h))
     }
     #[inline(always)]
     fn sad_bilinear(
@@ -253,10 +334,29 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// The segmentation of the frame being coded, with adaptive
     /// quantization.
     aq: Option<aq::Plan>,
+    /// The segmentation the next frame codes when it is not adaptively
+    /// quantized ([`FrameEncoder::set_segmentation`]).
+    next_plan: Option<aq::Plan>,
+    /// With `tune=ssim`, the frame's scales of the RD lambda by
+    /// superblock ([`ssim_scales`]), times those of [`Self::set_lambda_scales`].
+    ssim: Vec<f32>,
+    /// For the frame coded next, scales of the RD lambda by superblock
+    /// ([`Self::set_lambda_scales`]).
+    next_lambda: Option<Vec<f32>>,
+    /// The next frame's slots to refresh and references its blocks may
+    /// use ([`FrameEncoder::set_layer`]), and the frame's being coded.
+    next_layer: Option<(u8, u8)>,
+    layer: Option<(u8, u8)>,
     /// Each reference's picture in the last inter frame, the share of its
     /// area that frame predicted from it (in 1/1024), and how many frames
     /// in a row it has been left out of the search.
     ref_use: [(usize, u32, u8); 3],
+    /// Whether the picture coded next is drawn
+    /// ([`FrameEncoder::set_drawn`]).
+    drawn: bool,
+    /// If it stands still, which of its 16×16 blocks changed
+    /// ([`FrameEncoder::set_still`]).
+    still: Option<Vec<bool>>,
     /// What every frame signals.
     stream: Stream,
     /// The threads the encoder was made for.
@@ -266,6 +366,21 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     row_lanes: usize,
     /// The next frame's whole-picture motion from LAST, if far.
     global: Option<Mv>,
+    gold_mv: Option<Mv>,
+    ref_seeds: [Option<Mv>; 3],
+    /// The loop filter level the frame being coded searched
+    /// ([`pick_level`]), for its final header.
+    lf_pick: Option<u8>,
+    /// The level [`pick_level`] found for the frame coded last, before
+    /// [`LF_FIXED_SCALE`].
+    #[cfg(test)]
+    lf_found: Option<u8>,
+    /// The coefficient updates on the counts alone, as past
+    /// [`MODEL_UPDATE_SPEED`].
+    #[cfg(test)]
+    count_only_updates: bool,
+    /// [`pick_level`]'s band of luma rows, unfiltered and filtered.
+    lf_band: Vec<P>,
 }
 
 /// What one tile column's encoder keeps from frame to frame.
@@ -280,6 +395,10 @@ struct TileWork<P: EncPixel> {
     /// How many of them each superblock row ends at.
     row_ends: Vec<usize>,
     bufs: tile::TileBufs<P>,
+    /// The big tokens in `out` by class, under each third coefficient
+    /// probability, when the frame's coefficient updates weigh them
+    /// ([`MODEL_UPDATE_SPEED`]).
+    big: Vec<[u32; 9]>,
 }
 
 impl<P: EncPixel> TileWork<P> {
@@ -292,6 +411,7 @@ impl<P: EncPixel> TileWork<P> {
             out: Vec::new(),
             row_ends: Vec::new(),
             bufs: tile::TileBufs::default(),
+            big: Vec::new(),
         }
     }
 }
@@ -335,11 +455,26 @@ impl<P: EncPixel> FrameEncoder<P> {
             pre_bufs: Vec::new(),
             pre_frame: Vec::new(),
             aq: None,
+            next_plan: None,
+            ssim: Vec::new(),
+            next_lambda: None,
+            next_layer: None,
+            layer: None,
+            drawn: false,
+            still: None,
             ref_use: [(0, 1024, 0); 3],
             stream: Stream::default(),
             threads: threads.max(1),
             row_lanes: 0,
             global: None,
+            gold_mv: None,
+            ref_seeds: [None; 3],
+            lf_pick: None,
+            #[cfg(test)]
+            lf_found: None,
+            #[cfg(test)]
+            count_only_updates: false,
+            lf_band: Vec::new(),
         }
     }
 
@@ -357,6 +492,19 @@ impl<P: EncPixel> FrameEncoder<P> {
         self.log2_tiles = log2.min(6);
     }
 
+    /// The segmentation the next frame codes (cyclic refresh, 360°
+    /// pictures), unless it is adaptively quantized or lossless.
+    pub fn set_segmentation(&mut self, plan: aq::Plan) {
+        self.next_plan = Some(plan);
+    }
+
+    /// The next inter frame refreshes the slots of `refresh` (a mask; its
+    /// type's otherwise) and its blocks use only the references of `refs`
+    /// (bit 0 LAST, 1 GOLDEN, 2 ALTREF): a temporal layer's frame.
+    pub fn set_layer(&mut self, refresh: u8, refs: u8) {
+        self.next_layer = Some((refresh, refs));
+    }
+
     /// What every frame signals from now on.
     pub fn set_stream(&mut self, stream: Stream) {
         self.stream = stream;
@@ -366,6 +514,52 @@ impl<P: EncPixel> FrameEncoder<P> {
     /// LAST's, as a whole (a jump of the camera that the searches, which
     /// reach a few dozen samples, would take for a cut): every block's
     /// search on LAST starts there too.
+    /// GOLDEN's blocks at speeds 9 and 10 also try this whole-sample
+    /// vector (the next frame only): where the picture GOLDEN reads
+    /// stands from this one's content.
+    pub fn set_gold_mv(&mut self, (x, y): (isize, isize)) {
+        self.gold_mv = Some(Mv {
+            row: (y * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+            col: (x * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+        });
+    }
+
+    /// The next frame's picture stands `(x, y)` whole samples from the one
+    /// reference `r` (0 LAST, 1 GOLDEN, 2 ALTREF) holds: up to
+    /// [`tile::REF_SEED_SPEED`] every block's search on it starts there
+    /// too, and reaches as far past its range (the next frame only).
+    pub fn set_ref_seed(&mut self, r: usize, (x, y): (isize, isize)) {
+        self.ref_seeds[r] = Some(Mv {
+            row: (y * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+            col: (x * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+        });
+    }
+
+    /// For the frame coded next only: each superblock's scale of the RD
+    /// lambda, in raster order (`width.div_ceil(64)` a row), as `tune=ssim`
+    /// scales it (the two multiply): the temporal dependency model's
+    /// ([`tpl`]).
+    pub fn set_lambda_scales(&mut self, scales: Vec<f32>) {
+        self.next_lambda = Some(scales);
+    }
+
+    /// Whether the pictures coded from now on are drawn (graphics,
+    /// animation, screen content: see the encoder's `DRAWN_SHARE`). At a
+    /// fixed quantizer in one pass, a key frame of them searches more
+    /// ([`tile::Shared::drawn_key`]).
+    pub fn set_drawn(&mut self, drawn: bool) {
+        self.drawn = drawn;
+    }
+
+    /// For the picture coded next, if it is drawn and stands still (see
+    /// the encoder's `STILL_ARF_Q`), which of its 16×16 blocks (`width /
+    /// 16` a row) differ from the picture before where they stand: at a
+    /// fixed quantizer in one pass, its inter frames search more there
+    /// ([`tile::Shared::still`]).
+    pub fn set_still(&mut self, changed: Option<Vec<bool>>) {
+        self.still = changed;
+    }
+
     pub fn set_global(&mut self, (x, y): (isize, isize)) {
         self.global = Some(Mv {
             row: (y * 8).clamp(-8 * 1023, 8 * 1023) as i16,
@@ -416,6 +610,8 @@ impl<P: EncPixel> FrameEncoder<P> {
     pub fn encode(&mut self, fp: FrameParams) -> Result<Coded, CodecError> {
         let key = fp.key || self.dec.ref_pic::<P>(0).is_none();
         let lossless = fp.qindex == 0;
+        self.layer = self.next_layer.take().filter(|_| !key);
+        let next = self.next_plan.take();
         self.aq = (fp.aq && !lossless).then(|| {
             let (w, h) = (self.width as usize, self.height as usize);
             aq::plan(
@@ -426,12 +622,41 @@ impl<P: EncPixel> FrameEncoder<P> {
                 fp.qindex,
             )
         });
+        if self.aq.is_none() && !lossless {
+            self.aq = next;
+        }
+        if self.stream.ssim && !lossless {
+            let (w, h) = (self.width as usize, self.height as usize);
+            ssim_scales(
+                &self.src[0],
+                self.strides[0],
+                (w, h),
+                self.bd,
+                &mut self.ssim,
+            );
+        } else {
+            self.ssim.clear();
+        }
+        if let Some(scales) = self.next_lambda.take().filter(|_| !lossless) {
+            if self.ssim.is_empty() {
+                self.ssim = scales;
+            } else {
+                for (a, b) in self.ssim.iter_mut().zip(scales) {
+                    *a *= b;
+                }
+            }
+        }
         // The tiles are coded against the probabilities as they stand; their
         // symbols are kept, the coefficient probabilities that pay for
         // their update are updated, and the symbols written with them.
+        self.lf_pick = None;
         let head = self.headers(key, fp, None, None)?;
         let parsed = header::parse(self.dec.persist(), &head)?;
-        let (counts, mvs, segmap, pic, coded) = self.tiles(&parsed, fp, key)?;
+        let tiles = self.tiles(&parsed, fp, key);
+        if tiles.is_err() {
+            self.lf_pick = None;
+        }
+        let (counts, mvs, segmap, pic, coded) = tiles?;
         let Written {
             old,
             new,
@@ -439,8 +664,9 @@ impl<P: EncPixel> FrameEncoder<P> {
             new_nc,
             tiles,
         } = coded;
-        let head = self.headers(key, fp, Some((&old, &new)), Some((&old_nc, &new_nc)))?;
-        let mut data = head;
+        let head = self.headers(key, fp, Some((&old, &new)), Some((&old_nc, &new_nc)));
+        self.lf_pick = None;
+        let mut data = head?;
         // Tiles go row by row; every one but the last carries its size.
         let cols = tiles.into_iter().collect::<Result<Vec<_>, _>>()?;
         let rows = cols.first().map_or(0, Vec::len);
@@ -460,18 +686,47 @@ impl<P: EncPixel> FrameEncoder<P> {
 
     /// What the headers of a frame code (and so which probabilities it
     /// can update).
-    fn coded(key: bool, fp: FrameParams) -> probs::Coded {
+    fn coded(&self, key: bool, fp: FrameParams) -> probs::Coded {
         // The sign bias goes with compound prediction: alone it only makes
         // the vectors of neighbours on the other side worse candidates.
         let future = !key && !fp.hidden && fp.altref_future && fp.speed <= COMPOUND_SPEED;
         probs::Coded {
             tx_select: fp.qindex != 0,
             inter: !key,
-            switchable: !key && fp.speed <= SWITCHABLE_SPEED,
-            allow_hp: true,
+            switchable: self.switchable(key, fp),
+            allow_hp: Self::allow_hp(fp),
             compound_allowed: future,
             compound: future.then_some(true),
         }
+    }
+
+    /// Whether an inter frame's vectors may take eighths of a sample: not
+    /// at a fixed quantizer in one pass from [`HP_MAX_Q`] up.
+    fn allow_hp(fp: FrameParams) -> bool {
+        !(fp.full_search && !fp.second_pass && fp.qindex >= HP_MAX_Q)
+    }
+
+    /// A frame that shows the picture of `slot` again
+    /// (`show_existing_frame`): its uncompressed header alone.
+    pub fn show_existing(&self, slot: u8) -> Vec<u8> {
+        let mut b = BitWriter::new();
+        b.write(2, 2); // frame marker
+        let profile = u32::from(self.ss != (1, 1)) | if self.bd > 8 { 2 } else { 0 };
+        b.write(((profile & 1) << 1) | (profile >> 1), 2);
+        if profile == 3 {
+            b.write_bit(false);
+        }
+        b.write_bit(true); // show_existing_frame
+        b.write(u32::from(slot), 3);
+        b.finish()
+    }
+
+    /// Whether the frame's inter blocks each pick their filter: up to
+    /// [`SWITCHABLE_SPEED`], and in a drawn picture at a fixed quantizer
+    /// in one pass up to [`DRAWN_FILTER_SPEED`].
+    fn switchable(&self, key: bool, fp: FrameParams) -> bool {
+        !key && (fp.speed <= SWITCHABLE_SPEED
+            || (self.drawn && fp.full_search && !fp.second_pass && fp.speed <= DRAWN_FILTER_SPEED))
     }
 
     /// The uncompressed and compressed headers.
@@ -485,8 +740,8 @@ impl<P: EncPixel> FrameEncoder<P> {
         let qindex = fp.qindex;
         let hidden = fp.hidden && !key;
         let lossless = qindex == 0;
-        let switchable = !key && fp.speed <= SWITCHABLE_SPEED;
-        let compressed = compressed_header(lossless, &Self::coded(key, fp), coef, nc)?;
+        let switchable = self.switchable(key, fp);
+        let compressed = compressed_header(lossless, &self.coded(key, fp), coef, nc)?;
         let mut b = BitWriter::new();
         b.write(2, 2); // frame marker
         // Profile 0 for 8-bit 4:2:0, 1 for 8-bit 4:2:2, 4:4:0 and 4:4:4;
@@ -541,21 +796,27 @@ impl<P: EncPixel> FrameEncoder<P> {
             }
             // LAST, and GOLDEN on a golden frame; an alt-ref only ALTREF.
             let refresh = if hidden {
-                0x04
+                1 << fp.hidden_slot
             } else if fp.golden {
                 0x03
             } else {
                 0x01
             } | u32::from(fp.also_refresh);
+            let refresh = self.layer.map_or(refresh, |l| u32::from(l.0));
             b.write(refresh, 8);
-            let future = Self::coded(key, fp).compound_allowed;
-            for (i, slot) in [0, u32::from(fp.golden_slot), 2].into_iter().enumerate() {
+            let future = self.coded(key, fp).compound_allowed;
+            let slots = [
+                u32::from(fp.last_slot),
+                u32::from(fp.golden_slot),
+                u32::from(fp.altref_slot),
+            ];
+            for (i, slot) in slots.into_iter().enumerate() {
                 b.write(slot, 3); // LAST 0, GOLDEN (1), ALTREF 2
                 b.write_bit(i == 2 && future); // sign bias
             }
             b.write_bit(true); // size from the first reference
             render(&mut b);
-            b.write_bit(true); // allow_high_precision_mv
+            b.write_bit(Self::allow_hp(fp)); // allow_high_precision_mv
             if switchable {
                 b.write_bit(true); // a filter per block
             } else {
@@ -572,14 +833,32 @@ impl<P: EncPixel> FrameEncoder<P> {
         let level = if lossless {
             0
         } else {
-            filter_level(qindex, key, self.bd)
+            self.lf_pick.unwrap_or_else(|| {
+                let l = filter_level(qindex, key, self.bd);
+                // At a fixed quantizer in one pass the level is searched
+                // from the highest it can be rebased from (see
+                // [`LF_SEARCH_CAP`]).
+                if fp.full_search && !fp.second_pass && fp.speed <= LF_SEARCH_SPEED {
+                    l.min(LF_SEARCH_CAP)
+                } else {
+                    l
+                }
+            })
         };
         b.write(u32::from(level), 6);
         b.write(u32::from(st.sharpness.min(7)), 3);
         b.write_bit(true); // mode_ref_delta_enabled (the defaults)
         b.write_bit(false); // no update
         b.write(u32::from(qindex), 8);
-        b.write(0, 3); // no dc / uv deltas
+        let uvd = if lossless { 0 } else { fp.uv_delta };
+        b.write_bit(false); // no y dc delta
+        for _ in 0..2 {
+            b.write_bit(uvd != 0);
+            if uvd != 0 {
+                b.write(u32::from(uvd.unsigned_abs()), 4);
+                b.write_bit(uvd < 0);
+            }
+        }
         match &self.aq {
             Some(plan) => {
                 b.write_bit(true); // segmentation
@@ -593,16 +872,27 @@ impl<P: EncPixel> FrameEncoder<P> {
                 b.write_bit(false); // no temporal prediction
                 b.write_bit(true); // update_data
                 b.write_bit(false); // deltas
-                for d in plan.deltas {
-                    // Feature 0, the quantizer; no others.
+                for i in 0..8 {
+                    // The quantizer and loop filter deltas (8 and 6 bits
+                    // and a sign), the reference (2 bits), skip (none).
+                    let d = plan.deltas[i];
                     b.write_bit(d != 0);
                     if d != 0 {
                         b.write(u32::from(d.unsigned_abs()), 8);
                         b.write_bit(d < 0);
                     }
-                    for _ in 1..4 {
-                        b.write_bit(false);
+                    let l = plan.lf[i];
+                    b.write_bit(l != 0);
+                    if l != 0 {
+                        b.write(u32::from(l.unsigned_abs()), 6);
+                        b.write_bit(l < 0);
                     }
+                    let r = plan.refs[i].filter(|_| !key);
+                    b.write_bit(r.is_some());
+                    if let Some(r) = r {
+                        b.write(u32::from(r), 2);
+                    }
+                    b.write_bit(plan.skip[i] && !key);
                 }
             }
             None => b.write_bit(false), // no segmentation
@@ -684,10 +974,17 @@ impl<P: EncPixel> FrameEncoder<P> {
         ];
         // From REF_PRUNE_SPEED, GOLDEN and ALTREF are left out of the
         // search while the same picture predicted under 1% of the last
-        // inter frame that searched it, but tried again every fourth frame.
+        // inter frame that searched it, but tried again every fourth frame
+        // (and always by an alt-ref at a fixed quantizer in one pass).
         let ids = refs.map(|r| r.map_or(0, |p| std::ptr::from_ref(p) as usize));
+        if let Some((_, refs)) = self.layer {
+            for (r, live) in refs_live.iter_mut().enumerate() {
+                *live &= refs >> r & 1 != 0;
+            }
+        }
         let searched_before = refs_live;
-        if !h.is_intra() && fp.speed >= REF_PRUNE_SPEED && !fp.altref_future {
+        let arf_all = fp.hidden && fp.full_search && !fp.second_pass;
+        if !h.is_intra() && fp.speed >= REF_PRUNE_SPEED && !fp.altref_future && !arf_all {
             for r in 1..3 {
                 let (id, share, out) = &mut self.ref_use[r];
                 if refs_live[r] && *id == ids[r] && *share < 10 && *out < 3 {
@@ -740,7 +1037,12 @@ impl<P: EncPixel> FrameEncoder<P> {
             },
             filter_on,
             lambda: sad_per_bit(ac, self.bd),
-            rd_lambda: rd_lambda(i32::from(h.y_dq[0][0])),
+            rd_lambda: rd_lambda(i32::from(h.y_dq[0][0]))
+                * if self.drawn && key && fp.full_search && !fp.second_pass {
+                    drawn_key_lambda(fp.speed)
+                } else {
+                    1.0
+                },
             src: Source {
                 planes: [&self.src[0], &self.src[1], &self.src[2]],
                 strides: self.strides,
@@ -752,15 +1054,39 @@ impl<P: EncPixel> FrameEncoder<P> {
                 ]
             }),
             seg_map: self.aq.as_ref().map_or(&[][..], |p| &p.map[..]),
+            seg_exact: self.aq.as_ref().is_some_and(|p| p.exact),
+            seg_lam: self.aq.as_ref().filter(|p| p.seg_lambda).map(|_| {
+                let base = rd_lambda(i32::from(h.y_dq[0][0]));
+                std::array::from_fn(|g| rd_lambda(i32::from(h.y_dq[g][0])) / base)
+            }),
             speed: fp.speed,
             refs_live,
             switchable: h.interp == geom::SWITCHABLE,
+            filter_by_luma: fp.full_search && !fp.second_pass,
             prepass: None,
             tok: &tok,
             second_pass: fp.second_pass,
+            full_search: fp.full_search,
+            fast_arf: fp.fast_arf,
             noise: fp.noise,
             static_thresh: self.stream.static_thresh,
+            screen: self.stream.screen,
+            film: self.stream.film,
+            ssim: &self.ssim,
             global: self.global.take(),
+            gold_mv: self.gold_mv.take(),
+            ref_seeds: std::mem::take(&mut self.ref_seeds),
+            drawn_key: self.drawn && key && fp.full_search && !fp.second_pass,
+            still: self
+                .still
+                .as_deref()
+                .filter(|_| !key && !fp.hidden && fp.full_search && !fp.second_pass)
+                .map(|m| (m, self.width as usize / 16)),
+            pop_mvs: if fp.full_search && !fp.second_pass && !key {
+                popular_mvs(self.dec.prev_mvs())
+            } else {
+                [[None; tile::POP_STARTS]; 3]
+            },
         };
         // Each tile column on its own thread, into its own copy of the
         // picture (intra prediction reads nothing across tile columns).
@@ -873,8 +1199,12 @@ impl<P: EncPixel> FrameEncoder<P> {
         // With one lane a tile column on threads, the loop filter follows
         // the tiles row by row ([`lf_rows`]) instead of filtering the frame
         // after them: on four threads at speed 10 it was a tenth of the
-        // time. (Not with a grid: 4:2:2 and 4:4:0 filter chroma from it.)
-        let piped = lanes == 1 && ntiles > 1 && !needs_grid;
+        // time. (Not with a grid: 4:2:2 and 4:4:0 filter chroma from it;
+        // nor when the level is searched, on the whole frame's samples.)
+        let seg_lf = h.seg.enabled && (0..8).any(|i| h.seg.feature_on[i][1]);
+        let lf_search =
+            filter_on && fp.speed <= LF_SEARCH_SPEED && !seg_lf && lpf::rebasable(h.filter_level);
+        let piped = lanes == 1 && ntiles > 1 && !needs_grid && !lf_search;
         // At EARLY_SPEED, piped and with one tile row: the probability
         // updates are decided once every tile column has coded the rows
         // up to `early_row`, and each tile's symbols are written on a
@@ -886,15 +1216,25 @@ impl<P: EncPixel> FrameEncoder<P> {
             probs: OnceLock::new(),
             old: flat_coef(&parsed.fc),
             old_nc: probs::flatten(&parsed.fc),
-            coded: Self::coded(key, fp),
+            coded: self.coded(key, fp),
             max_tx: if h.lossless { 0 } else { 3 },
         });
+        // Coefficient updates that weigh the big tokens
+        // ([`MODEL_UPDATE_SPEED`]): not where the tiles count nothing
+        // (error resilient or frame parallel).
+        let model_updates = fp.full_search
+            && !fp.second_pass
+            && fp.speed <= MODEL_UPDATE_SPEED
+            && !h.error_resilient
+            && !h.frame_parallel;
+        #[cfg(test)]
+        let model_updates = model_updates && !self.count_only_updates;
         let run = |t: &mut TileWork<P>,
                    col0: usize,
                    col1: usize,
                    lane: usize,
                    sync: Option<&tile::Lanes<P>>,
-                   pipe: Option<&[mpsc::Sender<Band<P>>]>,
+                   pipe: Option<&mpsc::Sender<(usize, Band<P>)>>,
                    mut lazy: Option<Lazy<'_, '_, P>>,
                    early: Option<&EarlyTile<'_>>|
          -> Result<(), CodecError> {
@@ -906,6 +1246,10 @@ impl<P: EncPixel> FrameEncoder<P> {
                 .reset(col0, col1 - col0, mi_rows, sb_rows * tsb, needs_grid);
             t.out.clear();
             t.row_ends.clear();
+            t.big.clear();
+            if model_updates {
+                t.big.resize(1728, [0; 9]);
+            }
             let [y, u, v] = &mut t.pix;
             let mut views = [
                 View {
@@ -946,6 +1290,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                     sh,
                     &mut t.state,
                     &mut t.out,
+                    model_updates.then_some(&mut t.big[..]),
                     &mut rec,
                     (col0, col1),
                     seeds,
@@ -972,7 +1317,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                 if let Some(pipe) = pipe {
                     // The row's samples and filter masks, for the loop
                     // filter (a receiver gone has failed: the frame does).
-                    for (p, tx) in pipe.iter().enumerate() {
+                    for (p, view) in views.iter().enumerate() {
                         let (sx, sy) = if p == 0 {
                             (0, 0)
                         } else {
@@ -988,7 +1333,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                         };
                         let mut pix = Vec::with_capacity((x1 - x0) * (y1 - y0));
                         for y in y0..y1 {
-                            pix.extend_from_slice(&views[p].data[y * stride + x0..y * stride + x1]);
+                            pix.extend_from_slice(&view.data[y * stride + x0..y * stride + x1]);
                         }
                         let band = Band {
                             cols: (col0, col1),
@@ -996,7 +1341,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                             pix,
                             masks: t.state.masks[r * tsb..(r + 1) * tsb].to_vec(),
                         };
-                        if tx.send(band).is_err() {
+                        if pipe.send((p, band)).is_err() {
                             return Err(CodecError::Malformed {
                                 at_bit: 0,
                                 what: "vp9 encoder loop filter",
@@ -1048,17 +1393,18 @@ impl<P: EncPixel> FrameEncoder<P> {
             let (results, written) = std::thread::scope(|sc| {
                 // Piped: each plane's rows go into the picture and through
                 // the loop filter as every tile column finishes them.
+                // (One thread for the three planes: fewer threads to start
+                // each frame.)
                 let mut lf_threads = Vec::new();
-                let mut txs = Vec::new();
+                let mut txs = None;
                 if piped {
-                    for (p, v) in writer.tails().map(View::of).into_iter().enumerate() {
-                        let (tx, rx) = mpsc::channel();
-                        txs.push(tx);
-                        let (l, g) = (&levels, &geo);
-                        lf_threads.push(
-                            sc.spawn(move || lf_rows(v, p, rx, (ntiles, sb_rows), filter_on, l, g)),
-                        );
-                    }
+                    let views = writer.tails().map(View::of);
+                    let (tx, rx) = mpsc::channel();
+                    txs = Some(tx);
+                    let (l, g) = (&levels, &geo);
+                    lf_threads.push(
+                        sc.spawn(move || lf_rows(views, rx, (ntiles, sb_rows), filter_on, l, g)),
+                    );
                 }
                 // Early: each tile's symbol writer, and what its coder
                 // sends it.
@@ -1103,7 +1449,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                         let (c0, c1) = (edges[i], edges[i + 1]);
                         let sync = (lanes > 1).then(|| &syncs[i]);
                         let run = &run;
-                        let pipe = piped.then(|| txs.clone());
+                        let pipe = txs.clone();
                         let end = ends.next().flatten();
                         sc.spawn(move || {
                             // (A lane that stops lets the others stop
@@ -1111,7 +1457,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                             // still lets the updates be decided.)
                             let _guard = Release(sync);
                             let _arrive = end.as_ref().map(Arrive);
-                            let r = run(t, c0, c1, lane, sync, pipe.as_deref(), lazy, end.as_ref());
+                            let r = run(t, c0, c1, lane, sync, pipe.as_ref(), lazy, end.as_ref());
                             if r.is_err()
                                 && let Some(l) = sync
                             {
@@ -1200,14 +1546,69 @@ impl<P: EncPixel> FrameEncoder<P> {
             }
             counts.add(&st.counts);
         }
+        // The loop filter level: searched on a band of the frame (see
+        // [`LF_SEARCH_SPEED`]), the masks rebased to it.
+        let mut lf_level = h.filter_level;
+        if lf_search {
+            let pick = pick_level(
+                &self.src,
+                &work,
+                &edges,
+                &dims,
+                &masks,
+                &levels,
+                &geo,
+                lf_level,
+                h.tx_mode != geom::ONLY_4X4,
+                &mut self.lf_band,
+            );
+            #[cfg(test)]
+            {
+                self.lf_found = Some(pick);
+            }
+            // At a fixed quantizer, an inter frame's level a share lower
+            // ([`LF_FIXED_SCALE`]).
+            let pick = if fp.full_search && !fp.second_pass && !key {
+                ((f64::from(pick) * LF_FIXED_SCALE) as u8).max(2)
+            } else {
+                pick
+            };
+            if pick != lf_level {
+                for m in &mut masks {
+                    m.rebase(lf_level, pick);
+                }
+                lf_level = pick;
+            }
+        }
+        self.lf_pick = Some(lf_level);
+        // (The chroma of 4:2:2 and 4:4:0 takes its levels from the grid.)
+        let lf_levels = if needs_grid && lf_level != h.filter_level {
+            let mut hl = h.clone();
+            hl.filter_level = lf_level;
+            lpf::levels(&hl)
+        } else {
+            levels
+        };
         let lossless = h.lossless;
         let old = flat_coef(&parsed.fc);
         let old_nc = probs::flatten(&parsed.fc);
         let (new, new_nc) = match &early {
             Some((new, new_nc, _)) => (*new, *new_nc),
             None => (
-                coef_updates(&old, &counts, if lossless { 0 } else { 3 }),
-                probs::updates(&old_nc, &counts, &Self::coded(key, fp)),
+                if model_updates {
+                    let mut big = vec![[0u32; 9]; 1728];
+                    for t in &work {
+                        for (a, b) in big.iter_mut().zip(&t.big) {
+                            for (x, y) in a.iter_mut().zip(b) {
+                                *x += y;
+                            }
+                        }
+                    }
+                    coef_updates_model(&old, &counts, &big, if lossless { 0 } else { 3 })
+                } else {
+                    coef_updates(&old, &counts, if lossless { 0 } else { 3 })
+                },
+                probs::updates(&old_nc, &counts, &self.coded(key, fp)),
             ),
         };
         // A tile column's symbols, one coder for each tile row.
@@ -1239,7 +1640,7 @@ impl<P: EncPixel> FrameEncoder<P> {
                 .collect()
         };
         let work = &work[..];
-        let (m, l, g, ed, gr) = (&masks, &levels, &geo, &edges, &grid);
+        let (m, l, g, ed, gr) = (&masks, &lf_levels, &geo, &edges, &grid);
         let tiles = std::thread::scope(|sc| {
             for (p, mut v) in writer.tails().map(View::of).into_iter().enumerate() {
                 if piped {
@@ -1440,26 +1841,31 @@ struct Band<P> {
     masks: Vec<lpf::Mask>,
 }
 
-/// Puts the rows of plane `p` that the tile columns send into the picture
-/// `v`, and filters each superblock row once every tile column has sent
+/// Puts the rows of each plane that the tile columns send into its picture
+/// in `views`, and filters each superblock row once every tile column has sent
 /// it: a row's filter reads and writes no sample under it, and the row
 /// above is filtered first, so the picture is the one filtering the whole
 /// frame after coding it makes. Whether every row came.
 fn lf_rows<P: EncPixel>(
-    mut v: View<'_, P>,
-    p: usize,
-    rx: mpsc::Receiver<Band<P>>,
+    mut views: [View<'_, P>; 3],
+    rx: mpsc::Receiver<(usize, Band<P>)>,
     (ntiles, sb_rows): (usize, usize),
     filter_on: bool,
     levels: &lpf::Levels,
     g: &lf::Geo,
 ) -> bool {
-    let (sx, sy) = if p == 0 { (0, 0) } else { (g.ss_x, g.ss_y) };
-    let stride = v.stride;
-    let mut masks = vec![lpf::Mask::default(); sb_rows * g.sb_cols];
-    let mut have = vec![0usize; sb_rows];
-    let mut next = 0;
-    for b in rx {
+    let mut masks: [Vec<lpf::Mask>; 3] =
+        std::array::from_fn(|_| vec![lpf::Mask::default(); sb_rows * g.sb_cols]);
+    let mut have = [
+        vec![0usize; sb_rows],
+        vec![0usize; sb_rows],
+        vec![0usize; sb_rows],
+    ];
+    let mut next = [0usize; 3];
+    for (p, b) in rx {
+        let v = &mut views[p];
+        let (sx, sy) = if p == 0 { (0, 0) } else { (g.ss_x, g.ss_y) };
+        let stride = v.stride;
         let (x0, x1) = ((b.cols.0 * 8) >> sx, ((b.cols.1 * 8) >> sx).min(stride));
         let w = x1 - x0;
         let y0 = (b.row * 64) >> sy;
@@ -1468,16 +1874,16 @@ fn lf_rows<P: EncPixel>(
             v.data[at..at + w].copy_from_slice(line);
         }
         let at = b.row * g.sb_cols + b.cols.0 / 8;
-        masks[at..at + b.masks.len()].copy_from_slice(&b.masks);
-        have[b.row] += 1;
-        while next < sb_rows && have[next] == ntiles {
+        masks[p][at..at + b.masks.len()].copy_from_slice(&b.masks);
+        have[p][b.row] += 1;
+        while next[p] < sb_rows && have[p][next[p]] == ntiles {
             if filter_on {
-                lf::sb_row_plane(&mut v, p, &masks, &[], levels, g, next);
+                lf::sb_row_plane(v, p, &masks[p], &[], levels, g, next[p]);
             }
-            next += 1;
+            next[p] += 1;
         }
     }
-    next == sb_rows
+    next.iter().all(|&n| n == sb_rows)
 }
 
 /// Releases a tile column's other lanes when its thread unwinds.
@@ -1536,6 +1942,11 @@ fn merge_lanes<P: EncPixel>(
             }
         }
         first.state.counts.add(&t.state.counts);
+        for (a, b) in first.big.iter_mut().zip(&t.big) {
+            for (x, y) in a.iter_mut().zip(b) {
+                *x += y;
+            }
+        }
     }
     let mut out = Vec::with_capacity(chunk_symbols(first, rest));
     let mut ends = Vec::with_capacity(sb_rows);
@@ -1580,6 +1991,98 @@ fn sad_per_bit(ac: i32, bd: u8) -> u32 {
 /// doubled: measured against libvpx's good quality on grainy and clean
 /// 720p, twice the weight on rate takes 8 to 17% off the bitrate at the
 /// same PSNR, Y or averaged over the planes, in the same time.
+/// See [`ssim_scales`]: the power of libvpx's scales a superblock's
+/// lambda takes. On the README's three scenes and the clip of a still
+/// picture (speed 5, 0.5/1 to 3/4 Mb/s, four threads), BD-rate at the
+/// same SSIM-Y (FFmpeg's `ssim`, in dB) against no tuning: at 1 (libvpx's),
+/// +8.0% and +9.0%; at 0.5, +2.2% and −0.8%. A scale by 16×16 block, as
+/// libvpx's, made the partition search weigh a block's rate against its
+/// parts' at different lambdas: +33% and +46%; one by superblock for the
+/// searches but by block for the quantization, +16% and +28% (+1.9% and
+/// +1.8% at 0.5).
+const SSIM_STRENGTH: f64 = 0.5;
+
+/// libvpx's `tune=ssim` (`set_mb_ssim_rdmult_scaling`): each superblock's
+/// scale of the RD lambda, from the mean variance of the 8×8 blocks of
+/// each of its 16×16 blocks in luma `y` (rows `stride` apart, `w`×`h`
+/// visible) by libvpx's fit, 67.035434 (1 − e^(−0.0021489 var)) +
+/// 17.492222: flat blocks, where SSIM sees coding errors most, take a
+/// smaller lambda and so more bits. The scales go over their geometric
+/// mean in the frame, and a superblock takes the geometric mean of its
+/// 16×16 blocks' to the power [`SSIM_STRENGTH`], into `out` in raster
+/// order.
+fn ssim_scales<P: EncPixel>(
+    y: &[P],
+    stride: usize,
+    (w, h): (usize, usize),
+    bd: u8,
+    out: &mut Vec<f32>,
+) {
+    let (mi_cols, mi_rows) = (w.div_ceil(8), h.div_ceil(8));
+    let (cols, rows) = (mi_cols.div_ceil(2), mi_rows.div_ceil(2));
+    let scale = f64::from(1u32 << (2 * u32::from(bd - 8)));
+    // Each 16×16 block's log scale.
+    let mut f = vec![0f64; cols * rows];
+    for r in 0..rows {
+        for c in 0..cols {
+            let (mut var, mut n) = (0.0, 0.0);
+            for mr in 2 * r..(2 * r + 2).min(mi_rows) {
+                for mc in 2 * c..(2 * c + 2).min(mi_cols) {
+                    // (The source is padded to whole superblocks.)
+                    let (mut sum, mut sq) = (0u64, 0u64);
+                    for yy in mr * 8..mr * 8 + 8 {
+                        for &v in &y[yy * stride + mc * 8..yy * stride + mc * 8 + 8] {
+                            let v = v.get() as u64;
+                            sum += v;
+                            sq += v * v;
+                        }
+                    }
+                    var += (sq as f64 - (sum * sum) as f64 / 64.0) / 64.0 / scale;
+                    n += 1.0;
+                }
+            }
+            let var = var / n;
+            f[r * cols + c] = (67.035434 * (1.0 - (-0.0021489 * var).exp()) + 17.492222).ln();
+        }
+    }
+    let mean = f.iter().sum::<f64>() / f.len() as f64;
+    let (sb_cols, sb_rows) = (mi_cols.div_ceil(8), mi_rows.div_ceil(8));
+    out.clear();
+    for sr in 0..sb_rows {
+        for sc in 0..sb_cols {
+            let (mut sum, mut n) = (0.0, 0.0);
+            for r in 4 * sr..(4 * sr + 4).min(rows) {
+                for &v in &f[r * cols + 4 * sc..r * cols + (4 * sc + 4).min(cols)] {
+                    sum += v - mean;
+                    n += 1.0;
+                }
+            }
+            out.push((SSIM_STRENGTH * sum / n).exp() as f32);
+        }
+    }
+}
+
+/// A drawn picture's key frame at a fixed quantizer in one pass, up to
+/// [`tile::KEY_RD_SPEED`] ([`tile::Shared::drawn_key`]): its RD lambda
+/// over [`rd_lambda`]'s. Ours is about 1.6 times libvpx's on a key frame
+/// (`vp9_compute_rd_mult`: `dc² · (4.35 + qindex / 1000)` over SSE scaled
+/// by 2048 and its trellis' plane weights), and FFmpeg's `-crf` (at
+/// `-cpu-used 1`) spends more of the first picture of `testsrc2` on its
+/// fine lines; at 0.6 (with [`tile::Shared::drawn_key`]'s 8×4 and 4×8
+/// halves) its BD-rate against libvpx's first picture goes from +3.2 to
+/// about +0.6%. Not on the key frames of camera pictures: there the
+/// lower lambda cost 1.5 to 3 points of U and V on the README's clips.
+fn drawn_key_lambda(speed: u8) -> f32 {
+    if speed <= tile::KEY_RD_SPEED {
+        DRAWN_KEY_LAMBDA
+    } else {
+        1.0
+    }
+}
+
+/// See [`drawn_key_lambda`].
+const DRAWN_KEY_LAMBDA: f32 = 0.6;
+
 fn rd_lambda(dc: i32) -> f32 {
     0.00358 * (dc * dc) as f32
 }
@@ -1609,8 +2112,289 @@ pub fn filter_level(qindex: u8, key: bool, bd: u8) -> u8 {
     guess.clamp(0, 63) as u8
 }
 
+/// Speeds at and below which a frame at a fixed quantizer in one pass
+/// ([`FrameParams::full_search`]) decides its coefficient updates as
+/// libvpx's `update_coef_probs` does ([`coef_updates_model`]): each
+/// probability takes the value between its count's and the old one that
+/// saves the most, and the third of a context's, from which the big
+/// tokens' probabilities follow ([`PARETO8`]), is weighed with theirs.
+/// On the counts alone, a context whose nonzero tokens are all over one
+/// took a third probability of 1, and with it the big tokens' of very
+/// large values: in `testsrc2`'s first picture at quantizer 15 the
+/// timestamp's and the bars' 8×8 transforms coded the same levels as
+/// libvpx's in 20% more bits, the frame 14996 bytes against libvpx's
+/// 14422, now 14270 with the same reconstruction. Its first picture
+/// against FFmpeg's (BD-rate at the same PSNR-Y / U / V, the mean of five
+/// grids of `crf`): from +0.7 / −0.7 / −1.5% to −1.8 / −3.2 / −3.8%. Every
+/// frame takes it, not only key frames: the same pictures in fewer bits,
+/// `testsrc2`'s stream 0.4 points, the gradient's 1.1, the README's clips
+/// 0.2 to 0.3. The big tokens are counted as the tiles write them, on
+/// their threads.
+pub const MODEL_UPDATE_SPEED: u8 = 5;
+
+/// Speeds at and below which the loop filter level of each frame is
+/// searched ([`pick_level`]) rather than taken from the quantizer
+/// ([`filter_level`], libvpx's `LPF_PICK_FROM_Q`).
+pub const LF_SEARCH_SPEED: u8 = 5;
+
+/// The quantizer from which an inter frame at a fixed quantizer in one
+/// pass codes its vectors in quarters of a sample (libvpx's
+/// `HIGH_PRECISION_MV_QTHRESH`). On `testsrc2` at `crf=50` against
+/// FFmpeg's `-crf`, 1.5 points fewer bits at the same PSNR-Y (from 150,
+/// where the alt-refs at 172 lose it, as many as before).
+const HP_MAX_Q: u8 = 200;
+
+/// At a fixed quantizer in one pass ([`FrameParams::full_search`]), the
+/// quantizer's level is capped at this, the highest the masks can be
+/// rebased from ([`lpf::rebasable`]), so that the level is searched at
+/// every quantizer: from about 208 up (`testsrc2` at `crf=55`) the level
+/// from the quantizer is 63 and was kept unsearched (libvpx's levels
+/// there 3 to 16): `testsrc2` at `crf=55`, 21 057 bytes at 35.48 dB →
+/// 19 572 at 35.65 dB.
+const LF_SEARCH_CAP: u8 = 61;
+
+/// At a fixed quantizer ([`FrameParams::full_search`] in one pass), an
+/// inter frame takes this share of the level [`pick_level`] finds. The
+/// search measures the frame it filters alone, and on a picture that
+/// stands still from frame to frame (blocks that keep their reference
+/// whole, their edges filtered again each time) it found levels that
+/// blurred the pictures after it: libvpx's on `testsrc2` at `-crf 35`
+/// were 1 to 14 where this encoder's were 6 to 21. At speed 5 against
+/// FFmpeg's `-crf`, BD-rate at the same PSNR-Y / U / V: `testsrc2` +10.0
+/// / +9.1 / +3.2% → +8.8 / +8.0 / +2.9%, the gradient of "Synthetic pans"
+/// in the README +6.2% → +4.3%; on the README's three clips at `q=60` to
+/// `210`, within a point either way (PSNR-Y −0.3, +0.7 and −0.3 points on
+/// the three scenes, the still scene and the pan; another run of the same
+/// scale, −0.6, −0.8 and −0.8). (At 0.45, the still scene lost a point; at
+/// 0.7, half the gain. The search's levels kept without its margin
+/// ([`LF_MARGIN`]): `testsrc2` +9.1%, the gradient +4.6%, PSNR-U lost on
+/// the still scene. At a bitrate, 0.6 lost 0.1 to 1.4 points of PSNR-Y on
+/// the three clips.)
+const LF_FIXED_SCALE: f64 = 0.6;
+
+/// [`pick_level`] filters one superblock row in this many, spread over
+/// the frame.
+const LF_BAND_EVERY: usize = 4;
+
+/// The share of its error (the three planes', each relative to its own
+/// at the quantizer's level, averaged) a searched level must take off to
+/// be kept over the quantizer's.
+const LF_MARGIN: f64 = 0.01;
+
+/// libvpx's `search_filter_level` on part of the picture
+/// (`LPF_PICK_FROM_SUBIMAGE`), on the frame's samples before the filter:
+/// one superblock row in [`LF_BAND_EVERY`] (each with the rows above it
+/// that its top edge's taps read), filtered at a level and at the levels
+/// a step either side of it, from `l0` (the quantizer's, at which the
+/// masks were built) and a step of a quarter of it (4 under 16); it moves
+/// to the side whose luma error is the least, a lower level at a little
+/// more error and a higher one only at a little less (libvpx's bias), and
+/// the step halves while the level stands, down to 2. Kept only if the
+/// three planes' errors there, each over its own at `l0`, average under
+/// 1 − [`LF_MARGIN`]; `l0` otherwise. Levels 2 to 61
+/// ([`lpf::rebasable`]: the masks take the level by [`lpf::Mask::rebase`]).
+/// 4:2:2 and 4:4:0 chroma, filtered from the grid, is left out of the
+/// measure.
+#[allow(clippy::too_many_arguments)]
+fn pick_level<P: EncPixel>(
+    src: &[Vec<P>; 3],
+    work: &[&TileWork<P>],
+    edges: &[usize],
+    dims: &Dims,
+    masks: &[lpf::Mask],
+    levels: &lpf::Levels,
+    geo: &lf::Geo,
+    l0: u8,
+    big_tx: bool,
+    band: &mut Vec<P>,
+) -> u8 {
+    let sb_rows = geo.mi_rows.div_ceil(8);
+    let sb_cols = geo.sb_cols;
+    let n = sb_rows.div_ceil(LF_BAND_EVERY);
+    let planes = if geo.ss_x == geo.ss_y { 3 } else { 1 };
+    // Each band: its plane and superblock row, its first and end rows
+    // (from the rows above it that its top edge's taps read), and its
+    // place in `band`.
+    let mut bands = Vec::with_capacity(3 * n);
+    let mut len = 0;
+    for p in 0..planes {
+        let sy = if p == 0 { 0 } else { geo.ss_y };
+        for k in 0..n {
+            let r = ((2 * k + 1) * sb_rows) / (2 * n);
+            let y_top = ((r * 64) >> sy).saturating_sub(8);
+            let y1 = (((r + 1) * 64) >> sy).min(dims.rows[p]);
+            bands.push((p, r, y_top, y1, len));
+            len += (y1 - y_top) * dims.stride[p];
+        }
+    }
+    band.clear();
+    band.resize(2 * len, P::default());
+    let (orig, trial) = band.split_at_mut(len);
+    for &(p, _, y_top, y1, at) in &bands {
+        let stride = dims.stride[p];
+        let sx = if p == 0 { 0 } else { geo.ss_x };
+        for (i, t) in work.iter().enumerate() {
+            let (x0, x1) = ((edges[i] * 8) >> sx, ((edges[i + 1] * 8) >> sx).min(stride));
+            for row in y_top..y1 {
+                let o = at + (row - y_top) * stride;
+                orig[o + x0..o + x1]
+                    .copy_from_slice(&t.pix[p][row * stride + x0..row * stride + x1]);
+            }
+        }
+    }
+    let mut mk = vec![lpf::Mask::default(); sb_rows * sb_cols];
+    // The squared error of each plane's bands (of the first `np` planes)
+    // filtered at level `l`.
+    let mut err = |l: u8, np: usize| -> [u64; 3] {
+        let mut e = [0; 3];
+        let mut rebased = usize::MAX;
+        for &(p, r, y_top, y1, at) in bands.iter().filter(|b| b.0 < np) {
+            let stride = dims.stride[p];
+            let end = at + (y1 - y_top) * stride;
+            let data = &mut trial[at..end];
+            data.copy_from_slice(&orig[at..end]);
+            if rebased != r {
+                let ms = r * sb_cols..(r + 1) * sb_cols;
+                for (m, &o) in mk[ms.clone()].iter_mut().zip(&masks[ms]) {
+                    *m = o;
+                    if l != l0 {
+                        m.rebase(l0, l);
+                    }
+                }
+                rebased = r;
+            }
+            let mut v = View {
+                data: &mut data[..],
+                base: y_top * stride,
+                stride,
+            };
+            lf::sb_row_plane(&mut v, p, &mk, &[], levels, geo, r);
+            let sy = if p == 0 { 0 } else { geo.ss_y };
+            let y0 = (r * 64) >> sy;
+            let h = dims.h[p].min(y1).saturating_sub(y0);
+            let o = (y0 - y_top) * stride;
+            let w = dims.w[p];
+            for x in (0..w).step_by(64) {
+                let cw = (w - x).min(64);
+                e[p] += P::sse(
+                    &src[p][y0 * stride + x..],
+                    stride,
+                    &data[o + x..],
+                    stride,
+                    cw,
+                    h,
+                );
+            }
+        }
+        e
+    };
+    let mut luma = [None::<u64>; 64];
+    let mut mid = i32::from(l0);
+    let mut step = if mid < 16 { 4 } else { mid / 4 };
+    let mut best_err = err(l0, 1)[0];
+    luma[usize::from(l0)] = Some(best_err);
+    let mut best = mid;
+    let mut dir = 0;
+    while step > 0 {
+        let (low, high) = ((mid - step).clamp(2, 61), (mid + step).clamp(2, 61));
+        let mut bias = (best_err >> (15 - mid / 8)) * step as u64;
+        if big_tx {
+            bias >>= 1;
+        }
+        let mut get = |l: i32| *luma[l as usize].get_or_insert_with(|| err(l as u8, 1)[0]);
+        if dir <= 0 && low != mid {
+            let e = get(low);
+            if e.saturating_sub(bias) < best_err {
+                best_err = best_err.min(e);
+                best = low;
+            }
+        }
+        if dir >= 0 && high != mid {
+            let e = get(high);
+            if e < best_err.saturating_sub(bias) {
+                best_err = e;
+                best = high;
+            }
+        }
+        if best == mid {
+            step /= 2;
+            if step < 2 {
+                break;
+            }
+            dir = 0;
+        } else {
+            dir = if best < mid { -1 } else { 1 };
+            mid = best;
+        }
+    }
+    if best == i32::from(l0) {
+        return l0;
+    }
+    let (a, b) = (err(l0, 3), err(best as u8, 3));
+    let r = (0..3)
+        .map(|p| (b[p] as f64 + 1.0) / (a[p] as f64 + 1.0))
+        .sum::<f64>()
+        / 3.0;
+    if r <= 1.0 - LF_MARGIN { best as u8 } else { l0 }
+}
+
+/// The whole-sample vectors (in eighths) most 8×8 blocks of the previous
+/// frame took on each reference, other than zero and at least twice, by
+/// count (ties by the vector) ([`tile::POP_STARTS`]).
+fn popular_mvs(prev: Option<&[frame::MvRef]>) -> [[Option<Mv>; tile::POP_STARTS]; 3] {
+    let mut out = [[None; tile::POP_STARTS]; 3];
+    let Some(prev) = prev else {
+        return out;
+    };
+    let mut counts: [std::collections::HashMap<(i16, i16), u32>; 3] = Default::default();
+    for m in prev {
+        let r = usize::from(m.refs[0]);
+        if (1..=3).contains(&r) {
+            let v = ((m.mv[0].row + 4) >> 3, (m.mv[0].col + 4) >> 3);
+            if v != (0, 0) {
+                *counts[r - 1].entry(v).or_insert(0) += 1;
+            }
+        }
+    }
+    for (o, c) in out.iter_mut().zip(&counts) {
+        let mut v: Vec<_> = c
+            .iter()
+            .filter(|e| *e.1 >= 2)
+            .map(|(k, n)| (*n, *k))
+            .collect();
+        v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        for (slot, (_, (row, col))) in o.iter_mut().zip(v) {
+            *slot = Some(Mv {
+                row: row * 8,
+                col: col * 8,
+            });
+        }
+    }
+    out
+}
+
 /// Speeds at and below which each inter block picks its filter.
 pub const SWITCHABLE_SPEED: u8 = 2;
+
+/// Up to this speed at a fixed quantizer in one pass, the inter blocks of
+/// a drawn picture ([`FrameEncoder::set_drawn`]) pick their filter too,
+/// by luma's error and chroma's unweighted
+/// ([`tile::Shared::filter_by_luma`]), where their vectors leave a whole
+/// sample in some plane. `testsrc2` spends most of its bits on its
+/// squares of noise, redrawn every picture: FFmpeg's `libvpx-vp9` (at its
+/// speed 1) predicts 43% of their blocks through the smooth filter, this
+/// encoder predicted all through the regular one. Against FFmpeg's `-crf`
+/// at speed 5 (BD-rate at the same PSNR-Y / U / V, ours at `crf=15` to
+/// `55` by 5 against FFmpeg's by 10): from +1.3 / −2.1 / −7.4% to +0.3 /
+/// −3.6 / −8.4% (at five points each, from −1.7 / −4.2 / −8.7% to −2.2 /
+/// −5.5 / −9.1%); the gradient from −0.2% to −2.4%. With chroma's error
+/// weighed twice, as the trials weigh it, the smooth filter that predicts
+/// chroma's detail better cost luma's: on the still scene's drawn pan
+/// (the README's clips at `q=60` to `210`) 0.7 points of PSNR-Y for 1.1
+/// of PSNR-U and V, now 0.1 for 0.9. On every picture, not only drawn
+/// ones: the three clips −1.0 / −0.4 / +0.1 points of PSNR-Y and −1.2 /
+/// −2.1 / −1.0 of PSNR-U, in 6 to 11% more time.
+pub const DRAWN_FILTER_SPEED: u8 = 5;
 
 fn compressed_header(
     lossless: bool,
@@ -1735,6 +2519,113 @@ fn coef_updates(old: &[u8; 1728], counts: &prob::Counts, max_tx: usize) -> [u8; 
         }
         // Updating a size costs a flag for every probability in it.
         if gain > (coded_probs * flag(false) + 256) as i64 {
+            for (i, p) in changed {
+                new[i] = p;
+            }
+        }
+    }
+    new
+}
+
+/// The header bits of probability `new` coded against `old` (no code:
+/// `u8::MAX`), by `old * 256 + new`.
+static UPDATE_BITS: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(|| {
+    let mut t = vec![u8::MAX; 256 * 256];
+    for old in 1..=255u8 {
+        for v in 0..=254u8 {
+            let new = prob::inv_remap(v, old);
+            let at = usize::from(old) * 256 + usize::from(new);
+            t[at] = t[at].min(subexp_bits(v) as u8);
+        }
+    }
+    t
+});
+
+/// The coefficient probabilities after libvpx's `update_coef_probs`
+/// (two loops, step 1): each of a context's three probabilities takes
+/// the value between its count's and the old one that saves the most
+/// bits with its update's, and the third is weighed with the big tokens'
+/// probabilities it brings ([`PARETO8`]) on their counts (`big`, by class
+/// under each third probability) — libvpx's
+/// `vp9_prob_diff_update_savings_search_model`.
+#[cold]
+#[inline(never)]
+fn coef_updates_model(
+    old: &[u8; 1728],
+    counts: &prob::Counts,
+    big: &[[u32; 9]],
+    max_tx: usize,
+) -> [u8; 1728] {
+    let mut new = *old;
+    let flag = |b: bool| i64::from(tile::bit_cost(b, 252));
+    let branch = |c: [u32; 2], p: u8| {
+        i64::from(c[0]) * i64::from(tile::bit_cost(false, p))
+            + i64::from(c[1]) * i64::from(tile::bit_cost(true, p))
+    };
+    let bits = &*UPDATE_BITS;
+    for tx in 0..=max_tx {
+        let mut savings = 0i64;
+        let mut changed = Vec::new();
+        for plane in 0..2 {
+            for r in 0..2 {
+                for band in 0..6 {
+                    for ctx in 0..6 {
+                        if !coded(band, ctx) {
+                            continue;
+                        }
+                        let c = &counts.coef[tx][plane][r][band][ctx];
+                        let eob = counts.eob[tx][plane][r][band][ctx];
+                        let pairs = [
+                            [c[3], eob.saturating_sub(c[3])],
+                            [c[0], c[1] + c[2]],
+                            [c[1], c[2]],
+                        ];
+                        for (node, ct) in pairs.into_iter().enumerate() {
+                            let i = ((((tx * 2 + plane) * 2 + r) * 6 + band) * 6 + ctx) * 3 + node;
+                            let total = u64::from(ct[0]) + u64::from(ct[1]);
+                            if total == 0 {
+                                // (Nothing to save: no update.)
+                                savings -= flag(false);
+                                continue;
+                            }
+                            let tail = (node == 2).then(|| tile::big_branches(&big[i]));
+                            let cost = |p: u8| {
+                                branch(ct, p)
+                                    + tail.as_ref().map_or(0, |t| {
+                                        let pp = &PARETO8[usize::from(p.max(1)) - 1];
+                                        t.iter().zip(pp).map(|(&c, &q)| branch(c, q)).sum()
+                                    })
+                            };
+                            let o = old[i];
+                            let start =
+                                ((256 * u64::from(ct[0]) + total / 2) / total).clamp(1, 255) as u8;
+                            let old_cost = cost(o);
+                            let (mut best, mut best_p) = (0i64, o);
+                            let mut p = start;
+                            while p != o {
+                                let b = bits[usize::from(o) * 256 + usize::from(p)];
+                                if b != u8::MAX {
+                                    let s = old_cost
+                                        - cost(p)
+                                        - (i64::from(b) * 256 + flag(true) - flag(false));
+                                    if s > best {
+                                        (best, best_p) = (s, p);
+                                    }
+                                }
+                                p = if p > o { p - 1 } else { p + 1 };
+                            }
+                            if best_p != o {
+                                savings += best - flag(false);
+                                changed.push((i, best_p));
+                            } else {
+                                savings -= flag(false);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !changed.is_empty() && savings >= 0 {
             for (i, p) in changed {
                 new[i] = p;
             }

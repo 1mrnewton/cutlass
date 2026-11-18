@@ -2261,3 +2261,1837 @@ fn the_first_key_frame_is_planned_from_the_lookahead() {
     let total = packet_bytes(&packets) as f64 * 8.0 / 2.0;
     assert!((total / f64::from(rate) - 1.0).abs() < 0.3, "{total} b/s");
 }
+
+/// Luma of full-range noise, new in every picture: no quantizer the rate
+/// control has codes it within a small rate.
+fn static_noise(w: u32, h: u32, i: u32) -> VideoFrame {
+    let mut f = moving(w, h, 0);
+    for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+        let n = ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 24;
+        *v = n as u8;
+    }
+    f
+}
+
+#[test]
+fn a_low_buffer_drops_frames() {
+    let (w, h) = (128u32, 64u32);
+    let n = 60;
+    let opts = super::Vp9Options {
+        bitrate: 60_000,
+        cbr_buffer_ms: 500,
+        speed: 9,
+        ..lag0(60)
+    };
+    let run = |o: super::Vp9Options| {
+        let p = encode_with(o, (w, h), n, |i| static_noise(w, h, i));
+        assert_decodes(&p, (w, h), p.len());
+        p
+    };
+    let kept = run(opts);
+    assert_eq!(kept.len(), n as usize);
+    let dropping = run(super::Vp9Options {
+        drop_frame_pct: 30,
+        ..opts
+    });
+    // Some frames are dropped, the key frame and those coded keep their
+    // place, and the stream comes near the rate (at the coarsest
+    // quantizer it is four times over without).
+    assert!(dropping.len() < kept.len(), "{} packets", dropping.len());
+    assert!(dropping.len() > 5, "{} packets", dropping.len());
+    assert!(dropping[0].keyframe && dropping[0].pts == 0);
+    assert!(dropping.windows(2).all(|p| p[0].pts < p[1].pts));
+    let rate = |p: &[Packet]| packet_bytes(p) as f64 * 8.0 / (f64::from(n) / 30.0);
+    let (with, without) = (rate(&dropping), rate(&kept));
+    assert!(without > 2.0 * 60_000.0, "{without} without dropping");
+    assert!(with < 1.5 * 60_000.0, "{with} with dropping");
+    // A rate the pictures fit in drops none.
+    let easy = encode_with(
+        super::Vp9Options {
+            drop_frame_pct: 30,
+            bitrate: 400_000,
+            ..opts
+        },
+        (w, h),
+        n,
+        |i| moving(w, h, i),
+    );
+    assert_eq!(easy.len(), n as usize);
+    let past = super::Vp9Options {
+        drop_frame_pct: 101,
+        ..opts
+    };
+    assert!(Vp9Encoder::with_options(w, h, past).is_err());
+}
+
+/// Each packet's header and the segment map its frame leaves.
+fn segmaps_of(packets: &[Packet]) -> Vec<(header::Header, Vec<u8>)> {
+    let mut dec = Decoder::new();
+    packets
+        .iter()
+        .map(|p| {
+            let h = header::parse(dec.persist(), &p.data)
+                .expect("header")
+                .header;
+            dec.decode(&p.data).expect("decode");
+            (h, dec.last_segmap().to_vec())
+        })
+        .collect()
+}
+
+#[test]
+fn cyclic_refresh_moves_a_band_of_finer_superblocks() {
+    // 10×2 superblocks: a tenth is two a frame, the next two each time.
+    let (w, h) = (640u32, 128u32);
+    let opts = super::Vp9Options {
+        aq_mode: super::AqMode::CyclicRefresh,
+        speed: 9,
+        ..lag0(120)
+    };
+    let packets = encode_with(opts, (w, h), 5, |i| moving(w, h, i));
+    assert_decodes(&packets, (w, h), 5);
+    let maps = segmaps_of(&packets);
+    assert!(!maps[0].0.seg.enabled, "the key frame refreshes all");
+    let mi_cols = 80;
+    for (i, (hd, map)) in maps.iter().enumerate().skip(1) {
+        assert!(hd.seg.enabled && hd.seg.update_map, "frame {i}");
+        assert!(hd.seg.feature_on[1][0] && hd.seg.feature_data[1][0] < 0);
+        assert!(!hd.seg.feature_on[0][0]);
+        // Superblocks 2i − 2 and 2i − 1 of the first row are segment 1.
+        for (k, &s) in map.iter().enumerate() {
+            let sb = (k / mi_cols / 8) * 10 + (k % mi_cols) / 8;
+            assert_eq!(s, u8::from(sb / 2 == i - 1), "frame {i} block {k}");
+        }
+    }
+    let both = super::Vp9Options { aq: true, ..opts };
+    assert!(Vp9Encoder::with_options(w, h, both).is_err());
+}
+
+#[test]
+fn complexity_aq_codes_flat_superblocks_finer_and_busy_ones_coarser() {
+    // 4×2 superblocks: the right column under heavy noise, the rest flat.
+    let (w, h) = (256u32, 128u32);
+    let frame = |i: u32| {
+        let mut f = solid(w, h, 120, 128, 128);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            if k as u32 % w >= 192 {
+                let n =
+                    ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 26;
+                *v = 60 + n as u8;
+            }
+        }
+        f
+    };
+    let opts = super::Vp9Options {
+        aq_mode: super::AqMode::Complexity,
+        speed: 6,
+        ..lag0(120)
+    };
+    let packets = encode_with(opts, (w, h), 3, frame);
+    assert_decodes(&packets, (w, h), 3);
+    let mi_cols = 32;
+    for (i, (hd, map)) in segmaps_of(&packets).iter().enumerate() {
+        let s = &hd.seg;
+        assert!(s.enabled, "frame {i}");
+        assert!(s.feature_data[0][0] < 0 && s.feature_data[4][0] > 0);
+        assert!(!s.feature_on[3][0]);
+        for (k, &seg) in map.iter().enumerate() {
+            let busy = k % mi_cols >= 24;
+            assert_eq!(seg, if busy { 4 } else { 0 }, "frame {i} block {k}");
+        }
+    }
+    // With a bitrate under 256 bits a superblock a frame: none.
+    let low = super::Vp9Options {
+        bitrate: 10_000,
+        ..opts
+    };
+    let packets = encode_with(low, (w, h), 3, frame);
+    assert!(segmaps_of(&packets).iter().all(|(hd, _)| !hd.seg.enabled));
+}
+
+#[test]
+fn equator_aq_codes_the_polar_rows_coarser() {
+    let (w, h) = (128u32, 256u32);
+    let opts = super::Vp9Options {
+        aq_mode: super::AqMode::Equator360,
+        speed: 6,
+        ..lag0(100)
+    };
+    let packets = encode_with(opts, (w, h), 3, |i| noisy(w, h, i, i));
+    assert_decodes(&packets, (w, h), 3);
+    for (hd, map) in segmaps_of(&packets) {
+        let s = &hd.seg;
+        assert!(s.enabled);
+        assert_eq!(s.feature_data[0][0], 0);
+        assert!(0 < s.feature_data[1][0] && s.feature_data[1][0] < s.feature_data[2][0]);
+        // (A block takes its top-left row's segment.)
+        assert_eq!(map[0], 2);
+        assert_eq!(map[16 * 16], 0);
+    }
+}
+
+/// A screen: dark text-like strokes on a light page that scrolls up by
+/// whole rows, a line of new strokes appearing at the bottom each frame.
+fn page(w: u32, h: u32, i: u32) -> VideoFrame {
+    let mut f = solid(w, h, 230, 128, 128);
+    for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+        let (r, c) = ((k as u32 / w) + 3 * i, k as u32 % w);
+        let glyph = (r / 12).wrapping_mul(0x9e37_79b9) ^ (c / 7).wrapping_mul(0x85eb_ca6b);
+        if r % 12 < 9 && c % 7 < 5 && (glyph >> 7) % 3 != 0 && ((r * 5 + c * 3) % 4 != 0) {
+            *v = 30;
+        }
+    }
+    f
+}
+
+#[test]
+fn screen_content_codes_no_alt_ref() {
+    let (w, h) = (128u32, 96u32);
+    let opts = super::Vp9Options {
+        qindex: 120,
+        lag: Some(16),
+        speed: 6,
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let superframes = |p: &[Packet]| {
+        p.iter()
+            .filter(|p| p.data.last().is_some_and(|&m| m & 0xe0 == 0xc0))
+            .count()
+    };
+    let camera = encode_with(opts, (w, h), 30, |i| page(w, h, i / 4));
+    assert!(superframes(&camera) > 0);
+    let screen = encode_with(
+        super::Vp9Options {
+            tune_content: super::TuneContent::Screen,
+            ..opts
+        },
+        (w, h),
+        30,
+        |i| page(w, h, i / 4),
+    );
+    assert_eq!(superframes(&screen), 0);
+    assert_eq!(screen.len(), 30);
+    assert_decodes(&screen, (w, h), 30);
+}
+
+#[test]
+fn ssim_tuning_moves_bits_to_flat_blocks() {
+    // Left: a gentle ramp under faint noise; right: heavy noise.
+    let (w, h) = (128u32, 64u32);
+    let picture = || {
+        let mut f = moving(w, h, 0);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let (r, c) = (k as u32 / w, k as u32 % w);
+            let n = (k as u32).wrapping_mul(2_654_435_761) >> 24;
+            *v = if c < 64 {
+                (60 + r + c / 4 + n % 12) as u8
+            } else {
+                (30 + n * 3 / 4) as u8
+            };
+        }
+        f
+    };
+    let err = |tune| {
+        let opts = super::Vp9Options { tune, ..lag0(80) };
+        let p = encode_with(opts, (w, h), 1, |_| picture());
+        let decoded = Decoder::new()
+            .decode(&p[0].data)
+            .expect("decode")
+            .expect("shown");
+        let src = vis(&picture().y);
+        let (mut flat, mut busy) = (0u64, 0u64);
+        for (k, (&a, &b)) in src.iter().zip(&decoded.y).enumerate() {
+            let d = u64::from(a.abs_diff(b)).pow(2);
+            if k as u32 % w < 64 {
+                flat += d
+            } else {
+                busy += d
+            }
+        }
+        (flat, busy)
+    };
+    let (psnr_flat, psnr_busy) = err(super::Tune::Psnr);
+    let (ssim_flat, ssim_busy) = err(super::Tune::Ssim);
+    assert!(ssim_flat < psnr_flat, "{ssim_flat} against {psnr_flat}");
+    assert!(ssim_busy >= psnr_busy, "{ssim_busy} against {psnr_busy}");
+}
+
+#[test]
+fn film_tuning_keeps_more_grain() {
+    // A flat ramp under fresh faint grain each frame: tuned for film, the
+    // inter frames' reconstruction keeps more of the grain's variance
+    // (candidates that smooth it cost more in the RD search). At q 60:
+    // at q 100 a picture one superblock row tall lets plain coding copy
+    // the key frame's grain with still vectors (every block reaches the
+    // edge), and the comparison no longer holds at 128×128 or larger
+    // even without that; at q 60 it holds at every size tried.
+    let (w, h) = (128u32, 64u32);
+    let frame = |i: u32| {
+        let mut f = moving(w, h, 0);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let (r, c) = (k as u32 / w, k as u32 % w);
+            let n = ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 29;
+            *v = (100 + r / 8 + c / 16 + n) as u8;
+        }
+        f
+    };
+    let grain = |tune_content| {
+        let opts = super::Vp9Options {
+            tune_content,
+            speed: 5,
+            ..lag0(60)
+        };
+        let p = encode_with(opts, (w, h), 6, frame);
+        let mut dec = Decoder::new();
+        let mut var = 0.0;
+        for (i, p) in p.iter().enumerate() {
+            let y = dec.decode(&p.data).expect("decode").expect("shown").y;
+            if i == 0 {
+                continue;
+            }
+            // Each 8×8 block's variance about its mean.
+            for by in 0..h as usize / 8 {
+                for bx in 0..w as usize / 8 {
+                    let at =
+                        |r: usize, c: usize| f64::from(y[(by * 8 + r) * w as usize + bx * 8 + c]);
+                    let mean = (0..64).map(|k| at(k / 8, k % 8)).sum::<f64>() / 64.0;
+                    var += (0..64)
+                        .map(|k| (at(k / 8, k % 8) - mean).powi(2))
+                        .sum::<f64>();
+                }
+            }
+        }
+        (var, packet_bytes(&p))
+    };
+    let (plain, plain_bytes) = grain(super::TuneContent::Default);
+    let (film, film_bytes) = grain(super::TuneContent::Film);
+    assert!(
+        film > plain,
+        "{film} against {plain} ({film_bytes} and {plain_bytes} bytes)"
+    );
+}
+
+#[test]
+fn the_denoiser_brings_a_noisy_still_picture_near_the_clean_one() {
+    // A still picture under fresh noise each frame, coded losslessly: what
+    // comes out is the denoised source.
+    let (w, h) = (64u32, 48u32);
+    let clean = moving(w, h, 0);
+    let noisy = |i: u32| {
+        let mut f = clean.clone();
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let n = ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 29;
+            *v = (i32::from(*v) + n as i32 - 4).clamp(0, 255) as u8;
+        }
+        f
+    };
+    let err = |level: u8| {
+        let opts = super::Vp9Options {
+            noise_sensitivity: level,
+            ..lag0(0)
+        };
+        let packets = encode_with(opts, (w, h), 8, noisy);
+        let mut dec = Decoder::new();
+        let mut last = None;
+        for p in &packets {
+            last = dec.decode(&p.data).expect("decode");
+        }
+        let pic = last.expect("shown");
+        // Chroma comes through as it went in.
+        assert_eq!(pic.u, vis(&clean.u));
+        let src = vis(&clean.y);
+        src.iter()
+            .zip(&pic.y)
+            .map(|(&a, &b)| u64::from(a.abs_diff(b)).pow(2))
+            .sum::<u64>()
+    };
+    let (raw, denoised) = (err(0), err(1));
+    assert!(denoised * 2 < raw, "{denoised} against {raw}");
+    let past = super::Vp9Options {
+        noise_sensitivity: 7,
+        ..lag0(0)
+    };
+    assert!(Vp9Encoder::with_options(w, h, past).is_err());
+}
+
+#[test]
+fn each_temporal_layer_decodes_without_those_above() {
+    let (w, h) = (128u32, 64u32);
+    for (layers, pattern) in [(2u8, &[0u8, 1][..]), (3, &[0, 2, 1, 2][..])] {
+        let opts = super::Vp9Options {
+            temporal_layers: layers,
+            bitrate: 300_000,
+            cbr_buffer_ms: 1000,
+            speed: 9,
+            lag: Some(16),
+            ..lag0(100)
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let mut coded = Vec::new();
+        for i in 0..24u32 {
+            let p = encoder
+                .push(&VideoInput {
+                    frame: noisy(w, h, i, i),
+                    pts: i64::from(i),
+                    duration: 1,
+                    timescale: 30,
+                })
+                .expect("push");
+            // No lookahead in layers: each picture comes out at once.
+            assert_eq!(p.len(), 1);
+            coded.push((encoder.temporal_layer(), p[0].data.clone()));
+        }
+        let mut dec = Decoder::new();
+        for (i, (layer, data)) in coded.iter().enumerate() {
+            assert_eq!(*layer, pattern[i % pattern.len()], "picture {i}");
+            let h = header::parse(dec.persist(), data).expect("header").header;
+            dec.decode(data).expect("decode");
+            assert!(h.error_resilient || i == 0);
+            if i > 0 {
+                let refresh = match layer {
+                    0 => 0x01,
+                    1 => 0x02,
+                    _ => 0x00,
+                };
+                assert_eq!(h.refresh_flags, refresh, "picture {i}");
+            }
+        }
+        // All the layers, then each set of the lower ones alone: the
+        // pictures of a set are those of all.
+        let decode = |top: u8| -> Vec<(usize, Vec<u8>)> {
+            let mut dec = Decoder::new();
+            coded
+                .iter()
+                .enumerate()
+                .filter(|(_, (l, _))| *l <= top)
+                .map(|(i, (_, d))| (i, dec.decode(d).expect("decode").expect("shown").y))
+                .collect()
+        };
+        let all = decode(layers - 1);
+        assert_eq!(all.len(), 24);
+        for top in 0..layers - 1 {
+            let some = decode(top);
+            assert!(some.len() < 24);
+            for (i, y) in &some {
+                assert_eq!(y, &all[*i].1, "{layers} layers, up to {top}, picture {i}");
+            }
+        }
+    }
+    let past = super::Vp9Options {
+        temporal_layers: 4,
+        ..lag0(100)
+    };
+    assert!(Vp9Encoder::with_options(w, h, past).is_err());
+}
+
+#[test]
+fn a_region_of_interest_map_codes_its_segments_features() {
+    // 128×64: 16×8 blocks. The top two rows of blocks skip, the left half
+    // of the rest is finer, filtered less and predicts from LAST only.
+    let (w, h) = (128u32, 64u32);
+    let mut roi = super::RoiMap {
+        map: vec![0; 16 * 8],
+        ..super::RoiMap::default()
+    };
+    for (k, s) in roi.map.iter_mut().enumerate() {
+        *s = if k < 32 {
+            2
+        } else if k % 16 < 8 {
+            1
+        } else {
+            0
+        };
+    }
+    roi.delta_q[1] = -30;
+    roi.delta_lf[1] = -10;
+    roi.ref_frame[1] = Some(1);
+    roi.skip[2] = true;
+    // (Unfiltered, so that the skipped rows away from the segments below
+    // are the picture before's.)
+    roi.delta_lf[2] = -63;
+    for speed in [2u8, 6, 9, 10] {
+        let opts = super::Vp9Options {
+            speed,
+            lag: Some(16),
+            ..lag0(120)
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        encoder.set_roi_map(Some(roi.clone())).expect("roi");
+        let mut packets = Vec::new();
+        for i in 0..20u32 {
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: noisy(w, h, i, i),
+                        pts: i64::from(i),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        assert_decodes(&packets, (w, h), 20);
+        // Each shown picture: its header's features, and the first eight
+        // skipped rows the picture before's samples (zero vector, no
+        // residual, no loop filter).
+        let mut dec = Decoder::new();
+        let mut before: Option<Vec<u8>> = None;
+        for p in &packets {
+            for f in crate::decode::split_superframe(&p.data).expect("superframe") {
+                let hd = header::parse(dec.persist(), f).expect("header").header;
+                let shown = dec.decode(f).expect("decode");
+                if !hd.show_frame {
+                    continue;
+                }
+                let s = &hd.seg;
+                assert!(s.enabled, "speed {speed}");
+                assert_eq!(s.feature_data[1][0], -30);
+                assert_eq!(s.feature_data[1][1], -10);
+                let inter = !hd.key_frame;
+                assert_eq!(s.feature_on[1][2], inter);
+                assert_eq!(s.feature_on[2][3], inter);
+                assert_eq!(dec.last_segmap(), &roi.map[..]);
+                let y = shown.expect("shown").y;
+                if let (true, Some(b)) = (inter, &before) {
+                    assert_eq!(&y[..8 * 128], &b[..8 * 128], "speed {speed}");
+                }
+                before = Some(y);
+            }
+        }
+    }
+    let mut encoder = Vp9Encoder::with_options(w, h, lag0(120)).expect("encoder");
+    let wrong = |f: &dyn Fn(&mut super::RoiMap)| {
+        let mut r = roi.clone();
+        f(&mut r);
+        r
+    };
+    for bad in [
+        wrong(&|r| r.map.pop().map_or((), |_| ())),
+        wrong(&|r| r.map[0] = 8),
+        wrong(&|r| r.delta_lf[0] = 64),
+        wrong(&|r| r.ref_frame[0] = Some(4)),
+        wrong(&|r| r.ref_frame[2] = Some(0)),
+    ] {
+        assert!(encoder.set_roi_map(Some(bad)).is_err());
+    }
+    let mut aq = Vp9Encoder::with_options(
+        w,
+        h,
+        super::Vp9Options {
+            aq: true,
+            ..lag0(120)
+        },
+    )
+    .expect("encoder");
+    assert!(aq.set_roi_map(Some(roi)).is_err());
+}
+
+#[test]
+fn a_finer_region_of_interest_comes_back_nearer_the_source() {
+    // The left half of the picture 40 indices finer: it comes back nearer
+    // the source than without the map (its blocks weigh rate against
+    // error at their own quantizer), the right half no nearer.
+    let (w, h) = (128u32, 64u32);
+    let mut roi = super::RoiMap {
+        map: (0..16 * 8).map(|k| u8::from(k % 16 < 8)).collect(),
+        ..super::RoiMap::default()
+    };
+    roi.delta_q[1] = -40;
+    for speed in [6u8, 9] {
+        let err = |map: Option<super::RoiMap>| {
+            let opts = super::Vp9Options { speed, ..lag0(120) };
+            let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+            encoder.set_roi_map(map).expect("roi");
+            let mut dec = Decoder::new();
+            let (mut left, mut right) = (0u64, 0u64);
+            for i in 0..4 {
+                let p = encoder.push(&input(noisy(w, h, i, i))).expect("push");
+                let y = dec.decode(&p[0].data).expect("decode").expect("shown").y;
+                for (k, (&a, &b)) in vis(&noisy(w, h, i, i).y).iter().zip(&y).enumerate() {
+                    let d = u64::from(a.abs_diff(b)).pow(2);
+                    if k as u32 % w < 64 {
+                        left += d
+                    } else {
+                        right += d
+                    }
+                }
+            }
+            (left, right)
+        };
+        let (plain, with) = (err(None), err(Some(roi.clone())));
+        assert!(
+            with.0 * 3 < plain.0 * 2,
+            "speed {speed}: {with:?} against {plain:?}"
+        );
+        assert!(
+            with.1 * 10 >= plain.1 * 9,
+            "speed {speed}: {with:?} against {plain:?}"
+        );
+    }
+}
+
+#[test]
+fn a_corpus_gives_its_hard_clip_the_bits_of_its_easy_one() {
+    // An easy clip (still) and a hard one (a noisy pan), two passes each,
+    // at a rate both spend.
+    let (w, h) = (160u32, 96u32);
+    let clips: [&dyn Fn(u32) -> VideoFrame; 2] = [&|_| moving(w, h, 0), &|i| noisy(w, h, i * 3, i)];
+    let base = super::Vp9Options {
+        threads: 2,
+        speed: 8,
+        ..super::Vp9Options::default()
+    };
+    let rate = 60_000u32;
+    let run = |clip: &dyn Fn(u32) -> VideoFrame, corpus: Option<u32>| -> (u32, u64) {
+        let first_opts = super::Vp9Options {
+            qindex: 120,
+            speed: 10,
+            ..base
+        };
+        let first: Vec<u64> = encode_with(first_opts, (w, h), 30, clip)
+            .iter()
+            .map(|p| p.data.len() as u64 * 8)
+            .collect();
+        let opts = super::Vp9Options {
+            bitrate: rate,
+            corpus_complexity: corpus.unwrap_or(0),
+            ..base
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let complexity = encoder.first_pass_complexity(&first, 120);
+        encoder.set_second_pass(&first, 120);
+        let mut bits = 0;
+        for i in 0..30u32 {
+            let p = encoder.push(&input(clip(i))).expect("push");
+            bits += p.iter().map(|p| p.data.len() as u64 * 8).sum::<u64>();
+        }
+        let p = VideoEncoder::drain(&mut encoder).expect("drain");
+        bits += p.iter().map(|p| p.data.len() as u64 * 8).sum::<u64>();
+        (complexity, bits)
+    };
+    let alone: Vec<(u32, u64)> = clips.iter().map(|c| run(*c, None)).collect();
+    let (easy, hard) = (alone[0].0, alone[1].0);
+    assert!(hard > 2 * easy.max(1), "{easy} and {hard}");
+    let corpus = (easy + hard) / 2;
+    let together: Vec<u64> = clips.iter().map(|c| run(*c, Some(corpus)).1).collect();
+    // The easy clip spends less than the bitrate and the hard one more;
+    // the two come to about what they spent alone.
+    assert!(
+        together[0] < alone[0].1,
+        "{} against {}",
+        together[0],
+        alone[0].1
+    );
+    assert!(
+        together[1] > alone[1].1,
+        "{} against {}",
+        together[1],
+        alone[1].1
+    );
+    let (sum, before) = (together[0] + together[1], alone[0].1 + alone[1].1);
+    assert!(
+        sum as f64 > 0.75 * before as f64 && (sum as f64) < 1.25 * before as f64,
+        "{sum} against {before}"
+    );
+}
+
+#[test]
+fn layered_alt_refs_are_shown_as_they_are() {
+    // A scrolling page at a fixed quantizer with the lookahead: with layers,
+    // hidden alt-refs within the golden groups are shown in their
+    // targets' places as they are (`show_existing_frame`, one byte),
+    // and the pictures decode near the source, as with one layer.
+    let (w, h) = (128u32, 96u32);
+    let clip = |i: u32| page(w, h, i / 4);
+    let opts = super::Vp9Options {
+        qindex: 120,
+        lag: Some(16),
+        speed: 6,
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let shows = |p: &[Packet]| {
+        p.iter()
+            .filter(|p| p.data.len() == 1 && p.data[0] >> 3 & 1 == 1)
+            .count()
+    };
+    let worst = |p: &[Packet]| {
+        let params = CodecParams::with_format(CodecId::Vp9, w, h, PixelFormat::Yuv420p);
+        let mut decoder = Vp9Decoder::open(&params).expect("decoder");
+        let mut out = Vec::new();
+        for p in p {
+            out.extend(decoder.push_all(p).expect("decode"));
+        }
+        assert_eq!(out.len(), 30);
+        out.iter()
+            .enumerate()
+            .map(|(i, o)| psnr(&vis(&clip(i as u32).y), &vis(&o.frame.y)))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let one = encode_with(opts, (w, h), 30, clip);
+    assert_eq!(shows(&one), 0);
+    let base = worst(&one);
+    let mut n = Vec::new();
+    for layers in [2u8, 3] {
+        let p = encode_with(
+            super::Vp9Options {
+                alt_ref_layers: layers,
+                ..opts
+            },
+            (w, h),
+            30,
+            clip,
+        );
+        assert_eq!(p.len(), 30);
+        n.push(shows(&p));
+        let q = worst(&p);
+        assert!(q > base - 1.5, "{layers} layers: {q} against {base}");
+    }
+    // One in the golden group of twelve with an alt-ref, three with three
+    // layers (at 6, then 3 and 9).
+    assert_eq!(n, [1, 3]);
+    let past = super::Vp9Options {
+        alt_ref_layers: 4,
+        ..opts
+    };
+    assert!(Vp9Encoder::with_options(w, h, past).is_err());
+}
+
+/// A moving alpha gradient: a diagonal ramp that slides `shift` samples a
+/// picture, with an opaque band.
+fn alpha_plane(width: u32, height: u32, shift: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    for row in 0..height {
+        for col in 0..width {
+            let ramp = (col + row + 3 * shift) * 4 % 256;
+            out.push(if (row / 8) % 3 == 1 {
+                255
+            } else {
+                u8::try_from(ramp).unwrap_or(0)
+            });
+        }
+    }
+    out
+}
+
+/// Whether a profile 0 VP9 frame (no superframe) is a key frame: its
+/// first octet is the frame marker, the profile's two bits,
+/// `show_existing_frame` and `frame_type` (0 for a key frame).
+fn is_key(frame: &[u8]) -> bool {
+    frame[0] & 0xF0 == 0x80 && frame[0] & 0x0C == 0
+}
+
+#[test]
+fn alpha_rides_beside_each_packet_and_decodes_to_the_plane() {
+    use super::{AlphaCoded, Vp9Options};
+    use crate::decode::Vp9AlphaDecoder;
+
+    let (w, h) = (64_u32, 48_u32);
+    // Lossless, to check the planes exactly; lookahead and alt-refs in the
+    // stream (speed 5) and a key frame every 5.
+    let opts = Vp9Options {
+        qindex: 0,
+        keyint: 5,
+        alpha: true,
+        threads: 1,
+        ..Vp9Options::default()
+    };
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let mut coded: Vec<AlphaCoded> = Vec::new();
+    let mut sources = Vec::new();
+    for n in 0..12 {
+        let frame = moving(w, h, n * 2);
+        let alpha = alpha_plane(w, h, n);
+        let planes = [
+            (&frame.y.samples[..], frame.y.stride),
+            (&frame.u.samples[..], frame.u.stride),
+            (&frame.v.samples[..], frame.v.stride),
+            (&alpha[..], w as usize),
+        ];
+        coded.extend(
+            encoder
+                .push_planes_alpha(planes, 1.0 / 30.0, (i64::from(n), 1, 30))
+                .expect("push"),
+        );
+        sources.push(alpha);
+    }
+    coded.extend(encoder.flush_alpha().expect("flush"));
+    assert_eq!(coded.len(), 12);
+    // The stream is the one the same options code without alpha.
+    let mut plain = Vp9Encoder::with_options(
+        w,
+        h,
+        Vp9Options {
+            alpha: false,
+            ..opts
+        },
+    )
+    .expect("plain");
+    let mut streams = Vec::new();
+    for n in 0..12 {
+        let frame = moving(w, h, n * 2);
+        let planes = [
+            (&frame.y.samples[..], frame.y.stride),
+            (&frame.u.samples[..], frame.u.stride),
+            (&frame.v.samples[..], frame.v.stride),
+        ];
+        streams.extend(
+            plain
+                .push_planes(planes, 1.0 / 30.0, (i64::from(n), 1, 30))
+                .expect("push"),
+        );
+    }
+    streams.extend(plain.flush().expect("flush"));
+    let main: Vec<_> = coded
+        .iter()
+        .map(|c| (c.data.clone(), c.keyframe, c.clock))
+        .collect();
+    assert_eq!(main, streams);
+    let mut alpha_decoder = Vp9AlphaDecoder::new();
+    for (n, c) in coded.iter().enumerate() {
+        assert_eq!(c.clock, (n as i64, 1, 30));
+        // The alpha stream's key frames are the stream's.
+        assert_eq!(is_key(&c.alpha), c.keyframe, "picture {n}");
+        let plane = alpha_decoder
+            .decode(&c.alpha)
+            .expect("alpha")
+            .expect("shown");
+        assert_eq!((plane.width, plane.height, plane.bit_depth), (w, h, 8));
+        assert_eq!(plane.samples, sources[n], "picture {n}");
+    }
+    assert_eq!(coded.iter().filter(|c| c.keyframe).count(), 3);
+    // Without alpha in, the plain calls are refused.
+    let frame = moving(w, h, 0);
+    let planes = [
+        (&frame.y.samples[..], frame.y.stride),
+        (&frame.u.samples[..], frame.u.stride),
+        (&frame.v.samples[..], frame.v.stride),
+    ];
+    assert!(encoder.push_planes(planes, 0.0, (99, 1, 30)).is_err());
+    assert!(encoder.flush().is_err());
+    // Nor is alpha above 8 bits or in temporal layers.
+    for opts in [
+        Vp9Options {
+            alpha: true,
+            bit_depth: 10,
+            ..Vp9Options::default()
+        },
+        Vp9Options {
+            alpha: true,
+            temporal_layers: 2,
+            ..Vp9Options::default()
+        },
+    ] {
+        assert!(Vp9Encoder::with_options(w, h, opts).is_err());
+    }
+    // And alpha on an encoder without it is.
+    let mut plain = Vp9Encoder::with_quantizer(w, h, 60).expect("plain");
+    let alpha = alpha_plane(w, h, 0);
+    let planes = [planes[0], planes[1], planes[2], (&alpha[..], w as usize)];
+    assert!(plain.push_planes_alpha(planes, 0.0, (0, 1, 30)).is_err());
+}
+
+#[test]
+fn alpha_of_dropped_pictures_is_passed_over() {
+    use super::Vp9Options;
+    use crate::decode::Vp9AlphaDecoder;
+
+    // Constant bitrate far under what the pictures take, dropping frames.
+    let (w, h) = (96_u32, 64_u32);
+    let opts = Vp9Options {
+        bitrate: 20_000,
+        cbr_buffer_ms: 1000,
+        drop_frame_pct: 60,
+        speed: 9,
+        alpha: true,
+        threads: 1,
+        ..Vp9Options::default()
+    };
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let mut coded = Vec::new();
+    for n in 0..30 {
+        let frame = moving(w, h, n * 5);
+        let alpha = alpha_plane(w, h, n * 3);
+        let planes = [
+            (&frame.y.samples[..], frame.y.stride),
+            (&frame.u.samples[..], frame.u.stride),
+            (&frame.v.samples[..], frame.v.stride),
+            (&alpha[..], w as usize),
+        ];
+        coded.extend(
+            encoder
+                .push_planes_alpha(planes, 1.0 / 30.0, (i64::from(n), 1, 30))
+                .expect("push"),
+        );
+    }
+    coded.extend(encoder.flush_alpha().expect("flush"));
+    assert!(coded.len() < 30, "{} pictures coded", coded.len());
+    let mut alpha_decoder = Vp9AlphaDecoder::new();
+    for c in &coded {
+        let plane = alpha_decoder
+            .decode(&c.alpha)
+            .expect("alpha")
+            .expect("shown");
+        // Each alpha packet is the alpha of its own picture.
+        let source = alpha_plane(w, h, u32::try_from(c.clock.0).expect("pts") * 3);
+        assert!(psnr(&source, &plane.samples) > 20.0, "pts {}", c.clock.0);
+    }
+}
+
+#[test]
+fn frames_with_alpha_round_trip_on_the_codec_contracts() {
+    use super::Vp9Options;
+    use cutlass_encode::SideData;
+
+    let (w, h) = (64_u32, 32_u32);
+    let opts = Vp9Options {
+        qindex: 0,
+        alpha: true,
+        threads: 1,
+        ..Vp9Options::default()
+    };
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let mut packets = Vec::new();
+    let mut sources = Vec::new();
+    for n in 0..6 {
+        let frame = moving(w, h, n);
+        // The fourth picture goes in without alpha: opaque.
+        let alpha = if n == 3 {
+            vec![255; (w * h) as usize]
+        } else {
+            alpha_plane(w, h, n)
+        };
+        let frame = if n == 3 {
+            frame
+        } else {
+            frame
+                .with_alpha(8, Plane::tight(w, h, alpha.clone()).expect("plane"))
+                .expect("alpha")
+        };
+        sources.push(alpha);
+        packets.extend(
+            encoder
+                .push(&VideoInput {
+                    frame,
+                    pts: i64::from(n),
+                    duration: 1,
+                    timescale: 30,
+                })
+                .expect("push"),
+        );
+    }
+    packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+    assert_eq!(packets.len(), 6);
+    let params = CodecParams::with_format(CodecId::Vp9, w, h, PixelFormat::Yuv420p);
+    let mut decoder = Vp9Decoder::open_with_threads(&params, 2).expect("decoder");
+    let mut frames = Vec::new();
+    for packet in &packets {
+        assert!(
+            packet
+                .side
+                .iter()
+                .any(|side| matches!(side, SideData::BlockAdditional { id: 1, .. }))
+        );
+        frames.extend(VideoDecoder::push(&mut decoder, packet).expect("decode"));
+    }
+    frames.extend(VideoDecoder::drain(&mut decoder).expect("drain"));
+    assert_eq!(frames.len(), 6);
+    for (n, out) in frames.iter().enumerate() {
+        let alpha = out.frame.alpha.as_ref().expect("alpha");
+        assert_eq!(alpha.bit_depth, 8);
+        assert_eq!(vis(&alpha.plane), sources[n], "picture {n}");
+    }
+    // A packet without its alpha decodes to a picture without one.
+    let mut decoder = Vp9Decoder::open_with_threads(&params, 1).expect("decoder");
+    let mut bare = packets[0].clone();
+    bare.side.clear();
+    let out = VideoDecoder::push(&mut decoder, &bare).expect("decode");
+    assert!(out.iter().all(|o| o.frame.alpha.is_none()));
+}
+
+#[test]
+fn a_pan_with_alt_refs_seeds_its_searches_and_decodes() {
+    // A pan of a sample a picture: an alt-ref every golden interval, which
+    // the frames after it search from where the pan puts it, and a key
+    // frame midway that resets where the pictures stand
+    // (`tile::REF_SEED_SPEED`; speed 7 reads no seed).
+    let (w, h) = (320u32, 192u32);
+    let frame = |i: u32| moving(w, h, i);
+    for speed in [5, 6, 7] {
+        let opts = super::Vp9Options {
+            qindex: 120,
+            lag: Some(16),
+            keyint: 20,
+            speed,
+            threads: 2,
+            ..super::Vp9Options::default()
+        };
+        let packets = encode_with(opts, (w, h), 40, frame);
+        assert_decodes(&packets, (w, h), 40);
+        let superframes = packets
+            .iter()
+            .filter(|p| {
+                crate::decode::split_superframe(&p.data)
+                    .expect("split")
+                    .len()
+                    > 1
+            })
+            .count();
+        assert!(superframes >= 2, "speed {speed}: {superframes} alt-refs");
+        // The pictures between the first alt-ref and its overlay predict
+        // from it and from LAST: a fraction of the key frame each.
+        let key = packets[0].data.len();
+        for p in &packets[2..11] {
+            assert!(
+                p.data.len() * 4 < key,
+                "speed {speed}: {} bytes, key frame {key}",
+                p.data.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn an_overlay_keeps_the_golden_frame_before_it_as_altref() {
+    // At a fixed quantizer in one pass, an alt-ref's overlay is coded into
+    // the alt-ref's slot and becomes GOLDEN, and the golden frame before it
+    // stays, as ALTREF (`OVERLAY_KEEPS_GOLDEN`): the frame after the
+    // overlay reads ALTREF from slot 1 (and GOLDEN from 2, or from a
+    // picture of the pool). In a second pass the overlay refreshes slot 1
+    // as before, and ALTREF reads slot 2.
+    let run = |opts: super::Vp9Options, first: Option<(&[u64], u8)>| {
+        let mut encoder = Vp9Encoder::with_options(160, 96, opts).expect("encoder");
+        if let Some((bits, q)) = first {
+            encoder.set_second_pass(bits, q);
+        }
+        let mut packets = Vec::new();
+        for index in 0..40u32 {
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: moving(160, 96, index * 2),
+                        pts: i64::from(index),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        packets
+            .into_iter()
+            .map(|p| p.data)
+            .collect::<Vec<Vec<u8>>>()
+    };
+    let refs_after_overlay = |packets: &[Vec<u8>]| {
+        // Each frame's header read against the state of a decoder that has
+        // decoded the frames before it.
+        let mut dec = Decoder::new();
+        let mut headers = Vec::new();
+        for p in packets {
+            for f in crate::decode::split_superframe(p).expect("superframe") {
+                headers.push(header::parse(dec.persist(), f).expect("header").header);
+                dec.decode(f).expect("decode");
+            }
+        }
+        // The overlay: the first shown frame after the alt-ref that
+        // refreshes slot 1 or 2.
+        let hidden = headers
+            .iter()
+            .position(|h| !h.show_frame)
+            .expect("an alt-ref");
+        let overlay = (hidden + 1..headers.len())
+            .find(|&i| headers[i].show_frame && headers[i].refresh_flags & 0x06 != 0)
+            .expect("an overlay");
+        let after = &headers[overlay + 1];
+        assert_ne!(after.ref_index[1], after.ref_index[2]);
+        after.ref_index[2]
+    };
+    let base = super::Vp9Options {
+        threads: 1,
+        speed: 5,
+        ..super::Vp9Options::default()
+    };
+    let fixed = super::Vp9Options {
+        qindex: 120,
+        ..base
+    };
+    assert_eq!(refs_after_overlay(&run(fixed, None)), 1);
+    let first: Vec<u64> = run(super::Vp9Options { speed: 10, ..fixed }, None)
+        .iter()
+        .map(|p| p.len() as u64 * 8)
+        .collect();
+    let second = run(
+        super::Vp9Options {
+            bitrate: 300_000,
+            ..base
+        },
+        Some((&first, 120)),
+    );
+    assert_eq!(refs_after_overlay(&second), 2);
+}
+
+#[test]
+fn a_drawn_pictures_key_frame_is_finer_and_its_alt_refs_coarser() {
+    // A drawn picture moved by whole samples repeats the one before it
+    // exactly: at a fixed quantizer in one pass its key frame takes a
+    // finer step and its alt-refs a coarser one (`DRAWN_SHARE`,
+    // `DRAWN_STEP_SCALE`). With a camera's noise (most samples a level
+    // off, each picture its own) nothing repeats, and the key frame
+    // takes the usual step.
+    let (w, h) = (160u32, 96u32);
+    let pic = |t: u32, noise: bool| {
+        let (cw, ch) = (w / 2, h / 2);
+        let mut y = Vec::new();
+        for row in 0..h {
+            for col in 0..w {
+                let base = ((col + 2 * t) * 9 + row * 3) % 200 + 20;
+                let k = (col.wrapping_mul(73_856_093)
+                    ^ row.wrapping_mul(19_349_663)
+                    ^ t.wrapping_mul(83_492_791))
+                .wrapping_mul(2_654_435_761)
+                    >> 29;
+                let n = if noise { k % 3 } else { 1 };
+                y.push(u8::try_from(base + n).unwrap_or(0));
+            }
+        }
+        let u = vec![110u8; (cw * ch) as usize];
+        let v = vec![140u8; (cw * ch) as usize];
+        VideoFrame::yuv420p(
+            w,
+            h,
+            Plane::tight(w, h, y).expect("y"),
+            Plane::tight(cw, ch, u).expect("u"),
+            Plane::tight(cw, ch, v).expect("v"),
+        )
+        .expect("frame")
+    };
+    let steps = |noise: bool| {
+        let opts = super::Vp9Options {
+            qindex: 120,
+            speed: 5,
+            threads: 1,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let mut packets = Vec::new();
+        for t in 0..40u32 {
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: pic(t, noise),
+                        pts: i64::from(t),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        let mut dec = Decoder::new();
+        let (mut key, mut arf) = (None, None);
+        for p in &packets {
+            for f in crate::decode::split_superframe(&p.data).expect("superframe") {
+                let hd = header::parse(dec.persist(), f).expect("header").header;
+                if hd.key_frame {
+                    key = key.or(Some(hd.base_qindex));
+                } else if !hd.show_frame {
+                    arf = arf.or(Some(hd.base_qindex));
+                }
+                dec.decode(f).expect("decode");
+            }
+        }
+        (key.expect("a key frame"), arf.unwrap_or(0))
+    };
+    let at = |scale: f64| super::q_of_step(super::step_of(120, 8) * scale, 8);
+    let (drawn, camera) = (steps(false), steps(true));
+    assert_eq!(drawn, (at(0.3), at(0.6)), "drawn");
+    assert_eq!(camera.0, at(0.35), "camera");
+}
+
+#[test]
+fn a_still_drawn_picture_codes_no_alt_ref_at_a_coarse_quantizer() {
+    // A drawn picture that stands still (`testsrc2`: what moves, moves over
+    // a background that repeats exactly where it stands) codes no alt-ref
+    // at a fixed quantizer from `STILL_ARF_Q`; under it, it does, and so
+    // does a drawn picture that moves as a whole (a pan) at any quantizer.
+    let (w, h) = (160u32, 96u32);
+    let pic = |t: u32, pan: bool| {
+        let (cw, ch) = (w / 2, h / 2);
+        let mut y = Vec::new();
+        for row in 0..h {
+            for col in 0..w {
+                let x = if pan { col + 2 * t } else { col };
+                let mut v = (x * 9 + row * 3) % 200 + 20;
+                // A square that moves across the picture.
+                let sx = (3 * t) % (w - 16);
+                if !pan && (40..56).contains(&row) && (sx..sx + 16).contains(&col) {
+                    v = 250;
+                }
+                y.push(u8::try_from(v).unwrap_or(0));
+            }
+        }
+        let u = vec![110u8; (cw * ch) as usize];
+        let v = vec![140u8; (cw * ch) as usize];
+        VideoFrame::yuv420p(
+            w,
+            h,
+            Plane::tight(w, h, y).expect("y"),
+            Plane::tight(cw, ch, u).expect("u"),
+            Plane::tight(cw, ch, v).expect("v"),
+        )
+        .expect("frame")
+    };
+    let hidden = |qindex: u8, pan: bool| {
+        let opts = super::Vp9Options {
+            qindex,
+            speed: 5,
+            threads: 1,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let mut packets = Vec::new();
+        for t in 0..40u32 {
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: pic(t, pan),
+                        pts: i64::from(t),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        let mut dec = Decoder::new();
+        let mut n = 0;
+        for p in &packets {
+            for f in crate::decode::split_superframe(&p.data).expect("superframe") {
+                let hd = header::parse(dec.persist(), f).expect("header").header;
+                n += usize::from(!hd.show_frame);
+                dec.decode(f).expect("decode");
+            }
+        }
+        n
+    };
+    assert_eq!(hidden(super::STILL_ARF_Q, false), 0, "still");
+    assert!(hidden(super::STILL_ARF_Q - 40, false) > 0, "still, finer");
+    assert!(hidden(super::STILL_ARF_Q + 20, true) > 0, "pan");
+}
+
+/// Every frame's header (the hidden ones in superframes too), each read
+/// against the state of a decoder that has decoded the frames before it.
+fn all_headers(packets: &[Packet]) -> Vec<header::Header> {
+    let mut dec = Decoder::new();
+    let mut out = Vec::new();
+    for p in packets {
+        for f in crate::decode::split_superframe(&p.data).expect("superframe") {
+            out.push(header::parse(dec.persist(), f).expect("header").header);
+            dec.decode(f).expect("decode");
+        }
+    }
+    out
+}
+
+/// Two passes over `n` pictures of `clip`: a first pass at its quantizer,
+/// then the second at `opts`.
+fn two_pass(
+    opts: super::Vp9Options,
+    (w, h): (u32, u32),
+    n: u32,
+    clip: &dyn Fn(u32) -> VideoFrame,
+) -> Vec<Packet> {
+    let probe = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let q = probe.first_pass_qindex(1.0 / 30.0);
+    let first_opts = super::Vp9Options {
+        bitrate: 0,
+        qindex: q,
+        speed: 10,
+        lag: Some(0),
+        ..opts
+    };
+    let bits: Vec<u64> = encode_with(first_opts, (w, h), n, clip)
+        .iter()
+        .map(|p| p.data.len() as u64 * 8)
+        .collect();
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    encoder.set_second_pass(&bits, q);
+    let mut packets = Vec::new();
+    for i in 0..n {
+        packets.extend(
+            encoder
+                .push(&VideoInput {
+                    frame: clip(i),
+                    pts: i64::from(i),
+                    duration: 1,
+                    timescale: 30,
+                })
+                .expect("push"),
+        );
+    }
+    packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+    packets
+}
+
+#[test]
+fn every_frame_stays_within_min_q_and_max_q_in_every_rate_mode() {
+    // A noisy pan at a rate far under what it costs at `max_q` (the rate
+    // control wants coarser), and at one far over what it costs at `min_q`
+    // (it wants finer): every frame, hidden ones too, stays within the two
+    // in each mode. (One pass at a variable bitrate once took the key
+    // frame's step over its scale for the inter quantizer, and the two
+    // frames after the key frame went up to 44 indices past `max_q`.)
+    let (w, h) = (160u32, 96u32);
+    let clip = |i: u32| noisy(w, h, i * 2, i);
+    let base = super::Vp9Options {
+        threads: 2,
+        speed: 6,
+        ..super::Vp9Options::default()
+    };
+    let modes: [(&str, super::Vp9Options); 7] = [
+        ("vbr", base),
+        (
+            "vbr lag 0",
+            super::Vp9Options {
+                lag: Some(0),
+                ..base
+            },
+        ),
+        (
+            "cbr",
+            super::Vp9Options {
+                cbr_buffer_ms: 1000,
+                ..base
+            },
+        ),
+        (
+            "cq",
+            super::Vp9Options {
+                cq_level: Some(30),
+                ..base
+            },
+        ),
+        (
+            "layers",
+            super::Vp9Options {
+                temporal_layers: 3,
+                ..base
+            },
+        ),
+        ("speed 10", super::Vp9Options { speed: 10, ..base }),
+        (
+            "arf layers",
+            super::Vp9Options {
+                alt_ref_layers: 3,
+                ..base
+            },
+        ),
+    ];
+    for (rate, min_q, max_q) in [(20_000u32, 1u8, 80u8), (8_000_000, 120, 236)] {
+        let check = |name: &str, packets: &[Packet]| {
+            for (i, hd) in all_headers(packets).iter().enumerate() {
+                if hd.show_existing {
+                    continue;
+                }
+                assert!(
+                    (min_q..=max_q).contains(&hd.base_qindex),
+                    "{name} at {rate}: frame {i} q {} outside {min_q} to {max_q}",
+                    hd.base_qindex
+                );
+            }
+        };
+        for (name, mode) in modes {
+            let opts = super::Vp9Options {
+                bitrate: rate,
+                min_q,
+                max_q,
+                ..mode
+            };
+            check(name, &encode_with(opts, (w, h), 30, clip));
+        }
+        let opts = super::Vp9Options {
+            bitrate: rate,
+            min_q,
+            max_q,
+            ..base
+        };
+        check("two passes", &two_pass(opts, (w, h), 30, &clip));
+        // A fixed quantizer outside the two is held to them.
+        let fixed = super::Vp9Options {
+            qindex: if rate < 1_000_000 { 200 } else { 40 },
+            min_q,
+            max_q,
+            ..base
+        };
+        check("fixed", &encode_with(fixed, (w, h), 30, clip));
+    }
+}
+
+#[test]
+fn the_initial_buffer_level_sizes_the_first_key_frame_and_the_start() {
+    // At a constant bitrate the first key frame is planned at half the
+    // buffer's initial level (`rc_init_occupancy_ms`), and a buffer that
+    // starts low spends less until it fills.
+    let (w, h) = (160u32, 96u32);
+    let run = |occupancy: u32| {
+        let opts = super::Vp9Options {
+            bitrate: 100_000,
+            cbr_buffer_ms: 1000,
+            rc_init_occupancy_ms: occupancy,
+            threads: 2,
+            speed: 9,
+            ..super::Vp9Options::default()
+        };
+        let p = encode_with(opts, (w, h), 20, |i| moving(w, h, i * 2));
+        assert_decodes(&p, (w, h), 20);
+        (p[0].data.len(), packet_bytes(&p))
+    };
+    let (low, high) = (run(100), run(1000));
+    assert!(low.0 * 3 / 2 < high.0, "key {} against {}", low.0, high.0);
+    assert!(low.1 < high.1, "{} against {}", low.1, high.1);
+    // Unset, three quarters of the buffer (FFmpeg's default occupancy).
+    let unset = run(0);
+    assert_eq!(unset, run(750));
+}
+
+#[test]
+fn a_bigger_buffer_takes_a_bigger_first_key_frame() {
+    // libvpx's buffer (`-bufsize`) sizes the first key frame through the
+    // initial level (three quarters of it unless set).
+    let (w, h) = (160u32, 96u32);
+    let key = |cbr_buffer_ms: u32| {
+        let opts = super::Vp9Options {
+            bitrate: 100_000,
+            cbr_buffer_ms,
+            threads: 2,
+            speed: 9,
+            ..super::Vp9Options::default()
+        };
+        encode_with(opts, (w, h), 3, |i| moving(w, h, i * 2))[0]
+            .data
+            .len()
+    };
+    let (small, mid, big) = (key(250), key(1000), key(4000));
+    assert!(small < mid && mid < big, "{small}, {mid}, {big}");
+    assert!(small * 3 / 2 < big, "{small} against {big}");
+}
+
+#[test]
+fn golden_groups_are_at_least_min_gf_interval_long() {
+    // With the lookahead, each alt-ref targets the end of a golden group:
+    // with `min_gf_interval` 16 they come at least 16 pictures apart (12
+    // without), in one pass and in two.
+    let (w, h) = (96u32, 64u32);
+    let clip = |i: u32| moving(w, h, i / 20);
+    let hidden_at = |packets: &[Packet]| {
+        let mut at = Vec::new();
+        for p in packets {
+            let frames = crate::decode::split_superframe(&p.data).expect("superframe");
+            if frames.len() > 1 {
+                at.push(p.pts);
+            }
+        }
+        at
+    };
+    for two in [false, true] {
+        for min in [0u32, 16] {
+            let opts = super::Vp9Options {
+                min_gf_interval: min,
+                threads: 1,
+                speed: 6,
+                ..super::Vp9Options::default()
+            };
+            let packets = if two {
+                two_pass(
+                    super::Vp9Options {
+                        bitrate: 200_000,
+                        ..opts
+                    },
+                    (w, h),
+                    60,
+                    &clip,
+                )
+            } else {
+                encode_with(
+                    super::Vp9Options {
+                        qindex: 120,
+                        ..opts
+                    },
+                    (w, h),
+                    60,
+                    clip,
+                )
+            };
+            assert_decodes(&packets, (w, h), 60);
+            let at = hidden_at(&packets);
+            assert!(at.len() >= 2, "two {two} min {min}: {at:?}");
+            if min > 0 {
+                assert!(at.windows(2).all(|p| p[1] - p[0] >= 16), "{at:?}");
+            }
+            if !two {
+                // One pass: after each golden place, every 12 (16).
+                let every = if min > 0 { 16 } else { 12 };
+                assert!(at.iter().all(|p| (p - 1) % every == 0), "{at:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_forced_key_frame_lands_on_the_picture_pushed_after_it() {
+    // With the lookahead, `force_keyframe` before a push makes that
+    // picture the key frame (FFmpeg's `-force_key_frames`), whenever it
+    // comes out, and no alt-ref spans it; without, the same.
+    let (w, h) = (96u32, 64u32);
+    for lag in [Some(0), None] {
+        let opts = super::Vp9Options {
+            qindex: 120,
+            lag,
+            threads: 1,
+            speed: 6,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let mut packets = Vec::new();
+        for i in 0..40u32 {
+            if i == 7 || i == 25 {
+                encoder.force_keyframe();
+            }
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: moving(w, h, i / 3),
+                        pts: i64::from(i),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        let keys: Vec<i64> = packets
+            .iter()
+            .filter(|p| p.keyframe)
+            .map(|p| p.pts)
+            .collect();
+        assert_eq!(keys, vec![0, 7, 25], "lag {lag:?}");
+        let mut dec = Decoder::new();
+        for p in &packets {
+            for f in crate::decode::split_superframe(&p.data).expect("superframe") {
+                let hd = header::parse(dec.persist(), f).expect("header").header;
+                // (No hidden alt-ref is a key frame, and a key frame
+                // shows.)
+                assert_eq!(hd.key_frame, p.keyframe && hd.show_frame, "pts {}", p.pts);
+                dec.decode(f).expect("decode");
+            }
+        }
+        assert_decodes(&packets, (w, h), 40);
+    }
+}
+
+#[test]
+fn complexity_aq_segments_at_a_bitrate_by_the_golden_frames_budget() {
+    // At a bitrate whose frames are each under 256 bits a superblock but
+    // whose golden frames and alt-refs (their boost) are over, complexity
+    // AQ segments in one pass and in two: libvpx decides on those frames,
+    // and the frames between keep it.
+    let (w, h) = (256u32, 128u32);
+    let frame = |i: u32| {
+        let mut f = moving(w, h, i / 4);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            if k as u32 % w >= 192 {
+                let n =
+                    ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 26;
+                *v = 60 + n as u8;
+            }
+        }
+        f
+    };
+    // 1000 bits a frame (2048 a frame is 256 a superblock here).
+    let opts = super::Vp9Options {
+        aq_mode: super::AqMode::Complexity,
+        bitrate: 30_000,
+        speed: 6,
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let one = encode_with(opts, (w, h), 30, frame);
+    let two = two_pass(opts, (w, h), 30, &frame);
+    for (name, packets) in [("one pass", one), ("two passes", two)] {
+        assert_decodes(&packets, (w, h), 30);
+        let segmented = all_headers(&packets)
+            .iter()
+            .filter(|hd| !hd.show_existing && !hd.key_frame && hd.seg.enabled)
+            .count();
+        assert!(segmented >= 10, "{name}: {segmented} frames segmented");
+    }
+}
+
+#[test]
+fn the_temporal_dependency_model_codes_an_alt_ref_its_group_leans_on_finer() {
+    // A still textured picture (after a key frame of another): the group
+    // predicts from its alt-ref wholly, so with `enable_tpl` the alt-ref
+    // is coded finer than without, and the stream decodes.
+    let (w, h) = (128u32, 128u32);
+    let pic = |i: u32| {
+        if i == 0 {
+            return noisy(w, h, 7, 99);
+        }
+        noisy(w, h, 0, 1)
+    };
+    let arf_q = |tpl: bool| {
+        let opts = super::Vp9Options {
+            qindex: 120,
+            speed: 6,
+            threads: 2,
+            enable_tpl: tpl,
+            ..super::Vp9Options::default()
+        };
+        let packets = encode_with(opts, (w, h), 20, pic);
+        assert_decodes(&packets, (w, h), 20);
+        all_headers(&packets)
+            .iter()
+            .find(|hd| !hd.show_frame && !hd.show_existing)
+            .map(|hd| hd.base_qindex)
+            .expect("an alt-ref")
+    };
+    let (with, without) = (arf_q(true), arf_q(false));
+    assert!(with < without, "{with} against {without}");
+}
+
+#[test]
+fn a_corpus_four_times_the_clips_complexity_halves_its_rate() {
+    // libvpx's unit and mapping: a clip spends the bitrate times the
+    // square root of its complexity over the corpus's (its VBR bias of
+    // 50%), so a corpus four times as complex as the clip halves its rate
+    // and one a quarter of it doubles it.
+    let (w, h) = (160u32, 96u32);
+    let clip = |i: u32| noisy(w, h, i * 2, i);
+    let base = super::Vp9Options {
+        bitrate: 120_000,
+        threads: 2,
+        speed: 8,
+        ..super::Vp9Options::default()
+    };
+    let probe = Vp9Encoder::with_options(w, h, base).expect("encoder");
+    let q = probe.first_pass_qindex(1.0 / 30.0);
+    let first: Vec<u64> = encode_with(
+        super::Vp9Options {
+            bitrate: 0,
+            qindex: q,
+            speed: 10,
+            ..base
+        },
+        (w, h),
+        30,
+        clip,
+    )
+    .iter()
+    .map(|p| p.data.len() as u64 * 8)
+    .collect();
+    let own = probe.first_pass_complexity(&first, q);
+    assert!(own > 0);
+    let bits = |corpus: u32| {
+        let mut encoder = Vp9Encoder::with_options(
+            w,
+            h,
+            super::Vp9Options {
+                corpus_complexity: corpus,
+                ..base
+            },
+        )
+        .expect("encoder");
+        encoder.set_second_pass(&first, q);
+        let mut packets = Vec::new();
+        for i in 0..30u32 {
+            packets.extend(encoder.push(&input(clip(i))).expect("push"));
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        packet_bytes(&packets) as f64
+    };
+    let (at, rich, poor) = (bits(own), bits(own / 4), bits(own * 4));
+    assert!(poor / at > 0.35 && poor / at < 0.7, "{poor} against {at}");
+    assert!(rich / at > 1.4 && rich / at < 2.8, "{rich} against {at}");
+}
+
+#[test]
+fn two_passes_put_a_key_frame_on_a_cut() {
+    // As libvpx's two passes: a cut is a key frame by default (it was a
+    // golden frame), and with `keyint_min` past it, not.
+    let (w, h) = (128u32, 128u32);
+    let clip = |i: u32| {
+        if i < 12 {
+            return moving(w, h, i);
+        }
+        let mut f = moving(w, h, 0);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let (r, c) = (k / 128, k % 128);
+            *v = (40 + (r + c + i as usize) / 4).min(255) as u8;
+        }
+        f
+    };
+    for (min, key) in [(0u32, true), (20, false)] {
+        let opts = super::Vp9Options {
+            bitrate: 400_000,
+            keyint_min: min,
+            speed: 6,
+            threads: 2,
+            ..super::Vp9Options::default()
+        };
+        let packets = two_pass(opts, (w, h), 24, &clip);
+        assert_decodes(&packets, (w, h), 24);
+        let keys: Vec<i64> = packets
+            .iter()
+            .filter(|p| p.keyframe)
+            .map(|p| p.pts)
+            .collect();
+        let want = if key { vec![0, 12] } else { vec![0] };
+        assert_eq!(keys, want, "keyint_min {min}");
+    }
+}
+
+/// Two passes over `n` pictures of `clip` with key frames forced on
+/// `keys` in both, the second told of them (as `vp9enc`'s
+/// `force_keyframes=` does).
+fn two_pass_forced(
+    opts: super::Vp9Options,
+    (w, h): (u32, u32),
+    n: u32,
+    clip: &dyn Fn(u32) -> VideoFrame,
+    keys: &[u32],
+) -> Vec<Packet> {
+    let probe = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let q = probe.first_pass_qindex(1.0 / 30.0);
+    let first_opts = super::Vp9Options {
+        bitrate: 0,
+        qindex: q,
+        speed: 10,
+        ..opts
+    };
+    let run = |encoder: &mut Vp9Encoder| {
+        let mut packets = Vec::new();
+        for i in 0..n {
+            if keys.contains(&i) {
+                encoder.force_keyframe();
+            }
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: clip(i),
+                        pts: i64::from(i),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(encoder).expect("drain"));
+        packets
+    };
+    let mut first = Vp9Encoder::with_options(w, h, first_opts).expect("encoder");
+    let bits: Vec<u64> = run(&mut first)
+        .iter()
+        .map(|p| p.data.len() as u64 * 8)
+        .collect();
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let at: Vec<u64> = keys.iter().map(|&k| u64::from(k)).collect();
+    encoder.set_second_pass_with_keys(&bits, q, &at);
+    run(&mut encoder)
+}
+
+#[test]
+fn two_passes_plan_key_frames_forced_inside_scenes() {
+    // A moving scene, then a cut to a still one, with key frames forced
+    // inside both (the second late in the still scene, which codes little
+    // between key frames): as libvpx's two passes, the key frames fall on
+    // the forced pictures (and the cut), and the stream keeps to the rate
+    // as it does without them (it went a third over: the still scene was
+    // started afresh at the forced key frame, and its cost found late).
+    let (w, h) = (256u32, 128u32);
+    let clip = |i: u32| {
+        if i < 30 {
+            return noisy(w, h, 2 * i, i);
+        }
+        let mut f = moving(w, h, 0);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let (r, c) = (k / 256, k % 256);
+            *v = (30 + (r * 7 + c * 3) % 190) as u8;
+        }
+        f
+    };
+    let opts = super::Vp9Options {
+        bitrate: 120_000,
+        speed: 6,
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let n = 60;
+    let rate = |packets: &[Packet]| {
+        packet_bytes(packets) as f64 * 8.0 * 30.0 / f64::from(n) / f64::from(opts.bitrate)
+    };
+    let free = rate(&two_pass_forced(opts, (w, h), n, &clip, &[]));
+    let packets = two_pass_forced(opts, (w, h), n, &clip, &[15, 45]);
+    assert_decodes(&packets, (w, h), n as usize);
+    let keys: Vec<i64> = packets
+        .iter()
+        .filter(|p| p.keyframe)
+        .map(|p| p.pts)
+        .collect();
+    assert_eq!(keys, vec![0, 15, 30, 45]);
+    let forced = rate(&packets);
+    assert!(
+        (forced - free).abs() < 0.05,
+        "rate {forced:.3} of the target, {free:.3} without forced key frames"
+    );
+}
+
+#[test]
+fn complexity_aq_in_one_pass_takes_libvpx_golden_budget() {
+    // At 500 bits a frame (2048 a frame is 256 a superblock here), a
+    // golden frame or alt-ref of one pass takes libvpx's budget of 5.3
+    // frames (`af_ratio_onepass_vbr` 10 over a group of 10), over the
+    // floor: one pass segments from it on, as libvpx does at 400 kb/s on
+    // a 720p picture (at 3.5 frames, under the floor, it made none).
+    // The key frame (a frame's budget here) and two passes (libvpx's give
+    // their alt-refs less) make none.
+    let (w, h) = (256u32, 128u32);
+    let frame = |i: u32| {
+        let mut f = moving(w, h, i / 4);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            if k as u32 % w >= 192 {
+                let n =
+                    ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 26;
+                *v = 60 + n as u8;
+            }
+        }
+        f
+    };
+    let opts = super::Vp9Options {
+        aq_mode: super::AqMode::Complexity,
+        bitrate: 15_000,
+        speed: 6,
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let segmented = |packets: &[Packet]| {
+        all_headers(packets)
+            .iter()
+            .filter(|hd| !hd.show_existing && hd.seg.enabled)
+            .map(|hd| hd.key_frame)
+            .collect::<Vec<bool>>()
+    };
+    let one = encode_with(opts, (w, h), 30, frame);
+    assert_decodes(&one, (w, h), 30);
+    let seg = segmented(&one);
+    assert!(seg.len() >= 10, "one pass: {} frames segmented", seg.len());
+    assert!(
+        seg.iter().all(|&key| !key),
+        "one pass: a key frame segmented"
+    );
+    let two = two_pass(opts, (w, h), 30, &frame);
+    assert_decodes(&two, (w, h), 30);
+    assert!(segmented(&two).is_empty(), "two passes segmented");
+}

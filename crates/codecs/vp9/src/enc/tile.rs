@@ -208,6 +208,15 @@ pub struct Shared<'a, P> {
     pub src: Source<'a, P>,
     /// The quantizer steps of luma and chroma, DC and AC, by segment.
     pub dq: [[[i32; 2]; 2]; 8],
+    /// Whether every block keeps to one segment of [`Shared::seg_map`] (a
+    /// region of interest map's, whose segments may skip or keep to one
+    /// reference): a square spanning two is split.
+    pub seg_exact: bool,
+    /// Each segment's scale of `rd_lambda`, its DC step's over segment
+    /// 0's squared, when the plan's segments are their own quantizers
+    /// (whole superblocks, or [`Shared::seg_exact`]); `None` for variance
+    /// AQ, whose deltas are small and whose blocks span segments.
+    pub seg_lam: Option<[f32; 8]>,
     /// The segment of every 8×8 block of the frame (empty: segmentation
     /// off).
     pub seg_map: &'a [u8],
@@ -215,6 +224,12 @@ pub struct Shared<'a, P> {
     pub speed: u8,
     /// Whether each inter block codes its filter.
     pub switchable: bool,
+    /// With [`Shared::switchable`], the filter of a block is chosen by
+    /// luma's error and chroma's as they are (not chroma's weighed
+    /// [`CHROMA_DIST`]), and only where its vectors leave a whole sample
+    /// in some plane (elsewhere every filter predicts alike): a fixed
+    /// quantizer in one pass (see [`super::DRAWN_FILTER_SPEED`]).
+    pub filter_by_luma: bool,
     /// The fast path's search, made ahead for the whole frame (inter
     /// frames at speed 7 and up), by superblock in raster order.
     pub prepass: Option<&'a [Pre]>,
@@ -226,15 +241,89 @@ pub struct Shared<'a, P> {
     pub tok: &'a TokCosts,
     /// See [`super::FrameParams::second_pass`].
     pub second_pass: bool,
+    /// See [`super::FrameParams::full_search`].
+    pub full_search: bool,
+    /// See [`super::FrameParams::fast_arf`].
+    pub fast_arf: bool,
     /// See [`super::FrameParams::noise`].
     pub noise: f32,
     /// See [`super::Stream::static_thresh`].
     pub static_thresh: u32,
+    /// libvpx's `tune=ssim`: each superblock's scale of `rd_lambda` (see
+    /// [`super::ssim_scales`]), in raster order; empty: 1 everywhere.
+    pub ssim: &'a [f32],
+    /// Screen content: inter frames below speed 10 try intra blocks at a
+    /// smaller error ([`SCREEN_INTRA_ERROR`]; text and windows that appear predict
+    /// from nothing before them), and a whole-sample vector that matches
+    /// exactly is not refined (text moves by whole samples).
+    pub screen: bool,
+    /// Film (libvpx's `tune-content=film`): an inter frame's candidates
+    /// whose reconstruction is smoother than the source on a block of
+    /// little variance (film grain lost), and intra and compound
+    /// candidates on a block whose 8×8 parts differ in energy, cost more
+    /// in the RD search ([`Tile::film_rd`]).
+    pub film: bool,
     /// A vector the whole picture moved by from LAST, far past where the
     /// searches reach (see [`super::FrameEncoder::set_global`]): a start
     /// of every block's search on LAST.
     pub global: Option<Mv>,
+    pub gold_mv: Option<Mv>,
+    /// Up to [`REF_SEED_SPEED`], where the picture each reference (LAST,
+    /// GOLDEN, ALTREF) holds stands from this one, as a vector (see
+    /// [`super::FrameEncoder::set_ref_seed`]): a start of every block's
+    /// search on it, and the search reaches that far past its usual
+    /// range.
+    pub ref_seeds: [Option<Mv>; 3],
+    /// A key frame of drawn pictures at a fixed quantizer in one pass
+    /// ([`super::FrameEncoder::set_drawn`]), whose blocks the frames after
+    /// it keep for as long as the picture stands: its blocks try their
+    /// halves after the whole block at every size (as speeds 0 to 3), and
+    /// its trials are quantized by RD ([`DZ_TRIAL_SPEED`]). With its finer
+    /// step (the encoder's `DRAWN_STEP_SCALE`), against FFmpeg's `-crf`
+    /// (BD-rate at the same PSNR-Y / U / V): `testsrc2` +0.7 / +0.5 /
+    /// −4.6% → +1.0 / +0.9 / −3.9%, the gradient of "Synthetic pans" in the
+    /// README +0.1% → −0.3% (within what five points move between builds
+    /// that differ in little, both ways). Up to [`KEY_RD_SPEED`], its 8×8
+    /// blocks try 8×4 and 4×8 halves too ([`Tile::drawn_key_rd`]), at a
+    /// lower lambda (the encoder's `DRAWN_KEY_LAMBDA`).
+    pub drawn_key: bool,
+    /// An inter frame of drawn pictures that stand still, at a fixed
+    /// quantizer in one pass ([`super::FrameEncoder::set_drawn`]): which
+    /// of its 16×16 blocks (the second, a row) changed from the picture
+    /// before. There each 8×8 block tries 4×4, 8×4 and 4×8 sub-blocks
+    /// with vectors of their own (as speeds 0 and 1, `SUB8_SPEED`), and
+    /// each 32×32 or 64×64 block over blocks that changed and blocks that
+    /// did not tries its halves (as speeds 0 to 3). What changed in such
+    /// a picture moved over a background that stands exactly: glyphs,
+    /// edges and objects whose parts move by a sample each way. Against
+    /// FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U / V): `testsrc2`
+    /// +0.3 / −0.1 / −4.7% → −1.7 / −4.2 / −8.7% (nine points +2.7% →
+    /// +1.3%; the sub-blocks alone −0.9%, the halves alone −0.5%), in
+    /// 1.11 times the time on the README's three scenes (a third of
+    /// which is `testsrc2`). The 16×16 blocks that changed try their
+    /// halves too ([`STILL_HALVES_LEVEL`]), and the blocks over them
+    /// [`STILL_INTRA_CANDS`] intra modes.
+    pub still: Option<(&'a [bool], usize)>,
+    /// At a fixed quantizer in one pass, the whole-sample vectors the
+    /// previous frame's blocks took most on each reference
+    /// ([`POP_STARTS`]): more starts of the search on it.
+    pub pop_mvs: [[Option<Mv>; POP_STARTS]; 3],
 }
+
+/// How many of the previous frame's most common whole-sample vectors on
+/// a reference (other than zero, each taken by two 8×8 blocks or more)
+/// start every block's search on it, at a fixed quantizer in one pass
+/// ([`Shared::pop_mvs`]). A diamond starts from the block's neighbours'
+/// vectors; where the picture moves as a whole, but the neighbours took
+/// intra, another reference or a vector off by a little, it stops in the
+/// valleys of a smooth or periodic picture. On the gradient of "Synthetic
+/// pans" in the README (which enters at the edges, and whose period the
+/// pictures in GOLDEN and ALTREF hold at other vectors), against
+/// FFmpeg's `-crf`, +3.0% → +0.4% at the same PSNR-Y, `testsrc2` +2.5% →
+/// +2.1%; on the README's three clips at `q=60` to `210`, −0.1, −0.1 and
+/// −0.7 points (four starts: the gradient +0.5%, the clips −0.0, −0.5
+/// and −0.4).
+pub const POP_STARTS: usize = 2;
 
 /// The context energy of a level (libvpx `vp9_pt_energy_class`): 0, 1, 2,
 /// 3 for 3 and 4, 4 for 5 to 10, and 5 past.
@@ -305,6 +394,17 @@ impl Default for TxRd {
 /// [`TxRd::rate`] not counted.
 const NO_RATE: u32 = u32::MAX;
 
+/// See [`Tile::film_rd`]: libvpx's `LOW_VAR_THRESH`, a variance a 8×8
+/// block (64 times a sample's).
+const FILM_VAR: u64 = 250;
+
+/// See [`Shared::screen`]: the mean error a sample of the best inter
+/// candidate over which an inter frame's block tries intra modes. On the
+/// README's screen clip at speed 6 (no alt-refs), BD-rate at the same
+/// PSNR-Y against the camera's 7: 2, −1.7 points in 1.2 times the time;
+/// 1, −3.5 in 1.3 times; 0 (always), −3.1 in 1.7 times.
+const SCREEN_INTRA_ERROR: u64 = 1;
+
 /// The shift of the context in [`TxRd::rate`].
 const RATE_CTX: u32 = 28;
 
@@ -323,6 +423,11 @@ const DZ_TRIAL_RATE: u32 = 180;
 /// Speed 9's 16×16 blocks whose best starting vector has under this much
 /// SAD a sample skip the diamond search.
 const STILL_SAD: u64 = 4;
+
+/// How far past the edges of the reference (in luma samples) the motion
+/// search reads, the edge samples repeated as prediction repeats them:
+/// content that moves in from an edge predicts from there.
+const EDGE_REACH: i32 = 16;
 
 /// A tx block's coefficients: plane, size, position (4×4 units in the
 /// block), levels, end of block.
@@ -391,6 +496,20 @@ struct Blk {
 
 /// A sub-block mode to choose while coding.
 const AUTO: u8 = 255;
+
+/// The ten intra modes.
+const INTRA_MODES: [u8; 10] = [
+    geom::DC,
+    geom::V,
+    geom::H,
+    geom::TM,
+    geom::D45,
+    geom::D135,
+    geom::D117,
+    geom::D153,
+    geom::D207,
+    geom::D63,
+];
 
 /// Which sub-block of a neighbour under 8×8 gives sub-block `i`'s
 /// candidate: `[i][from above]` (libvpx `idx_n_column_to_subblock`).
@@ -468,6 +587,25 @@ pub const CHROMA_SPEED: u8 = 6;
 /// PSNR-U. Speeds 7 and 8 lost with it (1/0.7 there).
 const CHROMA_RATE: f32 = 0.8;
 
+/// [`CHROMA_RATE`] at speed 6 in one pass (and, before [`CHROMA_RATE_TWO`], in a second pass). Two
+/// passes against FFmpeg's on the three scenes: at 0.8, −6.8 / +0.04 /
+/// −4.9% at the same PSNR-Y / U / V; at 0.75, −6.4 / −0.9 / −5.3% (and
+/// 0.4 and 1.3 points of PSNR-Y for 1 to 3 of PSNR-U on the other two
+/// clips). One pass against FFmpeg's default on
+/// the README's three scenes (four threads), at 0.8: −1.5 / +0.2 / −2.1%
+/// at the same PSNR-Y / U / V; at 0.75, −1.0 / −1.4 / −3.3% (and 1 point
+/// of PSNR-Y for 1 of PSNR-U on the other two clips, FFmpeg's average
+/// the same or better); at 0.7, −0.3 / −1.4 / −3.2%.
+const CHROMA_RATE_SIX: f32 = 0.75;
+
+/// [`CHROMA_RATE`] in a second pass. Two passes against FFmpeg's on the
+/// README's three scenes, four threads, BD-rate at the same PSNR-Y / U /
+/// V / FFmpeg's average / 6:1:1: at 0.75 (as speed 6), −6.4 / −0.9 /
+/// −5.3 / −5.1 / −5.6; at 0.7, −6.0 / −1.6 / −5.9 / −5.2 / −5.4 (the
+/// closest measure 1.6 points ahead rather than 0.9; the other two clips
+/// within 0.4 points of before on every measure).
+const CHROMA_RATE_TWO: f32 = 0.7;
+
 /// See [`CHROMA_SPEED`]: with [`CHROMA_RATE`], 2 rather than 1 (the
 /// planes' errors summed as they are) takes 3 points off the bits at the
 /// same PSNR-U and V on the three scenes and on the clip from a still
@@ -526,6 +664,15 @@ const CHEAP_DIST: f64 = 0.64;
 /// bits, −8.1% / −2.1% in the same time; at 128, −3.2% / +2.7%).
 const SIX_TX_BITS: f64 = 32.0 * 256.0;
 
+/// [`CHEAP_RATE`] and [`CHEAP_DIST`] for the alt-refs of speeds 8 and up
+/// ([`super::FrameParams::fast_arf`]): their values before the reference
+/// pool came to one pass. With these, and chroma weighed as at speed 8,
+/// speed 8 is the same as before that round (it had lost 1 to 3 points
+/// at the same PSNR-Y on the README's clips, and gained 0 to 3 at PSNR-U,
+/// from the alt-refs alone; with the chroma weights of speed 6 kept, 0.8
+/// points of PSNR-Y were still lost on the three scenes).
+const CHEAP_FAST_ARF: (f64, f64) = (8.0, 0.16);
+
 /// The first speed of [`CHEAP_RATE`]'s stop. (It is left out of the
 /// second pass, which is far ahead of libvpx's time already.)
 const CHEAP_SPEED: u8 = 5;
@@ -547,6 +694,20 @@ const CHEAP_SPEED: u8 = 5;
 /// there (from 0.1), at the price of 4 points at the same PSNR-Y on that
 /// pan at a bitrate (and 0.6 and 1.3 on the README's other two clips).
 const ONE_CAND_SPEED: u8 = 5;
+
+/// With [`super::FrameParams::full_search`] (a fixed quantizer up to speed
+/// 5), where one inter candidate is tried (speed 5's blocks of 32×32 and
+/// up), a NEW vector's block also tries the free vector (NEAREST, NEAR or
+/// ZERO, of the same reference) ranked after it when that one's score is
+/// within this share of its. On a smooth picture the search finds vectors
+/// a sample or more off the motion whose SAD is a few units under the
+/// exact one's (the reference's quantization noise), and their bits lose
+/// to NEAREST's at the exact vector: on the gradient of "Synthetic pans"
+/// in the README, the 64×64 blocks' second candidate won a sixth of the
+/// time (a quarter of the 32×32 ones'), and the stream went from 13.2%
+/// over libvpx's at the same PSNR-Y to 10.9% (at 1%, two thirds of
+/// that), for 2% more time at a fixed quantizer on the README's clips.
+const CLOSE_FREE: f64 = 0.03;
 
 /// From this speed the sub-sample refinement tries, of the four diagonals,
 /// only the one between the better of up and down and of left and right.
@@ -577,6 +738,147 @@ const TX_DOMAIN_SPEED: u8 = 5;
 /// level (costed as RD quantization costs it, with its end of block
 /// chosen); the blocks the search chooses are coded with RD quantization.
 const DZ_TRIAL_SPEED: u8 = 5;
+
+/// Up to this speed, with [`super::FrameParams::full_search`] (a fixed
+/// quantizer, or a second pass), a key frame's blocks try the four best
+/// intra modes by SATD however far behind the best's (speed 5 tries
+/// three, and from [`CAND_MARGIN_SPEED`] only those within a fifth of the
+/// best's). On a smooth picture SATD ranks the modes poorly: on the
+/// gradient of "Synthetic pans" in the README, a key frame at speed 5 was
+/// 0.6 dB under speed 3's at the same quantizer, for 6% more bits (now
+/// 0.06 dB and 2%), and the stream (with the loop filter's search) 17.9%
+/// over libvpx's at the same PSNR-Y (now 13.2%). A key frame takes 1.18
+/// times the instructions (720p, fine quantizer); with the trials
+/// quantized by RD too (not by the dead zone, [`DZ_TRIAL_SPEED`]), a
+/// point fewer bits there for 1.69 times. Not at a bitrate in
+/// one pass, where the key frame's size moves the rate control: the
+/// grainy pan's chroma lost 2 points at the same PSNR for its luma's 2.5.
+pub const KEY_FULL_SPEED: u8 = 5;
+
+/// Up to this speed at a fixed quantizer in one pass
+/// ([`super::FrameParams::full_search`]), a key frame searches its intra
+/// modes more as libvpx's do (`rd_pick_intra_sub_8x8_y_mode`,
+/// `rd_pick_intra_sbuv_mode`): a block tries the [`KEY_RD_CANDS`] best
+/// luma modes by SATD (not four); its best then tries the best chroma mode
+/// by SATD besides DC (not the luma's mode, which SATD may rank last);
+/// and each 4×4 of a split 8×8 takes the best by RD of the
+/// [`KEY_RD_4X4`] best by SATD (not the best by SATD), its mode's bits in
+/// the context of the 4×4s above and left of it.
+pub const KEY_RD_SPEED: u8 = 5;
+
+/// See [`KEY_RD_SPEED`].
+const KEY_RD_CANDS: usize = 6;
+
+/// See [`KEY_RD_SPEED`].
+const KEY_RD_4X4: usize = 3;
+
+/// In an inter frame of a still drawn picture ([`Shared::still`]), the
+/// blocks of this level (16×16) that changed try their halves as well,
+/// with a search of their own, as the larger blocks over what changed and
+/// what did not do. `testsrc2`'s squares of noise, redrawn every picture,
+/// sit a row off the grid of 16×16 blocks (at `y = 225` and every 16
+/// rows on), and take most of its bits. With [`STILL_INTRA_CANDS`],
+/// against FFmpeg's `-crf` at speed 5 (BD-rate at the same PSNR-Y / U /
+/// V, nine points, ours at `crf=15` to `55` by 5 against FFmpeg's by 10):
+/// +0.3 / −3.6 / −8.4% → −1.0 / −6.0 / −11.0% (five points −2.2 / −5.5 /
+/// −9.1% → −3.4 / −7.2 / −11.6%); the halves alone −0.5%, at every level
+/// over what changed −0.8% for half again the time. In 1.10 times the
+/// time on the README's three scenes at a fixed quantizer (with four
+/// intra modes, −1.4% in 1.18 times; with the halves only after the 16×16
+/// block's split won, and four intra modes, −0.6% in 1.10 times; halves
+/// with no search of their own, from the whole block's and its quarters'
+/// choices, +0.5%).
+const STILL_HALVES_LEVEL: usize = 1;
+
+/// In an inter frame of a still drawn picture at speed 5 in one pass, a
+/// block over a 16×16 block that changed tries this many intra modes, the
+/// best by SATD (elsewhere one). See [`STILL_HALVES_LEVEL`]: alone, 0.3
+/// points; with four, 0.7 points for 4% of the time.
+const STILL_INTRA_CANDS: usize = 2;
+
+#[cfg(test)]
+thread_local! {
+    /// The most intra modes a block of an inter frame has tried on this
+    /// thread.
+    pub static INTER_INTRA_MOST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many 16×16 blocks of inter frames have tried their halves
+    /// before their split on this thread.
+    pub static INTER_16X16_HALVES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Up to this speed the search on a reference starts also where its
+/// picture stands from this one ([`Shared::ref_seeds`]) and reaches that
+/// far past its usual 64 samples: an alt-ref's search on LAST (a golden
+/// interval of motion away), and every frame's on ALTREF (as many pictures
+/// away as it is from the alt-ref's). The search on ALTREF otherwise
+/// started from zero and from the neighbours' vectors on LAST, and on a
+/// pan stopped in the valleys of a smooth picture or of grain: at speed 5
+/// against `crf=` before, the gradient of "Synthetic pans" in the README
+/// +10.9% → +6.0% at the same PSNR-Y against FFmpeg's `-crf`, `testsrc2`
+/// +15.2% → +12.8%, the README's grainy pan 24% fewer bits at a fixed
+/// quantizer. (GOLDEN seeded from its pool picture's place as well: the
+/// gradient at +4.1%, but the pan in two passes 3.4 points worse at the
+/// same PSNR-U.)
+pub const REF_SEED_SPEED: u8 = 6;
+
+/// At speeds 4 and 5 with [`super::FrameParams::full_search`] (a fixed
+/// quantizer, a second pass), an inter frame's 16×16 block whose split won
+/// also tries its halves across or down (speeds 0 to 3 try them at every
+/// size, before the split) where two of its quarters side by side share a
+/// prediction (reference and vector), in the direction with more such
+/// pairs (both when as many): each half tries the best by SAD and vector
+/// rate of the whole block's and its two quarters' choices, with no search
+/// of its own ([`Tile::rect_cands`]); where one of those chose intra, the
+/// intra modes when it predicts poorly; and where one of its quarters took
+/// 4×4, after a best that codes a residual, the next smaller transform. On
+/// `testsrc2`, where half of the splits of 16×16 lose to a half, against
+/// FFmpeg's `-crf` at the same PSNR-Y: +12.8% → +11.4%. (With the
+/// smaller transform tried as for any block, +12.0%, in 1.06 times the
+/// time at `q=80` on the README's clip of three scenes, where this takes
+/// 0.97 of that; with the intra modes wherever a half predicts poorly too,
+/// +11.9% for a third more trials; with two candidates, as many bits for a
+/// third more again; halves after every split that won, with their own
+/// search and candidates, +11.1% for 1.25 times the time; after every
+/// split, won or not, at every size, +10.4%.)
+pub const RECT_SPEED: std::ops::RangeInclusive<u8> = 4..=5;
+
+/// From speed 4 to [`KEY_FULL_SPEED`] at a fixed quantizer (one pass,
+/// [`super::FrameParams::full_search`]), a key frame's 64×64 block whose
+/// whole cost came within this factor of the best of whole and split
+/// tries its halves after the split (speeds 0 to 3 try halves at every
+/// size). On a smooth picture the 64×32 and 32×64 halves code a gradient
+/// for less than four 32×32 blocks: the first picture of the gradient of
+/// "Synthetic pans" in the README alone, against libvpx's at the same
+/// PSNR-Y, +6.5% → +5.2% (with halves at every 64×64 block, +4.6%;
+/// speed 3, +2.7%), and the whole stream at speed 5 against FFmpeg's
+/// `-crf` +4.3% → +3.6%, in 1.00 to 1.06 times the time at `q=120` on
+/// the README's clips (30 pictures, one key frame).
+const KEY_HALVES: f64 = 1.1;
+
+/// At a fixed quantizer in one pass, a 16×16 block's whole-sample search
+/// on LAST ends with a mesh, and on GOLDEN and ALTREF where LAST's took
+/// one (on every reference, the grainy pan took 7 to 10% more time, this
+/// way 2 to 4%, for 0.7 points on `testsrc2` and 1.9 on the still scene
+/// at a fixed quantizer): every second sample within this
+/// many of the diamond's choice, measured on every other row, the best
+/// two of the block and of each 8×8 quarter kept (the quarters' for their
+/// own searches, which take no mesh of their own) and measured whole.
+/// A diamond stops on the plateaus of flat pictures, where a small object
+/// moves over a plain background (`testsrc2`'s squares and bars: its
+/// error is the same at every vector short of the object's), and on a
+/// distant reference whose motion is many times a picture's; libvpx's
+/// slower speeds search meshes too (`full_pixel_exhaustive`).
+const MESH_RANGE: i32 = 32;
+
+/// Only where the diamond's choice leaves more than this error a sample
+/// (its SAD; in 8-bit units) ...
+const MESH_ERROR: f64 = 1.5;
+
+/// ... gathered in few samples: its squared error over this many times
+/// its SAD (the mean size of an error, weighed by size, in 8-bit units).
+/// Noise and grain spread their error over the block, and a mesh seldom
+/// finds them a better vector.
+const MESH_SPARSE: f64 = 8.0;
 
 /// The dead zone's offsets at speeds 9 and 10 (0.5 rounds to nearest).
 const DZ_INTRA_ROUND: f32 = 0.42;
@@ -720,6 +1022,20 @@ fn residual_of<P: EncPixel>(
 /// length that is a multiple of 16): sixteen squares at a time in 32 bits
 /// (at most 268 million), so that it runs in vector lanes.
 #[inline(always)]
+/// The variance of a `w`×`h` block of samples (rows `stride` apart), times
+/// its samples.
+fn block_var<P: Pixel>(a: &[P], stride: usize, w: usize, h: usize) -> u64 {
+    let (mut sum, mut sq) = (0u64, 0u64);
+    for r in 0..h {
+        for &v in &a[r * stride..r * stride + w] {
+            let v = v.get() as u64;
+            sum += v;
+            sq += v * v;
+        }
+    }
+    sq - sum * sum / (w * h) as u64
+}
+
 fn sum_sq(res: &[i32]) -> i64 {
     let mut total = 0i64;
     for c in res.as_chunks::<16>().0 {
@@ -904,6 +1220,10 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     /// below ([`Tile::put_seeds`]).
     spill: Vec<(usize, Mv)>,
     w: &'t mut Out,
+    /// The big tokens written, by class (`TWO` to `CAT6`), under each
+    /// third coefficient probability (by its [`coef_flat`] index), when
+    /// the frame's updates weigh them (`super::MODEL_UPDATE_SPEED`).
+    big: Option<&'t mut [[u32; 9]]>,
     rec: &'t mut Recon<'r, 'v, P>,
     col0: usize,
     col1: usize,
@@ -913,6 +1233,8 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     cache: [u8; 1024],
     /// The segment of the block being coded (its quantizer).
     seg: usize,
+    /// The block being coded's scale of `rd_lambda` ([`Shared::ssim`]).
+    lam_mul: f32,
     pred: Vec<P>,
     res: Vec<i32>,
     fcoef: Vec<f32>,
@@ -926,6 +1248,13 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     /// those coded across (0) or down (1).
     part: [u8; 21],
     rect: [[[Blk; 2]; 21]; 2],
+    /// While a half of a split 16×16 block is tried after it
+    /// ([`RECT_SPEED`]): the choices whose predictions its inter
+    /// candidates take.
+    rect_seeds: Vec<Blk>,
+    /// Each reference's mesh of the 16×16 block searched last
+    /// ([`MESH_RANGE`]).
+    mesh: [Mesh; 3],
     /// Snapshots: 0 the superblock, then four per level.
     snaps: Vec<Snap<P>>,
     toks: Vec<Tok>,
@@ -971,6 +1300,12 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     tx_dom: bool,
     /// The summed [`TxRd::dist`] of the block's tx blocks.
     dist_sum: (f32, f32),
+    /// The chroma planes' error, unweighted, of the block
+    /// [`Tile::block_sse`] last measured.
+    uv_sse: f64,
+    /// The cost and the chroma's error ([`Tile::uv_sse`]) of the best
+    /// candidate so far in [`Tile::best_block`].
+    best_full: (f64, f64),
     /// In a trial nothing is written or counted: bits add to `cost`
     /// (1/256 bits).
     trial: bool,
@@ -985,6 +1320,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         s: &'s Shared<'s, P>,
         f: &'t mut State,
         w: &'t mut Out,
+        big: Option<&'t mut [[u32; 9]]>,
         rec: &'t mut Recon<'r, 'v, P>,
         (col0, col1): (usize, usize),
         mut seeds: Vec<Mv>,
@@ -1027,6 +1363,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             lanes,
             spill: Vec::new(),
             w,
+            big,
             rec,
             col0,
             col1,
@@ -1035,6 +1372,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             left_nz: [[0; 16]; 3],
             cache: [0; 1024],
             seg: 0,
+            lam_mul: 1.0,
             pred,
             res,
             fcoef,
@@ -1042,6 +1380,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             choice: [Blk::default(); 85],
             part: [PARTITION_NONE; 21],
             rect: [[[Blk::default(); 2]; 21]; 2],
+            rect_seeds: Vec::with_capacity(3),
+            mesh: [None; 3],
             snaps,
             toks,
             kept,
@@ -1062,6 +1402,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             rd: TxRd::default(),
             tx_dom: false,
             dist_sum: (0.0, 0.0),
+            uv_sse: 0.0,
+            best_full: (0.0, 0.0),
             trial: false,
             cost: 0,
         }
@@ -1247,6 +1589,20 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     // Partition decision --------------------------------------------------
 
     /// Speed 6 in one pass: speed 5's search (see [`SIX_TX_BITS`]).
+    /// A key frame's fuller search of its intra modes ([`KEY_RD_SPEED`]).
+    fn key_rd(&self) -> bool {
+        let s = self.s;
+        s.intra_frame && s.full_search && !s.second_pass && s.speed <= KEY_RD_SPEED
+    }
+
+    /// A drawn picture's key frame ([`Shared::drawn_key`]) up to
+    /// [`KEY_RD_SPEED`]: its 8×8 blocks try 8×4 and 4×8 halves too, as
+    /// libvpx's (`rd_pick_intra_sub_8x8_y_mode`), each half with one mode
+    /// by RD (an 8×4's over both its 4×4s).
+    fn drawn_key_rd(&self) -> bool {
+        self.s.drawn_key && self.key_rd()
+    }
+
     fn six(&self) -> bool {
         self.s.speed == 6 && !self.s.second_pass
     }
@@ -1270,7 +1626,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         }
         let n = 1usize << level;
         let hbs = n / 2;
-        let whole = row + n <= s.mi_rows && col + n <= s.mi_cols;
+        let whole = row + n <= s.mi_rows && col + n <= s.mi_cols && seg_uniform(s, row, col, n);
         let own = if whole {
             self.estimate(row, col, SQUARE[level])
         } else {
@@ -1331,6 +1687,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         if self.intra_worth(&base, &cands) {
             self.intra_cands(&base, &mut cands);
         }
+        self.seg_restrict(&base, &mut cands);
         // Up to FAST_TX_SPEED, the best inter candidate also with the next
         // smaller transform.
         if self.s.speed <= FAST_TX_SPEED
@@ -1350,7 +1707,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             // prediction's SAD.
             usize::from(self.last_satd.saturating_mul(5) < self.last_sad.saturating_mul(4))
         } else {
-            let lam = f64::from(self.s.rd_lambda) / 256.0;
+            let lam = f64::from(self.s.rd_lambda * self.lam_at(row, col)) / 256.0;
             let n = MI_WH[usize::from(bsize)].0;
             self.trial = true;
             self.save(row, col, (n, n), 1);
@@ -1426,11 +1783,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         if row >= s.mi_rows || col >= s.mi_cols {
             return 0.0;
         }
-        let lam = f64::from(s.rd_lambda) / 256.0;
         let n = 1usize << level;
         let hbs = n / 2;
         let bsize = SQUARE[level];
-        let whole = level == 0 || (row + hbs < s.mi_rows && col + hbs < s.mi_cols);
+        let lam = f64::from(s.rd_lambda * self.lam_at(row, col)) / 256.0;
+        let whole = level == 0
+            || (row + hbs < s.mi_rows && col + hbs < s.mi_cols && seg_uniform(s, row, col, n));
         // Slots: the state before, after the best whole shape so far, and
         // two for the blocks' own trials.
         let before = 1 + 4 * (3 - level);
@@ -1464,21 +1822,39 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let d = self.code_block(&b);
                 self.part_after(row, col, bsize, PARTITION_SPLIT);
                 let j = d + (self.cost - c0) as f64 * lam;
+                let mut won = None;
                 if j < best.0 {
                     let mut chosen = b;
                     chosen.bmode = self.sub;
-                    self.choice[Self::slot(row, col, bsize)] = chosen;
-                    self.sub8[i8] = PARTITION_SPLIT;
-                    return j;
+                    if !self.drawn_key_rd() {
+                        // (No halves to try: keep the split as it stands.)
+                        self.choice[Self::slot(row, col, bsize)] = chosen;
+                        self.sub8[i8] = PARTITION_SPLIT;
+                        return j;
+                    }
+                    best = (j, PARTITION_SPLIT);
+                    won = Some(chosen);
+                    self.save(row, col, (1, 1), before + 1);
+                }
+                // (A drawn key frame's halves too, see
+                // [`Self::drawn_key_rd`].)
+                if self.drawn_key_rd() {
+                    self.drawn_key_halves(row, col, bsize, before, lam, b, &mut best, &mut won);
                 }
                 self.restore(before + 1);
+                if let Some(chosen) = won {
+                    self.choice[Self::slot(row, col, bsize)] = chosen;
+                    self.sub8[i8] = best.1;
+                    return best.0;
+                }
             }
             // Inter frames: the best whole block's reference over 4×4,
             // 8×4 or 4×8 sub-blocks, each with its own vector.
             let whole_b = self.choice[Self::slot(row, col, bsize)];
             if !s.intra_frame
-                && s.speed <= SUB8_SPEED
+                && (s.speed <= SUB8_SPEED || self.still_cover(row, col, 1).0)
                 && whole
+                && !self.seg_skip(&whole_b)
                 && whole_b.refs[0] != INTRA_FRAME
                 && whole_b.refs[1] == INTRA_FRAME
             {
@@ -1515,38 +1891,13 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.save(row, col, (n, n), before + 1);
         }
         // Halves, across and down.
-        if whole && s.speed < 4 {
-            let node = Self::node(row, col, level);
-            for (p, k, offs) in [
-                (PARTITION_HORZ, 0usize, [(0, 0), (hbs, 0)]),
-                (PARTITION_VERT, 1, [(0, 0), (0, hbs)]),
-            ] {
-                let sub = geom::subsize(p, bsize);
-                // Halves whose chroma has no size of its own (4:2:2's tall
-                // ones, 4:4:0's wide ones) are not allowed.
-                if !geom::uv_valid(sub, s.h.ss_x, s.h.ss_y) {
-                    continue;
-                }
-                self.restore(before);
-                let c0 = self.cost;
-                self.part_symbol(row, col, bsize, p);
-                let mut j = (self.cost - c0) as f64 * lam;
-                let mut picks = [Blk::default(); 2];
-                for (i, (dr, dc)) in offs.into_iter().enumerate() {
-                    if j >= best.0 {
-                        break;
-                    }
-                    let (jb, b) = self.best_block(row + dr, col + dc, sub, before + 2);
-                    j += jb;
-                    picks[i] = b;
-                }
-                if j < best.0 {
-                    self.part_after(row, col, bsize, p);
-                    best = (j, p);
-                    self.rect[k][node] = picks;
-                    self.save(row, col, (n, n), before + 1);
-                }
-            }
+        if whole
+            && (s.speed < 4 || s.drawn_key || {
+                let (changed, kept) = self.still_cover(row, col, n);
+                changed && (kept || level == STILL_HALVES_LEVEL)
+            })
+        {
+            best = self.try_halves(row, col, level, before, best);
         }
         // No split when the whole block needs no residual and its error is
         // under the quantizer's own noise (or the picture's, see
@@ -1555,10 +1906,13 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // 16×16 or 32×32 block that needs no residual ends the search, and
         // so does a 64×64 one that keeps LAST's picture where it is (see
         // `SKIP_SPLIT_LEVEL`, `STILL_BREAKOUT`).
-        if whole && best.1 == PARTITION_NONE && (none_skip.0 || s.speed >= BREAKOUT_SPEED) {
+        if whole
+            && best.1 == PARTITION_NONE
+            && (none_skip.0 || (s.speed >= BREAKOUT_SPEED && !s.full_search))
+        {
             let pixels = (n * 8 * n * 8) as f64;
             let step = f64::from(s.dq[0][0][1]) / 8.0;
-            let fast = s.speed >= BREAKOUT_SPEED;
+            let fast = s.speed >= BREAKOUT_SPEED && !s.full_search;
             // A block that codes a residual stops the search at half that
             // error (from BREAKOUT_SPEED: 6% of the time, 0.2% of the bits),
             // and from BREAKOUT_SPEED one that codes none at two thirds
@@ -1581,13 +1935,28 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                     && none_skip.1 < pixels * step * step / STILL_BREAKOUT
             };
             let small_skip = fast && none_skip.0 && level <= SKIP_SPLIT_LEVEL;
+            let cheap = if s.fast_arf {
+                CHEAP_FAST_ARF
+            } else {
+                (CHEAP_RATE, CHEAP_DIST)
+            };
             let cheap = (CHEAP_SPEED..=6).contains(&s.speed)
                 && !s.second_pass
                 && !none_skip.0
-                && (best.0 - none_skip.1) / lam < CHEAP_RATE * pixels
-                && none_skip.1 < CHEAP_DIST * pixels * step * step;
-            if still || small_skip || cheap || none_skip.1 < (pixels * step * step / div).max(noise)
-            {
+                && (best.0 - none_skip.1) / lam < cheap.0 * pixels
+                && none_skip.1 < cheap.1 * pixels * step * step;
+            let limit = (pixels * step * step / div).max(noise);
+            // At a fixed quantizer, the error of a block that needs no
+            // residual is also read at its worst 8×8 ([`Tile::peak_sse`]).
+            let stop = still
+                || small_skip
+                || cheap
+                || (none_skip.1 < limit
+                    && (!s.full_search || s.second_pass || !none_skip.0 || {
+                        self.restore(before + 1);
+                        self.peak_sse(row, col, n) * pixels / 64.0 < limit
+                    }));
+            if stop {
                 self.restore(before + 1);
                 self.part[Self::node(row, col, level)] = PARTITION_NONE;
                 return best.0;
@@ -1604,7 +1973,41 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             j += self.rd_node(row + dr, col + dc, level - 1);
         }
         let node = Self::node(row, col, level);
-        if j < best.0 {
+        // A key frame's 64×64 block, at a fixed quantizer, where whole it
+        // came close to the best ([`KEY_HALVES`]).
+        if level == 3
+            && whole
+            && s.intra_frame
+            && s.full_search
+            && !s.second_pass
+            && (4..=KEY_FULL_SPEED).contains(&s.speed)
+            && best.1 == PARTITION_NONE
+            && best.0 <= KEY_HALVES * j.min(best.0)
+        {
+            let won = if j < best.0 {
+                self.save(row, col, (n, n), before + 1);
+                (j, PARTITION_SPLIT)
+            } else {
+                best
+            };
+            let (j, p) = self.try_halves(row, col, level, before, won);
+            self.restore(before + 1);
+            self.part[node] = p;
+            return j;
+        }
+        if j < best.0
+            && level == 1
+            && whole
+            && s.full_search
+            && !s.intra_frame
+            && RECT_SPEED.contains(&s.speed)
+        {
+            self.part[node] = PARTITION_SPLIT;
+            self.save(row, col, (n, n), before + 1);
+            let j = self.halves_after_split(row, col, before, (j, PARTITION_SPLIT));
+            self.restore(before + 1);
+            j
+        } else if j < best.0 {
             self.part[node] = PARTITION_SPLIT;
             j
         } else {
@@ -1614,22 +2017,250 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         }
     }
 
+    /// In a still drawn picture ([`Shared::still`]), whether any of the
+    /// 16×16 blocks the `n`×`n` (in 8×8s) block at `(row, col)` covers
+    /// changed, and whether any did not; neither elsewhere.
+    fn still_cover(&self, row: usize, col: usize, n: usize) -> (bool, bool) {
+        let Some((map, bw)) = self.s.still else {
+            return (false, false);
+        };
+        let (mut changed, mut kept) = (false, false);
+        for r in row / 2..(row + n).div_ceil(2) {
+            for c in col / 2..(col + n).div_ceil(2) {
+                // (Past the blocks measured: changed.)
+                if c < bw && !map.get(r * bw + c).copied().unwrap_or(true) {
+                    kept = true;
+                } else {
+                    changed = true;
+                }
+            }
+        }
+        (changed, kept)
+    }
+
+    /// The halves across and down of the square of `level` at `(row,
+    /// col)`, each half's best block, against `best` (its cost and
+    /// partition, its state in snapshot `before + 1`; the state before it
+    /// in `before`). Returns the best of them, its state left in `before +
+    /// 1` and its halves in `rect`.
+    fn try_halves(
+        &mut self,
+        row: usize,
+        col: usize,
+        level: usize,
+        before: usize,
+        mut best: (f64, u8),
+    ) -> (f64, u8) {
+        let s = self.s;
+        let lam = f64::from(s.rd_lambda * self.lam_at(row, col)) / 256.0;
+        let n = 1usize << level;
+        let hbs = n / 2;
+        let bsize = SQUARE[level];
+        let node = Self::node(row, col, level);
+        #[cfg(test)]
+        if level == 1 && !s.intra_frame {
+            INTER_16X16_HALVES.with(|c| c.set(c.get() + 1));
+        }
+        for (p, k, offs) in [
+            (PARTITION_HORZ, 0usize, [(0, 0), (hbs, 0)]),
+            (PARTITION_VERT, 1, [(0, 0), (0, hbs)]),
+        ] {
+            let sub = geom::subsize(p, bsize);
+            // Halves whose chroma has no size of its own (4:2:2's tall
+            // ones, 4:4:0's wide ones) are not allowed.
+            if !geom::uv_valid(sub, s.h.ss_x, s.h.ss_y) {
+                continue;
+            }
+            self.restore(before);
+            let c0 = self.cost;
+            self.part_symbol(row, col, bsize, p);
+            let mut j = (self.cost - c0) as f64 * lam;
+            let mut picks = [Blk::default(); 2];
+            for (i, (dr, dc)) in offs.into_iter().enumerate() {
+                if j >= best.0 {
+                    break;
+                }
+                let (jb, b) = self.best_block(row + dr, col + dc, sub, before + 2);
+                j += jb;
+                picks[i] = b;
+            }
+            if j < best.0 {
+                self.part_after(row, col, bsize, p);
+                best = (j, p);
+                self.rect[k][node] = picks;
+                self.save(row, col, (n, n), before + 1);
+            }
+        }
+        best
+    }
+
+    /// After the split of the 16×16 block at `(row, col)` won at cost
+    /// `best.0` (its state in snapshot `before + 1`, the state before it in
+    /// `before`), its halves across or down where two of its quarters side
+    /// by side share a prediction ([`RECT_SPEED`]). Leaves the winner's
+    /// state in `before + 1`, its partition in `part`, and returns its cost.
+    fn halves_after_split(
+        &mut self,
+        row: usize,
+        col: usize,
+        before: usize,
+        best: (f64, u8),
+    ) -> f64 {
+        let s = self.s;
+        let lam = f64::from(s.rd_lambda * self.lam_at(row, col)) / 256.0;
+        let (level, bsize) = (1, SQUARE[1]);
+        let node = Self::node(row, col, level);
+        let q = [(0, 0), (0, 1), (1, 0), (1, 1)]
+            .map(|(dr, dc)| self.choice[Self::slot(row + dr, col + dc, SQUARE[0])]);
+        let same = |a: &Blk, b: &Blk| {
+            a.refs == b.refs
+                && if a.refs[0] == INTRA_FRAME {
+                    a.mode == b.mode
+                } else {
+                    a.mv == b.mv && (a.refs[1] == INTRA_FRAME || a.mv2 == b.mv2)
+                }
+        };
+        let whole = self.choice[Self::slot(row, col, bsize)];
+        let mut best = best;
+        // Pairs across and down: a direction with fewer than the other is
+        // left out.
+        let pairs = |h: [(usize, usize); 2]| h.iter().filter(|&&(a, b)| same(&q[a], &q[b])).count();
+        let (ph, pv) = (pairs([(0, 1), (2, 3)]), pairs([(0, 2), (1, 3)]));
+        for (p, k, halves) in [
+            (PARTITION_HORZ, 0usize, [(0, 1), (2, 3)]),
+            (PARTITION_VERT, 1, [(0, 2), (1, 3)]),
+        ] {
+            let sub = geom::subsize(p, bsize);
+            let (mine, other) = if k == 0 { (ph, pv) } else { (pv, ph) };
+            if mine == 0 || mine < other || !geom::uv_valid(sub, s.h.ss_x, s.h.ss_y) {
+                continue;
+            }
+            self.restore(before);
+            let c0 = self.cost;
+            self.part_symbol(row, col, bsize, p);
+            let mut j = (self.cost - c0) as f64 * lam;
+            let mut picks = [Blk::default(); 2];
+            for (i, (a, b)) in halves.into_iter().enumerate() {
+                if j >= best.0 {
+                    break;
+                }
+                self.rect_seeds.clear();
+                self.rect_seeds.extend([whole, q[a], q[b]]);
+                let (dr, dc) = if k == 0 { (i, 0) } else { (0, i) };
+                let (jb, b) = self.best_block(row + dr, col + dc, sub, before + 2);
+                self.rect_seeds.clear();
+                j += jb;
+                picks[i] = b;
+            }
+            if j < best.0 {
+                self.part_after(row, col, bsize, p);
+                best = (j, p);
+                self.part[node] = p;
+                self.rect[k][node] = picks;
+                self.save(row, col, (2, 2), before + 1);
+            }
+        }
+        best.0
+    }
+
+    /// The inter candidates of a half tried after a split
+    /// ([`RECT_SPEED`]): the predictions of [`Tile::rect_seeds`] (one
+    /// reference each) over the half, the best by SAD and vector rate (as
+    /// [`Tile::inter_cands`] scores them).
+    fn rect_cands(&mut self, base: &Blk, out: &mut Vec<Blk>) {
+        let s = self.s;
+        let (row, col) = (base.row, base.col);
+        let (x, y) = (col * 8, row * 8);
+        let w = (base.bw * 8).min((s.mi_cols - col) * 8);
+        let h = (base.bh * 8).min((s.mi_rows - row) * 8);
+        let lam = u64::from(s.lambda);
+        let mut scored: Vec<(u64, Blk)> = Vec::with_capacity(3);
+        let seeds = std::mem::take(&mut self.rect_seeds);
+        for q in &seeds {
+            if q.refs[0] == INTRA_FRAME || q.refs[1] != INTRA_FRAME {
+                continue;
+            }
+            let r = usize::from(q.refs[0] - 1);
+            let mut b = Blk {
+                refs: q.refs,
+                interp: q.interp,
+                ..*base
+            };
+            let nearest = self.find_mv(&b, NEAREST);
+            let near = self.find_mv(&b, NEAR);
+            let hp_ok =
+                s.h.allow_hp && nearest.row.unsigned_abs() < 64 && nearest.col.unsigned_abs() < 64;
+            let even = |v: i16| if v & 1 != 0 { v - v.signum() } else { v };
+            let mv = if hp_ok {
+                q.mv
+            } else {
+                Mv {
+                    row: even(q.mv.row),
+                    col: even(q.mv.col),
+                }
+            };
+            if scored.iter().any(|(_, o)| o.refs == b.refs && o.mv == mv) {
+                continue;
+            }
+            b.mv = mv;
+            b.mode = if mv == nearest {
+                NEAREST
+            } else if mv == near {
+                NEAR
+            } else if mv == Mv::ZERO {
+                ZERO
+            } else {
+                NEW
+            };
+            let bits = if b.mode == NEW {
+                lam * u64::from(mv_bits(Mv {
+                    row: mv.row - nearest.row,
+                    col: mv.col - nearest.col,
+                })) / 256
+                    + lam * 2
+            } else {
+                lam
+            };
+            self.cur_ref = r;
+            if let Some(d) = self.sad_sub_exact(x, y, w, h, mv) {
+                scored.push((d + bits + lam * 2 * r as u64, b));
+            }
+        }
+        self.cur_ref = 0;
+        self.rect_seeds = seeds;
+        scored.sort_by_key(|t| t.0);
+        self.last_sad = scored.first().map_or(u64::MAX, |t| t.0);
+        out.extend(scored.first().map(|t| t.1));
+    }
+
     /// Codes the best of the block's candidate modes (leaving the state
     /// as it leaves it) and returns its cost. `slot` holds the state
     /// before it.
     fn best_block(&mut self, row: usize, col: usize, bsize: u8, slot: usize) -> (f64, Blk) {
         let s = self.s;
-        let lam = f64::from(s.rd_lambda) / 256.0;
+        let lam = f64::from(s.rd_lambda * self.lam_at(row, col)) / 256.0;
         let (bw_mi, bh_mi) = MI_WH[usize::from(bsize)];
         self.save(row, col, (bw_mi, bh_mi), slot);
         let mut cands: Vec<Blk> = Vec::with_capacity(8);
         let base = self.blk(row, col, bsize);
-        if !s.intra_frame {
+        if !self.rect_seeds.is_empty() {
+            self.rect_cands(&base, &mut cands);
+        } else if !s.intra_frame {
             self.inter_cands(&base, &mut cands);
         }
         let intra_first = cands.len();
-        if s.intra_frame || self.intra_worth(&base, &cands) {
+        // (A half tried after a split, only where the block or one of its
+        // two quarters chose intra.)
+        let no_intra = !self.rect_seeds.is_empty()
+            && !self.rect_seeds.iter().any(|b| b.refs[0] == INTRA_FRAME);
+        if s.intra_frame || (!no_intra && self.intra_worth(&base, &cands)) {
             self.intra_cands(&base, &mut cands);
+        }
+        let intra_first = self.seg_restrict(&base, &mut cands).unwrap_or(intra_first);
+        // (A segment's reference may leave a half tried after a split
+        // nothing: it loses.)
+        if cands.is_empty() {
+            return (f64::INFINITY, base);
         }
         let mut best = (f64::INFINITY, 0usize);
         let mut last = usize::MAX;
@@ -1638,27 +2269,40 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // sample predicted, or reconstructed, before it is read), so the
         // samples the one before left need not be put back.
         let inside = row + bh_mi <= s.mi_rows && col + bw_mi <= s.mi_cols;
-        let try_one =
-            |t: &mut Self, i: usize, b: &Blk, best: &mut (f64, usize), last: &mut usize| {
-                if *last != usize::MAX {
-                    if inside {
-                        t.restore_ctx(slot);
-                    } else {
-                        t.restore(slot);
-                    }
+        // Film: the range of the energy of the block's 8×8 parts.
+        let film = s.film && !s.intra_frame;
+        let energy =
+            (film && bsize >= geom::BLOCK_16X16 && inside).then(|| self.energy_range(&base));
+        // (`luma`: how much of chroma's error the cost compared leaves
+        // out.)
+        let try_one = |t: &mut Self,
+                       i: usize,
+                       b: &Blk,
+                       best: &mut (f64, usize),
+                       last: &mut usize,
+                       luma: f64| {
+            if *last != usize::MAX {
+                if inside {
+                    t.restore_ctx(slot);
+                } else {
+                    t.restore(slot);
                 }
-                let c0 = t.cost;
-                let d = t.code_block(b);
-                let j = d + (t.cost - c0) as f64 * lam;
-                *last = i;
-                if j < best.0 {
-                    *best = (j, i);
-                    t.choice_skip = (t.coded_skip, d);
-                    t.save(row, col, (bw_mi, bh_mi), slot + 1);
-                }
-            };
+            }
+            let c0 = t.cost;
+            let d = t.code_block(b);
+            let j = d + (t.cost - c0) as f64 * lam;
+            let j = if film { t.film_rd(b, j, energy) } else { j };
+            *last = i;
+            let jc = j - luma * t.uv_sse;
+            if jc < best.0 {
+                *best = (jc, i);
+                t.best_full = (j, t.uv_sse);
+                t.choice_skip = (t.coded_skip, d);
+                t.save(row, col, (bw_mi, bh_mi), slot + 1);
+            }
+        };
         for (i, b) in cands.clone().iter().enumerate() {
-            try_one(self, i, b, &mut best, &mut last);
+            try_one(self, i, b, &mut best, &mut last, 0.0);
         }
         // Chroma and transform size for the best intra mode.
         if best.1 >= intra_first
@@ -1667,7 +2311,13 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         {
             let b0 = cands[best.1];
             let mut more = Vec::new();
-            for uv in [b0.mode, geom::TM, geom::V, geom::H] {
+            // (A key frame's: by SATD, [`KEY_RD_SPEED`].)
+            let order = if self.key_rd() {
+                self.uv_ranked(&b0)
+            } else {
+                [b0.mode, geom::TM, geom::V, geom::H]
+            };
+            for uv in order {
                 if uv != b0.uv
                     && !more.iter().any(|m: &Blk| m.uv == uv)
                     && more.len() < if s.speed < 4 { 3 } else { 1 }
@@ -1678,7 +2328,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             for b in more {
                 let i = cands.len();
                 cands.push(b);
-                try_one(self, i, &b, &mut best, &mut last);
+                try_one(self, i, &b, &mut best, &mut last, 0.0);
             }
         }
         let trial = s.second_pass
@@ -1697,36 +2347,148 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             && (s.speed < 6
                 || (self.six()
                     && (best.0 - self.choice_skip.1) / lam > SIX_TX_BITS * (bw_mi * bh_mi) as f64));
+        // A half tried after a split ([`RECT_SPEED`]): only where one of
+        // its two quarters took 4×4, after a best that codes a residual.
+        let half = !self.rect_seeds.is_empty()
+            && (self.choice_skip.0 || !self.rect_seeds[1..].iter().any(|b| b.tx == 0));
+        let (smaller, trial) = (smaller && !half, trial && !half);
         if smaller || (s.intra_frame && s.speed < 9) || trial {
             let b0 = cands[best.1];
-            let tries = if s.speed < 4 { 2 } else { 1 };
+            // At a fixed quantizer in one pass, from speed 4 a second
+            // size smaller after the first won ([`TX_FIXED_TRIES`]).
+            let more = s.speed >= 4 && s.full_search && !s.second_pass;
+            let tries = if s.speed < 4 || more { 2 } else { 1 };
             let mut tx = b0.tx;
-            for _ in 0..tries {
-                if tx == 0 || b0.bsize < BLOCK_8X8 {
+            for k in 0..tries {
+                if tx == 0 || b0.bsize < BLOCK_8X8 || (k > 0 && more && best.1 != cands.len() - 1) {
                     break;
                 }
                 tx -= 1;
                 let i = cands.len();
                 let b = Blk { tx, ..b0 };
                 cands.push(b);
-                try_one(self, i, &b, &mut best, &mut last);
+                try_one(self, i, &b, &mut best, &mut last, 0.0);
             }
         }
         // The other filters for the best inter candidate.
-        if s.switchable && cands[best.1].refs[0] != INTRA_FRAME {
+        if s.switchable
+            && cands[best.1].refs[0] != INTRA_FRAME
+            && !(s.filter_by_luma && self.whole_mv(&cands[best.1]))
+        {
             let b0 = cands[best.1];
+            let luma = if s.filter_by_luma {
+                self.chroma_dist() - 1.0
+            } else {
+                0.0
+            };
+            best.0 = self.best_full.0 - luma * self.best_full.1;
             for f in [geom::SMOOTH, geom::SHARP] {
                 let i = cands.len();
                 let b = Blk { interp: f, ..b0 };
                 cands.push(b);
-                try_one(self, i, &b, &mut best, &mut last);
+                try_one(self, i, &b, &mut best, &mut last, luma);
             }
+            best.0 = self.best_full.0;
         }
         if last != best.1 {
             self.restore(slot + 1);
         }
         self.last_skip = self.choice_skip;
         (best.0, cands[best.1])
+    }
+
+    /// Whether inter block `b`'s vectors land on whole samples in every
+    /// plane, where the filters all predict alike.
+    fn whole_mv(&self, b: &Blk) -> bool {
+        let (sx, sy) = plane_ss(self.s, 1);
+        let whole = |m: Mv| m.col % (8 << sx) == 0 && m.row % (8 << sy) == 0;
+        b.bsize >= BLOCK_8X8 && whole(b.mv) && (b.refs[1] == INTRA_FRAME || whole(b.mv2))
+    }
+
+    /// Film ([`Shared::film`]): the RD cost `j` of the inter frame's
+    /// candidate `b` just coded, raised as libvpx's
+    /// `rd_variance_adjustment` and its film bias raise it: an intra
+    /// candidate by the range of the energy of the block's 8×8 parts
+    /// (`energy`, from 16×16; DC by all of it, the others by a quarter),
+    /// a compound one by a quarter when they differ; then, where the
+    /// source or the reconstruction has a variance of at most
+    /// [`FILM_VAR`] a 8×8 (a second pass: twice that for intra and
+    /// compound, ten times for DC), by 2.5 times the share the
+    /// reconstruction's variance falls short of the source's (a quarter
+    /// of what it is over), at most 2.5 times (5 for intra and
+    /// compound).
+    fn film_rd(&mut self, b: &Blk, j: f64, energy: Option<(i32, i32)>) -> f64 {
+        let s = self.s;
+        let intra = b.refs[0] == INTRA_FRAME;
+        let comp = b.refs[1] != INTRA_FRAME;
+        let dc = intra && b.mode == geom::DC;
+        let mut j = j;
+        if let Some((lo, hi)) = energy
+            && hi > lo
+        {
+            let r = f64::from(hi - lo);
+            if dc {
+                j += j * r;
+            } else if intra {
+                j += j * r / 4.0;
+            } else if comp {
+                j += j / 4.0;
+            }
+        }
+        let (_, _, vw, vh) = self.visible(b, 0);
+        let (w, h) = (vw * 4, vh * 4);
+        if w == 0 || h == 0 {
+            return j;
+        }
+        let (x, y) = (b.col * 8, b.row * 8);
+        let shift = 2 * u32::from(s.h.bit_depth - 8);
+        let n8 = ((w * h) / 64).max(1) as u64;
+        let (src, sst) = (s.src.planes[0], s.src.strides[0]);
+        let sv = (block_var(&src[y * sst + x..], sst, w, h) >> shift) / n8;
+        let v = &mut self.rec.views()[0];
+        let stride = v.stride;
+        let rv = (block_var(v.at(y, x), stride, w, h) >> shift) / n8;
+        let mut thresh = FILM_VAR;
+        if s.second_pass {
+            if dc {
+                thresh *= 10;
+            } else if intra || comp {
+                thresh *= 2;
+            }
+        }
+        if sv.min(rv) > thresh {
+            return j;
+        }
+        let diff = if sv > rv {
+            (sv - rv) * 2
+        } else {
+            (rv - sv) / 2
+        };
+        let mut f = (250 * diff / sv.max(1)).min(250);
+        if intra || comp {
+            f *= 2;
+        }
+        j + j * f as f64 / 100.0
+    }
+
+    /// The least and most energy of the 8×8 parts of `b`'s source luma
+    /// (libvpx's `vp9_get_sub_block_energy`: the log of 256 times the
+    /// variance a sample, less 10, rounded, from −4 to 1).
+    fn energy_range(&self, b: &Blk) -> (i32, i32) {
+        let s = self.s;
+        let (src, sst) = (s.src.planes[0], s.src.strides[0]);
+        let shift = 2 * u32::from(s.h.bit_depth - 8);
+        let (mut lo, mut hi) = (u64::MAX, 0);
+        for r in 0..b.bh {
+            for c in 0..b.bw {
+                let (x, y) = ((b.col + c) * 8, (b.row + r) * 8);
+                let v = (block_var(&src[y * sst + x..], sst, 8, 8) >> shift) * 4;
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        let e = |v: u64| ((v as f64 + 1.0).ln() - 10.0).round().clamp(-4.0, 1.0) as i32;
+        (e(lo), e(hi))
     }
 
     /// A block at `(row, col)` with the defaults.
@@ -1937,12 +2699,20 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.last_satd = scored.first().map_or(u64::MAX, |t| t.0);
         let k = match s.speed {
             0..=3 => 4,
+            _ if self.key_rd() => KEY_RD_CANDS,
+            _ if s.intra_frame && s.full_search && s.speed <= KEY_FULL_SPEED => 4,
             4 => 3,
             // (Inter frames' intra blocks seldom win: 4 to 15% of the
             // blocks that try them.)
             // (At speed 5, one: the second's trials took 4% of the time
             // on the README's grainy pan at 4 Mb/s, for the same BD-rates
             // within the noise.)
+            5 if !s.intra_frame
+                && !s.second_pass
+                && self.still_cover(base.row, base.col, base.bw.max(base.bh)).0 =>
+            {
+                STILL_INTRA_CANDS
+            }
             5 | 6 if !s.intra_frame && !s.second_pass => 1,
             5 if !s.intra_frame => 2,
             5 => 3,
@@ -1951,11 +2721,15 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         };
         // From CAND_MARGIN_SPEED, as for inter: within a fifth of the best.
         // (No product with infinity, which a zero SATD would make NaN.)
-        let first = if s.speed >= CAND_MARGIN_SPEED {
+        let first = if s.speed >= CAND_MARGIN_SPEED
+            && !(s.intra_frame && s.full_search && s.speed <= KEY_FULL_SPEED)
+        {
             self.last_satd as f64 * 1.2
         } else {
             f64::INFINITY
         };
+        #[cfg(test)]
+        let from = out.len();
         for &(_, m) in scored.iter().take(k).filter(|t| t.0 as f64 <= first) {
             out.push(Blk {
                 mode: m,
@@ -1964,10 +2738,80 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 ..*base
             });
         }
+        #[cfg(test)]
+        if !s.intra_frame {
+            let n = out.len() - from;
+            INTER_INTRA_MOST.with(|c| c.set(c.get().max(n)));
+        }
     }
 
     /// Whether intra is worth trying in an inter frame: when the best
     /// inter prediction is poor.
+    /// The scale of `rd_lambda` of the block at `(row, col)`
+    /// ([`Shared::ssim`]): its superblock's, 1 without `tune=ssim`.
+    fn lam_at(&self, row: usize, col: usize) -> f32 {
+        let s = self.s;
+        let seg = match s.seg_lam {
+            Some(l) => l[usize::from(s.seg_map[row * s.mi_cols + col])],
+            None => 1.0,
+        };
+        if s.ssim.is_empty() {
+            return seg;
+        }
+        seg * s.ssim[(row / 8) * s.mi_cols.div_ceil(8) + col / 8]
+    }
+
+    /// The block's segment's reference (a region of interest map's), in
+    /// an inter frame.
+    fn seg_ref(&self, b: &Blk) -> Option<u8> {
+        let seg = &self.s.h.seg;
+        let i = usize::from(b.seg);
+        (seg.enabled && !self.s.intra_frame && seg.feature_on[i][2])
+            .then(|| seg.feature_data[i][2] as u8)
+    }
+
+    /// Whether the block's segment codes no residual (a region of
+    /// interest map's skip), in an inter frame.
+    fn seg_skip(&self, b: &Blk) -> bool {
+        let seg = &self.s.h.seg;
+        seg.enabled && !self.s.intra_frame && seg.feature_on[usize::from(b.seg)][3]
+    }
+
+    /// Keeps the candidates the block's segment allows: on its reference
+    /// alone (no compound prediction), and with its skip feature one
+    /// block, the zero vector on that reference (LAST without one). When
+    /// that changes the list, the index of its first intra candidate.
+    fn seg_restrict(&self, base: &Blk, cands: &mut Vec<Blk>) -> Option<usize> {
+        let r = self.seg_ref(base);
+        let skip = self.seg_skip(base);
+        if r.is_none() && !skip {
+            return None;
+        }
+        if let Some(r) = r {
+            cands.retain(|c| c.refs[0] == r && c.refs[1] == INTRA_FRAME);
+        }
+        if skip || cands.is_empty() {
+            cands.clear();
+            let r = r.unwrap_or(LAST_FRAME);
+            cands.push(if r == INTRA_FRAME {
+                *base
+            } else {
+                Blk {
+                    refs: [r, INTRA_FRAME],
+                    mode: ZERO,
+                    tx: geom::max_tx(base.bsize).min(geom::tx_mode_biggest(self.s.h.tx_mode)),
+                    ..*base
+                }
+            });
+        }
+        Some(
+            cands
+                .iter()
+                .position(|c| c.refs[0] == INTRA_FRAME)
+                .unwrap_or(cands.len()),
+        )
+    }
+
     fn intra_worth(&self, base: &Blk, cands: &[Blk]) -> bool {
         if cands.is_empty() {
             return true;
@@ -1976,6 +2820,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // A mean error of more than a few levels a sample (from speed 6,
         // eight: 5% of the time for 0 to 1% of the bits; at speed 5, seven).
         let per = match self.s.speed {
+            // (Not at speed 10, whose choice of intra is no trial.)
+            ..=9 if self.s.screen => SCREEN_INTRA_ERROR,
             0..=4 => 5,
             5 => 7,
             6 if !self.s.second_pass => 7,
@@ -2006,8 +2852,15 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             if self.rec_ref().is_none() {
                 continue;
             }
+            let gold = if r == 1 && s.speed >= 9 {
+                s.gold_mv
+            } else {
+                None
+            };
             let (mv, sad) = if r == 0 && self.fast() {
                 self.found[Self::slot(row, col, bsize)]
+            } else if let Some(g) = gold {
+                (g, self.sad_sub(x, y, w, h, g).unwrap_or(u64::MAX / 4))
             } else if r > 0 && s.speed >= 9 {
                 // Other references: only their candidate vectors, below.
                 (Mv::ZERO, u64::MAX / 4)
@@ -2018,7 +2871,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let (bw, _) = MI_WH[usize::from(bsize)];
                 self.put_seeds(row, col, bw, mv);
             }
-            let (mv, sad) = if sad < u64::MAX / 4 {
+            let (mv, sad) = if sad < u64::MAX / 4 && gold.is_none() {
                 self.refine(row, col, bsize, mv, sad)
             } else {
                 (mv, sad)
@@ -2130,6 +2983,21 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             scored.first().map_or(0, |t| t.0) as f64 * 1.1
         } else {
             f64::INFINITY
+        };
+        // With a full search, the second too when the first is a NEW
+        // vector and the second a free one (NEAREST, NEAR, ZERO) of the
+        // same reference within CLOSE_FREE of its score.
+        let k = if k == 1
+            && s.full_search
+            && scored.len() > 1
+            && scored[0].1.mode == NEW
+            && scored[1].1.mode != NEW
+            && scored[1].1.refs == scored[0].1.refs
+            && (scored[1].0 as f64) <= scored[0].0 as f64 * (1.0 + CLOSE_FREE)
+        {
+            2
+        } else {
+            k
         };
         out.extend(
             scored
@@ -2467,12 +3335,18 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let ((data, stride), (rw, rh)) = self.rec_ref()?;
         let (r, c) = (i32::from(mv.row), i32::from(mv.col));
         let (bx, by) = (x as i32 + (c >> 3), y as i32 + (r >> 3));
-        if bx < 0 || by < 0 || bx + w as i32 + 1 > rw || by + h as i32 + 1 > rh {
-            return None;
-        }
         let (src, ss) = (s.src.planes[0], s.src.strides[0]);
         let a = &src[y * ss + x..];
-        let b = &data[by as usize * stride + bx as usize..];
+        let copy;
+        let (b, stride) = if bx < 0 || by < 0 || bx + w as i32 + 1 > rw || by + h as i32 + 1 > rh {
+            if !reaches(bx, by, w + 1, h + 1, (rw, rh)) {
+                return None;
+            }
+            copy = edge_window(data, stride, (rw, rh), (bx, by), (w + 1, h + 1));
+            (&copy[..], w + 1)
+        } else {
+            (&data[by as usize * stride + bx as usize..], stride)
+        };
         if r & 7 == 0 && c & 7 == 0 {
             // Whole samples: the bilinear filter at zero is the samples.
             return Some(u64::from(P::sad(a, ss, b, stride, w, h)));
@@ -2499,16 +3373,22 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let mut tmp = std::mem::take(&mut self.mctmp);
         let out = (|| {
             let ((data, stride), (rw, rh)) = self.rec_ref()?;
-            if bx < 3
-                || by < 3
-                || bx + w as i32 + 4 > rw
-                || by + h as i32 + 4 > rh
-                || !matches!(w, 8 | 16 | 32 | 64)
-            {
+            if !matches!(w, 8 | 16 | 32 | 64) {
                 return None;
             }
+            let copy;
+            let (data, stride, at) =
+                if bx < 3 || by < 3 || bx + w as i32 + 4 > rw || by + h as i32 + 4 > rh {
+                    if !reaches(bx, by, w, h, (rw, rh)) {
+                        return None;
+                    }
+                    let es = w + 7;
+                    copy = edge_window(data, stride, (rw, rh), (bx - 3, by - 3), (es, h + 7));
+                    (&copy[..], es, 3 * es + 3)
+                } else {
+                    (data, stride, by as usize * stride + bx as usize)
+                };
             let filter = &crate::dsp::mc::FILTERS[usize::from(geom::EIGHTTAP)];
-            let at = by as usize * stride + bx as usize;
             crate::dsp::mc::predict(
                 &mut pred,
                 w,
@@ -2537,7 +3417,22 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let Some(rp) = self.rec_ref() else {
             return (Mv::ZERO, u64::MAX / 4);
         };
-        search_in(self.s, rp, &self.seeds, self.cur_ref, row, col, bsize)
+        let r = self.cur_ref;
+        let mut mesh = self.mesh[r];
+        // GOLDEN and ALTREF take a mesh only where LAST's took one.
+        let may = r == 0 || matches!(self.mesh[0], Some((r0, c0, _)) if (r0, c0) == (row, col));
+        let found = search_in(
+            self.s,
+            rp,
+            &self.seeds,
+            r,
+            row,
+            col,
+            bsize,
+            (&mut mesh, may),
+        );
+        self.mesh[r] = mesh;
+        found
     }
 
     /// Refines a whole-sample vector of a block to halves and quarters (and
@@ -2555,6 +3450,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let (x, y) = (col * 8, row * 8);
         let w = (bw * 8).min((s.mi_cols - col) * 8);
         let h = (bh * 8).min((s.mi_rows - row) * 8);
+        if s.screen && best_sad == 0 {
+            return (mv, 0);
+        }
         if s.speed < 9 {
             let hp = s.h.allow_hp && mv.row.unsigned_abs() < 64 && mv.col.unsigned_abs() < 64;
             let steps: &[i16] = if hp && s.speed < 4 {
@@ -2662,6 +3560,45 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     }
 
     /// The partition symbol of the square at `(row, col)`.
+    /// A drawn key frame's 8×8 block: its 8×4 and 4×8 halves after the
+    /// split ([`Self::drawn_key_rd`]). Kept out of line so the partition
+    /// search every other frame runs compiles as it did without it (inlined,
+    /// it cost the still scene 2.7% of its time with the same streams).
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn drawn_key_halves(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: u8,
+        before: usize,
+        lam: f64,
+        b: Blk,
+        best: &mut (f64, u8),
+        won: &mut Option<Blk>,
+    ) {
+        for (p, sbs) in [
+            (PARTITION_HORZ, geom::BLOCK_8X4),
+            (PARTITION_VERT, geom::BLOCK_4X8),
+        ] {
+            self.restore(before);
+            let c0 = self.cost;
+            self.part_symbol(row, col, bsize, p);
+            let b = Blk { bsize: sbs, ..b };
+            let d = self.code_block(&b);
+            self.part_after(row, col, bsize, p);
+            let j = d + (self.cost - c0) as f64 * lam;
+            if j < best.0 {
+                let mut chosen = b;
+                chosen.bmode = self.sub;
+                *best = (j, p);
+                *won = Some(chosen);
+                self.save(row, col, (1, 1), before + 1);
+            }
+        }
+    }
+
     fn part_symbol(&mut self, row: usize, col: usize, bsize: u8, p: u8) {
         let s = self.s;
         let n8 = geom::mi_width_log2(bsize) as usize;
@@ -2790,6 +3727,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let s = self.s;
         let mut b = *b0;
         self.seg = usize::from(b.seg);
+        self.lam_mul = self.lam_at(b.row, b.col);
         let (row, col, bsize) = (b.row, b.col, b.bsize);
         let (bw, bh) = (b.bw, b.bh);
         let inter = b.refs[0] != INTRA_FRAME;
@@ -2828,12 +3766,18 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             let mut eobs = 0;
             // (libvpx's static threshold: a prediction near enough codes
             // no residual.)
-            breakout = inter && !s.h.lossless && s.static_thresh > 0 && self.static_skip(&b);
+            // (A segment's skip feature codes none.)
+            breakout = inter
+                && !s.h.lossless
+                && ((s.static_thresh > 0 && self.static_skip(&b)) || self.seg_skip(&b));
             // From TX_DOMAIN_SPEED, a trial of an inter block measures its
             // error on the coefficients (libvpx's transform-domain
             // distortion) and leaves the prediction unreconstructed.
-            self.tx_dom =
-                self.trial && inter && !s.h.lossless && (TX_DOMAIN_SPEED..9).contains(&s.speed);
+            self.tx_dom = self.trial
+                && inter
+                && !s.h.lossless
+                && (TX_DOMAIN_SPEED..9).contains(&s.speed)
+                && !s.full_search;
             let (coded, dropped) = if breakout {
                 (0.0, 0.0)
             } else {
@@ -2849,7 +3793,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let ctx = usize::from(self.above_nb(&b).is_some_and(|n| n.skip))
                     + usize::from(self.left_nb(&b).is_some_and(|n| n.skip));
                 let p = s.fc.skip[ctx];
-                let lam = s.rd_lambda / 256.0;
+                let lam = s.rd_lambda * self.lam_mul / 256.0;
                 let j_skip = dropped + lam * bit_cost(true, p) as f32;
                 let j_coded = coded + lam * bit_cost(false, p) as f32;
                 if j_skip <= j_coded {
@@ -3025,13 +3969,44 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             total[usize::from(p > 0)] +=
                 P::sse(&src[y * sst + x..], sst, v.at(y, x), stride, vw * 4, vh * 4);
         }
+        self.uv_sse = total[1] as f64;
         total[0] as f64 + total[1] as f64 * self.chroma_dist()
+    }
+
+    /// The largest luma error (SSE) of the 8×8 parts of the square of `n`
+    /// 8×8 at `(row, col)` inside the picture, as it is reconstructed now.
+    ///
+    /// At a fixed quantizer ([`super::FrameParams::full_search`] in one pass),
+    /// a whole block that needs no residual ends the partition search only
+    /// where this too, over the block, is under the quantizer's noise: its
+    /// error summed hid a small object (a moving square, a figure of the clock,
+    /// a row of noise) in a block that predicted the rest exactly, which then
+    /// went uncoded. On `testsrc2` at speed 5 against FFmpeg's `-crf`, at the
+    /// same PSNR-Y / U / V: +11.4 / +9.9 / +6.9% → +10.0 / +9.1 / +3.2% (with
+    /// chroma's error in it as the trials weigh it, +10.1 / +5.6 / −0.7%, but
+    /// 1.6 to 2.5 points of PSNR-Y lost on the README's clips at fixed
+    /// quantizers; without the stop at all, +9.8 / +4.7 / −1.5% for 1.46 times
+    /// the time). Not in a second pass, where the clip of a still scene and two
+    /// jumps lost 0.4 points of PSNR-Y.
+    fn peak_sse(&mut self, row: usize, col: usize, n: usize) -> f64 {
+        let s = self.s;
+        let (src, sst) = (s.src.planes[0], s.src.strides[0]);
+        let v = &mut self.rec.views()[0];
+        let stride = v.stride;
+        let mut peak = 0;
+        for r in row..(row + n).min(s.mi_rows) {
+            for c in col..(col + n).min(s.mi_cols) {
+                let (x, y) = (c * 8, r * 8);
+                peak = peak.max(P::sse(&src[y * sst + x..], sst, v.at(y, x), stride, 8, 8));
+            }
+        }
+        peak as f64
     }
 
     /// How much chroma's error weighs against luma's in the trials'
     /// decisions ([`CHROMA_DIST`] up to [`CHROMA_SPEED`]).
     fn chroma_dist(&self) -> f64 {
-        if self.s.speed <= CHROMA_SPEED {
+        if self.s.speed <= CHROMA_SPEED && !self.s.fast_arf {
             f64::from(CHROMA_DIST)
         } else {
             1.0
@@ -3076,6 +4051,108 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         best.1
     }
 
+    /// The intra mode of the 4×4 luma block at `(x, y)` by RD
+    /// ([`KEY_RD_SPEED`]): the [`KEY_RD_4X4`] best by SATD each predicted,
+    /// quantized and reconstructed, costed with its bits in the context
+    /// `(above, left)` of the modes beside it.
+    #[allow(clippy::too_many_arguments)]
+    fn pick_4x4_rd(
+        &mut self,
+        x: usize,
+        y: usize,
+        have_left: bool,
+        have_above: bool,
+        have_right: bool,
+        ctx: (u8, u8),
+        pair: bool,
+    ) -> u8 {
+        let s = self.s;
+        let modes = self.ranked_4x4(x, y, have_left, have_above, have_right);
+        let lam = s.rd_lambda * self.lam_mul / 256.0;
+        let probs = &KF_Y_MODE_PROB[usize::from(ctx.0)][usize::from(ctx.1)];
+        let mut best = (f32::INFINITY, modes[0]);
+        for m in modes.into_iter().take(KEY_RD_4X4) {
+            self.rec
+                .predict_intra(0, m, 0, x, y, have_left, have_above, have_right);
+            let kind = if s.h.lossless {
+                0
+            } else {
+                geom::intra_tx_type(m)
+            };
+            let (levels, _) = self.quantize(0, 0, kind, x, y, true);
+            self.pool.push(levels);
+            let mut d = self.rd.coded;
+            if pair {
+                // (An 8×4's: the 4×4 right of it too, in the same mode.)
+                self.rec
+                    .predict_intra(0, m, 0, x + 4, y, true, have_above, false);
+                let (levels, _) = self.quantize(0, 0, kind, x + 4, y, true);
+                self.pool.push(levels);
+                d += self.rd.coded;
+            }
+            let mut c = Cost(0);
+            tree_to(&mut c, &prob::INTRA_TREE, probs, m);
+            let j = d + lam * c.0 as f32;
+            if j < best.0 {
+                best = (j, m);
+            }
+        }
+        best.1
+    }
+
+    /// The ten intra modes of the 4×4 luma block at `(x, y)`, best first
+    /// by SATD (as [`Self::pick_4x4`] scores them).
+    fn ranked_4x4(
+        &mut self,
+        x: usize,
+        y: usize,
+        have_left: bool,
+        have_above: bool,
+        have_right: bool,
+    ) -> [u8; 10] {
+        let s = self.s;
+        let e = self
+            .rec
+            .intra_edges(0, 0, x, y, have_left, have_above, have_right);
+        let (src, ss) = (s.src.planes[0], s.src.strides[0]);
+        let lam = u64::from(s.lambda);
+        let mut ranked = [(0u64, 0u8); 10];
+        for (r, m) in ranked.iter_mut().zip(INTRA_MODES) {
+            ipred::predict(m, 4, &mut self.pred, 4, &e, u32::from(s.h.bit_depth));
+            let d = satd(&src[y * ss + x..], ss, &self.pred, 4, 4);
+            *r = (d + lam * u64::from(m != geom::DC), m);
+        }
+        ranked.sort_unstable();
+        ranked.map(|r| r.1)
+    }
+
+    /// The four chroma modes of intra block `b` best by the SATD of both
+    /// planes' prediction of their top left square (the block's, up to
+    /// 32×32), with a little for leaving DC.
+    fn uv_ranked(&mut self, b: &Blk) -> [u8; 4] {
+        let s = self.s;
+        let (sx, sy) = plane_ss(s, 1);
+        let (w, h) = ((b.bw * 8) >> sx, (b.bh * 8) >> sy);
+        let n = w.min(h).clamp(4, 32);
+        let tx = (n.trailing_zeros() - 2) as u8;
+        let (x, y) = ((b.col * 8) >> sx, (b.row * 8) >> sy);
+        let (have_left, have_above) = (b.col > self.col0, b.row > 0);
+        let lam = u64::from(s.lambda);
+        let mut ranked = INTRA_MODES.map(|m| (lam * u64::from(m != geom::DC), m));
+        for p in 1..3 {
+            let e = self
+                .rec
+                .intra_edges(p, tx, x, y, have_left, have_above, false);
+            let (src, ss) = (s.src.planes[p], s.src.strides[p]);
+            for r in &mut ranked {
+                ipred::predict(r.1, n, &mut self.pred, n, &e, u32::from(s.h.bit_depth));
+                r.0 += satd(&src[y * ss + x..], ss, &self.pred, n, n);
+            }
+        }
+        ranked.sort_unstable();
+        [ranked[0].1, ranked[1].1, ranked[2].1, ranked[3].1]
+    }
+
     fn uv_tx(&self, b: &Blk) -> u8 {
         let (sx, sy) = plane_ss(self.s, 1);
         geom::uv_tx(b.bsize, b.tx, sx as u32, sy as u32)
@@ -3117,7 +4194,44 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                             b.uv
                         } else if b.bsize < BLOCK_8X8 {
                             let k = r * 2 + c;
-                            if b.bmode[k] == AUTO {
+                            // An 8×4's and a 4×8's second 4×4 of each half
+                            // takes the first's mode.
+                            let lead = match b.bsize {
+                                geom::BLOCK_8X4 => k & 2,
+                                geom::BLOCK_4X8 => k & 1,
+                                _ => k,
+                            };
+                            if b.bmode[k] == AUTO && lead != k {
+                                self.sub[k] = self.sub[lead];
+                            } else if b.bmode[k] == AUTO && self.trial && self.key_rd() {
+                                // ([`KEY_RD_SPEED`]: by RD, in the context of
+                                // the modes above and left of it.)
+                                let a = if r > 0 {
+                                    self.sub[k - 2]
+                                } else {
+                                    match self.above_nb(b) {
+                                        Some(n) if n.refs[0] == INTRA_FRAME => n.bmode[c + 2],
+                                        _ => geom::DC,
+                                    }
+                                };
+                                let l = if c > 0 {
+                                    self.sub[k - 1]
+                                } else {
+                                    match self.left_nb(b) {
+                                        Some(n) if n.refs[0] == INTRA_FRAME => n.bmode[r * 2 + 1],
+                                        _ => geom::DC,
+                                    }
+                                };
+                                self.sub[k] = self.pick_4x4_rd(
+                                    x,
+                                    y,
+                                    have_left_of(c, b, self.col0),
+                                    r > 0 || b.row > 0,
+                                    c + step < n4w,
+                                    (a, l),
+                                    b.bsize == geom::BLOCK_8X4,
+                                );
+                            } else if b.bmode[k] == AUTO {
                                 // The 4×4's mode from its own edges, by SATD.
                                 self.sub[k] = self.pick_4x4(
                                     x,
@@ -3249,7 +4363,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             // What the dead zone's costs come to for zeros: the error all
             // dropped, and an end of block either way.
             let ss = res_ss as f32;
-            let lam = s.rd_lambda;
+            let lam = s.rd_lambda * self.lam_mul;
             self.rd = TxRd {
                 coded: ss + lam,
                 dropped: ss + lam,
@@ -3282,7 +4396,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 }
                 rd_eob = Some(e);
             } else {
-                let one = self.trial && s.speed >= DZ_TRIAL_SPEED;
+                let one = self.trial && s.speed >= DZ_TRIAL_SPEED && !s.drawn_key;
                 let (eob, rd) = self.rd_levels(plane, tx, kind, x, y, intra, one, &mut levels);
                 self.rd = rd;
                 rd_eob = Some(eob);
@@ -3370,7 +4484,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let d_all = dc.energy + ac.energy;
         let bits = (dc.bits + ac.bits) as f32;
         let any = dc.nonzero || ac.nonzero;
-        let lam = s.rd_lambda;
+        let lam = s.rd_lambda * self.lam_mul;
         (
             TxRd {
                 coded: (d_coded + lam * (bits + 1.0) * g) / g,
@@ -3444,12 +4558,18 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // fast speeds: at the same average PSNR over the planes, 3 to 4%
         // fewer bits, and 19 to 22% fewer at the same PSNR-Y, on grainy
         // and clean 720p at speed 6 before the reference pool).
-        let chroma = if s.speed <= CHROMA_SPEED {
+        let chroma = if s.fast_arf {
+            CHROMA_RATE_FAST
+        } else if s.second_pass {
+            CHROMA_RATE_TWO
+        } else if self.six() {
+            CHROMA_RATE_SIX
+        } else if s.speed <= CHROMA_SPEED {
             CHROMA_RATE
         } else {
             CHROMA_RATE_FAST
         };
-        let lam = s.rd_lambda * g / 256.0 * if plane > 0 { chroma } else { 1.0 };
+        let lam = s.rd_lambda * self.lam_mul * g / 256.0 * if plane > 0 { chroma } else { 1.0 };
         let (scan, nb) = scan_pair(tx, kind);
         // Each scan position's place in the transposed block.
         let tpos = crate::dec::parse::scan_pair(tx, kind).2;
@@ -3841,6 +4961,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     // Syntax ---------------------------------------------------------------
 
     fn write_skip(&mut self, b: &Blk) {
+        if self.seg_skip(b) {
+            // (The segment's skip feature: implied.)
+            return;
+        }
         let ctx = usize::from(self.above_nb(b).is_some_and(|n| n.skip))
             + usize::from(self.left_nb(b).is_some_and(|n| n.skip));
         self.put_nc(u32::from(b.skip), self.s.fc.skip[ctx], probs::SKIP + ctx);
@@ -3932,7 +5056,14 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 Some(l) if l.refs[0] == INTRA_FRAME => l.bmode[k + 1],
                 _ => geom::DC,
             };
-            for k in 0..4 {
+            // (An 8×4 codes the modes of its 4×4s 0 and 2, a 4×8 of 0
+            // and 1.)
+            let ks: &[usize] = match b.bsize {
+                geom::BLOCK_8X4 => &[0, 2],
+                geom::BLOCK_4X8 => &[0, 1],
+                _ => &[0, 1, 2, 3],
+            };
+            for &k in ks {
                 let a = if k < 2 { ab(k) } else { b.bmode[k - 2] };
                 let l = if k % 2 == 0 { lb(k) } else { b.bmode[k - 1] };
                 self.put_tree(
@@ -3960,14 +5091,19 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.write_seg(b);
         self.write_skip(b);
         let inter = b.refs[0] != INTRA_FRAME;
-        let ctx = ctx::intra_inter_ctx(self.above_nb(b), self.left_nb(b));
-        self.put_nc(
-            u32::from(inter),
-            s.fc.intra_inter[ctx],
-            probs::INTRA_INTER + ctx,
-        );
-        if self.collect() {
-            self.f.counts.intra_inter[ctx][usize::from(inter)] += 1;
+        // (A segment's reference feature implies the reference, and so
+        // whether the block is inter; its skip feature, the zero vector.)
+        let seg_ref = self.seg_ref(b).is_some();
+        if !seg_ref {
+            let ctx = ctx::intra_inter_ctx(self.above_nb(b), self.left_nb(b));
+            self.put_nc(
+                u32::from(inter),
+                s.fc.intra_inter[ctx],
+                probs::INTRA_INTER + ctx,
+            );
+            if self.collect() {
+                self.f.counts.intra_inter[ctx][usize::from(inter)] += 1;
+            }
         }
         self.write_tx(b, !b.skip || !inter);
         if !inter {
@@ -3988,7 +5124,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             return;
         }
         let compound = b.refs[1] > INTRA_FRAME;
-        if s.h.reference_mode == geom::REFERENCE_SELECT {
+        if !seg_ref && s.h.reference_mode == geom::REFERENCE_SELECT {
             let ctx = ctx::reference_mode_ctx(self.above_nb(b), self.left_nb(b), s.h.comp_fixed);
             self.put_nc(
                 u32::from(compound),
@@ -3999,7 +5135,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 self.f.counts.comp_inter[ctx][usize::from(compound)] += 1;
             }
         }
-        if compound {
+        if compound && !seg_ref {
             // The fixed reference takes its sign bias's place; the other
             // is one of the two variable ones.
             let ctx = ctx::comp_ref_ctx(self.above_nb(b), self.left_nb(b), s.h);
@@ -4013,13 +5149,13 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // Single reference: LAST, or GOLDEN / ALTREF.
         let c0 = ctx::single_p1(self.above_nb(b), self.left_nb(b));
         let bit0 = u32::from(b.refs[0] != LAST_FRAME);
-        if !compound {
+        if !compound && !seg_ref {
             self.put_nc(bit0, s.fc.single_ref[c0][0], probs::SINGLE_REF + 2 * c0);
             if self.collect() {
                 self.f.counts.single_ref[c0][0][bit0 as usize] += 1;
             }
         }
-        if !compound && bit0 == 1 {
+        if !compound && !seg_ref && bit0 == 1 {
             let c1 = ctx::single_p2(self.above_nb(b), self.left_nb(b));
             let bit1 = u32::from(b.refs[0] == geom::ALTREF_FRAME);
             self.put_nc(bit1, s.fc.single_ref[c1][1], probs::SINGLE_REF + 2 * c1 + 1);
@@ -4036,7 +5172,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         }
         let mctx = usize::from(COUNTER_CTX[counter as usize]).min(6);
         let p = s.fc.inter_mode[mctx];
-        if b.bsize >= BLOCK_8X8 {
+        if b.bsize >= BLOCK_8X8 && !self.seg_skip(b) {
             self.write_inter_mode(b.mode, &p, mctx);
         }
         if s.switchable {
@@ -4450,6 +5586,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                         e
                     } else {
                         let p2 = coef_flat(ti, pi, ri, band, ctx, 2);
+                        if let Some(big) = self.big.as_deref_mut() {
+                            count_big(big, p2, a);
+                        }
                         write_big(&mut BigOut { out: self.w, p2 }, pp, a, s.h.bit_depth)
                     };
                 }
@@ -4559,6 +5698,40 @@ pub fn prob_of(id: u16, coef: &[u8; 1728], nc: &probs::Flat) -> u32 {
         let f = usize::from((id & 0x3fff) >> 3);
         u32::from(PARETO8[usize::from(coef[f].max(1)) - 1][usize::from(id & 7)])
     }
+}
+
+/// Counts a big token of level `a` (2 or more) by its class, `TWO` to
+/// `CAT6`, under the third probability at flattened index `p2`.
+#[inline(never)]
+fn count_big(big: &mut [[u32; 9]], p2: u16, a: u32) {
+    let class = match a {
+        0..=4 => a.saturating_sub(2) as usize,
+        5..=6 => 3,
+        7..=10 => 4,
+        11..=18 => 5,
+        19..=34 => 6,
+        35..=66 => 7,
+        _ => 8,
+    };
+    if let Some(c) = big.get_mut(usize::from(p2)) {
+        c[class] += 1;
+    }
+}
+
+/// The branches of the big tokens' nodes (3 to 10, [`PARETO8`]'s
+/// columns) from their counts by class ([`Tile`]'s `big`): node `3 + k`'s
+/// zeros and ones at `k`.
+pub fn big_branches(n: &[u32; 9]) -> [[u32; 2]; 8] {
+    [
+        [n[0] + n[1] + n[2], n[3..].iter().sum()],
+        [n[0], n[1] + n[2]],
+        [n[1], n[2]],
+        [n[3] + n[4], n[5..].iter().sum()],
+        [n[3], n[4]],
+        [n[5] + n[6], n[7] + n[8]],
+        [n[5], n[6]],
+        [n[7], n[8]],
+    ]
 }
 
 /// [`prob_of`] of every symbol id, by id (0 between the ranges ids take):
@@ -4840,7 +6013,14 @@ fn scan_pair(tx: u8, kind: u8) -> (&'static [u16], &'static [u16]) {
 
 /// The sum of absolute 4×4 Hadamard coefficients of `src - pred` over an
 /// `w`×`h` block (`pred` rows `w` apart).
-fn satd<P: Pixel>(src: &[P], ss: usize, pred: &[P], w: usize, h: usize) -> u64 {
+fn satd<P: EncPixel>(src: &[P], ss: usize, pred: &[P], w: usize, h: usize) -> u64 {
+    P::satd(src, ss, pred, w, w, h)
+}
+
+/// The SATD of `src` against `pred` (rows `w` apart), `w`×`h` of whole
+/// 4×4s: the sum of the absolute values of each 4×4's Walsh-Hadamard
+/// transform of the differences, over two.
+pub fn satd_px<P: Pixel>(src: &[P], ss: usize, pred: &[P], w: usize, h: usize) -> u64 {
     let mut total = 0u64;
     for by in (0..h).step_by(4) {
         for bx in (0..w).step_by(4) {
@@ -4879,6 +6059,7 @@ fn satd<P: Pixel>(src: &[P], ss: usize, pred: &[P], w: usize, h: usize) -> u64 {
 #[inline]
 #[allow(clippy::type_complexity)]
 fn sad_ref<P: EncPixel>(
+    edge: &mut Vec<P>,
     (src, ss): (&[P], usize),
     ((data, stride), (rw, rh)): ((&[P], usize), (i32, i32)),
     (x, y, w, h): (usize, usize, usize, usize),
@@ -4886,16 +6067,93 @@ fn sad_ref<P: EncPixel>(
     dc: i32,
 ) -> Option<u64> {
     let (bx, by) = (x as i32 + dc, y as i32 + dr);
-    if bx < 0 || by < 0 || bx + w as i32 > rw || by + h as i32 > rh {
-        return None;
-    }
     let a = &src[y * ss + x..];
+    if bx < 0 || by < 0 || bx + w as i32 > rw || by + h as i32 > rh {
+        if !reaches(bx, by, w, h, (rw, rh)) {
+            return None;
+        }
+        if bx >= 0 && bx + w as i32 <= rw {
+            // Over the top or the bottom only: the rows past it are its
+            // first or last row, read again (a stride of 0), no copy.
+            let top = (-by).clamp(0, h as i32) as usize;
+            let bottom = (by + h as i32 - rh).clamp(0, (h - top) as i32) as usize;
+            let mid = h - top - bottom;
+            let row = |r: usize| &data[r * stride + bx as usize..];
+            let mut v = 0u64;
+            if top > 0 {
+                v += u64::from(P::sad(a, ss, row(0), 0, w, top));
+            }
+            if mid > 0 {
+                let r0 = (by + top as i32) as usize;
+                v += u64::from(P::sad(&a[top * ss..], ss, row(r0), stride, w, mid));
+            }
+            if bottom > 0 {
+                let last = row(rh as usize - 1);
+                v += u64::from(P::sad(&a[(h - bottom) * ss..], ss, last, 0, w, bottom));
+            }
+            return Some(v);
+        }
+        edge_window_into(edge, data, stride, (rw, rh), (bx, by), (w, h));
+        return Some(u64::from(P::sad(a, ss, edge, w, w, h)));
+    }
     let b = &data[by as usize * stride + bx as usize..];
     Some(u64::from(P::sad(a, ss, b, stride, w, h)))
 }
 
+/// Whether a `w`×`h` window at `(bx, by)` lies within [`EDGE_REACH`] of
+/// the reference.
+fn reaches(bx: i32, by: i32, w: usize, h: usize, (rw, rh): (i32, i32)) -> bool {
+    bx >= -EDGE_REACH
+        && by >= -EDGE_REACH
+        && bx + w as i32 <= rw + EDGE_REACH
+        && by + h as i32 <= rh + EDGE_REACH
+}
+
+/// The reference's `ew`×`eh` window at `(x0, y0)`, which crosses its edge,
+/// the edge samples repeated (as `dec::recon` predicts such a window),
+/// rows `ew` apart, and 32 samples after the last for the kernels' wide
+/// loads (as `dec::recon`'s copy has).
+fn edge_window<P: Copy + Default>(
+    data: &[P],
+    stride: usize,
+    (rw, rh): (i32, i32),
+    (x0, y0): (i32, i32),
+    (ew, eh): (usize, usize),
+) -> Vec<P> {
+    let mut e = Vec::new();
+    edge_window_into(&mut e, data, stride, (rw, rh), (x0, y0), (ew, eh));
+    e
+}
+
+/// [`edge_window`] into `e` (its samples replaced).
+fn edge_window_into<P: Copy + Default>(
+    e: &mut Vec<P>,
+    data: &[P],
+    stride: usize,
+    (rw, rh): (i32, i32),
+    (x0, y0): (i32, i32),
+    (ew, eh): (usize, usize),
+) {
+    e.clear();
+    e.reserve(ew * eh + 32);
+    let lo = (-x0).clamp(0, ew as i32) as usize;
+    let hi = (rw - x0).clamp(lo as i32, ew as i32) as usize;
+    for j in 0..eh {
+        let yy = (y0 + j as i32).clamp(0, rh - 1) as usize;
+        let row = &data[yy * stride..yy * stride + rw as usize];
+        e.extend(std::iter::repeat_n(row[0], lo));
+        if hi > lo {
+            let from = (x0 + lo as i32) as usize;
+            e.extend_from_slice(&row[from..from + hi - lo]);
+        }
+        e.extend(std::iter::repeat_n(row[rw as usize - 1], ew - hi));
+    }
+    e.extend(std::iter::repeat_n(P::default(), 32));
+}
+
 /// [`sad_ref`] at four vectors at once, each within `range`.
 fn sad4_ref<P: EncPixel>(
+    edge: &mut Vec<P>,
     (src, ss): (&[P], usize),
     ((data, stride), (rw, rh)): ((&[P], usize), (i32, i32)),
     (x, y, w, h): (usize, usize, usize, usize),
@@ -4913,20 +6171,45 @@ fn sad4_ref<P: EncPixel>(
             .then(|| by as usize * stride + bx as usize)
     };
     let offs = pts.map(at);
+    // Within the range but over the reference's edge: one at a time, on
+    // a copy with the edge repeated.
+    let mut edge_at = |k: usize| {
+        let (dr, dc) = pts[k];
+        if dr.abs() <= range && dc.abs() <= range {
+            sad_ref(
+                edge,
+                (src, ss),
+                ((data, stride), (rw, rh)),
+                (x, y, w, h),
+                dr,
+                dc,
+            )
+        } else {
+            None
+        }
+    };
     let Some(any) = offs.iter().flatten().next().copied() else {
-        return [None; 4];
+        return [edge_at(0), edge_at(1), edge_at(2), edge_at(3)];
     };
     let b = offs.map(|o| &data[o.unwrap_or(any)..]);
     let v = P::sad4(&src[y * ss + x..], ss, b, stride, w, h);
     let mut out = [None; 4];
     for k in 0..4 {
-        out[k] = offs[k].map(|_| u64::from(v[k]));
+        out[k] = match offs[k] {
+            Some(_) => Some(u64::from(v[k])),
+            None => edge_at(k),
+        };
     }
     out
 }
 
-/// A superblock's whole-sample search on LAST, made ahead of coding.
-#[allow(clippy::type_complexity)]
+/// A 16×16 block's mesh ([`MESH_RANGE`]): its place, and each 8×8
+/// quarter's best two whole-sample vectors.
+type Mesh = Option<(usize, usize, [[(i32, i32); 2]; 4])>;
+
+/// A superblock's whole-sample search on LAST, made ahead of coding (and
+/// a block's on any reference, with its reference's `mesh`).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn search_in<P: EncPixel>(
     s: &Shared<'_, P>,
     rp: ((&[P], usize), (i32, i32)),
@@ -4935,6 +6218,7 @@ fn search_in<P: EncPixel>(
     row: usize,
     col: usize,
     bsize: u8,
+    (mesh, may_mesh): (&mut Mesh, bool),
 ) -> (Mv, u64) {
     let src = (s.src.planes[0], s.src.strides[0]);
     let (bw, bh) = MI_WH[usize::from(bsize)];
@@ -4945,8 +6229,18 @@ fn search_in<P: EncPixel>(
     let w = w.min((s.mi_cols - col) * 8);
     let h = h.min((s.mi_rows - row) * 8);
     // Starting points.
-    let mut cands = [Mv::ZERO; 7];
+    let mut cands = [Mv::ZERO; 8 + POP_STARTS];
     let mut nc = 1;
+    // Where the reference's picture stands: a start, and the reach of the
+    // search past its range.
+    let mut reach = 0;
+    if s.speed <= REF_SEED_SPEED
+        && let Some(m) = s.ref_seeds[cur_ref]
+    {
+        cands[nc] = m;
+        nc += 1;
+        reach = i32::from(m.row.unsigned_abs().max(m.col.unsigned_abs()) / 8);
+    }
     if cur_ref == 0
         && let Some(g) = s.global
     {
@@ -4973,15 +6267,21 @@ fn search_in<P: EncPixel>(
         cands[nc] = m.mv[0];
         nc += 1;
     }
+    for m in s.pop_mvs[cur_ref].iter().flatten() {
+        cands[nc] = *m;
+        nc += 1;
+    }
     let mut best = (0i32, 0i32);
     let mut best_sad = u64::MAX;
+    // Windows over the reference's edge are copied here.
+    let mut edge = Vec::new();
     // (Neighbours often share a vector: each one's SAD is taken once.)
-    let mut seen = [((0i32, 0i32), None::<u64>); 7];
+    let mut seen = [((0i32, 0i32), None::<u64>); 8 + POP_STARTS];
     for (k, m) in cands[..nc].iter().enumerate() {
         let (r, c) = ((i32::from(m.row) + 4) >> 3, (i32::from(m.col) + 4) >> 3);
         let sad = match seen[..k].iter().find(|e| e.0 == (r, c)) {
             Some(e) => e.1,
-            None => sad_ref(src, rp, (x, y, w, h), r, c),
+            None => sad_ref(&mut edge, src, rp, (x, y, w, h), r, c),
         };
         seen[k] = ((r, c), sad);
         if let Some(v) = sad {
@@ -4998,7 +6298,7 @@ fn search_in<P: EncPixel>(
     // Diamond search in whole samples; below 64×64 the search starts
     // from the square around it, whose vector is a seed, with a smaller
     // step.
-    let range = 64;
+    let range = 64 + reach;
     let mut step = match (bsize, s.speed) {
         (BLOCK_64X64, 9..) => 4,
         (geom::BLOCK_32X32, 9..) => 1,
@@ -5026,7 +6326,10 @@ fn search_in<P: EncPixel>(
             let center = best;
             let pts = [(-step, 0), (step, 0), (0, -step), (0, step)]
                 .map(|(dr, dc)| (center.0 + dr, center.1 + dc));
-            for (&(r, c), v) in pts.iter().zip(sad4_ref(src, rp, (x, y, w, h), pts, range)) {
+            for (&(r, c), v) in
+                pts.iter()
+                    .zip(sad4_ref(&mut edge, src, rp, (x, y, w, h), pts, range))
+            {
                 if let Some(v) = v
                     && v < best_sad
                 {
@@ -5037,6 +6340,33 @@ fn search_in<P: EncPixel>(
             }
         }
         step /= 2;
+    }
+    // A mesh's best two ([`MESH_RANGE`]), measured whole.
+    let mut more = [None; 2];
+    if s.full_search && !s.second_pass {
+        if bsize == geom::BLOCK_16X16 {
+            *mesh = if may_mesh {
+                mesh_in(s, src, rp, (x, y, w, h), best, best_sad).map(|(whole, quarters)| {
+                    more = whole;
+                    (row, col, quarters)
+                })
+            } else {
+                None
+            };
+        } else if bsize == BLOCK_8X8
+            && let Some((r0, c0, quarters)) = *mesh
+            && (r0, c0) == (row & !1, col & !1)
+        {
+            more = quarters[(row & 1) * 2 + (col & 1)].map(Some);
+        }
+    }
+    for p in more.into_iter().flatten() {
+        if let Some(v) = sad4_ref(&mut edge, src, rp, (x, y, w, h), [p; 4], i32::MAX)[0]
+            && v < best_sad
+        {
+            best_sad = v;
+            best = p;
+        }
     }
     // Every whole sample within two of the diamond's choice.
     if s.speed <= 6 {
@@ -5057,7 +6387,7 @@ fn search_in<P: EncPixel>(
         for q in pts[..np].chunks(4) {
             let mut four = [q[0]; 4];
             four[..q.len()].copy_from_slice(q);
-            let v4 = sad4_ref(src, rp, (x, y, w, h), four, i32::MAX);
+            let v4 = sad4_ref(&mut edge, src, rp, (x, y, w, h), four, i32::MAX);
             for (&(r, cc), v) in q.iter().zip(v4) {
                 if let Some(v) = v
                     && v < best_sad
@@ -5073,6 +6403,98 @@ fn search_in<P: EncPixel>(
         col: (best.1 * 8) as i16,
     };
     (mv, best_sad)
+}
+
+/// The mesh of a 16×16 block at `(x, y)` around the whole-sample vector
+/// `c` (rows, columns) whose SAD is `sad` ([`MESH_RANGE`]): `None` where
+/// it is not searched, else the best two of the whole block and of each
+/// 8×8 quarter (in raster order) by their SAD on every other row.
+#[allow(clippy::type_complexity)]
+fn mesh_in<P: EncPixel>(
+    s: &Shared<'_, P>,
+    (sd, ss): (&[P], usize),
+    ((data, stride), (rw, rh)): ((&[P], usize), (i32, i32)),
+    (x, y, w, h): (usize, usize, usize, usize),
+    c: (i32, i32),
+    sad: u64,
+) -> Option<([Option<(i32, i32)>; 2], [[(i32, i32); 2]; 4])> {
+    let inside = |(r, cc): (i32, i32)| {
+        let (bx, by) = (x as i32 + cc, y as i32 + r);
+        bx >= 0 && by >= 0 && bx + 16 <= rw && by + 16 <= rh
+    };
+    let at = |(r, cc): (i32, i32)| (y as i32 + r) as usize * stride + (x as i32 + cc) as usize;
+    let scale = f64::from(1u32 << (s.h.bit_depth - 8));
+    if w != 16 || h != 16 || (sad as f64) < MESH_ERROR * scale * 256.0 || !inside(c) {
+        return None;
+    }
+    let sse = P::sse(&sd[y * ss + x..], ss, &data[at(c)..], stride, 16, 16);
+    if (sse as f64) < MESH_SPARSE * scale * sad as f64 {
+        return None;
+    }
+    let keep = |t: &mut [(u32, (i32, i32)); 2], v: u32, p: (i32, i32)| {
+        if v < t[1].0 {
+            if v < t[0].0 {
+                t[1] = t[0];
+                t[0] = (v, p);
+            } else {
+                t[1] = (v, p);
+            }
+        }
+    };
+    let none = (u32::MAX, c);
+    let mut whole = [none; 2];
+    let mut quarters = [[none; 2]; 4];
+    // (The square of two around the choice is searched after.)
+    let mut pts = [c; 4];
+    let mut n = 0;
+    let mut flush = |pts: &[(i32, i32); 4], n: usize| {
+        let mut sum = [0u32; 4];
+        for half in 0..2 {
+            let b = pts.map(|p| &data[at(p) + 8 * half * stride..]);
+            let v = P::halves4(&sd[(y + 8 * half) * ss + x..], 2 * ss, b, 2 * stride, 4);
+            for (j, &p) in pts[..n].iter().enumerate() {
+                for side in 0..2 {
+                    keep(&mut quarters[2 * half + side], v[j][side], p);
+                    sum[j] += v[j][side];
+                }
+            }
+        }
+        for (j, &p) in pts[..n].iter().enumerate() {
+            keep(&mut whole, sum[j], p);
+        }
+    };
+    // The even offsets whose window lies inside the reference.
+    let span = |at: i32, lim: i32| {
+        let lo = (-MESH_RANGE).max(-at);
+        let hi = MESH_RANGE.min(lim - 16 - at);
+        (lo + (lo & 1), hi)
+    };
+    let (r0, r1) = span(y as i32 + c.0, rh);
+    let (c0, c1) = span(x as i32 + c.1, rw);
+    for dr in (r0..=r1).step_by(2) {
+        for dc in (c0..=c1).step_by(2) {
+            if dr.abs() <= 2 && dc.abs() <= 2 {
+                continue;
+            }
+            let p = (c.0 + dr, c.1 + dc);
+            pts[n] = p;
+            n += 1;
+            if n == 4 {
+                flush(&pts, 4);
+                n = 0;
+            }
+        }
+    }
+    if n > 0 {
+        for k in n..4 {
+            pts[k] = pts[0];
+        }
+        flush(&pts, n);
+    }
+    Some((
+        whole.map(|t| (t.0 != u32::MAX).then_some(t.1)),
+        quarters.map(|t| t.map(|e| e.1)),
+    ))
 }
 
 /// The fast path's partition and vectors of one superblock, searched
@@ -5108,6 +6530,20 @@ pub fn prepass_sb<P: EncPixel>(
 }
 
 #[allow(clippy::type_complexity)]
+/// Whether the square of `n` 8×8 blocks at `(row, col)` keeps to one
+/// segment, or the frame need not ([`Shared::seg_exact`]).
+fn seg_uniform<P: EncPixel>(s: &Shared<'_, P>, row: usize, col: usize, n: usize) -> bool {
+    if !s.seg_exact {
+        return true;
+    }
+    let first = s.seg_map[row * s.mi_cols + col];
+    (row..(row + n).min(s.mi_rows)).all(|r| {
+        s.seg_map[r * s.mi_cols + col..r * s.mi_cols + (col + n).min(s.mi_cols)]
+            .iter()
+            .all(|&g| g == first)
+    })
+}
+
 fn pre_choose<P: EncPixel>(
     s: &Shared<'_, P>,
     rp: ((&[P], usize), (i32, i32)),
@@ -5122,7 +6558,7 @@ fn pre_choose<P: EncPixel>(
     }
     let lam = u64::from(s.lambda);
     let estimate = |seeds: &mut [Mv], pre: &mut Pre, bsize: u8| -> u64 {
-        let (mv, sad) = search_in(s, rp, seeds, 0, row, col, bsize);
+        let (mv, sad) = search_in(s, rp, seeds, 0, row, col, bsize, (&mut None, false));
         pre.found[Tile::<P>::slot(row, col, bsize)] = (mv, sad);
         let bw = MI_WH[usize::from(bsize)].0;
         for r in 0..bw.min(s.mi_rows - row) {
@@ -5139,7 +6575,7 @@ fn pre_choose<P: EncPixel>(
     }
     let n = 1usize << level;
     let hbs = n / 2;
-    let whole = row + n <= s.mi_rows && col + n <= s.mi_cols;
+    let whole = row + n <= s.mi_rows && col + n <= s.mi_cols && seg_uniform(s, row, col, n);
     let own = if whole {
         estimate(seeds, pre, SQUARE[level])
     } else {

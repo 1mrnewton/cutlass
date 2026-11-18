@@ -33,6 +33,9 @@ Decoder (`Vp9Decoder`, over `Decoder`):
   parse) and tile-column threads for the parse. `Vp9Decoder::open` uses one
   thread per core; the frames still being made when `push` returns come out
   of later pushes or `drain`, as with FFmpeg's frame threads.
+- Alpha (WebM's BlockAdditional 1, FFmpeg's `libvpx-vp9` `yuva420p`): a
+  packet's alpha packet (`SideData::BlockAdditional` id 1) is decoded by a
+  second decoder into the frame's alpha plane (`Vp9AlphaDecoder` alone).
 
 Encoder (`Vp9Encoder`, `EngineEncoder`):
 
@@ -46,7 +49,12 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   with the alt-ref ahead, chosen per block, speeds 0–6), sub-sample motion
   (to eighths where the vector may be), per-block transform size
   (`TX_MODE_SELECT`, 4×4 to 32×32 with the intra ADST types), skip, the loop
-  filter (libvpx's level from the quantizer), probability adaptation.
+  filter (its level searched on part of each frame up to speed 5, as
+  libvpx's `LPF_PICK_FROM_SUBIMAGE`, and libvpx's level from the quantizer
+  past it), probability adaptation.
+- Alpha (`Vp9Options::alpha`, FFmpeg's `-pix_fmt yuva420p`): the alpha
+  plane coded by a second encoder as its own VP9 stream, one alpha packet
+  beside each packet ("Options measured").
 - Segmentation: with `Vp9Options::aq` (libvpx's `aq-mode=1`) each 32×32
   region goes in one of five segments by its luma variance, each with
   its own quantizer (flat regions finer); the map is coded per block.
@@ -112,7 +120,7 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   from the bit depth's own step (its square grows as the SSE does), the
   SAD lambda is libvpx's `sad_per_bit16` on the step brought to 8 bits
   and scaled back up, the loop filter level is libvpx's `LPF_PICK_FROM_Q`
-  for 10 and 12 bits, the temporal filter's thresholds and strength and
+  for 10 and 12 bits (and the search's start up to speed 5), the temporal filter's thresholds and strength and
   the intra trial's threshold scale with the samples, the largest token
   category takes 16 or 18 bits, and rate control models 8-bit-scaled
   steps. On 8-bit content shifted up two or four bits (a grainy 720p pan,
@@ -278,7 +286,11 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   the same PSNR-Y / averaged PSNR, in a third less time, most of it the noise's
   end of the search. One pass was unchanged by that round, bit for bit;
   since, one pass keeps the reference pool too, up to speed 7 (see
-  "Chroma" in "Against FFmpeg's libvpx-vp9").
+  "Chroma" in "Against FFmpeg's libvpx-vp9"), and a cheaper one at speeds
+  9 and 10 (see "The gaps" there). Since then too, the second pass codes
+  a scene that predicts better than the key frame's at a finer step
+  (`api::SCENE_BETA`), searches without the one-pass breakouts
+  (`FrameParams::full_search`) and weighs chroma's bits 0.75 of luma's.
 
   Where the chroma gap came from: the grainy pan is of a fractal, flat
   colour gradients and an edge of fine colour detail, and its luma moves
@@ -387,7 +399,8 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
 
 - `enc::mod`: a frame. It writes the headers, parses them back with the
   decoder's own parser, codes the tile columns (on threads), merges them,
-  filters, and commits the frame through `Decoder::commit` — so the encoder
+  searches the loop filter level (`pick_level`, up to speed 5), filters,
+  and commits the frame through `Decoder::commit` — so the encoder
   predicts from exactly the references, motion and probabilities a decoder
   holds, and its reconstruction is the decoder's (`dec::recon`, `dec::lf`).
 - `enc::tile`: a tile column. For each superblock, `rd_node` searches the
@@ -433,10 +446,25 @@ let mut encoder = Vp9Encoder::with_options(1280, 720, Vp9Options { qindex: 120, 
 let (bytes, key) = encoder.encode_planes([(y, 1280), (u, 640), (v, 640)], 1.0 / 30.0)?;
 ```
 
-Examples: `examples/roundtrip.rs` (decode a committed key frame) and
-`examples/vp9enc.rs` (raw 4:2:0 to IVF:
+Examples: `examples/roundtrip.rs` (decode a committed key frame),
+`examples/vp9enc.rs` (raw 4:2:0 to IVF, or to WebM or Matroska by the
+output's extension:
 `vp9enc in.yuv 1280 720 out.ivf q=120 speed=5 threads=4`; its doc
-comment lists the options, libvpx-vp9's among them).
+comment lists the options, libvpx-vp9's among them; `alpha=FILE` codes
+alpha) and `examples/vp9dec.rs` (the VP9 track of a WebM or Matroska file
+to raw `yuv420p`, or `yuva420p` with alpha: `vp9dec in.webm out.yuv`).
+
+With alpha (`Vp9Options::alpha`), each picture goes in with its alpha
+plane and comes out with its alpha packet, which WebM keeps as the
+block's BlockAdditional 1:
+
+```rust
+let mut encoder = Vp9Encoder::with_options(1280, 720, Vp9Options { alpha: true, ..Default::default() })?;
+for coded in encoder.push_planes_alpha([(y, 1280), (u, 640), (v, 640), (a, 1280)], 1.0 / 30.0, (pts, 1, 30))? {
+    // coded.data, coded.alpha, coded.keyframe, coded.clock
+}
+let plane = Vp9AlphaDecoder::new().decode(&alpha_packet)?; // or Vp9Decoder with SideData::BlockAdditional
+```
 
 ## How it is tested
 
@@ -457,6 +485,10 @@ cargo test -p cutlass-vp9
   inter and golden frames, odd sizes, lossless, four tile columns on four
   threads, two columns past 4096 samples); FFmpeg decodes the same streams
   to the same pictures.
+- Alpha: `tests/alpha_interop.rs` writes a WebM with alpha through
+  `cutlass-matroska` that FFmpeg's `libvpx-vp9` decodes to the pictures
+  and alpha this decoder gives, and decodes FFmpeg's `yuva420p` WebM to
+  FFmpeg's YUVA (skipped without `ffmpeg`).
 
 ## Speed and size against FFmpeg
 
@@ -922,6 +954,469 @@ the picture's noise (time, but 10 to 25% under the rate), and a stop
 of the partition search at a coded block under the picture's noise (40
 points worse).
 
+**The gaps.** After "Chroma", speed 5 at a bitrate was ahead of
+FFmpeg's default on every plane and average of every clip, but two
+passes, speed 10, constant quality and speed 6 were still behind on the
+three scenes in one column or two. In the round after (16 November
+2026, commits `75836650`, `8e2e64ed` and `c0063234`), each against its
+FFmpeg counterpart, four threads, BD-rate at the same PSNR-Y / PSNR-U /
+PSNR-V / FFmpeg's average / 6:1:1 average, before → now. Speed 5 at a
+bitrate writes the same streams as before (0.53, 0.61 and 0.72 of
+FFmpeg's time, from 0.53, 0.62 and 0.73 in the same runs), and so does
+speed 10 at a fixed quantizer, the first pass of two.
+
+| Two passes, `-pass 1/2` | Y | U | V | FFmpeg avg | 6:1:1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| three scenes, before | −4.7% | +9.6% | +4.5% | −0.1% | −1.7% |
+| three scenes, now | −6.4% | −0.9% | −5.3% | −5.1% | −5.6% |
+| still scene, before | −38.3% | −32.8% | −32.7% | −35.2% | −36.4% |
+| still scene, now | −37.9% | −34.2% | −34.1% | −35.7% | −36.5% |
+| grainy pan, before | −15.9% | −25.5% | −24.9% | −21.0% | −19.8% |
+| grainy pan, now | −14.6% | −28.8% | −28.0% | −22.0% | −20.2% |
+
+in 0.30, 0.32 and 0.38 of libvpx's two passes' time (0.27, 0.29 and
+0.35 before; 6.5, 6.4 and 5.8 s a stream against 22.1, 19.7 and 15.5 s,
+the mean over the rates of medians of three runs interleaved). What
+moved it:
+
+- A scene that starts at a cut and predicts better than the last key
+  frame's scene is coded at a finer step (`api::SCENE_BETA`): the
+  ratio of its first picture's first-pass bits to its inter frames'
+  (over the 12 pictures after it) is taken against the key frame
+  scene's, and the step scaled by that to the power −0.45, down to half
+  (never coarser). The three scenes' grainy pan predicts nearly whole
+  from the reference pool (a ratio of 15 against the fractal's 5.6) and
+  its inter frames code under 1 kB at 2 Mb/s, so its quality is what its
+  golden frames and alt-refs carry on: at one step for the clip it took
+  120 kB of the 770 at 2 Mb/s with PSNR-U at 39.9 dB, where libvpx gives
+  it 193 kB for 41.8 dB (its alt-refs every four pictures at q 55 to 84);
+  at 0.65 of the step (with the rest of this round), 153 kB for 41.5
+  dB, and `testsrc2` 275 kB where it took 309. The rate model weighs the
+  scene's first-pass bits by the step's scale up to where the first
+  pass shows the scene end (`Pass2::scene_end`). A clip without a cut
+  is coded as before.
+- The second pass leaves out the partition search's fast breakouts and
+  measures inter trials by reconstructing them, not on their
+  coefficients (`FrameParams::full_search`): on the three scenes (on
+  two threads, with the step above) 1.7 points fewer bits at the same
+  PSNR-Y and 3.6 to 5.2 at PSNR-U and V, in 1.1 to 1.25 times the time.
+- Golden intervals by motion count a picture as moving only when one
+  block in ten of its sample moved (`arf::MOVED_SHARE`): `testsrc2`'s
+  few moving things (a twentieth of its blocks, 12 samples a picture)
+  gave it golden frames every 6 pictures, alt-refs of 6 to 11 kB at
+  1 Mb/s, where libvpx's are 16 apart and take 23 and 8 kB (on the three
+  scenes, two threads, 1.3 points fewer bits at the same PSNR-Y, 0.7 and
+  0.8 at PSNR-U and V).
+- The second pass weighs chroma's bits 0.75 of luma's (0.8): PSNR-U on
+  the three scenes from +0.04% to −0.9% for 0.4 points of PSNR-Y, and
+  0.4 and 1.3 points of PSNR-Y for 1 to 3 at PSNR-U on the other two.
+
+| Speed 10, realtime 8 | Y | U | V | FFmpeg avg | 6:1:1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| three scenes, before | −6.0% | +4.9% | +1.7% | −2.5% | −4.1% |
+| three scenes, now | −8.3% | −0.7% | −2.5% | −5.8% | −7.0% |
+| still scene, before | −66.7% | −52.8% | −53.4% | −61.3% | −64.8% |
+| still scene, now | −69.3% | −58.0% | −58.4% | −65.0% | −67.8% |
+| grainy pan, before | n/a | −56.6% | −57.5% | −67.8% | −74.3% |
+| grainy pan, now | n/a | −60.7% | −61.3% | −70.3% | n/a |
+
+| Speed 9, realtime 8 | Y | U | V | FFmpeg avg | 6:1:1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| three scenes, before | −14.7% | −2.9% | −5.3% | −10.6% | −12.5% |
+| three scenes, now | −17.0% | −9.4% | −10.7% | −14.4% | −15.6% |
+| still scene, before | −68.9% | −55.0% | −55.7% | −63.5% | −67.0% |
+| still scene, now | −72.0% | −59.6% | −60.0% | −67.2% | −70.4% |
+| grainy pan, before | n/a | −58.8% | −59.4% | −69.6% | −75.7% |
+| grainy pan, now | n/a | −61.2% | −61.7% | −71.2% | −76.9% |
+
+(n/a: the curves do not meet.) Speeds 9 and 10 at a bitrate keep a
+reference pool too (`api::RT_POOL_SPEED`), a cheap one: every shown
+picture refreshes one of slots 3 to 5, and GOLDEN reads the last of
+them (or the golden frame) that stands an even number of luma samples
+from where the content is now, so that chroma predicts from it at whole
+samples; its blocks try the vector of that displacement (the vector
+from neither NEAREST nor NEAR: at these speeds GOLDEN is not searched).
+Where the content stands is the sum of each picture's motion, found on
+luma profiles (`arf::Profile`: the differences from the sample above
+summed along each row, and from the one to the left down each column,
+the offsets of least difference within 32 samples): with the extra
+GOLDEN candidate, 2.3% more instructions at speed 10 on the still
+scene's clip. On the three scenes at 2 Mb/s the pan's PSNR-U went from
+34.9 to 35.4 dB at the same bits.
+Time against FFmpeg's realtime 8: on one thread, paired runs pinned to
+their own cores (medians of five), 0.89, 0.90 and 0.88 (0.89, 0.84 and
+0.90 before); on four threads, interleaved (eleven runs), 1.00, 1.02
+and 0.90 (0.97, 1.00 and 0.86 before in the same runs, where the
+previous round measured 0.91, 0.91 and 0.82: the machine's load moves
+these by several points, and in this sitting FFmpeg ran relatively
+faster). So speed 10 was over 0.95 of FFmpeg's time on four threads on
+two clips here, 3 to 4% over the build before. Speed 9: 0.95, 1.02 and 0.86 on four threads
+(0.94, 1.01 and 0.82 before).
+
+The pool costs no CPU time (the same task-clock, ±5%, as the build
+before it); the four threads were idle more. Speed 10 kept 2.2 of the
+four cores busy, and its main thread did about 30% of the wall time on
+its own: half of that starting and waking threads (each frame started
+four tile threads, three loop-filter threads and four symbol writers),
+the rest copies and reading the input. Two changes, both byte-identical
+(41 of 41 configurations of the identity check):
+
+- **One loop-filter thread for the three planes** (`lf_rows`), fed by
+  one channel of each plane's rows: two threads fewer to start each
+  frame, and fewer waking on the four cores the tile threads already
+  fill. 6 to 11% less time at speed 10 on four threads.
+- **The example reads the input on a thread of its own** (`vp9enc`, a
+  few pictures ahead, as FFmpeg's demuxer runs on its own thread): 1 to
+  4% less.
+
+Tried and dropped, both byte-identical and no faster: building the
+motion profile in bands on threads, and the cut check on threads.
+
+Now, against realtime 8 on four threads (interleaved, medians of seven
+or nine rounds of all four rates): speed 10 0.90, 0.95 and 0.82 (the
+build with the pool, before these two changes, 1.03, 1.02 and 0.90 in
+the same runs; the build before the pool 0.95–0.97, 0.93–0.97 and
+0.85–0.87); speed 9 0.86, 0.88 and 0.76 (0.95, 0.96 and 0.88; before
+the pool 0.91, 0.96 and 0.83). On one thread (paired, pinned, medians
+of five) speed 10 is 0.90, 0.88 and 0.85.
+
+| Constant quality, `-crf` | Y | U | V | FFmpeg avg | 6:1:1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| three scenes, before | +0.2% | −10.2% | −10.1% | −4.1% | −2.5% |
+| three scenes, now | −4.3% | −15.6% | −16.6% | −9.4% | −7.5% |
+| still scene, before | −0.9% | −33.3% | −33.3% | −23.1% | −15.2% |
+| still scene, now | −5.5% | −41.3% | −41.2% | −29.9% | −21.3% |
+| grainy pan, before | −21.1% | −39.7% | −39.7% | −32.5% | −27.9% |
+| grainy pan, now | −25.9% | −45.9% | −45.9% | −38.4% | −33.4% |
+
+A fixed quantizer at speed 5 searches as the second pass does
+(`api::FULL_SEARCH_SPEED`), in 1.22, 1.39 and 1.38 times the time:
+0.55, 0.82 and 0.76 of libvpx's (3.96, 3.21 and 2.21 s a stream against
+7.23, 3.93 and 2.90 s; 0.45, 0.59 and 0.55 before; the mean over each
+curve's points of medians of three runs). With every one-pass prune
+left out too (the second pass's whole search), the same within a point
+in 1.2 times that time.
+
+| Speed 6, FFmpeg's default | Y | U | V | FFmpeg avg | 6:1:1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| three scenes, before | −1.5% | +0.2% | −2.1% | −1.3% | −1.4% |
+| three scenes, now | −1.0% | −1.4% | −3.3% | −1.5% | −1.3% |
+| still scene, before | −21.2% | −34.9% | −35.1% | −29.3% | −26.2% |
+| still scene, now | −20.2% | −36.1% | −36.3% | −29.7% | −26.1% |
+| grainy pan, before | −30.7% | −49.1% | −49.2% | −42.3% | −38.3% |
+| grainy pan, now | −29.8% | −50.3% | −50.4% | −42.7% | −38.2% |
+
+Speed 6 in one pass weighs chroma's bits 0.75 of luma's
+(`tile::CHROMA_RATE_SIX`; 0.7: −0.3 / −1.4% at PSNR-Y / U on the three
+scenes), in 1.00, 0.93 and 0.99 of speed 5's time (0.53, 0.57 and 0.71
+of FFmpeg's): on the three scenes speed 6 is no faster than speed 5 in
+these runs, nor was it before (0.99). Speed 7's alt-refs, coded at
+speed 6, take it too: on the three clips 0.2 to 2.6 points fewer bits at
+every column. Speed 8's alt-refs weigh chroma as speed 8 does and stop
+the partition search at a cheap block at the thresholds of before the
+pool (`FrameParams::fast_arf`): speed 8 writes the streams it wrote
+before "Chroma", which had cost it 1 to 3 points at PSNR-Y.
+
+Tried and left out in this round. Two passes: finer golden frames and
+alt-refs only in groups that predict well (libvpx's boost: to half the
+step, PSNR-U on the three scenes +9.6% to +8.5% but the still scene's
+from −32.8% to −25.7%); golden intervals of 32 samples of motion (4
+pictures on the pan, as libvpx: worse on all three clips); the scene's
+step by a window of 12 pictures around each picture instead of a scene's
+(clips without cuts lost 3 to 7 points of PSNR-Y: the window's ratio
+wanders); chroma's error weighed 3 and its bits 0.6 in the second pass
+(the three scenes' PSNR-U −0.6%, but PSNR-Y −0.5% there and 2 to 3
+points elsewhere); the inter candidates' margin left out too (PSNR-U
+−0.6%, the still scene's PSNR-Y 1.2 points worse); six candidates
+ranked with their chroma (−0.3%); speed 4's search in the second pass
+(the three scenes at −6.4 / +5.7 / −0.1%, every clip better, but 1.45
+to 1.75 times the time: the pan at 0.53 to 0.69 of libvpx's). Speed 10:
+the median of the coded vectors on LAST as the motion (they run short,
+6 samples where the content moves 7 or 8, and the parity is lost),
+nine vectors around the last motion voted on by blocks of detail
+(content moving 7.5 samples a picture splits the vote), and
+`arf::shift` itself on blocks 64 apart (the same streams as the
+profiles, 5 to 9% more time); the two best candidates ranked with their
+chroma (the fractal 1 dB under at PSNR-Y, the pan no better). Speed 6:
+chroma's error weighed 2.5 (PSNR-U −0.3% only); no compound prediction
+(`COMPOUND_SPEED` 5, to take speed 6 under speed 5's time on the three
+scenes): 3.5 to 9.8 points more bits at the same PSNR-Y than speed 6
+with it, and behind FFmpeg's default on the three scenes (+3.1 / +3.8 /
++1.2 / +2.9 / +3.0), so speed 6 keeps it. Leaving out its extra chroma intra modes
+(as speed 7 does) cost less but still too much: −0.2 / −0.0 / −1.7 /
+−0.5 / −0.4 on the three scenes, level with FFmpeg at PSNR-U, so speed
+6 keeps those too and takes speed 5's time there; everything it does
+past speed 5 is what keeps it ahead. Speed 8: the old stop
+with speed 6's chroma weights (0.3 to 1.4 points better at PSNR-U, 0.8
+worse at PSNR-Y on the three scenes).
+
+The two thinnest margins, then widened. Speed 10's PSNR-U on the three
+scenes (−0.7%) and two passes' (−0.9%) were the closest any measure came
+to libvpx's. Speed 10 at a bitrate now codes chroma 3 quantizer steps
+finer than luma (`api::RT_UV_DELTA`, the header's chroma deltas, which
+the encoder had always written as 0), and the second pass weighs chroma's
+bits 0.7 of luma's (`tile::CHROMA_RATE_TWO`, from 0.75). BD-rate at the
+same PSNR-Y / U / V / FFmpeg's average / 6:1:1, four threads:
+
+| Three scenes | Before | Now |
+| --- | --- | --- |
+| Speed 10 vs realtime 8 | −8.3 / −0.7 / −2.5 / −5.8 / −7.0 | −6.9 / −1.6 / −4.3 / −5.5 / −6.1 |
+| Two passes vs `-pass 1/2` | −6.4 / −0.9 / −5.3 / −5.1 / −5.6 | −6.0 / −1.6 / −5.9 / −5.2 / −5.4 |
+
+The closest measure is now 1.6 points ahead in both, where it was 0.7
+and 0.9; each gives back a little PSNR-Y for it. On the other two clips speed 10 is −69.6 /
+−57.2 / −57.7 / −65.0 / −68.0 (still scene) and n/a / −59.3 / −60.0 /
+−70.0 / n/a (pan), and two passes −37.6 / −34.3 / −34.2 / −35.5 / −36.3
+and −14.3 / −29.0 / −28.3 / −21.9 / −20.0. Larger chroma deltas trade
+on: −6 gives −5.1 / −2.3 / −5.3 / −4.7 / −4.9 on the three scenes, −10
+−2.6 / −3.5 / −6.4 / −3.6 / −3.3. At speed 9, whose closest measure is
+9 points ahead, −3 bought nothing (−15.4 / −9.7 / −11.5 / −13.7 / −14.5
+from −17.0 / −9.4 / −10.7 / −14.4 / −15.6); a chroma bit weight of 1.15
+instead of 1/0.7 at speeds 9 and 10 changed no stream (their realtime
+path does not weigh chroma's bits). Speed 10 on four threads: 0.92,
+0.96 and 0.82 of realtime 8's time (0.91, 0.92 and 0.83 for the build
+before, in the same runs). The streams were checked in FFmpeg's `vp9`
+(threaded and on one thread), libvpx and this decoder: 20 of 20 decodes
+the same; every other configuration of the identity check is
+byte-identical (36 of 41; the five that changed are speed 10 at a
+bitrate and two passes).
+
+**Synthetic pans.** The alpha plane of "Alpha" (in "Options measured"),
+a 640×360 plane of `128 + 127 sin((X + 6N)/50) cos((Y − 3N)/40)`
+(chroma 128, 60 pictures), moves by whole samples, (−6, +3) a picture,
+so that nearly every block predicts exactly from one vector; yet at
+`crf=15` to `55` (speed 5, four threads) this encoder took +57% bits
+at the same PSNR-Y against FFmpeg's `-crf` (speeds 0 and 2: +25%),
+with inter frames of twice libvpx's size, 2.5 dB under. Decoded by this
+crate's decoder with the modes, vectors and residuals of each block
+printed, libvpx's frames and ours, two causes:
+
+- The motion search never read past the reference's edges. Its SADs
+  (`sad_ref`, the four at once, `sad_sub`, `sad_sub_exact`) were `None`
+  for a window over an edge (and the 8-tap one wanted three samples
+  inside), so content that moves in from an edge (here the top three
+  rows and the right six columns, each picture) could not take the
+  motion, nor its neighbours' NEAREST and NEAR where those cross: the
+  top superblock row coded NEWMV of (0, 4.5) to (0, 7.5) samples with
+  a residual each picture, which made the row below code NEAR (12 to 24
+  blocks a picture), and the right column took intra or vertical
+  vectors. libvpx reads its 160-sample borders. Now a window reaches
+  `tile::EDGE_REACH` (16) samples past each edge, the edge samples
+  repeated as the decoder predicts there (a window over the top or the
+  bottom only reads the edge row again, at a stride of 0; one over the
+  sides is copied).
+- The alt-ref's temporal filter blurred the pan. Its search in one pass
+  started from zero alone, and its diamond stops in the valleys of a
+  smooth picture: one block in five matched two samples off its exact
+  match, at an error its weights still take (the filtered alt-ref was
+  0.39 a sample in squared error from its picture; now 0.03). It now
+  starts from the match of the block to its left too (as two passes'
+  did), reaches past the edges as the search does, and filters chroma
+  at half a sample where the luma vector is odd (the mean of the two
+  chroma samples it falls between; it took the one before, half a
+  sample off: on the grainy pan, 7 to 8 samples a picture, every other
+  picture's chroma).
+
+The gradient (bytes of the IVF, PSNR-Y), FFmpeg's `-crf` against
+`crf=` here:
+
+| crf | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| 15 | 17767, 55.10 dB | 17570, 51.86 dB | 13491, 52.43 dB |
+| 25 | 14431, 53.64 dB | 12580, 50.63 dB | 9941, 50.94 dB |
+| 35 | 8704, 51.31 dB | 10130, 48.66 dB | 7760, 48.73 dB |
+| 45 | 6428, 48.40 dB | 8660, 45.93 dB | 6505, 46.04 dB |
+| 55 | 5395, 45.09 dB | 7654, 42.80 dB | 5969, 42.68 dB |
+
++57.0% → +17.9% at the same PSNR-Y (the edges alone: +22.8%; speed 2
++5.5%). `testsrc2` (640×360, 60 pictures, the colour stream of
+"Alpha"): +18.2% → +18.1%. On the README's three clips, against the
+build before (BD-rate at the same PSNR-Y / U / V / FFmpeg's average /
+6:1:1, four threads; the realtime speeds with `cbr=1000`, constant
+quality at `q=60` to `210`):
+
+| Before → now | Three scenes | Still scene, two jumps | Grainy pan |
+| --- | --- | --- | --- |
+| Speed 5 | −0.6 / −0.4 / −0.3 / −0.5 / −0.6 | −0.8 / −0.9 / −0.9 / −0.9 / −0.9 | −1.7 / −3.1 / −3.1 / −2.3 / −2.2 |
+| Speed 6 | −0.6 / +0.4 / +0.2 / −0.3 / −0.4 | −2.3 / −0.4 / −0.3 / −1.2 / −1.6 | −2.3 / −0.9 / −0.8 / −1.0 / −1.7 |
+| Two passes | −0.6 / −0.5 / −0.6 / −0.6 / −0.6 | +0.6 / −1.1 / −1.1 / −0.4 / −0.1 | −3.7 / −2.8 / −2.7 / −3.2 / −3.2 |
+| Constant quality | −0.4 / +0.1 / −0.1 / −0.2 / −0.3 | −1.6 / +0.1 / +0.2 / −0.7 / −1.1 | −3.3 / −0.7 / −0.9 / −2.1 / −2.6 |
+| Speed 9 | +0.1 / −0.2 / −0.6 / −0.1 / −0.0 | −2.7 / −0.7 / −0.1 / −1.5 / −2.1 | −3.0 / −1.6 / −1.7 / −2.2 / −2.6 |
+| Speed 10 | −0.2 / −0.8 / −0.6 / −0.4 / −0.3 | −3.0 / −2.8 / −2.8 / −2.9 / −3.0 | −1.6 / −2.9 / −2.7 / −2.1 / −1.8 |
+
+and against FFmpeg (speeds 5 and 6 against its default, two passes
+against `-pass 1/2`, constant quality against `-crf`, speeds 9 and 10
+against realtime 8): speed 5 −4.0 / −1.4 / −3.6 / −3.4 / −3.7 on the
+three scenes, −20.8 / −34.6 / −34.8 / −28.9 / −25.8 on the still scene,
+−31.9 / −50.4 / −50.5 / −43.5 / −39.4 on the pan; speed 6 −1.7 / −0.9 /
+−3.0 / −1.8 / −1.8, −21.5 / −35.6 / −35.7 / −29.8 / −26.6, −30.9 /
+−47.2 / −47.5 / −41.2 / −37.7; two passes −6.5 / −2.1 / −6.4 / −5.7 /
+−5.9, −37.4 / −35.1 / −35.0 / −36.0 / −36.4, −16.2 / −30.8 / −30.1 /
+−23.7 / −21.8; constant quality −4.6 / −15.4 / −16.5 / −9.5 / −7.7,
+−5.6 / −40.9 / −40.7 / −29.7 / −21.1, −26.2 / −45.1 / −45.2 / −38.0 /
+−33.1; speed 9 −11.4 / −7.5 / −9.7 / −10.4 / −10.8, −61.1 / −54.3 /
+−55.0 / −58.2 / −59.7, −64.0 / −57.0 / −57.8 / −60.8 / −62.4; speed 10
+−0.1 / −1.2 / −3.8 / −1.1 / −0.7, −41.2 / −40.6 / −40.9 / −40.8 /
+−41.1, −48.8 / −50.6 / −51.5 / −49.7 / −49.4. Every column on every
+clip is ahead of FFmpeg, as before. CPU time on one thread (1 and 3
+Mb/s on the three scenes and the pan, 0.5 and 2 on the still scene,
+the least of two or three runs each, against the build before): speed
+5 1.01, 1.01 and 1.03; speed 6 1.05, 1.04 and 1.07; speed 10 1.02,
+1.03 and 1.02 (the copies of windows over the edges, the filter's
+seeded search). Every configuration of the identity check changed (41
+of 41: the search reads past the edges at every speed); 56 decodes of
+14 new streams (the gradient at speeds 2, 5, 6 and 10, `testsrc2` in
+two passes and at `crf=30`, the pan at 10 bits, the three clips at
+speeds 5, 6, 9 and 10, two passes and constant quality) are the same in
+FFmpeg's `vp9` (threaded and on one thread), libvpx and this decoder.
+
+Tried and left out: the edges alone without the filter's changes, on
+speed 6 the still scene lost 1.8 points at every column; the filter's
+seed and half samples without the edges, constant quality lost 1.4 to
+2.2 points on the still scene (with both, every mode gains). A reach of
+8 or 32 samples (before the half samples, at speed 6: the pan's PSNR-U
++0.2 and +2.7 points against the build before, where 16 gave +1.3). What
+is left on the gradient: its key frame, at the same quantizer, is 1.7
+dB under libvpx's (at `q=100` 1552 bytes and 48.5 dB, libvpx's at 99
+1715 bytes and 50.2 dB, coded in 32×32 blocks and transforms with many
+more coefficients than ours; a finer key frame or a lower lambda on it
+moved along the same curve); speed 6 is at +80%
+(its partition search stops at whole 64×64 blocks on this smooth
+picture, so the new content at the edges costs a 64×64 block a
+picture); the loop filter level from the quantizer (libvpx searches
+it: on `testsrc2` its levels go from 1 to 14 at `-crf 35`, where ours
+are 21; half our level there gave 14.8% where the level from the
+quantizer gave 17.8%), and per-block filters (speed 5 with SMOOTH and
+SHARP tried, before the filter's changes: +18.1% on the gradient from
++22.8%, in more time).
+
+**Smooth and synthetic pictures, again** (16 November 2026, after
+`e11866b6`). What "Synthetic pans" left: the gradient at +17.9% against
+FFmpeg's `-crf` (its key frame 1.7 dB under libvpx's at the same
+quantizer) and `testsrc2` at +18.1%. Coded alone at `q=68` and decoded
+by this crate's decoder with each block's mode, transform and end of
+block printed, libvpx's key frame of the gradient is 199 blocks of 32×32
+in DC, H, V and TM whose ends of block sum to 15 000, at 0.45 a sample
+of squared error; ours had 24 blocks of 64×64 and 60 of 8×8, mostly TM
+and the directional modes, ends of block summing to 4 000, at 0.67. Speeds 0 to 3 code that key frame alike, 0.2 dB under libvpx's
+curve; speed 5 was 0.6 dB under speed 3 for 6% more bits. Turning speed
+5's key frame features off one at a time, and the inter frames' (the
+gradient at speed 4: +7.5%, at 2: +5.0%), gave three causes, and the
+loop filter a fourth:
+
+- The intra modes a key frame's block tries: speed 5 tries the three
+  best by SATD, and only those within a fifth of the best's, and on a
+  smooth picture SATD ranks them poorly. With a full search (a fixed
+  quantizer up to speed 5, or a second pass) a key frame's blocks now
+  try the best four, however far behind (`KEY_FULL_SPEED`): its key
+  frame is 0.06 dB under speed 3's for 2% more bits, in 1.18 times the
+  instructions of a key frame (720p, a fine quantizer).
+- The inter candidate of large blocks: from 32×32 speed 5 tries one, the
+  best by SAD and vector rate, and on the gradient's pan the search
+  finds vectors a sample to four off the motion, down, whose SAD is a few
+  units under the exact vector's (0.1 to 1% of a 64×64 block's SAD: the
+  reference's quantization noise), where NEAREST has the exact one and
+  wins its trial (a sixth of the 64×64 blocks, a quarter of the 32×32
+  ones, with both tried). With a full search a NEW vector now also tries
+  the free one (NEAREST, NEAR or ZERO of its reference) ranked after it
+  within 3% of its score (`CLOSE_FREE`).
+- The loop filter level came from the quantizer. libvpx searches it
+  (`vp9_pick_filter_level`): on `testsrc2` its levels go from 1 to 14 at
+  `-crf 35`, where ours were 21, and halving ours gave 14.5%. Up to speed
+  5 the level is now searched (`pick_level`, libvpx's
+  `search_filter_level` on part of the picture): one superblock row in
+  four, spread over the frame, filtered in luma at the quantizer's level
+  and a quarter of it either side, moving to the side of less error
+  (libvpx's bias for the lower level kept), the step halved while the
+  level stands, down to 2; levels 2 to 61, whose masks the encoder
+  rebases from the quantizer's (`Mask::rebase`) rather than build them
+  again. The level found is kept only where the three planes' errors,
+  each against its own at the quantizer's level, fall by 1% on average.
+  A frame whose level is searched is not filtered row by row as its tiles
+  come (the frames are the same whatever the threads).
+- Not a cause: the key frame's quantizer (libvpx's `-crf` codes it at a
+  quarter of the inter step; ours at 0.35 of it): at 0.25 no better, at
+  0.18 1 to 1.6 points worse.
+
+The gradient and `testsrc2` (bytes of the IVF, PSNR-Y; speed 5, four
+threads), FFmpeg's `-crf` against `crf=` here:
+
+| crf | Gradient, FFmpeg | Before | Now | `testsrc2`, FFmpeg | Before | Now |
+| --- | --- | --- | --- | --- | --- | --- |
+| 15 | 17767, 55.10 dB | 13491, 52.43 dB | 13433, 52.83 dB | 357003, 54.36 dB | 339547, 52.39 dB | 339601, 52.41 dB |
+| 25 | 14431, 53.64 dB | 9941, 50.94 dB | 9991, 51.37 dB | 272682, 50.37 dB | 255025, 48.53 dB | 254403, 48.54 dB |
+| 35 | 8704, 51.31 dB | 7760, 48.73 dB | 7491, 49.01 dB | 175644, 45.59 dB | 154368, 43.25 dB | 153152, 43.34 dB |
+| 45 | 6428, 48.40 dB | 6505, 46.04 dB | 6269, 46.38 dB | 87402, 40.61 dB | 68119, 38.26 dB | 65830, 38.47 dB |
+| 55 | 5395, 45.09 dB | 5969, 42.68 dB | 5555, 43.10 dB | 33071, 37.41 dB | 22194, 34.55 dB | 21597, 34.56 dB |
+
+At the same PSNR-Y, the gradient +17.9% → +10.9%, `testsrc2` +18.1% →
++15.2%. By part: the level's search alone, +17.9% and +15.5%; with the
+key frames, +13.2% and +15.1%; the key frames and free vectors without
+the search, +10.9% and +17.7%. On the README's three clips, against the
+build before (BD-rate at the same PSNR-Y / U / V / FFmpeg's average /
+6:1:1, four threads; constant quality at `q=60` to `210`):
+
+| Before → now | Three scenes | Still scene, two jumps | Grainy pan |
+| --- | --- | --- | --- |
+| Speed 5 | +0.0 / −0.1 / −0.6 / −0.1 / −0.1 | −2.6 / −2.2 / −2.4 / −2.4 / −2.5 | 0.0 / 0.0 / 0.0 / 0.0 / 0.0 |
+| Two passes | −0.8 / −1.5 / −1.1 / −1.0 / −1.0 | −2.1 / −0.2 / −0.3 / −1.1 / −1.4 | −1.7 / +0.1 / +0.2 / −0.6 / −0.9 |
+| Constant quality | −0.6 / −1.3 / −1.2 / −0.8 / −0.7 | −3.8 / −2.5 / −2.4 / −3.1 / −3.4 | −1.4 / −2.1 / −2.0 / −1.7 / −1.6 |
+
+Speeds 6, 9 and 10 write the same streams as before (the pan at speed 5
+too: its searched levels never took off the 1%). Against FFmpeg now:
+speed 5 −3.9 / −1.6 / −4.4 / −3.6 / −3.7 on the three scenes, −22.7 /
+−36.2 / −36.5 / −30.7 / −27.6 on the still scene, −31.9 / −50.4 / −50.5
+/ −43.5 / −39.4 on the pan; two passes −7.4 / −3.6 / −7.5 / −6.7 / −6.9,
+−38.4 / −35.2 / −35.2 / −36.6 / −37.2, −17.0 / −30.7 / −30.0 / −24.0 /
+−22.3; constant quality −4.9 / −16.3 / −17.3 / −10.0 / −8.1, −8.2 /
+−42.2 / −41.9 / −31.4 / −23.1, −27.6 / −46.6 / −46.7 / −39.4 / −34.6.
+CPU time on one thread against the build before (1 and 3 Mb/s on the
+three scenes and the pan, 0.5 and 2 on the still scene, `q=80` and
+`160` at constant quality; medians of three rounds, in turn): speed 5
+0.995, 1.025 and 0.997; speed 6 1.008, 1.013 and 1.017 (the same
+streams: the noise of the measure); speed 10 0.991, 1.015 and 0.963;
+two passes 1.008, 1.018 and 1.035; constant quality 1.026, 1.059 and
+1.030 (the key frames' fuller search and the free vectors' trials, 2%
+each on the still scene). Speed 10 on four threads against FFmpeg's
+realtime 8: 0.97, 1.01 and 0.84 (the build before in the same runs:
+0.94, 1.01 and 0.86). 11 of the identity check's 41 configurations
+changed (speeds 2 and 5 at a fixed quantizer, and at a bitrate where a
+searched level took off the 1%; two passes; constant quality), the
+other 30 (every one at speeds 6 to 10) did not; 56 decodes of 14 new streams (the gradient
+and `testsrc2` at `crf=35`, `testsrc2` in two passes and at speed 2, 10
+bits at three quantizers, 4:4:4, a noisy picture at a bitrate, speed 2
+on one thread, the three clips' constant quality, two passes and speed
+5) are the same in FFmpeg's `vp9` (threaded and on one thread), libvpx
+and this decoder.
+
+Tried and left out: the level searched on luma alone (libvpx's measure):
+the grainy pan at speed 5 lost 4 points of PSNR-U, as its luma's error
+wants less filter and its chroma's more; the three planes' errors
+summed, 2.3 points; each plane's against its own, averaged, 1.6; with a
+margin of 1%, 0.4; with level 0 (no filter) left out of the levels, as
+now, none (the 0.4 was the pan's key frame turning its filter off). The
+whole frame searched (`testsrc2` 0.4 points better than a row in four)
+took 10% more time at speed 5, a row in three 5%, libvpx's single band
+in the middle (an eighth of the rows) lost 2 points on `testsrc2`. The
+key frames' fuller search at a bitrate in one pass: the pan lost 2.2
+points of PSNR-U for 2.5 of PSNR-Y (the key frame's size moves the rate
+control there), so only with a full search; with the key frames' trials
+quantized by RD too (not by the dead zone), the gradient a point better,
+for 1.69 times a key frame's instructions. The free vector preferred
+without its trial (ranked first within 3%, at every speed and mode): 1.8
+points lost on the still scene at speed 6, 0.6 on the pan at speed 5. Two inter candidates at every
+32×32 and larger block with a full search: the gradient at +8.9%, for
+5% more time at constant quality on the pan; the second candidate tried
+whenever within 3% of the first (not only a free one after a NEW), 3
+to 7% more time at a bitrate. Rectangular partitions (speed 4's halves, tried before
+the split): `testsrc2` 5 points better, in 2.5 times the time; after a
+split that won and only where its quarters pair up across or down, 0.6
+points; after every split that won, 3.6 points for 1.66 times the time.
+`testsrc2` without alt-refs: 2.2 points better there, 8 worse on the
+gradient. What is left: `testsrc2` at +15.2% (rectangular partitions
+are 5 points of it; with these changes speed 4 is at +13.0%, speed 2 at
++6.1%), the gradient at +10.9% (speed 2: +5.0%).
+
 Still behind: `testsrc2` alone, where libvpx is ahead at every speed
 here on PSNR-Y too (at fixed quantizers against `-crf`: +9% / +33% at
 PSNR-Y / U at speed 5, −2.8% / +18% at speed 1); its key frame takes 9%
@@ -936,6 +1431,1187 @@ constant bitrate (2 Mb/s, `cbr=1000`, speed 5) the pan comes in 6.4%
 over (2.6% before), the other two within 1.6% and 3.8% as before. The pan on
 four threads is at 0.81 of FFmpeg's time (0.73 before), the rest at
 0.55 to 0.62.
+
+**Seeded reference searches and halves after a split** (17 November
+2026, after `b564507e`). What was left: the gradient at +10.9% against
+FFmpeg's `-crf`, `testsrc2` at +15.2%.
+
+- The search on ALTREF started from zero and LAST's neighbours' vectors,
+  and an alt-ref's search on LAST from its own; on a pan both stopped in
+  the valleys of smooth pictures and grain, far from where the content
+  stood. With the reference pool (up to speed 6), they now also start
+  from the whole-picture offset the pool tracks between the two pictures
+  (`FrameEncoder::set_ref_seed`), and reach that far past the usual 64
+  samples. Speeds 7 and up write the same streams.
+- At speeds 4 and 5 with a full search (a fixed quantizer, a second
+  pass), an inter frame's 16×16 block whose split won also tries its
+  halves, across or down, where two of its quarters side by side share a
+  reference and vector: libvpx's rectangular partitions, pruned by the
+  split's own choices. Each half takes the best of the whole block's and
+  its quarters' predictions by SAD and vector rate, with no search of its
+  own; only the direction with more matching pairs; intra modes only
+  where the block or a quarter chose intra; 4×4 transforms only where a
+  quarter took them.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y, 15
+to 55, four threads):
+
+| | Before | Seeded searches | And halves |
+| --- | --- | --- | --- |
+| Gradient | +10.9% | +6.0% | +5.8% |
+| `testsrc2` | +15.2% | +12.8% | +11.4% |
+
+On the README's three clips (three scenes / still scene / grainy pan),
+BD-rate Y / U / V / FFmpeg's average / 6:1:1 against the build before:
+
+| Mode | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| Speed 5, 1–4 Mb/s | −1.6 / −2.8 / −3.0 / −2.1 / −1.9 | −5.1 / −9.7 / −9.5 / −7.5 / −6.7 | −7.3 / −14.5 / −14.2 / −11.5 / −10.2 |
+| Speed 6 | −1.4 / −2.9 / −2.8 / −2.0 / −1.8 | −4.2 / −9.8 / −10.0 / −7.4 / −6.2 | −6.8 / −16.2 / −15.9 / −12.3 / −10.6 |
+| Two passes | −2.8 / −2.4 / −2.7 / −2.7 / −2.8 | −3.5 / −3.5 / −3.3 / −3.4 / −3.5 | −6.2 / −5.2 / −5.5 / −5.8 / −5.8 |
+| Fixed q 60–210 | −3.8 / −4.0 / −3.9 / −3.9 / −3.8 | −9.8 / −9.7 / −9.9 / −9.8 / −9.8 | −25.0 / −24.7 / −24.7 / −25.0 / −24.9 |
+
+At the same quantizer the PSNR stays within 0.1 dB and the pan's streams
+take 13–30% fewer bytes. Speed 5 against FFmpeg's default is now −5.7 /
+−5.0 / −8.2 / −6.0 / −5.9 on the three scenes, −26.3 / −41.9 / −42.1 /
+−35.4 / −32.0 on the still scene and −36.2 / −59.7 / −59.7 / −51.1 /
+−46.1 on the pan; speed 6 −3.3 / −4.4 / −6.2 / −4.0 / −3.7, −24.6 /
+−42.3 / −42.7 / −35.0 / −31.1 and −35.2 / −59.9 / −59.7 / −50.8 /
+−45.6.
+
+CPU time on one thread against the build before (30 pictures, median of
+three interleaved runs pinned to one core; three scenes, still scene,
+pan): `q=120` 1.02, 1.12, 0.97; speed 5 at 2 Mb/s 0.97, 0.92, 0.93;
+speed 6 0.94, 0.97, 1.11; two passes 1.01, 1.08, 0.99. The halves cost
+time on the still scene at a fixed quantizer and in two passes, where
+they are tried; the seeded searches end sooner on the pan at speed 5.
+
+Checks: 27 of the 41 configurations of the identity check change (speeds
+2, 5 and 6, two passes and fixed quantizers), none at speeds 7 to 10. FFmpeg's
+`vp9` (threaded and on one thread), libvpx and this decoder agree on 7
+new streams (28 of 28 decodes: the pan at `q=120`, two passes, speed 6,
+4:4:4 at `q=60`, 10-bit at speed 6, `testsrc2` and the gradient at
+`crf=35`, the last on one thread).
+
+Tried and dropped: each half taking the best two candidates in both
+directions (`testsrc2` +12.8% → +12.0%); the single best in the
+direction with more pairs gives +11.9% with fewer trials. What is left:
+`testsrc2` at +11.4%, the gradient at +5.8%.
+
+**Small objects, the loop filter and key frames at a fixed quantizer**
+(17 November 2026, after `9c3ecf54`). What was left: `testsrc2` at
++11.4% against FFmpeg's `-crf` (+9.9% / +6.9% at the same PSNR-U / V),
+the gradient at +5.8%. Coded at `-crf 35`, libvpx's `testsrc2` has no
+alt-ref: LAST alone, a golden frame every 10 pictures, and quantizers 140
+/ 131 / 120 / 98 by the picture's place in 8. Measured by region at the
+same size (FFmpeg's `-crf 35` against `crf=32` here), the squares of
+noise (3% of the picture, two thirds of the error) are as good in both;
+the 8×8 blocks that hold a row of that noise (it starts a row below an
+8×8 edge) were 1.5 dB under libvpx's, and the rest of the picture (94%)
+2 dB under. Three causes:
+
+- The partition search's stop for a whole block that needs no residual
+  (under a full search: its error under the quantizer's step squared over
+  24 a sample) summed the block's error, which hid a small object (a
+  moving square, a figure of the clock, a row of noise) in a block that
+  predicted the rest exactly; the object went uncoded. At a fixed
+  quantizer the stop now also needs every 8×8's luma error under the same
+  bound (`Tile::peak_sse`). Not in a second pass, where the still scene
+  lost 0.4 points of PSNR-Y; second passes write the same streams.
+- The loop filter's search (`pick_level`) measures the frame it filters
+  alone. On pictures that stand still, whose blocks keep their reference
+  whole and have their edges filtered again each picture, the levels it
+  found blurred the pictures after it (libvpx's on `testsrc2` are 1 to
+  14, ours were 6 to 21). At a fixed quantizer in one pass an inter
+  frame now takes 0.6 of the level found (`LF_FIXED_SCALE`).
+- A key frame of a smooth picture codes a gradient in 64×32 and 32×64
+  halves for less than in four 32×32 blocks; speeds 0 to 3 try halves at
+  every size, speed 5 at none. The first picture of the gradient alone
+  was +6.5% against libvpx's at the same PSNR-Y (speed 3: +2.7%). From
+  speed 4 at a fixed quantizer in one pass, a key frame's 64×64 block
+  whose whole cost came within 1.1 times the best of whole and split now
+  tries its halves after the split (`KEY_HALVES`, `Tile::try_halves`):
+  +5.2%.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y, and
+for `testsrc2` U / V, 15 to 55, four threads):
+
+| | Before | 8×8 peak | And the level | And key halves |
+| --- | --- | --- | --- | --- |
+| `testsrc2` | +11.4 / +9.9 / +6.9% | +10.0 / +9.1 / +3.2% | +8.8 / +8.0 / +2.9% | +8.7 / +8.0 / +2.7% |
+| Gradient | +5.8% | +6.2% | +4.3% | +3.6% |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, FFmpeg | Before | Now | Gradient, FFmpeg | Before | Now |
+| --- | --- | --- | --- | --- | --- | --- |
+| 15 | 357003, 54.36 dB | 333587, 52.49 dB | 333472, 52.72 dB | 17767, 55.10 dB | 12926, 53.01 dB | 12916, 53.06 dB |
+| 25 | 272682, 50.37 dB | 248888, 48.58 dB | 250075, 48.80 dB | 14431, 53.64 dB | 9636, 51.56 dB | 9557, 51.57 dB |
+| 35 | 175644, 45.59 dB | 150636, 43.46 dB | 150857, 43.60 dB | 8704, 51.31 dB | 7311, 49.25 dB | 7238, 49.42 dB |
+| 45 | 87402, 40.61 dB | 64038, 38.56 dB | 64750, 38.83 dB | 6428, 48.40 dB | 6161, 46.58 dB | 5996, 46.71 dB |
+| 55 | 33071, 37.41 dB | 20929, 34.67 dB | 22915, 35.27 dB | 5395, 45.09 dB | 5534, 43.58 dB | 5620, 43.54 dB |
+
+Speed 2 at `crf=` (the peak and the level; key halves are from speed 4):
+`testsrc2` +3.1 / −1.8 / −7.4% → +2.0 / −2.6 / −7.7%, the gradient
+−0.7% → −1.4%. On the README's three clips at `q=60` to `210` against the
+build before (BD-rate Y / U / V / FFmpeg's average / 6:1:1):
+
+| Fixed q | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| 8×8 peak | −1.3 / −0.3 / −0.7 / −1.0 / −1.1 | −0.6 / −2.3 / −2.3 / −1.5 / −1.1 | −0.0 / −0.1 / −0.0 / −0.1 / −0.0 |
+| All three | −1.4 / −0.9 / −1.0 / −1.3 / −1.3 | −0.4 / −2.2 / −2.2 / −1.3 / −0.9 | −0.3 / −0.8 / −0.5 / −0.5 / −0.4 |
+
+Against FFmpeg's `-crf` there: −9.3 / −20.4 / −21.4 / −14.2 / −12.4 on the
+three scenes, −17.8 / −49.3 / −49.2 / −39.4 / −31.7 on the still scene and
+−45.9 / −60.5 / −60.5 / −54.9 / −51.2 on the pan (−8.1, −16.6 and −45.7
+at the same PSNR-Y before). Every other mode (speeds 5 to 10 at a bitrate,
+two passes) writes the same streams as before.
+
+CPU time on one thread against the build before (30 pictures, medians of
+five interleaved runs pinned to one core; three scenes, still scene,
+pan): `q=120` 0.96, 1.11 and 0.98, `q=80` 1.06, 1.08 and 0.97 (1.015 and
+1.034 on average). The still scene, with its two jumps, pays most: its
+key frames' halves and the peak's splits.
+
+Checks: of the identity check's 41 configurations, those at a fixed
+quantizer at speeds 2 and 5 (and the still scene at `q=120`) change, the
+other 36 (every bitrate, two passes, speeds 6 to 10) do not. FFmpeg's `vp9`
+(threaded and on one thread), libvpx and this decoder agree on 10 new
+streams (40 of 40 decodes: `testsrc2` at `crf=35` at speeds 5 and 4, at
+`crf=30` at speed 2 and at `crf=40` on one thread, the gradient at
+`crf=35`, a 4:2:0 picture at `crf=25` on two threads, the pan at `q=120`,
+the still scene at `q=80`, the pan at 10 bits at `q=100`, 4:4:4 at
+`q=60`). New tests: a 2×2 square in a flat 64×64 block that predicts whole
+is coded; inter frames take `LF_FIXED_SCALE` of the searched level in one
+pass only; a smooth key frame codes 64×64 blocks in halves in one pass
+and none in a second (each fails without its change).
+
+Tried and dropped (BD-rate on `testsrc2` / the gradient at speed 5 against
+FFmpeg's `-crf`, from the build of each step):
+
+- Halves after a winning split at 32×32, and at 32×32 and 64×64 too (the
+  quarters' pairing prune): +11.9% and +12.1% from +11.4%. Halves after
+  a split that lost, or in both directions without the pairing: +9.1%,
+  +8.2% from +8.8%.
+- Halves before the split at every size, with their own search, as speeds
+  0 to 3 try them: +6.8% from +11.4%, in twice the time; at 16×16 only,
+  +6.7% from +8.8%, in 1.34 to 1.67 times the time on the README's clips.
+  Pruned to whole blocks that code a residual, to the direction their
+  error is the more uneven, or to the halves' seeds without a search (the
+  whole block's choice and each reference's NEAREST and NEAR), the gain
+  went with the time (+8.1% to +9.7%, at 1.14 to 1.22 times).
+- libvpx's structure: layered alt-refs (`arf_layers=2`, `3`: +14.3%,
+  +15.5%); its quantizers by place in 8 (0.5 / 0.71 / 0.86 of the step):
+  +15.2% (+12.6% without alt-refs); key frames at 0.25 and 0.2 of the step
+  (+12.2%, +13.0%), golden frames at 0.4 and 0.6 (+13.0%, +11.5%).
+- Lambda: the trials' × 0.7 and × 1.4 (+12.3%, +15.0%), RD quantization's
+  (+11.9%, +14.4%); chroma's error weighed 1 rather than 2: +10.9% at the
+  same PSNR-Y for +14.5% / +11.9% at PSNR-U / V.
+- Each of speed 5's prunes set back to speed 4's alone: neutral or worse
+  on `testsrc2` (one candidate at 32×32 and up +13.2%, the subpixel
+  diagonals +11.9%, the dead zone's trials +12.4%); a transform cap of
+  16×16 or 8×8 for inter blocks, sub-8×8 inter blocks: +11.2% to +11.5%.
+- The 8×8 peak with chroma's error in it as the trials weigh it:
+  `testsrc2` +10.1 / +5.6 / −0.7%, but 1.6 to 2.5 points of PSNR-Y lost on
+  the still scene and the pan at fixed quantizers. With the bound doubled:
+  +10.6% on `testsrc2` for +5.8% on the gradient. No stop at all: +9.8%
+  for 1.46 times the time.
+- The level's scale at 0.45 (the still scene a point worse) and 0.7 (half
+  the gain); the search's level kept without its 1% margin (`testsrc2`
+  +9.1%, the gradient +4.6%, the still scene's chroma worse); the scale on
+  key frames (+9.1% / +4.8%), in a second pass (the pan 1.7 points worse),
+  at a bitrate (0.1 to 1.4 points of PSNR-Y lost).
+- Key frames' halves at every size with RD-quantized trials: the gradient
+  +3.6% with them alone, but 1.2 to 1.8 times the time on 30 pictures;
+  RD-quantized trials alone 1.0 to 1.2 times. Inter frames' 64×64 halves
+  where whole came close: nothing.
+- Candidates past the first without the margin at a fixed quantizer: the
+  gradient +2.8%, `testsrc2` +8.5%, for 1.03 to 1.08 times the time; three
+  intra candidates in inter frames: `testsrc2` +8.0%, 1.05 to 1.19 times.
+
+What is left: `testsrc2` at +8.7% (speed 4: +7.1%, speed 2: +2.0%), the
+gradient at +3.6% (speed 4: +2.3%). Most of `testsrc2`'s is halves before
+the split, which cost more time than speed 5 has.
+
+**A mesh after the diamond, and a second smaller transform** (17
+November 2026, after `944bc05a`). What was left: `testsrc2` at +8.7% /
++8.0% / +2.7% against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V, 15 to 55, speed 5, four threads), the gradient at +3.6%. Coded at
+FFmpeg's `-crf 35` and at `crf=32` here (175 644 and 181 194 bytes), the
+error of `testsrc2` by region, ours against libvpx's: blocks whose source
+did not change, 1.19 against 0.82 million (squared error, luma, the 59
+inter frames); blocks that changed, 20.5 against 18.8 million. Mapped by
+8×8, the excess sits on the small objects that move over the flat bars:
+the grey bar that grows 6 samples a picture at each end, the square that
+moves down by the green bar, the ring of small squares, the clock's
+figures. Decoded with each block's mode and vector printed, libvpx codes
+the grey bar's ends in the first inter frame as NEWMV (0, 6) and (0, 4)
+samples and NEAREST, all without a residual; ours took vector 0 with a
+residual, intra, and ALTREF at (0, −3.75). One cause, and a smaller one:
+
+- The whole-sample search is a diamond from the neighbours' vectors and
+  the pool's seeds, then the square of two around its choice. Over a flat
+  background a small object leaves the same error at every vector short
+  of its own (the grey bar's 8×8 block: 2 samples wrong a row from 0 to 4
+  samples across, none at 6), and the diamond stops at its start; on
+  GOLDEN and ALTREF, many pictures away, the motion is many times a
+  picture's and the diamond stops in the valleys between. A square of
+  radius 4, 6 or 8 at the end took `testsrc2` from +8.7% to +7.7%, +6.4%
+  and +5.7%; a mesh of every second sample within 16 at every block size,
+  to +4.0%, in 1.3 to 1.4 times the time on the README's clips (with a
+  floor on its SAD). At a
+  fixed quantizer in one pass a 16×16 block's search now ends with a mesh
+  (`tile::MESH_RANGE`, `mesh_in`): every second sample within 32 of the
+  diamond's choice, measured on every other row, where the choice leaves
+  more than 1.5 a sample of SAD (`MESH_ERROR`) in few samples (its squared
+  error over 8 times its SAD, `MESH_SPARSE`: grain spreads its error, and
+  a mesh seldom finds it a better vector). A `psadbw` gives both halves
+  of a 16-wide row (`cutlass_simd::vp9::sad8::halves4`), so one pass
+  keeps the best two of the block and of each 8×8 quarter; both are
+  measured whole, the quarters' at the quarters' own searches, which take
+  no mesh of their own. GOLDEN and ALTREF take one only where LAST's did.
+  libvpx's slower speeds search meshes too (`full_pixel_exhaustive`).
+- From speed 4, after the best mode, one transform size smaller is tried;
+  speeds 0 to 3 try two. At a fixed quantizer in one pass, the second is
+  now tried where the first won.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V):
+
+| | Before | Mesh, every reference | And the transform | Mesh on GOLDEN and ALTREF after LAST's (now) |
+| --- | --- | --- | --- | --- |
+| `testsrc2` | +8.7 / +8.0 / +2.7% | +2.9 / +1.7 / −2.5% | +2.4 / +1.8 / −3.4% | +3.1 / +2.2 / −2.9% |
+| Gradient | +3.6% | +3.6% | +3.6% | +3.6% |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, FFmpeg | Before | Now | Gradient, FFmpeg | Before | Now |
+| --- | --- | --- | --- | --- | --- | --- |
+| 15 | 357003, 54.36 dB | 333472, 52.72 dB | 324395, 52.76 dB | 17767, 55.10 dB | 12916, 53.06 dB | 13000, 53.05 dB |
+| 25 | 272682, 50.37 dB | 250075, 48.80 dB | 242857, 48.89 dB | 14431, 53.64 dB | 9557, 51.57 dB | 9559, 51.57 dB |
+| 35 | 175644, 45.59 dB | 150857, 43.60 dB | 145479, 43.67 dB | 8704, 51.31 dB | 7238, 49.42 dB | 7196, 49.39 dB |
+| 45 | 87402, 40.61 dB | 64750, 38.83 dB | 61447, 39.00 dB | 6428, 48.40 dB | 5996, 46.71 dB | 5996, 46.71 dB |
+| 55 | 33071, 37.41 dB | 22915, 35.27 dB | 21703, 35.53 dB | 5395, 45.09 dB | 5620, 43.54 dB | 5620, 43.54 dB |
+
+Speed 2 on `testsrc2`: +2.0 / −2.6 / −7.7% → −1.9 / −6.4 / −11.2%. The
+gradient's search never meets the mesh's bounds (its error is small and
+spread), and its streams barely change. Five points of BD-rate on
+`testsrc2` move by up to a point between builds that differ in little;
+with nine (`crf=15` to `55` by 5, against the same five of FFmpeg's) it is
++10.7% before and +5.1% now.
+
+On the README's three clips at `q=60` to `210` against the build before
+(BD-rate Y / U / V / FFmpeg's average / 6:1:1):
+
+| Fixed q | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| Now | −3.1 / −2.1 / −2.0 / −2.7 / −2.8 | −0.8 / −0.1 / +0.0 / −0.4 / −0.6 | −0.2 / +0.1 / +0.0 / −0.1 / −0.1 |
+
+Against FFmpeg's `-crf` there: −11.9 / −22.0 / −23.0 / −16.4 / −14.7 on
+the three scenes, −17.0 / −49.1 / −48.9 / −39.0 / −31.2 on the still
+scene and −46.0 / −60.4 / −60.5 / −55.0 / −51.3 on the pan (−9.3, −17.8
+and −45.9 at the same PSNR-Y before, measured against the same FFmpeg
+curves). Every other mode (speeds 5 to 10 at a bitrate, two passes)
+writes the same streams as before.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` (`-threads 4`) and
+the build before, three rounds interleaved, the mean over each one's
+points of the median of the rounds (Cutlass at `q=60` to `210`):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 6.74 s | 4.12 s (0.61) | 4.63 s (0.69) |
+| Still scene | 3.87 s | 3.30 s (0.85) | 3.24 s (0.84) |
+| Grainy pan | 2.71 s | 2.25 s (0.83) | 2.24 s (0.83) |
+
+At the same bitrate (each one's time interpolated in log rate over the
+range both cover; FFmpeg's time hardly falls below 2.3 s at its lowest
+rates), 0.70, 1.06 and 1.04 now, 0.62, 1.07 and 1.06 before. In pairs on
+the pan alone (`q=120`, six runs each) the two changes cost 2%; the three
+scenes, whose busy blocks take the mesh most, 12% (above).
+
+Checks: of the identity check's 41 configurations, the seven at a fixed
+quantizer (speeds 2 and 5 on three pictures, the still scene at `q=120`)
+change, the other 34 (every bitrate, two passes, speeds 6 to 10) do not.
+FFmpeg's `vp9` (threaded and on one thread), libvpx and this decoder agree
+on 10 new streams (40 of 40 decodes: `testsrc2` at `crf=35`, at `crf=25`
+at speed 4, at `crf=30` at speed 2 and at `crf=40` on one thread, the
+gradient at `crf=35`, 4:4:4 at `q=60`, the pan at 10 bits at `q=100` and
+at `q=120`, the still scene at `q=80`, the three scenes at `q=150` on two
+threads). New tests: a textured 6×6 square moved 12 and 14 samples over a
+flat picture codes in 24 bytes at a fixed quantizer (70 without the mesh,
+as a second pass); a picture of specks takes inter transforms two sizes
+under the block's in one pass and none in a second (each fails without its
+change); `halves4` matches its scalar twin.
+
+Tried and dropped (BD-rate on `testsrc2` at speed 5 against FFmpeg's
+`-crf`, from +8.7%, unless said):
+
+- The mesh at every second sample within 48 (+2.3%) or 64: the stop that
+  `a_reference_seed_reaches_past_the_search_range` reads (a seeded search
+  takes half the bytes of an unseeded one) no longer holds: within 48 the
+  mesh finds most of a 100-sample jump without the seed. Within 36 and
+  dense to 16, every fourth beyond: +2.8% for half the points. Within 32
+  at every fourth sample: +3.7%.
+- The mesh on every reference (+2.4% with the transform's change): on the
+  grainy pan 7 to 10% of the time. Its gate at SSE over 12 or 16 times
+  the SAD: as many meshes on the pan, `testsrc2` 0.6 points worse; at 0.5
+  or 0.25 a sample of SAD: no better.
+- A mesh at every block size, on every row (+4.0%, 1.3 to 1.4 times the
+  time); one only where the diamond's last four neighbours come within 0
+  to 5% of its choice (the plateau the mesh is for), with the vectors
+  below as starts: +5.2% to +7.0% against +4.0% without that gate.
+- The previous frame's most common vectors on each reference as starts of
+  the search: the gradient +3.6% → +1.0% (from ALTREF's alone +1.5%),
+  `testsrc2` +7.8%, but the still scene at a fixed quantizer +0.7 to +2.5
+  points of PSNR-Y, with or without a rate for them and a floor on their
+  count. On the gradient they find the periodic plane's aliases for the
+  content that enters at the right edge, from an alt-ref far behind.
+- No alt-ref: the gradient −10.5%, `testsrc2` +3.3%, but the three clips
+  at a fixed quantizer +5.2, +5.3 and +17.6 points. No alt-ref where the
+  filtered picture is within 0.06 a sample (squared) of its target
+  (nothing to filter, as on both synthetic sources): the gradient −10.5%,
+  the three scenes +0.9 and the still scene +0.6 points; with the pool's
+  noise under 1 too, the still scene +2.4. Most of the gradient's gain is
+  again the old reference's periodic aliases.
+- Key frames at 0.25 of the step: `testsrc2` +3.0% (from +2.9%), the
+  gradient +4.0%. The loop filter's fixed-quantizer scale at 0.45 and
+  0.3: the gradient +3.8% and +5.7%. The 8×8 peak on whole blocks that
+  code a residual: a full search never stops there.
+
+What is left: `testsrc2` at +3.1% (+2.2% / −2.9% at PSNR-U / V), most of
+it at the low rates (at the same PSNR-Y, +8% to +15% from `crf=35` up),
+where libvpx's squares of noise and its key frame are better (on its
+first picture alone speed 5 is at +8.1%, speed 0 at +5.6%: a vertical
+edge of a bar left in a V_PRED 32×32 block without a residual at `q=55`,
+which libvpx codes at 47, and copied down 200 rows and through every
+picture after); the gradient at +3.6%.
+
+**A key frame's intra search, and the golden frame an overlay kept**
+(17 November 2026, after `cf5a1a10`). What was left: `testsrc2` at +3.1%
+/ +2.2% / −2.9% against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V, `crf=15` to `55`, speed 5, four threads), the gradient at +3.6%. The
+first picture of each coded alone (`crf=10` to `60`) was at +8.1% / +4.9%
+/ +2.2% and +4.3% against libvpx's (speed 0: +6.0% and +2.9%); at the
+same quantizer (68 and 70) libvpx's key frame of `testsrc2` took 9 138
+bytes for 51.84 dB, this encoder's 9 358 for 50.77 dB, with the excess
+error spread over the squares of noise and the rest alike. Decoded with
+each block's modes printed, and the key frame's features turned on one
+at a time, three causes, and in the inter frames a fourth:
+
+- A split 8×8 of a key frame took each 4×4's mode by SATD alone (with a
+  little for leaving DC). libvpx's `rd_pick_intra_sub_8x8_y_mode` codes
+  each and keeps the least RD cost. Now, at a fixed quantizer in one pass
+  up to speed 5 (`KEY_RD_SPEED`), each 4×4 takes the best by RD of the
+  three best by SATD (`KEY_RD_4X4`), its mode's bits counted in the
+  context of the 4×4s above and left of it: the first picture of
+  `testsrc2` +8.1% → +6.5% (all ten modes: +6.1%).
+- A block's luma modes were the four best by SATD; on the smooth
+  gradient SATD ranks the mode that wins fifth or sixth. Six now
+  (`KEY_RD_CANDS`): the gradient's first picture +4.3% → −1.3% (ten: the
+  same), `testsrc2`'s +8.1% → +7.9%.
+- The best intra mode then tried one more chroma mode, the luma's (or TM
+  where that was DC): the chroma mode was mostly DC. A key frame's best
+  now tries the best chroma mode by the SATD of both planes besides DC
+  (`Tile::uv_ranked`): with the two above, `testsrc2`'s first picture
+  +6.4% / +3.9% / +1.9% → +4.6% / +2.5% / −0.4% (every chroma mode: +4.6%
+  / +1.9% / −0.6%, in twice the key frame's time).
+- After an alt-ref's overlay GOLDEN read the overlay and ALTREF the
+  alt-ref, the same picture, and the golden frame before was gone: the
+  overlay was coded into slot 1, over it. libvpx keeps that golden frame
+  as the new ALTREF (`vp9_preserve_existing_gf`). At a fixed quantizer in
+  one pass the overlay is now coded into the alt-ref's slot and becomes
+  GOLDEN, and the golden frame before it, in the other slot, ALTREF; the
+  next alt-ref takes ALTREF's slot (`OVERLAY_KEEPS_GOLDEN`). The pool's
+  pick of GOLDEN (`Core::pick_golden`) started from slot 1 whatever held
+  the golden frame; it starts from its slot.
+
+SATD ranks every intra trial and was a scalar loop: 9.8% of a key frame's
+time on the grainy pan, 3.7% of its first 30 pictures. It runs on AVX2
+now for 8-bit squares (`cutlass_simd::vp9::sad8::satd`: a 16-wide row a
+vector, the last butterfly as `2 max(|p|, |q|)`), the same sums. A 720p
+key frame of the pan (one thread, `q=120`) takes 0.95 s, 0.74 s before.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets with nine points, `crf=15` to `55` by 5, against the same
+five of FFmpeg's):
+
+| | Before | Key frames | And the overlay (now) |
+| --- | --- | --- | --- |
+| `testsrc2` | +3.1 / +2.2 / −2.9% (+5.1 / +3.1 / −2.9%) | +2.8 / +3.4 / −2.8% (+4.7 / +3.5 / −3.0%) | +2.5 / +2.3 / −3.4% (+4.4 / +2.7 / −3.6%) |
+| Gradient | +3.6% (+3.2%) | +2.4% (+1.6%) | +3.0% (+2.6%) |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 324395, 52.76 dB | 323861, 52.78 dB | 13000, 53.05 dB | 13042, 53.24 dB |
+| 25 | 242857, 48.89 dB | 241204, 48.88 dB | 9559, 51.57 dB | 9530, 51.64 dB |
+| 35 | 145479, 43.67 dB | 144495, 43.67 dB | 7196, 49.39 dB | 7128, 49.25 dB |
+| 45 | 61447, 39.00 dB | 61280, 39.03 dB | 5996, 46.71 dB | 5939, 46.51 dB |
+| 55 | 21703, 35.53 dB | 21811, 35.44 dB | 5620, 43.54 dB | 5641, 43.35 dB |
+
+The overlay's change gives back 0.6 points of the gradient's gain (within
+what five points move between builds that differ in little) for a point
+on `testsrc2` and the clips' chroma below. On the README's three clips
+at `q=60` to `210` against the build before (BD-rate Y / U / V / FFmpeg's
+average / 6:1:1):
+
+| Fixed q | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| Key frames | −0.4 / −0.1 / −0.2 / −0.3 / −0.4 | −2.8 / −1.6 / −1.8 / −2.3 / −2.5 | −2.0 / −0.5 / −0.6 / −1.3 / −1.6 |
+| And the overlay (now) | −0.2 / −0.8 / −0.7 / −0.4 / −0.3 | −2.7 / −4.3 / −4.5 / −3.5 / −3.2 | −2.2 / −2.2 / −2.2 / −2.2 / −2.2 |
+
+Every other mode (speeds 5 to 10 at a bitrate, two passes) writes the
+same streams as before.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` (`-threads 4`) and
+the build before, two rounds interleaved, the mean over each one's points
+of the median of the rounds (Cutlass at `q=60` to `210`):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 7.40 s | 4.97 s (0.67) | 5.02 s (0.68) |
+| Still scene | 4.12 s | 3.50 s (0.85) | 3.45 s (0.84) |
+| Grainy pan | 2.84 s | 2.35 s (0.83) | 2.51 s (0.89) |
+
+In three more rounds on the pan alone, 1.02 of the build before (the key
+frame: one in 60 pictures, coded on fewer threads than the rest).
+
+Checks: of the identity check's 41 configurations, the seven at a fixed
+quantizer change, the other 34 (every bitrate, two passes, speeds 6 to 10)
+do not. FFmpeg's `vp9` (threaded and on one thread), libvpx and this
+decoder agree on 10 new streams (40 of 40 decodes: `testsrc2` at
+`crf=35`, at `crf=30` at speed 2 and at `crf=40` on one thread, the
+gradient at `crf=35`, the pan at `q=120` and at 10 bits at `q=100`, the
+still scene at `q=80`, the three scenes at `q=150` on two threads, 4:4:4
+at `q=60`, 4:2:0 at speed 4). New tests: a key frame of horizontal luma
+stripes over vertical chroma ones takes V (or TM) for chroma in one pass
+and never in a second; after an overlay ALTREF reads slot 1 in one pass
+and slot 2 in a second (each fails without its change); `satd` matches its
+scalar twin.
+
+Tried and dropped (BD-rate against FFmpeg's `-crf`, from the build of
+each step; for the first picture alone, as above):
+
+- The key frame's lambda × 0.5 / 0.7 / 1.4: its first picture of
+  `testsrc2` +6.8% / +7.1% / +11.0%, the gradient's +3.6% / +3.3% /
+  +7.2%; × 0.7 with the rest, the still scene's chroma +3.1 points at a
+  fixed quantizer.
+- The key frame's loop filter level × 0.3 / 0.6 / 1.5: first pictures
+  +7.9% / +8.0% / +8.7% (`testsrc2`), +10.2% / +7.1% / +4.0% (gradient).
+  The inter frames' level forced to 4, 8, 12 or 16 (libvpx's are 3 to 10
+  on the gradient, ours 23): the gradient +5.8%, +3.6%, +3.2%, +6.1%, its
+  pictures' decay unchanged.
+- An 8×8 of a key frame in two halves, 8×4 or 4×8, their modes by RD:
+  `testsrc2`'s first picture +4.6% → +4.2%, for 0.3 s of a 0.74 s key
+  frame. Every transform size for every candidate: worse (+6.4%).
+- The overlay into the alt-ref's slot with GOLDEN left on the golden
+  frame before and ALTREF the overlay (the slots not traded): the gradient
+  −3.0%, `testsrc2` +1.6% / +1.4% / −3.9%, but the still scene +1.3 / +2.3
+  / +2.4 points at a fixed quantizer. The gradient's gain is the old
+  picture searched near zero, where it finds the periodic plane's aliases
+  of the content entering at the edges (4% to 26% of the area of the
+  pictures that use it); ALTREF's search starts where the old picture's
+  content stands. Gates on GOLDEN's share before the overlay (10%, 5% and
+  35% on the gradient, `testsrc2` and the still scene), on the picture
+  having moved since, or not jumped since, kept the loss. GOLDEN seeded
+  from where the overlay stands: the gradient +2.4%, `testsrc2` +2.3% /
+  +2.0% / −3.2%.
+
+Not pursued this time: the previous frame's popular vectors as starts
+(the still scene's loss in "A mesh after the diamond").
+
+What is left: `testsrc2` at +2.5% / +2.3% / −3.4%, the gradient at +3.0%.
+Without alt-refs the gradient is at −11.4%, for 5 to 18 points lost on
+the clips; most of that gain is again an old reference's aliases.
+
+**The alt-ref's reference prune, the previous frame's vectors, and
+drawn pictures** (17 November 2026, after `b2982b7d`). What was left:
+`testsrc2` at +2.5% / +2.3% / −3.4% against FFmpeg's `-crf` (BD-rate at
+the same PSNR-Y / U / V, `crf=15` to `55`, speed 5, four threads), the
+gradient at +3.0%. Three findings, and three changes:
+
+- The previous frame's most common vectors as starts of the search had
+  taken the gradient to +1.0% (in "A mesh after the diamond"), but cost
+  the still scene 0.7 to 2.5 points of PSNR-Y at a fixed quantizer, for
+  no reason found then. At `q=120` its stream grew by 6.5 kB, and all of
+  it was one hidden alt-ref (after the golden frame of the second jump):
+  19 818 bytes before, 26 277 with the starts. Decoded with each block's
+  reference and vector printed, the alt-ref before coded its 64×64 blocks
+  from ALTREF at (−84, −76) samples without a residual (the scene had
+  come back to an earlier place); with the starts it never searched
+  ALTREF. ALTREF had predicted under 1% of every inter frame before it in
+  both builds, and from speed 5 such a reference is left out of the
+  search but every fourth frame (`REF_PRUNE_SPEED`); the starts' own
+  ALTREF wins (128 samples of the frame before) moved that count by a
+  frame, and the alt-ref fell on a frame that left ALTREF out. Not a
+  worse RD choice, nor the vectors' context or the probabilities: the
+  phase of the prune. An alt-ref (one frame in a dozen, coded finer, and
+  read by every frame up to its overlay) at a fixed quantizer in one
+  pass now searches every reference: the still scene −2.1 / −1.9 / −1.7
+  points (BD-rate at the same PSNR-Y / U / V), the other clips and the
+  synthetic sources as before. Then the starts (`tile::POP_STARTS`, the
+  two most common whole-sample vectors other than zero, each of two 8×8
+  blocks or more, on each reference) take the gradient to +0.4% with no
+  loss on the clips (four starts: +0.5%, and on the clips' PSNR-U and V
+  up to 0.7 points less, on the pan 0.3 points less of PSNR-Y).
+- libvpx's `-crf` (one pass, a constant quantizer) on both sources codes
+  no alt-ref: LAST only, a key frame at 0.25 of the step (`testsrc2` at
+  `-crf 45`: 99, ours 121; at `55`: 145, ours 164), and the inter frames
+  at 0.5 / 1 / 0.85 / 1 / 0.7 / 1 / 0.85 / 1 of it by the frame's index in
+  eights (142, 180, 172, 180, 161, …). At `crf=45` ours spent a fifth of
+  `testsrc2`'s bits on its four alt-refs (3.0 to 3.4 kB each, five times
+  an inter frame). libvpx's cycle here (from +2.5% / +3.0%): `testsrc2`
+  +5.4%, the gradient +4.0%; with no alt-ref too, +5.3% and −10.3%; no
+  alt-ref alone, +3.5% and −11.4% (the gradient's gain is the key frame's
+  periodic aliases, kept as ALTREF). At the same bits (FFmpeg's `-crf 55`,
+  33 071 bytes, ours `crf=51`, 33 167) the squared error of `testsrc2`'s
+  luma, libvpx's and ours: blocks whose source did not change 9.1 and 14.6
+  million, blocks that changed 152 and 164; the key frame alone
+  (quantizers 145 and 147) 4 788 bytes at 43.07 dB and 4 197 at 40.98,
+  libvpx's with more coefficients (14 016 against 11 117) and halves of
+  8×8 to 32×32 blocks.
+- Drawn pictures (graphics, animation, screen content) repeat the
+  picture before exactly where they stand still or move as a whole; a
+  camera's never do. At a fixed quantizer in one pass a picture of which
+  half the 16×16 blocks or more repeat the one before, at the vector the
+  whole picture moved by (`arf::exact_share`: `testsrc2` 0.66, the
+  gradient 0.92, the grainy pan 0; the three scenes' `testsrc2` and a
+  drawn pan at the end of the still scene, 0.93 and 0.97), or whose next
+  picture repeats as much, is drawn (`DRAWN_SHARE`). Its key frame,
+  whose blocks the frames after keep for as long as the picture stands,
+  takes 0.3 of the inter step (not 0.35) and searches as speeds 0 to 3:
+  halves at every size, trials quantized by RD (`tile::Shared::drawn_key`);
+  its golden frames and alt-refs, which have no noise to average, take
+  0.6 (not 0.5). libvpx's two passes size a key frame's boost from its
+  share of still blocks, and search more in pictures they find drawn
+  (`FC_GRAPHICS_ANIMATION`).
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets with nine points, `crf=15` to `55` by 5, against the same
+five of FFmpeg's):
+
+| | Before | The alt-ref's prune and the starts | And drawn pictures (now) |
+| --- | --- | --- | --- |
+| `testsrc2` | +2.5 / +2.3 / −3.4% (+4.4 / +2.7 / −3.6%) | +2.1 / +2.2 / −3.2% (+4.1 / +2.7 / −3.8%) | +1.0 / +0.9 / −3.9% (+3.1 / +1.2 / −4.4%) |
+| Gradient | +3.0% (+2.6%) | +0.4% (−0.1%) | −0.3% (−0.7%) |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 323861, 52.78 dB | 321071, 52.65 dB | 13042, 53.24 dB | 12696, 53.38 dB |
+| 25 | 241204, 48.88 dB | 240212, 48.84 dB | 9530, 51.64 dB | 9267, 51.89 dB |
+| 35 | 144495, 43.67 dB | 142966, 43.62 dB | 7128, 49.25 dB | 7141, 49.57 dB |
+| 45 | 61280, 39.03 dB | 58143, 39.03 dB | 5939, 46.51 dB | 5984, 46.62 dB |
+| 55 | 21811, 35.44 dB | 21057, 35.48 dB | 5641, 43.35 dB | 5360, 43.72 dB |
+
+On the README's three clips at `q=60` to `210` against the build before
+(BD-rate Y / U / V / FFmpeg's average / 6:1:1):
+
+| Fixed q | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| The alt-ref's prune | 0.0 / 0.0 / 0.0 / 0.0 / 0.0 | −2.1 / −1.9 / −1.7 / −1.9 / −2.0 | the same streams |
+| And the starts | −0.1 / 0.0 / 0.0 / 0.0 / −0.1 | −2.1 / −2.4 / −2.2 / −2.2 / −2.2 | −0.7 / −0.9 / −1.0 / −0.9 / −0.8 |
+| And drawn pictures (now) | −1.1 / −0.1 / −0.6 / −0.8 / −0.9 | −3.0 / −2.5 / −2.3 / −2.7 / −2.8 | −0.7 / −0.9 / −1.0 / −0.9 / −0.8 |
+
+Every other mode (speeds 5 to 10 at a bitrate, two passes, speeds 6 to
+8 at a fixed quantizer) writes the same streams as before.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` (`-threads 4`) and
+the build before, three rounds interleaved, the mean over each one's
+points of the median of the rounds (Cutlass at `q=60` to `210`):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 7.34 s | 5.13 s (0.70) | 5.19 s (0.71) |
+| Still scene | 4.53 s | 3.68 s (0.81) | 3.63 s (0.80) |
+| Grainy pan | 2.95 s | 2.64 s (0.90) | 2.58 s (0.87) |
+
+Runs a few minutes apart moved these ratios by up to 0.04 (the still
+scene before: 0.81 to 0.86, with FFmpeg's own time 3.9 to 4.7 s); in
+pairs at `q=120` the starts cost 0.5% on the pan and 2% on the other
+two clips.
+
+Checks: of the identity check's 41 configurations, the seven at a fixed
+quantizer change, the other 34 do not. FFmpeg's `vp9` (threaded and on
+one thread), libvpx and this decoder agree on 10 new streams (40 of 40
+decodes: `testsrc2` at `crf=35` and `55`, at `crf=30` at speed 2 and at
+`crf=40` on one thread, the gradient at `crf=35`, the still scene at
+`q=80`, the three scenes at `q=150` on two threads, the pan at `q=120`
+and at 10 bits at `q=100`, 4:4:4 at `q=60`). New tests: after frames
+that never predict from ALTREF, a hidden alt-ref of the picture ALTREF
+holds codes from it wherever the prune's count stood; a band that starts
+to move by 48 samples (past the diamond and the mesh) takes the vector
+the rest of the picture took the frame before; a drawn picture's key
+frame takes 0.3 of the step and its alt-refs 0.6, a noisy one's key
+frame 0.35; a drawn key frame takes halves under 64×64 (each fails
+without its change).
+
+Tried and dropped (BD-rate on `testsrc2` / the gradient against FFmpeg's
+`-crf`, from +2.1% / +0.4% after the starts, unless said):
+
+- RD quantization's lambda on key frames × 0.5 and × 0.25, on every
+  frame × 0.7 and × 0.5, the RD lambda of key frames × 0.5 and of every
+  frame × 0.8: `testsrc2` +2.0% at best (+3.7% at × 0.5 on every
+  frame). libvpx's speed 5 does not optimize its coefficients at all;
+  ours keeping fewer of them is not where the loss is.
+- Key frames at 0.2, 0.25 or 0.3 of the step on every picture (not only
+  drawn ones): `testsrc2` +2.0%, +2.2% and +1.6%, the gradient +0.6%,
+  +1.0% and +0.6%. Golden frames and alt-refs at 0.4, 0.6 or 0.7 (before
+  the starts, from +2.5% / +3.0%): +3.1%, +2.1% and +1.9%, the gradient
+  +3.9%, +2.5% and +2.9%. libvpx's cycle of inter steps with ours: above.
+  Only `testsrc2`'s background stays from the key frame: 15% of its 16×16
+  blocks over the 60 pictures (87% from one picture to the next).
+- Speed 4's trials at speed 5 (on every picture): the candidates' margin
+  `testsrc2` +1.7%, the smaller transform after a block without a
+  residual +1.5% (12% of the time on the pan), trials quantized by RD
+  +1.5% (the gradient −0.5%), no reference prune (the gradient −0.2%);
+  all four +0.7% / −1.0% in 1.21 to 1.24 times the time. Halves at
+  every size (speeds 0 to 3): +0.4% alone in twice the time; with the
+  four, −0.6% / −1.6%. Speed 4 itself: +0.1% / 0.0%; speed 3: −2.1% /
+  +4.3%; speed 2: −2.6% / −4.8%.
+- On drawn pictures' inter frames (with the quantizers above unless
+  said): halves at every block that changed, with the margin and the
+  dead-zone trials left out there, the quantizers as before: +0.4% /
+  −0.7%, in 1.35 times the time on the three scenes and 1.11 on the
+  still scene at `q=120` (a third of each is drawn). Halves only where a
+  block covers both blocks that changed and blocks that did not, with a
+  drawn key frame's search on the alt-refs too: −0.1% / −1.5%, the
+  three scenes −1.1 points more, but 0.90 and 0.91 of FFmpeg's time on
+  the still scene in two measures (0.85 and 0.86 before). Halves only in
+  the direction that parts what changed from what did not: −0.1% /
+  −1.4%, 0.97; the margin and the dead-zone trials alone where blocks
+  changed: +0.6% / −0.3%, 0.95 (the trials quantized by RD at `q=60`
+  most of it).
+  Halves after a split at 32×32 and 64×64 (as `RECT_SPEED` at 16×16, the
+  quarters' vectors, no search): +0.8%. The alt-refs' halves and
+  trials as a drawn key frame's: +0.7% / −0.7% in one measure, 4% more
+  time on the still scene in it.
+
+What is left: `testsrc2` at +1.0% / +0.9% / −3.9% (nine points: +3.1%),
+most of it at the low rates (at FFmpeg's `-crf 55`, 0.36 dB of PSNR-Y
+under at the same bits; within 0.11 dB at the other points), the gradient
+at −0.3% (nine points −0.7%). The halves and the trials that would take
+`testsrc2` past libvpx cost more time than the still scene's drawn pan
+allows.
+
+**The coarse end, and drawn pictures that stand still** (17 November
+2026, after `2999cff7`). What was left: `testsrc2` at +1.0% / +0.9% /
+−3.9% against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U / V,
+`crf=15` to `55`, speed 5, four threads; nine points +3.1%), the
+gradient at −0.3%. Against FFmpeg at more points (`-crf 15` to `61`, by
+one or two at the coarse end), the bits this encoder took at the same
+PSNR-Y were within −0.7% and +2.9% from `crf=15` to `45`, but 10% over
+at `crf=50` (37.5 dB) and 20% over at `crf=55`. Decoded with each block's
+mode and residual bits printed (the cost of each symbol at its
+probability), four findings, and four changes:
+
+- From quantizer 208 or so the loop filter's level from the quantizer is
+  63, past what the masks can be rebased from (2 to 61), and the level
+  was not searched at all: `testsrc2`'s inter frames at `crf=55` were
+  filtered at 63, libvpx's at 3 to 16. At a fixed quantizer in one pass
+  the search now starts from 61 at most (`LF_SEARCH_CAP`): `testsrc2` at
+  `crf=55` 21 057 bytes at 35.48 dB → 19 572 at 35.65 dB.
+- libvpx codes vectors in quarters of a sample from quantizer 200
+  (`HIGH_PRECISION_MV_QTHRESH`); this encoder allowed eighths at every
+  quantizer. At a fixed quantizer in one pass it now does as libvpx
+  (`HP_MAX_Q`): at `crf=50`, 1.5 points fewer bits at the same PSNR-Y
+  (from 150 on, the alt-refs at 172 lost as much).
+- At `crf=50` against FFmpeg's `-crf 55`, at the same PSNR-Y, this
+  encoder's inter frames coded the picture at least as well as libvpx's
+  by region (squared error and bits of the blocks that did not change,
+  that changed, and of the squares of noise), but a fifth of its bits
+  went on its four hidden alt-refs; libvpx's `-crf` codes none. With no
+  alt-ref `testsrc2` took fewer bits from `crf=40` down and more above,
+  and the gradient 15% fewer at every point; but without them on every
+  drawn picture from `q=160` the still scene, whose drawn pan moves, lost
+  1.6 points of PSNR-Y (BD-rate at `q=60` to `210`). A drawn
+  picture (`DRAWN_SHARE`) is now also measured where it stands: the
+  share of its 16×16 blocks the picture before holds exactly at no
+  vector (`testsrc2` 0.81, where `arf::shift` finds the vector of what
+  moves, (6, −4); the gradient 0; the still scene's drawn pan 0.12 to
+  0.28). One that stands still (half its blocks or more, at the start of
+  a golden interval and at its end) codes no alt-ref from quantizer 160
+  (`STILL_ARF_Q`; from 140, `testsrc2` +0.7%; from 180, +3.0% at nine
+  points).
+- At `q=192` against FFmpeg's `-crf 52` (as many bits), this encoder's
+  squared error outside the squares of noise was 38 against libvpx's 28
+  million, and half the difference was the counter's digits, which
+  change every picture: 12.0 against 6.8 million. libvpx codes the rows of a glyph that moved
+  by a sample as 4×4 blocks with vectors of their own, without a
+  residual; this encoder kept the 8×8 block's vector and its error (39 000
+  where libvpx's 1 000), as blocks under 8×8 are tried only up to speed 1
+  (`SUB8_SPEED`). In an inter frame of a drawn picture that stands still,
+  at a fixed quantizer in one pass, the 16×16 blocks that changed from
+  the picture before (`arf::still_blocks`, `tile::Shared::still`) now
+  try them: each 8×8 block there its 4×4, 8×4 and 4×8 sub-blocks with the
+  whole block's reference, as speeds 0 and 1; and each 32×32 or 64×64
+  block that covers both blocks that changed and blocks that did not
+  tries its halves after the whole block, as speeds 0 to 3 and a drawn
+  key frame. Where nothing changed nothing is tried, and a drawn picture
+  that moves (a pan) tries none.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets with nine points, `crf=15` to `55` by 5, against the same
+five of FFmpeg's):
+
+| | `testsrc2` | Gradient |
+| --- | --- | --- |
+| Before | +1.0 / +0.9 / −3.9% (+3.1 / +1.2 / −4.4%) | −0.3% (−0.7%) |
+| The filter's level and quarters | +0.7 / +0.5 / −4.6% (+3.0 / +1.0 / −4.4%) | −0.2% (−0.8%) |
+| And no alt-ref on still pictures | +0.3 / −0.1 / −4.7% (+2.7 / +0.7 / −4.9%) | −0.2% (−0.8%) |
+| And blocks under 8×8 and halves (now) | −1.7 / −4.2 / −8.7% (+1.3 / −2.1 / −7.4%) | −0.2% (−0.8%) |
+
+With nine points of this encoder's at `crf=17` to `57` (the grid moved
+by two) against the same five of FFmpeg's, PSNR-Y: +3.9% before, +3.1%
+without the alt-refs, +1.7% now. Blocks under 8×8 alone: −0.9 / −0.5 /
+−5.3% (+1.9%); halves alone: −0.5 / −3.6 / −8.0% (+2.4%).
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 321071, 52.65 dB | 319877, 52.70 dB | 12696, 53.38 dB | 12696, 53.38 dB |
+| 25 | 240212, 48.84 dB | 239847, 48.89 dB | 9267, 51.89 dB | 9267, 51.89 dB |
+| 35 | 142966, 43.62 dB | 142253, 43.70 dB | 7141, 49.57 dB | 7141, 49.57 dB |
+| 45 | 58143, 39.03 dB | 56002, 39.11 dB | 5984, 46.62 dB | 5984, 46.62 dB |
+| 55 | 21057, 35.48 dB | 18831, 35.85 dB | 5360, 43.72 dB | 5426, 43.71 dB |
+
+On the README's three clips at `q=60` to `210` against the build before
+(BD-rate Y / U / V / FFmpeg's average / 6:1:1):
+
+| Fixed q | Three scenes | Still scene | Grainy pan |
+| --- | --- | --- | --- |
+| The filter's level and quarters | −0.6 / −1.2 / −0.9 / −0.8 / −0.7 | −0.7 / −0.5 / −0.5 / −0.6 / −0.7 | −0.6 / −0.7 / −0.7 / −0.7 / −0.6 |
+| And no alt-ref on still pictures | −0.2 / −0.6 / −0.4 / −0.3 / −0.3 | −0.7 / −0.5 / −0.5 / −0.6 / −0.7 | −0.6 / −0.7 / −0.7 / −0.7 / −0.6 |
+| And blocks under 8×8 and halves (now) | −0.2 / −1.2 / −0.8 / −0.5 / −0.4 | −0.7 / −0.5 / −0.5 / −0.6 / −0.7 | −0.6 / −0.7 / −0.7 / −0.7 / −0.6 |
+
+(The first two changes act at `q=210` only; the three scenes' `testsrc2`
+loses 0.4 points of PSNR-Y without its alt-refs at 180 and 210.) Every
+other mode (speeds 5 to 10 at a bitrate, two passes, speeds 6 to 8 at a
+fixed quantizer) writes the same streams as before.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` (`-threads 4`) and
+the build before, three rounds interleaved, the mean over each one's
+points of the median of the rounds (Cutlass at `q=60` to `210`; the still
+scene and the pan from a second run, the first having put both builds
+there at 0.92 to 0.94 of FFmpeg's time, FFmpeg's own 4.1 s):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 7.21 s | 5.09 s (0.71) | 5.64 s (0.78) |
+| Still scene | 4.44 s | 3.60 s (0.81) | 3.61 s (0.81) |
+| Grainy pan | 3.08 s | 2.68 s (0.87) | 2.65 s (0.86) |
+
+The three scenes' 11% is their `testsrc2`, a third of the clip; the still
+scene's drawn pan moves and tries nothing more.
+
+Checks: of the identity check's 41 configurations, four at a fixed
+quantizer change (the synthetic 4:2:0 and 4:4:4 sources at `q=60`,
+speeds 2 and 5), the other 37 do not. FFmpeg's `vp9` (threaded and on
+one thread), libvpx and this decoder agree on 10 new streams (40 of 40
+decodes: `testsrc2` at `crf=35`, `50` and `55`, at `crf=45` on one
+thread and at `crf=30` at speed 2, the gradient at `crf=55`, the three
+scenes at `q=180` on two threads, the still scene and the pan at
+`q=210`, 4:4:4 at `q=200`). New tests: an inter frame at quantizer 230
+searches its filter level; from quantizer 200 a fixed quantizer's
+inter frames code no eighths, under it and in a second pass they do; a
+still drawn picture codes no alt-ref from `STILL_ARF_Q`, under it it
+does, and a drawn pan does above it; a still drawn picture's changed
+blocks try sub-blocks under 8×8 with vectors of their own, and the
+halves of blocks over what changed and what did not (each fails without
+its change).
+
+Tried and dropped (BD-rate on `testsrc2` against FFmpeg's `-crf`, five
+points [nine], from the step before unless said):
+
+- The first picture alone (of three, so that it is found drawn) is 3.2%
+  over libvpx's at every rate, and as much at speeds 0 and 3: not the
+  search. At the same quantizer (146 and 145) its squared error is 1.5
+  times libvpx's for 13% fewer bits, most of it in the squares of noise.
+  Dead-zone quantization on key frames, as libvpx's speed 5 (no
+  trellis): +4.9% on the picture (rounding 0.375 the same, 0.3 +5.9%).
+- From `q=180` on drawn pictures: alt-refs at 0.75 and 0.9 of the step
+  (not 0.6), +0.4% [+3.1%] and +0.6% [+3.3%]; key frames at 0.25 and
+  0.35 (not 0.3), +1.3% and +1.1% [+3.5%]; the inter frames' loop filter
+  at 0.4 or 0.8 of the level found (not 0.6), and the level searched on
+  every superblock row (not one in four; steadier, but +1.4% [+1.4%]
+  after the last change against −1.7% [+1.3%]): within the noise. No
+  compound prediction from 180: +1.1% [+3.5%]; never: +2.0% [+4.3%].
+  `arnr_strength=0`: +0.4% [+3.0%]; one picture filtered: +0.8% [+3.0%].
+- RD lambda × 1.3 and × 0.8 on inter frames from 180: within the noise.
+  × 1.5 and × 2 in 8×8 blocks of variance over 1000 (the squares of
+  noise): +3.0% and +5.4%; × 0.7 and × 0.85, within the noise.
+- With no alt-ref on still pictures: libvpx's cycle of inter steps (0.5
+  / 1 / 0.85 / 1 / 0.7 / 1 / 0.85 / 1): +1.8% (its square root +0.7%);
+  golden frames at 0.5, 0.65, 0.75, 0.82 or 0.9 of the step (not 0.6):
+  +0.8%, +0.1%, −0.2%, +0.3%, −0.1% (+2.8% to +3.2% on the moved grid):
+  noise.
+- In still pictures' changed blocks, after the halves: halves only in
+  the direction that parts what changed from what did not, −0.1% [+2.6%]
+  against −0.5% [+2.4%]; with the candidates' margin left out there too,
+  −1.5% [+1.2%] (+1.1% on the moved grid, −3.1 / −8.6% chroma) against
+  −1.7% [+1.3%] for more trials; with the dead-zone trials left out too,
+  as the round before: 1.4 times the time on the three scenes.
+
+What is left: `testsrc2` at −1.7% / −4.2% / −8.7%, with nine points
++1.3% (the coarse end: from `crf=40`, 37.4 to 40.4 dB, five to eight
+points over FFmpeg's curve at the same PSNR-Y, the first picture 3% over
+libvpx's at every rate), the gradient at −0.2% (nine points −0.8%).
+
+**Squares of noise, and the smooth filter** (17 November 2026, after
+`8b877186`). What was left: `testsrc2` at −1.7% / −4.2% / −8.7%, +1.3%
+with nine points. Two findings about the measure first. The nine points
+are this encoder's at `crf=15` to `55` by 5 against FFmpeg's five (15 to
+55 by 10), and FFmpeg's own nine against its five come to +2.1% / +2.2%
+/ +2.2%: its points at `-crf 40` and `50` lie 7.3% and 7.7% over the
+chords between its five, so the denser curve loses about two points to
+the sparser one whoever draws it. Against FFmpeg's own nine, this
+encoder was at −1.0% / −4.4% / −9.6%. And a 5% cut in bits at one point
+moves the nine-point figure by 0.3 (at `crf=15` and `50`) to 1.0 points
+(`crf=35`): the middle of the range carries it.
+
+The first picture alone (of three, so that it is found drawn) was 3.2%
+over libvpx's, and FFmpeg's `libvpx-vp9` runs at its speed 1 (FFmpeg's
+default `-cpu-used`), not 5: trellis quantization, and rectangular
+partitions on key frames. libvpx's lambda on a key frame is the DC step
+squared times 4.35 plus a thousandth of the quantizer
+(`vp9_compute_rd_mult`), 0.0022 times the step squared for a bit at the
+scale of the squared error (its trellis 1.25 times that on luma, 0.75 on
+chroma); this encoder's is 0.00358, 1.6 times libvpx's. At 0.6 times,
+the first picture is 1.4% over libvpx's (0.4 times, 1.6%; 0.3, 1.9%;
+1.5, 6.0%), and with 8×4 and 4×8 intra blocks under 8×8 too (which
+libvpx codes for 107 of its 734 blocks, this encoder for none) 0.6%.
+But the whole stream did not move with either: nine points +1.1% to
++1.5% with the lambda at 0.4 to 0.75 times, +1.3% with the blocks, both
++1.1%.
+
+Most of `testsrc2`'s bits go on its squares of noise (160×80 samples of
+noise in 16×16 squares, redrawn every picture): in the inter frames at
+`crf=35` against FFmpeg's `-crf 38`, 96 of about 120 kB, and 30 of 36
+million of the squared error. Cut out alone (192×96, nine points each
+side), this encoder was at +0.9% / +0.8% / −7.3%, and 5.0% and 6.7%
+over FFmpeg's curve at `crf=35` and `40`. At the same PSNR-Y there
+(33.4 dB), libvpx's inter frames take 16.5 kB of modes and 94.3 kB of
+coefficients, this encoder's 11.9 and 105.2 kB; libvpx's filter is
+switchable, its blocks 43% smooth, 45% regular, while from speed 3 this
+encoder's frames keep the regular filter (`SWITCHABLE_SPEED`, 2). None
+of the speed-5 prunes lifted alone helped the cut-out (the candidates'
+margin, the breakouts, one candidate, the subpel prune, the skipped
+transform trials, the dead-zone trials, the reference prune, sub-blocks,
+halves: between −0.1 and +0.8 points); speed 3 was at −0.8%.
+
+In a drawn picture at a fixed quantizer in one pass, the inter blocks
+now pick their filter up to speed 5 (`DRAWN_FILTER_SPEED`), as speeds 0
+to 2 do: the best candidate tries the smooth and the sharp filter, where
+its vectors leave a whole sample in some plane (on whole samples every
+filter predicts alike). The choice weighs chroma's error as it is, not
+twice as the trials weigh it (`tile::Shared::filter_by_luma`): weighed
+twice, the smooth filter, which predicts chroma's detail better, cost
+luma's, and the still scene's drawn pan (its pictures 60 to 89) lost
+0.7 points of PSNR-Y for 1.1 and 1.2 of PSNR-U and V; now 0.1 for 0.9
+and 1.0. The cut-out, taken as drawn: −1.0% / −1.3% / −8.5%.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets nine points against FFmpeg's five):
+
+| | `testsrc2` | Gradient |
+| --- | --- | --- |
+| Before | −1.7 / −4.2 / −8.7% (+1.3 / −2.1 / −7.4%) | −0.2% (−0.8%) |
+| Each block's filter, chroma weighed twice | −2.0 / −4.8 / −9.2% (+0.9 / −3.1 / −8.2%) | −2.4% (−3.2%) |
+| By luma's error and chroma's (now) | −2.2 / −5.5 / −9.1% (+0.3 / −3.6 / −8.4%) | −2.4% (−3.2%) |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 319877, 52.70 dB | 319068, 52.71 dB | 12696, 53.38 dB | 12638, 53.72 dB |
+| 25 | 239847, 48.89 dB | 238127, 48.91 dB | 9267, 51.89 dB | 9381, 52.17 dB |
+| 35 | 142253, 43.70 dB | 140854, 43.68 dB | 7141, 49.57 dB | 7219, 49.74 dB |
+| 45 | 56002, 39.11 dB | 55956, 39.06 dB | 5984, 46.62 dB | 5933, 46.66 dB |
+| 55 | 18831, 35.85 dB | 18402, 35.95 dB | 5426, 43.71 dB | 5358, 43.69 dB |
+
+On the README's three clips at `q=60` to `210` against the build before
+(BD-rate Y / U / V / FFmpeg's average / 6:1:1): the three scenes −0.5 /
+−0.4 / −0.4 / −0.5 / −0.5, the still scene +0.1 / −0.2 / −0.2 / −0.0 /
++0.0, the pan unchanged (it is not drawn). On every picture, not
+only drawn ones, the three clips gained −1.0 / −0.4 / +0.1 points of
+PSNR-Y and −1.2 / −2.1 / −1.0 of PSNR-U, but in 6 to 11% more time,
+which puts the still scene and the pan at 0.94 of FFmpeg's.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` and the build
+before, three rounds interleaved, the mean over each one's points of the
+median of the rounds (Cutlass at `q=60` to `210`):
+
+| | FFmpeg | Before | Now | Every picture |
+| --- | --- | --- | --- | --- |
+| Three scenes | 7.32 s | 5.76 s (0.79) | 5.88 s (0.80) | 6.51 s (0.89) |
+| Still scene | 4.24 s | 3.70 s (0.87) | 3.76 s (0.89) | 3.98 s (0.94) |
+| Grainy pan | 2.89 s | 2.50 s (0.86) | 2.53 s (0.88) | 2.72 s (0.94) |
+
+Checks: of the identity check's 41 configurations, five at a fixed
+quantizer change (the synthetic 4:2:0 and 4:4:4 sources at `q=60`,
+speeds 2 and 5, and the noisy 4:2:0 one at speed 2), the other 36 do
+not. FFmpeg's `vp9`
+(threaded and on one thread), libvpx and this decoder agree on 10 new
+streams (40 of 40 decodes). New test: noise and the same noise through
+the smooth filter half a sample across, drawn, codes the filter per
+block and takes the smooth one; not drawn, the frame keeps one filter
+(fails without the change).
+
+**The squares of noise in still pictures** (17 November 2026, after the
+filter). The squares of noise are the 16×16 blocks of a still drawn
+picture that changed from the picture before (`tile::Shared::still`),
+where blocks under 8×8 and the halves of the larger blocks over what
+changed and what did not are tried already. They sit a row off the grid
+of 16×16 blocks (at `y = 225` and every 16 rows on), and a 16×16 block
+that changed covers one cell of the map of changes, so its halves were
+never tried; and an inter frame's block tries one intra mode at speed 5.
+Gated on the blocks that changed (BD-rate on `testsrc2` against FFmpeg's
+`-crf`, five points [nine]; time on the three scenes at `q=120` on one
+core):
+
+| Tried where a 16×16 block changed | PSNR-Y | Time |
+| --- | --- | --- |
+| Nothing more (the filter, before) | −2.2% [+0.3%] | 1 |
+| Two intra modes | −2.6% [−0.0%] | |
+| Four intra modes | −3.0% [−0.3%] | 1.04 |
+| Halves at every size over what changed | −3.4% [−0.8%] | 1.17 |
+| Halves of 16×16 blocks (and 32×32, 64×64 over both, as before) | −2.9% [−0.5%] | 1.12 |
+| Those halves, two intra modes (now) | −3.4% [−1.0%] | 1.14 |
+| Those halves, four intra modes | −4.1% [−1.4%] | 1.19 |
+| Halves only after a 16×16 split won, four intra modes | −3.5% [−0.6%] | 1.07 |
+| Halves from the whole block's and quarters' choices, no search, four intra modes | −2.9% [−0.4%] | |
+
+Across only (16×8) or down only (8×16) the halves of 16×16 blocks did
++0.1% and −0.2% [nine points]. With four threads over `q=60` to `210`,
+FFmpeg's three scenes at 7.29 s: the build before at 0.79 of it, two
+intra modes with the halves at 0.86 (as the halves after a split with
+four), four at 0.93, over the 0.9 this encoder keeps to. A 16×16 block
+that changed now tries its halves before its split, with a search of
+their own (`STILL_HALVES_LEVEL`), and a block over one tries two intra
+modes (`STILL_INTRA_CANDS`).
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets nine points against FFmpeg's five):
+
+| | `testsrc2` | Gradient |
+| --- | --- | --- |
+| Before | −2.2 / −5.5 / −9.1% (+0.3 / −3.6 / −8.4%) | −2.4% (−3.2%) |
+| Now | −3.4 / −7.2 / −11.6% (−1.0 / −6.0 / −11.0%) | −2.4% (−3.2%) |
+
+Against FFmpeg's own nine points, −3.2 / −8.1 / −13.0%; every one of the
+nine is under FFmpeg's curve (by 0.6% at `crf=50` and `55` to 5.5% at
+`45`). The gradient is not still (it pans) and writes the same streams.
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now |
+| --- | --- | --- |
+| 15 | 319068, 52.71 dB | 316954, 52.78 dB |
+| 25 | 238127, 48.91 dB | 237311, 48.99 dB |
+| 35 | 140854, 43.68 dB | 140443, 43.75 dB |
+| 45 | 55956, 39.06 dB | 56028, 39.13 dB |
+| 55 | 18402, 35.95 dB | 18371, 35.96 dB |
+
+On the README's three clips at `q=60` to `210` against the build before
+(BD-rate Y / U / V / FFmpeg's average / 6:1:1): the three scenes −0.4 /
+−0.7 / −0.8 / −0.5 / −0.5; the still scene and the pan write the same
+streams (nothing in them is still and drawn at once). Against the build
+before the filter: the three scenes −0.9 / −1.1 / −1.2 / −1.0 / −0.9,
+the still scene +0.1 / −0.2 / −0.2 / −0.0 / +0.0, the pan the same.
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` and the build
+before the filter, three rounds interleaved, the mean over each one's
+points of the median of the rounds (Cutlass at `q=60` to `210`; the pan
+writes the same streams in both, its 4% the noise of the measure):
+
+| | FFmpeg | Before the filter | Now |
+| --- | --- | --- | --- |
+| Three scenes | 7.04 s | 5.47 s (0.78) | 6.09 s (0.87) |
+| Still scene | 4.11 s | 3.55 s (0.86) | 3.64 s (0.89) |
+| Grainy pan | 2.91 s | 2.54 s (0.87) | 2.45 s (0.84) |
+
+Checks: of the identity check's 41 configurations, five at a fixed
+quantizer change from the build before the filter (the synthetic 4:2:0
+and 4:4:4 sources at `q=60`, speeds 2 and 5, the noisy 4:2:0 one at
+speed 2), the other 36 do not (every one at a bitrate, in two passes, or
+at speeds 6 to 10). FFmpeg's `vp9` (threaded and on one thread), libvpx
+and this decoder agree on 10 new streams (40 of 40 decodes: `testsrc2`
+at `crf=25`, `35`, `50`, at `crf=45` on one thread and at `crf=30` at
+speed 4, the gradient at `crf=35`, the three scenes at `q=120` and
+`180`, the still scene at `q=150`, the synthetic 4:2:0 source at
+`q=60`). New tests: a still drawn picture's 16×16 blocks that changed
+try their halves before their split, and a block over them two intra
+modes; elsewhere none and one (each fails without its change).
+
+What is left: `testsrc2` at −3.4% / −7.2% / −11.6% against FFmpeg's
+`-crf`, −1.0% / −6.0% / −11.0% with nine points; the gradient at −2.4%
+(nine points −3.2%). The first picture alone is still 3.2% over
+libvpx's: libvpx's lower lambda and its 8×4 and 4×8 intra blocks take
+it to 0.6%, but not the stream, and the lambda costs the README's clips
+1.5 to 3 points of PSNR-U and V.
+
+**A drawn picture's key frame** (17 November 2026, after the squares of
+noise). The first picture's 3.2% over libvpx's, again: a key frame of a
+drawn picture (`tile::Shared::drawn_key`: the encoder finds it drawn from
+the picture queued after it) at a fixed quantizer in one pass, up to
+speed 5 (`KEY_RD_SPEED`), now codes with 0.6 times the lambda
+(`DRAWN_KEY_LAMBDA`), and its 8×8 blocks try 8×4 and 4×8 halves besides
+their four 4×4s, each half with one mode (an 8×4's by RD over both its
+4×4s; `Tile::drawn_key_rd`). On every key frame, as tried before, the
+lambda cost the README's clips 1.5 to 3 points of PSNR-U and V; their
+key frames are not drawn, and they now write the same streams.
+
+The first picture of three of `testsrc2`, `crf=10` to `60`, against
+libvpx's (FFmpeg's `-crf`; BD-rate at the same PSNR-Y / U / V): +3.2 /
+−0.2 / −1.6% before, +0.6 / −1.1 / −1.2% now.
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets nine points against FFmpeg's five):
+
+| | `testsrc2` | Gradient |
+| --- | --- | --- |
+| Before | −3.4 / −7.2 / −11.6% (−1.0 / −6.0 / −11.0%) | −2.4% (−3.2%) |
+| Now | −3.9 / −8.1 / −12.2% (−1.1 / −6.6 / −11.0%) | −3.0% (−3.3%) |
+
+(bytes of the IVF, PSNR-Y):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 316954, 52.78 dB | 317090, 52.83 dB | 12638, 53.72 dB | 13165, 53.86 dB |
+| 25 | 237311, 48.99 dB | 237356, 49.03 dB | 9381, 52.17 dB | 9654, 52.44 dB |
+| 35 | 140443, 43.75 dB | 140793, 43.81 dB | 7219, 49.74 dB | 7380, 50.00 dB |
+| 45 | 56028, 39.13 dB | 56499, 39.17 dB | 5933, 46.66 dB | 6000, 47.04 dB |
+| 55 | 18371, 35.96 dB | 18634, 36.15 dB | 5358, 43.69 dB | 5344, 43.96 dB |
+
+On the README's three clips at `q=60` to `210`: the same streams as the
+build before. Yet with the 8×4/4×8 trial inlined into the partition
+search the still scene took 2.7% longer with the same streams: 0.905 of
+FFmpeg's time against 0.882, where the build before timed against a copy
+of itself gave 0.882 and 0.881. The trial now sits out of line
+(`Tile::drawn_key_halves`, `#[cold]`, `#[inline(never)]`), and a split
+that wins returns at once when there are no halves to try. Time, four
+threads, against FFmpeg's `-crf 24` to `48` and the build before, rounds
+interleaved, the mean over each one's points of the median of the rounds
+(Cutlass at `q=60` to `210`; the still scene five rounds, the others
+three):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 7.96 s | 6.61 s (0.83) | 6.75 s (0.85) |
+| Still scene | 4.85 s | 4.23 s (0.87) | 4.20 s (0.87) |
+| Grainy pan | 3.45 s | 2.95 s (0.86) | 2.92 s (0.85) |
+
+The three scenes' third of `testsrc2` is a drawn picture, and its key
+frame now searches more.
+
+Checks: of the identity check's 41 configurations, four at a fixed
+quantizer change (the synthetic 4:2:0 and 4:4:4 sources at `q=60`,
+speeds 2 and 5), the other 37 do not (every one at a bitrate, in two
+passes, or at speeds 6 to 10). FFmpeg's `vp9` (threaded and on one
+thread), libvpx and this decoder agree on 10 new streams (40 of 40
+decodes: `testsrc2` at `crf=25`, `35`, `50`, at `crf=45` on one thread
+and at `crf=15` at speed 2, the gradient at `crf=35`, the synthetic
+4:2:0 source at `q=60` at speeds 2 and 5, the 4:4:4 one at `q=60`, the
+three scenes at `q=120`). New test: a drawn key frame codes 8×4 and 4×8
+intra blocks, its reconstruction the decoder's; not drawn, none (fails
+without the change).
+
+What is left: `testsrc2` at −3.9% / −8.1% / −12.2% against FFmpeg's
+`-crf`, −1.1% / −6.6% / −11.0% with nine points; the gradient at −3.0%
+(nine points −3.3%). The first picture alone is 0.6% over libvpx's.
+
+**The big tokens' probabilities** (17 November 2026, after a drawn
+picture's key frame). The first picture's 0.6% over libvpx's was at its
+finest quantizers. At quantizer 15 with no loop filter on either side,
+ours took 14996 bytes and libvpx's 14422 at the same PSNR-Y; the squares
+of noise cost the same, the timestamp, the bars and the ramp 7% more.
+Traced block by block, the blocks were mostly alike, and where they were
+the same (a timestamp 8×8 block in D207 with an 8×8 transform, 64 levels
+the same but for two or three of them by one) ours took 543 bits and
+libvpx's 447: its tokens past the first few cost 9.5 bits against 6. The
+difference was the frame's coefficient probabilities. A context's third
+probability (one against more) also picks, through the Pareto table, the
+probabilities of every bigger token (`PARETO8`). The updates were decided
+on the counts alone, each probability set to its count's if that saved
+bits on its own node: a context whose nonzero tokens were all over one
+took a third probability of 1, and with it big tokens' probabilities made
+for very large values, which every level from 2 to 34 paid for (libvpx
+29 there).
+
+Up to speed 5 at a fixed quantizer in one pass (`MODEL_UPDATE_SPEED`),
+the updates are now decided as libvpx's `update_coef_probs` decides them
+(`coef_updates_model`): each probability takes the value between its
+count's and the old one that saves the most with its update's bits, and
+the third is weighed with the bits of the big tokens it brings
+(`vp9_prob_diff_update_savings_search_model`), on their counts by class,
+which the tiles keep as they write them (`Tile`'s `big`). The pictures
+are the same, in fewer bits: the frame above 14270 bytes. Every such
+frame takes it, key or not.
+
+The first picture of three of `testsrc2` against libvpx's (FFmpeg's
+`-crf`; BD-rate at the same PSNR-Y / U / V, the mean of five grids of
+`crf`, `10` to `60` by 10 and offset by 1 to 4): +0.7 / −0.7 / −1.5%
+before, −1.8 / −3.2 / −3.8% now (each grid −1.1 to −2.1% in PSNR-Y).
+
+Speed 5 `crf=` against FFmpeg's `-crf` (BD-rate at the same PSNR-Y / U /
+V; in brackets nine points against FFmpeg's five):
+
+| | `testsrc2` | Gradient |
+| --- | --- | --- |
+| Before | −3.9 / −8.1 / −12.2% (−1.1 / −6.6 / −11.0%) | −3.0% (−3.3%) |
+| Now | −4.3 / −8.4 / −12.5% (−1.4 / −6.9 / −11.3%) | −4.1% (−4.5%) |
+
+(bytes of the IVF; PSNR-Y the same as before):
+
+| crf | `testsrc2`, before | Now | Gradient, before | Now |
+| --- | --- | --- | --- | --- |
+| 15 | 317090, 52.83 dB | 315624 | 13165, 53.86 dB | 13117 |
+| 25 | 237356, 49.03 dB | 236397 | 9654, 52.44 dB | 9614 |
+| 35 | 140793, 43.81 dB | 140360 | 7380, 50.00 dB | 7267 |
+| 45 | 56499, 39.17 dB | 56367 | 6000, 47.04 dB | 5922 |
+| 55 | 18634, 36.15 dB | 18596 | 5344, 43.96 dB | 5287 |
+
+On the README's three clips at `q=60` to `210`, the same pictures in
+0.1 to 0.6% fewer bytes: −0.2, −0.3 and −0.3% at the same PSNR-Y, U and
+V. The search adds about 0.2 ms to a frame of the three scenes, after its
+tiles; the count is on the tiles' threads (scanning their symbols for the
+big tokens after each row cost as much again).
+
+Time, four threads, against FFmpeg's `-crf 24` to `48` and the build
+before, rounds interleaved, the mean over each one's points of the median
+of three rounds (Cutlass at `q=60` to `210`):
+
+| | FFmpeg | Before | Now |
+| --- | --- | --- | --- |
+| Three scenes | 7.14 s | 6.04 s (0.85) | 6.04 s (0.85) |
+| Still scene | 4.10 s | 3.62 s (0.88) | 3.61 s (0.88) |
+| Grainy pan | 2.73 s | 2.35 s (0.86) | 2.40 s (0.88) |
+
+(In two earlier runs of an earlier form of the count the differences
+went either way by up to 2 points: noise.)
+
+Checks: of the identity check's 41 configurations, seven at a fixed
+quantizer up to speed 5 change (the synthetic 4:2:0, 4:4:4 and noisy
+4:2:0 sources at `q=60`, speeds 2 and 5; the still scene at `q=120`),
+the other 34 do not (every one at a bitrate, in two passes, or at speeds
+6 to 10). FFmpeg's `vp9` (threaded and on one thread), libvpx and this
+decoder agree on 11 new streams (44 of 44 decodes: `testsrc2` at
+`crf=15` and `55` and its first three pictures at `q=68`, the gradient at
+`crf=25`, the synthetic 4:4:4 source at `q=60` at speed 2, the noisy
+4:2:0 one at speed 5, the grainy pan in 10 bits at `q=90`, the still
+scene lossless and at `q=210`, the three scenes at `q=60`, the grainy pan
+at `q=120`). New test: at a fixed quantizer at speed 5 a sharp texture's
+frames decode as the encoder reconstructed them, the same as with the
+updates on the counts alone, in fewer bytes; at speed 6 in the same
+(fails without the change).
+
+What is left: `testsrc2` at −4.3% / −8.4% / −12.5% against FFmpeg's
+`-crf`, −1.4% / −6.9% / −11.3% with nine points; the gradient at −4.1%
+(nine points −4.5%). The first picture alone is 1.8% under libvpx's.
 
 With `-row-mt 1` (in an earlier sitting `-row-mt 1 -tile-columns 2
 -frame-parallel 1` wrote the same streams), and speed 6 against it and
@@ -1270,12 +2946,19 @@ What is left:
 - Time on the pan with the reference pool in one pass (see "Chroma"):
   0.81 of FFmpeg's on four threads and 0.78 to 0.82 on one, at its
   finer quantizers; and its rate, 3 to 16% under (see there).
-- Chroma, and the three scenes' margin. Speed 5 is now ahead of libvpx's
+- Chroma, and the three scenes' margin. Speed 5 is ahead of libvpx's
   cpu-used 1 there on every plane and average, but by 1.1 to 4.6
-  points (on four threads: −3.2% PSNR-Y, −1.1% PSNR-U), and speed 6 is
-  at +0.2% at PSNR-U; `testsrc2` is where it is lost (see "Chroma").
-  Speed 10 is +4.9% at PSNR-U there and two passes +9.6% (their PSNR-Y
-  −6.0% and −4.7%). Before this round: speed 6 was ahead of libvpx's
+  points (on four threads: −3.2% PSNR-Y, −1.1% PSNR-U); `testsrc2` is
+  where it is lost (see "Chroma"). After "The gaps", every mode is
+  ahead of its FFmpeg counterpart on every column there, but narrowly
+  at PSNR-U: speed 6 −1.4%, speed 10 −1.6%, two passes −1.6% (−0.7%
+  and −0.9% before the chroma deltas and weights above); a run on
+  another number of threads (other tile columns) moves these by a
+  point. Speed 6
+  takes speed 5's time on the three scenes (it did before too), and
+  speed 10 0.82 to 0.95 of FFmpeg's realtime 8 on four threads, after
+  the loop filter's planes went to one thread (the reference pool had
+  taken it to 0.90 to 1.02; see "The gaps"). Before "Chroma": speed 6 was ahead of libvpx's
   cpu-used 1 on the three scenes by 2.0 points at the averaged PSNR (8.2
   at PSNR-Y), speed 5 by 3.0. At speed 6, a coarser gate on the smaller transform (128 bits an
   8×8) lost 5 points, intra left out of 64×64 blocks 1.1, speed 5's
@@ -1323,47 +3006,680 @@ brackets). "Added" is new in this round; each has a test in
 | `-b:v` | `rc_target_bitrate`, VBR | `bitrate` (`rate=`) |
 | `-crf N -b:v 0` | `end-usage=q`, `cq-level` | `qindex` = `Vp9Encoder::qindex_of_level(N)` (`crf=`, `q=`) |
 | `-crf N -b:v R` | `end-usage=cq` | `cq_level` (`crf=` with `rate=`, `cq=`): added |
-| `-minrate` = `-maxrate` = `-b:v`, `-bufsize` | `end-usage=cbr`, `rc_buf_sz` | `cbr_buffer_ms` (`cbr=`) |
-| `-qmin`, `-qmax` | `min-q`, `max-q` | `min_q`, `max_q` as indices (`min_q=`, `max_q=`: added to `vp9enc`) |
-| `-undershoot-pct`, `-overshoot-pct` | `undershoot-pct`, `overshoot-pct` | `undershoot_pct`, `overshoot_pct`: dead bands on what is paid back (added) |
+| `-minrate` = `-maxrate` = `-b:v`, `-bufsize` | `end-usage=cbr`, `rc_buf_sz` | `cbr_buffer_ms` (`cbr=`): the buffer sizes the first key frame and the start, as libvpx's; see "Options measured" |
+| `-rc_init_occupancy` | `rc_buf_initial_sz` | `rc_init_occupancy_ms` (`occupancy=`, in ms, added): the buffer's starting level; unset, three quarters of `-bufsize` (FFmpeg's default) |
+| `-qmin`, `-qmax` | `min-q`, `max-q` | `min_q`, `max_q` as indices (`min_q=`, `max_q=`: added to `vp9enc`): every frame's quantizer within them in every rate mode; see "Options measured" |
+| `-undershoot-pct`, `-overshoot-pct` | `undershoot-pct`, `overshoot-pct` | `undershoot_pct`, `overshoot_pct`: dead bands on what is paid back (added); they act at a variable bitrate too, where libvpx 1.14 shows none (an intentional difference, see "Options measured") |
 | `-max-intra-rate` | `max-intra-rate` | `max_intra_pct` (added) |
-| `-drop-threshold` | `drop-frame` | missing: no frame is dropped |
+| `-drop-threshold` | `drop-frame` | `drop_frame_pct` (`drop=`, added): one pass at a bitrate, at a variable bitrate too (libvpx drops in CBR only: an intentional difference); see "Options measured" |
 | `-g` | `kf-max-dist` | `keyint` |
-| `-keyint_min` | `kf-min-dist` | `keyint_min`: a cut that far from the last key frame is one (added); intervals are fixed as with `-keyint_min` = `-g` |
-| `-force_key_frames` | `VPX_EFLAG_FORCE_KF` | `Vp9Encoder::force_keyframe` (the engine's `force_keyframe`) |
-| `-pass 1` / `-pass 2` | `g_pass`, stats | `Vp9Encoder::first_pass_qindex`, `set_second_pass` (`twopass=1`) |
+| `-keyint_min` | `kf-min-dist` | `keyint_min`: a cut that far from the last key frame is one (added; in two passes every cut that far, by default every cut); intervals are fixed as with `-keyint_min` = `-g` |
+| `-force_key_frames` | `VPX_EFLAG_FORCE_KF` | `Vp9Encoder::force_keyframe` (the engine's `force_keyframe`; `force_keyframes=N,N,...` in pictures, added): the picture pushed next is the key frame, with the lookahead too, and no alt-ref spans it; in two passes `set_second_pass_with_keys` plans them before coding (key-frame and golden groups end there), as libvpx's two passes; see "Options measured" |
+| `-pass 1` / `-pass 2` | `g_pass`, stats | `Vp9Encoder::first_pass_qindex`, `set_second_pass` (`twopass=1`): a key frame on each scene cut, as libvpx's two passes put one (added); with forced key frames `set_second_pass_with_keys` (added); see "Options measured" |
 | `-deadline` best / good / realtime, `-cpu-used` (`-speed`, `-quality`) | | `speed` 0–10 (`speed=`); see the speeds below |
 | `-lag-in-frames` (`-rc_lookahead`) | `g_lag_in_frames` | `lag` (`lag=`) |
-| `-auto-alt-ref` 0 / 1 | `enable-auto-alt-ref` | `alt_ref` (`alt_ref=0`, added); libvpx's levels 2–6 (layered alt-refs) are not |
+| `-auto-alt-ref` 0 / 1 | `enable-auto-alt-ref` | `alt_ref` (`alt_ref=0`, added) |
+| `-auto-alt-ref` 2–6 | multi-layer alt-refs | `alt_ref_layers` 2 or 3 (`arf_layers=`, added): hidden alt-refs within the golden group, shown with `show_existing_frame`; see "Options measured" (they lose here) |
 | `-arnr-maxframes` | `arnr-maxframes` | `arnr_max_frames` (`arnr_frames=`, added) |
 | `-arnr-strength` | `arnr-strength` | `arnr_strength` (`arnr_strength=`, added) |
 | `-arnr-type` | `arnr-type` | n/a: libvpx's VP9 encoder ignores it too (VP8 only) |
-| `-min-gf-interval` | `min-gf-interval` | internal (golden every 12; 6 to 12 by motion in two passes), not an option |
+| `-min-gf-interval` | `min-gf-interval` | `min_gf_interval` (`min_gf=`, added): the shortest golden group, and the longest at least that (libvpx raises `max-gf-interval` to it); unset, golden every 12, 6 to 12 by motion in two passes |
 | `-tune psnr` | `tune` | the default |
-| `-tune ssim` | `tune=ssim` | missing |
-| `-tune-content screen` / `film` | `tune-content` | missing |
-| `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ) |
-| `-aq-mode 2` / `3` / `4` | complexity, cyclic refresh, equator360 | missing |
-| `-noise-sensitivity` | `noise-sensitivity` | missing (no temporal denoiser) |
+| `-tune ssim` | `tune=ssim` | `tune: Tune::Ssim` (`ssim=1`, added); see "Options measured" |
+| `-tune-content screen` | `tune-content` | `tune_content: TuneContent::Screen` (`screen=1`, added); see "Options measured" |
+| `-tune-content film` | `tune-content` | `tune_content: TuneContent::Film` (`film=1`, added): libvpx's RD penalties on grain lost; see "Options measured" |
+| `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ), or `aq_mode: AqMode::Variance` |
+| `-aq-mode 3` / `4` | cyclic refresh, equator360 | `aq_mode`: `AqMode::CyclicRefresh` (`aq=3`), `AqMode::Equator360` (`aq=4`), added |
+| `-aq-mode 2` | complexity AQ | `aq_mode: AqMode::Complexity` (`aq=2`, added): each superblock's segment by the rate its source's variance projects, before it is coded (libvpx's is the rate its search spent); at a bitrate, in one pass and two, segmented while golden frames' and alt-refs' budgets allow, as libvpx decides (one pass with libvpx's golden budget of one pass); see "Options measured" |
+| `-noise-sensitivity` | `noise-sensitivity` | `noise_sensitivity` (`noise=`, added): a temporal denoiser of luma; see "Options measured" |
 | `-static-thresh` | `static-thresh` | `static_thresh` (`static_thresh=`, added) |
-| `-sharpness` | `sharpness` | `sharpness` (`sharpness=`, added) |
+| `-sharpness` | `sharpness` | `sharpness` (`sharpness=`, added): written to the header for the loop filter (libvpx 1.14 writes 0 and uses it in its RD search: an intentional difference) |
 | `-error-resilient default` | `error-resilient` | `error_resilient` (`error_resilient=1`, added); `partitions` is VP8's |
-| `-frame-parallel` | `frame-parallel` | `frame_parallel` (`frame_parallel=1`, added) |
+| `-frame-parallel` | `frame-parallel` | `frame_parallel` (`frame_parallel=1`, added); off by default (libvpx's is on: an intentional difference, it costs 5 to 9% here; see "Options measured") |
 | `-lossless 1` | `lossless` | `qindex` 0 (`lossless=1`) |
 | `-tile-columns` | `tile-columns` | `tile_columns` (`tile_columns=`, added; by default one per thread) |
-| `-tile-rows` | `tile-rows` | `tile_rows` (`tile_rows=`) |
+| `-tile-rows` | `tile-rows` | `tile_rows` (`tile_rows=`): honoured (libvpx 1.14 here writes one tile row whatever it is asked: an intentional difference) |
 | `-row-mt 1` | `row-mt` | always below speed 9: rows on threads (`enc::tile::Lanes`, added); from speed 9 one thread a tile column, as many as the threads allow beyond one |
 | `-threads` | `g_threads` | `threads` (`threads=`) |
-| `-level` | `target-level` | `level`: named in `vpcC` (added), not enforced |
-| `-ts-parameters` | temporal layers | missing (no SVC / temporal layers) |
-| `-corpus-complexity` | corpus VBR | missing |
-| `-enable-tpl` | TPL model | n/a: two passes have their own allocation |
+| `-level` | `target-level` | `level`: named in `vpcC` (added), not enforced (libvpx refuses a level the picture size is over: an intentional difference) |
+| `-ts-parameters` | temporal layers | `temporal_layers` 2 or 3 (`layers=`, added): libvpx's L1T2 and L1T3 patterns; spatial layers are not |
+| `-corpus-complexity` | corpus VBR | `corpus_complexity` with `Vp9Encoder::first_pass_complexity` (`corpus=` with `twopass=1`, added), in libvpx's unit (its first pass's error a macroblock, projected here from first-pass bits); see "Options measured" |
+| `-enable-tpl` | TPL model | `enable_tpl` (`tpl=1`, added): libvpx's temporal dependency model of an alt-ref's group, its lambda by superblock and a step for the alt-ref from r0; off by default (libvpx's is on); see "Options measured" |
 | `-pix_fmt yuv420p` … `yuv444p12le` | profiles 0–3 | `chroma`, `bit_depth` (`chroma=`, `bits=`) |
 | `-pix_fmt gbrp`, `gbrp10le`, `gbrp12le` | `VPX_CS_SRGB` | `ColorSpace::Srgb` with 4:4:4: planes G, B, R (added) |
-| `-pix_fmt yuva420p` | alpha as a second stream in WebM `BlockAdditional` | missing: a container feature |
-| `-colorspace`, `-color_range` | `color-space`, `color-range` | `color_space`, `full_range` (`colorspace=`, `range=`), and from `CodecParams` (added) |
+| `-pix_fmt yuva420p` | alpha as a second stream in WebM `BlockAdditional` | `alpha` (`alpha=FILE`, added): a second encoder codes the alpha plane as the luma of a 4:2:0 picture with chroma at 128, one alpha packet a packet (`Vp9Encoder::push_planes_alpha`, `flush_alpha`; on the codec contract a frame's alpha plane in, `SideData::BlockAdditional` id 1 out); `cutlass-matroska` writes it as each block's BlockAdditional (BlockAddID 1) with AlphaMode 1 and reads it back; `Vp9Decoder` decodes it into the frame's alpha (`Vp9AlphaDecoder` on its own), as FFmpeg's `libvpx-vp9` decoder does; see "Options measured" |
+| `-colorspace`, `-color_range` | `color-space`, `color-range` | `color_space`, `full_range` (`colorspace=`, `range=`), and from `CodecParams` (added); BT.601 by default (FFmpeg writes 0, unknown, when no colour space is given: kept, as the decoded frames' colour on the codec contract depends on it) |
 | `-aspect` / sample aspect ratio | `VP9E_SET_RENDER_SIZE` | `render_size` (`render=WxH`, added) |
-| regions of interest (side data) | ROI map | missing |
+| regions of interest (side data) | ROI map | `Vp9Encoder::set_roi_map` with a `RoiMap` (`roi_q=`, `roi_ref=`, `roi_skip=` in `vp9enc`, added): a segment a block, each with a quantizer and loop filter delta, a reference and skip |
+
+### Options measured
+
+**Rate buffer** (`cbr_buffer_ms`, `rc_init_occupancy_ms`; FFmpeg's
+`-bufsize`, `-rc_init_occupancy`). At a constant bitrate the buffer
+starts at `rc_init_occupancy_ms` (unset, three quarters of the buffer,
+as FFmpeg sets libvpx's `rc_buf_initial_sz`), and the first key frame
+is planned at half that level (libvpx's
+`calc_iframe_target_size_one_pass_cbr`), at the step a key frame of four
+times an inter frame's bits would take. What the start left under the
+buffer's optimal level (five sixths of it) and what a key frame took
+past a frame's share are paid back at libvpx's pace, at most a quarter
+of a frame's share a frame (`calc_pframe_target_size_one_pass_cbr` at
+its default `undershoot-pct`/`overshoot-pct` of 50); what the frames
+took past their budgets is paid back within half the buffer, as before,
+and savings past a full buffer are lost. Before, the first key frame
+was a guess 1.5 times the inter step whatever the buffer (7.1 kB at
+every size below). The three scenes (60 frames) at 1000 kb/s, FFmpeg
+`-minrate`=`-maxrate`=`-b:v`, key frame, rate, PSNR-Y:
+
+| | FFmpeg 6.1 / libvpx 1.14 | Before | Now |
+| --- | --- | --- | --- |
+| `-bufsize 250k` / `cbr=250` | 5.3 kB, 1066 kb/s, 36.89 dB | 7.1, 1001, 36.57 | 10.7, 983, 36.28 |
+| `-bufsize 1000k` / `cbr=1000` | 22.1, 1033, 37.70 | 7.1, 1003, 36.82 | 27.5, 972, 36.58 |
+| `-bufsize 4000k` / `cbr=4000` | 49.8, 1170, 37.99 | 7.1, 1030, 36.98 | 50.9, 965, 36.34 |
+| `-rc_init_occupancy 100k` / `occupancy=100` | 1.8, 852, 35.51 | n/a | 5.6, 764, 35.59 |
+| `-rc_init_occupancy 1000k` / `occupancy=1000` | 26.9, 1132, 38.06 | n/a | 31.7, 1081, 37.13 |
+
+Both now start at a key frame the buffer pays for and come in under the
+rate from a low start. At speeds 6 and 9 with a 1 s buffer (0.5/1 to
+3/4 Mb/s, four threads), BD-rate against the build before at the same
+PSNR-Y / FFmpeg's average: speed 6 −1.1 / −1.9% on the three scenes,
+−54.3 / −46.5% on the still scene with two jumps, −38.0 / −36.7% on the
+grainy pan; speed 9 +6.0 / +3.9%, −38.5 / −26.0%, −33.7 / −21.0% (the
+build before swung its quantizer by up to 100 indices a frame on the
+two clips that gain); rates within −3% to +3% of the target (before −0.4
+to +4%), in 0.86 to 0.93 of the time.
+
+**Minimum golden interval** (`min_gf_interval`, `-min-gf-interval`). The
+shortest golden group (alt-ref target to alt-ref target), and the longest
+the more of it and 12, as libvpx raises its `max-gf-interval` to it. One
+pass places golden frames every that many pictures; two passes by
+motion within the two. Two passes at 1.5 Mb/s on the three scenes (60
+frames; hidden alt-refs, kB / PSNR-Y):
+
+| | FFmpeg 6.1 / libvpx 1.14 | Ours |
+| --- | --- | --- |
+| unset | 10 alt-refs (key frames 0, 30), 371 / 41.32 | 7 alt-refs, 370 / 41.56 |
+| `-min-gf-interval 4` / `min_gf=4` | the same | 7, 369 / 41.50 |
+| `-min-gf-interval 16` / `min_gf=16` | 2 (at 1, 31), 332 / 40.64 | 2 (at 1, 31), 395 / 41.84 |
+
+Both make one alt-ref a scene of 30 pictures with 16. libvpx comes in
+under the rate with it (1330 kb/s), ours over (1579): the alt-ref of a
+long group takes more than the model of 12-picture groups planned.
+
+**Forced key frames** (`Vp9Encoder::force_keyframe`,
+`-force_key_frames`; `force_keyframes=N,N,...` in `vp9enc`). The
+picture pushed after the call is a key frame, with the lookahead too
+(it waited for its turn; before, the call made the picture coded next a
+key frame, a lookahead's length early), and no alt-ref is coded across
+it. FFmpeg's `-crf 32 -force_key_frames 0.5,1.5` and `crf=32
+force_keyframes=15,45`: key frames at 0, 15 and 45 in both (850 kB /
+44.24 dB and 607 kB / 43.30 dB).
+
+**Quantizer limits** (`min_q`, `max_q`; FFmpeg's `-qmin`, `-qmax` times
+4). Every frame's quantizer index, hidden alt-refs too, is held within
+them in every rate mode, as libvpx holds its frames to `best_quality` and
+`worst_quality`; a fixed quantizer (`q=`, `crf=`) outside them is held
+to them (FFmpeg refuses a `-crf` outside `-qmin`/`-qmax`). One pass at a
+variable bitrate took the first key frame's step over its scale as the
+inter quantizer to move from, past `max_q`: on the three scenes (60
+frames) at 200 kb/s with `max_q=80` the two pictures after the key frame
+came at 124 and 100 (192 and 168 with `max_q=160`). Now (FFmpeg `-b:v
+200k`, against ours, quantizer range, kB / PSNR-Y):
+
+| | FFmpeg 6.1 / libvpx 1.14 | Before | Now |
+| --- | --- | --- | --- |
+| `-qmax 20` / `max_q=80` | 43–80, 1067 kB / 45.59 dB | 23–124, 855 / 45.21 | 23–80, 870 / 45.29 |
+| `-qmax 40` / `max_q=160` | 127–160, 326 / 39.99 | 97–192, 241 / 38.82 | 97–160, 245 / 38.98 |
+| `-qmax 20`, two passes | 80–80, 801 / 44.63 | 80–80, 788 / 44.32 | the same |
+| `-qmin 40 -b:v 20000k` / `min_q=160` | 160–169, 295 / 37.99 | 160–192, 203 / 36.51 | the same |
+| `-crf 40 -qmax 20` / `crf=40 max_q=80` | refused | 97–160 | 80–80, 776 / 44.23 |
+
+**Frame dropping** (`drop_frame_pct`, FFmpeg's `-drop-threshold`). One
+pass at a bitrate keeps libvpx's buffer model beside its own: the buffer
+(`cbr_buffer_ms`, or libvpx's 6 s at a variable bitrate) starts at
+`rc_init_occupancy_ms` (unset, three quarters of `cbr_buffer_ms`, as
+FFmpeg sets it, or libvpx's 4 of its 6 s), takes each frame's share of the rate in and its bits
+out, and holds at most its size. While it is under the threshold (in
+percent of its optimal level, 5/6 of its size) every other inter frame is
+dropped, and one frame in 1 + the decimation factor is coded while it
+stays under (libvpx's `vp9_test_drop`); under empty every inter frame is.
+A dropped frame gives no packet (`push_planes` returns nothing for it,
+`encode_planes` empty data), its share of the rate goes to the frames
+after it, and they predict from the frame coded before it. Key frames,
+golden frames, cuts and the frame an alt-ref comes with are never
+dropped, nor a frame of two passes. libvpx drops in one-pass CBR only.
+Measured before the rate buffer below planned the first key frame (it
+started at 4/6 of a constant bitrate's buffer then). Constant bitrate
+with a 1 s buffer, `drop=30` against FFmpeg's
+`-deadline realtime -cpu-used 8 -b:v R -minrate R -maxrate R -bufsize R
+-drop-threshold 30`, four threads, the README's three clips (packets,
+rate, the most a 1 s buffer held past the rate, PSNR-Y with each dropped
+frame shown as the one before):
+
+| Clip, 250 kb/s | Speed 10 | Speed 10, `drop=30` | Speed 9, `drop=30` | libvpx rt 8 | libvpx rt 8, 30 |
+| --- | --- | --- | --- | --- | --- |
+| Three scenes | 90, 413 kb/s, 2.25 s, 30.7 dB | 57, 281, 0.90, 27.1 | 88, 251, 0.49, 31.5 | 90, 335, 1.13, 29.7 | 74, 290, 0.78, 28.3 |
+| Still and jumps | 90, 668, 5.02, 28.5 | 37, 305, 0.73, 23.7 | 90, 251, 0.33, 31.9 | 90, 435, 2.22, 28.4 | 57, 304, 0.86, 26.1 |
+| Grainy pan | 60, 695, 3.56, 28.4 | 28, 337, 0.75, 24.2 | 60, 256, 0.20, 31.1 | 60, 382, 1.05, 27.9 | 45, 319, 0.58, 26.0 |
+
+Speed 10 runs out of quantizer at this rate (it codes at the coarsest),
+so it is the one that drops: it comes within 12 to 35% of the rate (from
+65 to 178% over), as libvpx's realtime 8 comes within 16 to 28% (from 34
+to 74% over). Speed 9 holds the rate on its own quantizers and drops at
+most two frames. At 500 kb/s speed 10 drops 1, 13 and 8 frames (to 508,
+572 and 603 kb/s from 508, 657 and 692), libvpx 0, 8 and 0.
+
+**Cyclic refresh** (`AqMode::CyclicRefresh`, `-aq-mode 3`). Every inter
+frame puts a tenth of the superblocks, the next ones in raster order, in
+segment 1, at the quantizer that takes three times the bits (bits as the
+step to the power −1.25; at most half the index finer); key frames
+refresh everything and code none. libvpx's version also leaves out
+blocks coded finely of late and puts a refreshed block that coded
+nothing back in segment 0; this one refreshes whole superblocks in turn.
+libvpx's ratio is 2: here that lost 4.0 points of PSNR-Y BD-rate summed
+over the three clips at speed 10, 3 won 2.2, 4 won 6.8 but lost 6.9 on
+the three scenes. BD-rate at a constant bitrate (1 s buffer, 0.5/1 to 3/4
+Mb/s, four threads) against the same speed without it, PSNR-Y / FFmpeg's
+average:
+
+| | Three scenes | Still and jumps | Grainy pan |
+| --- | --- | --- | --- |
+| Speed 10, `aq=3` | +4.8 / +4.8% | −3.8 / −2.9% | −3.2 / −1.4% |
+| Speed 9, `aq=3` | +2.9 / +2.8% | +1.7 / +2.5% | +0.8 / +3.2% |
+| libvpx realtime 8, `-aq-mode 3` against 0 | +4.8 / +4.2% | −11.2 / −9.2% | −14.9 / −8.2% |
+| Speed 10 `aq=3` against libvpx rt 8 `-aq-mode 3` | −9.1 / −7.2% | −16.5 / −16.7% | −15.0 / −16.4% |
+| Speed 9 `aq=3` against libvpx rt 8 `-aq-mode 3` | −18.8 / −15.4% | −44.4 / −41.6% | −28.8 / −27.4% |
+
+As in libvpx, it is for how a call looks (no block stays coarse for
+long) rather than for PSNR; libvpx gains PSNR by it on two clips because
+its constant bitrate without it is far behind (this encoder's speed 10
+without it is 12 to 14% ahead of libvpx's realtime 8 with `-aq-mode 3`
+at PSNR-Y). Time: 1.01 to 1.06 of the
+time without. Weighing the refreshed superblocks' rate against their
+error at their own quantizer's lambda, as region of interest maps do
+(see below), gained 6.8 points summed at speed 10 but lost 9.8 at speed
+9, and was left out.
+
+**Complexity AQ** (`AqMode::Complexity`, `-aq-mode 2`). libvpx's
+`vp9_aq_complexity.c`: five segments, 3 at the frame's quantizer and the
+others at the quantizers of 1.75 to 2.5, 1.25 to 1.75, 1.05 to 1.25 and
+0.8 to 0.9 times its rate (by strength, from the quantizer's step), and
+each superblock in the first segment both of whose thresholds it is
+under, of its rate over the frame's mean (0.15 to 0.75, then 2) and of
+its log variance (`ln(256 var + 1)`, 6 to 9): flat, cheap superblocks
+finer, the costliest coarser. libvpx's rate is the one its RD search spent on
+the block at the frame's quantizer; here it is projected before the frame
+is coded, from the variance of each 8×8 block of the source (the bits of
+a Gaussian of that variance at the step: half the log of 1 + 12 var over
+the pixel step squared, a sample), on every frame, hidden alt-refs too.
+Each segment's blocks weigh rate against error at their own quantizer
+(at the frame's lambda it lost 27.9 points summed over the clips, 6.1
+with it). With a bitrate, as in libvpx (`vp9_setup_in_frame_q_adj`), the
+segments are set up on key, golden and alt-ref frames, by their own
+budget, and the frames between keep what they chose: there is no
+segmentation while that budget's share a superblock is under 256 bits.
+In one pass a golden frame or alt-ref takes libvpx's one-pass golden
+budget, 10·g / (g + 9) frames' for libvpx's group of g frames (half the
+shortest and longest golden intervals, held within 10 and 20: 5.3
+frames by default), so at 720p and 30 pictures a second it segments from
+about 330 kb/s, as libvpx's one pass does; two passes keep 3.5 frames'
+(from about 500 kb/s; libvpx's two passes give their alt-refs less at a
+low bitrate). A key frame takes one frame's budget, not libvpx's 25: at
+25, libvpx segments even at 10 kb/s on a 256×128 picture (every frame of
+3 and of 30, lag 0 and 25), where this encoder keeps to none, and a key
+frame's segments cost 0.2 dB PSNR-Y at 1 Mb/s on the still scene and
+jumps and on the grainy pan. It decided on every frame by the average frame's budget before
+(under about 1.7 Mb/s, none): the three scenes (60 frames) at 1.5 Mb/s,
+FFmpeg `-aq-mode 2` against `aq=2`, frames segmented, kB / PSNR-Y: one
+pass, libvpx 60 of 60, 393 / 39.65; before 0 of 63 (the stream of
+`aq=0`), 332 / 40.37; now 62 of 63, 333 / 40.21. Two passes: libvpx 70
+of 70, 370 / 40.38; before 0, 375 / 41.59; now 66 of 67, 373 / 41.49.
+At 400 kb/s, one pass: libvpx segments 54 of 60 (555 kb/s, 35.59 dB);
+before, at 3.5 frames' budget, ours none (424 kb/s, 35.19 dB); now 62 of
+63 (425 kb/s, 34.96 dB). Two passes: libvpx 2 of 67 (its key frames),
+ours none (404 kb/s, 35.07 dB). The segments cost PSNR there as
+libvpx's do (libvpx `-aq-mode 2` against 0 at 400 kb/s: −0.55, −1.89
+and −1.51 dB on the three clips): one pass at 0.3 to 3 Mb/s (four
+threads) against before, BD-rate at the same PSNR-Y / FFmpeg's average,
++0.5 / +0.3%, +2.8 / +2.4% and +2.2 / +1.7% on the three clips, all of
+it the point at 400 kb/s (−0.17, −0.61 and −0.61 dB); at 1 to 4 Mb/s
+(0.5 to 3 on the still scene and jumps) the same streams. One pass at speed 5,
+four threads, BD-rate at the same PSNR-Y / FFmpeg's average (measured
+before this change, at 1 to 4 Mb/s):
+
+| | Three scenes | Still and jumps | Grainy pan |
+| --- | --- | --- | --- |
+| `aq=2` against no AQ | +1.9 / +1.4% | +1.0 / +1.0% | +3.2 / +4.2% |
+| libvpx `-aq-mode 2` against 0 | +8.5 / +9.3% | +46.1 / +38.1% | +42.8 / +31.9% |
+| `aq=2` against libvpx `-aq-mode 2` | −8.0 / −8.6% | −42.1 / −45.0% | −50.7 / −55.3% |
+
+As every AQ mode, it gives up PSNR to spend bits where coding errors
+show; libvpx's (1.14) gives up far more in one pass here, in 1.8 to 2.0
+times its time. Ours takes 1.04 (the pan) to 1.3 (still and jumps at 3
+Mb/s) times the time without it.
+
+**360° pictures** (`AqMode::Equator360`, `-aq-mode 4`): libvpx's bands,
+the outer eighths of the rows in segment 2 at the bits of 0.6 of the
+rate, the eighths next to them in segment 1 at 0.75, on every frame. On
+the three scenes (not a 360° picture) at `q=120`, 0.9% fewer bits for
+0.25 dB less PSNR-Y over the whole picture; libvpx's `-crf 30 -aq-mode 4`
+against `-aq-mode 0` 2.7% fewer for 0.29 dB.
+
+**Screen content** (`TuneContent::Screen`, `-tune-content screen`).
+Three changes: no alt-refs (LAST predicts still text exactly, and an
+alt-ref costs its bits for nothing: on the clip below, alt-refs off alone
+take 20% off the bits at speed 6); inter frames below speed 10 try intra
+modes when the best inter candidate's error is over 1 a sample (text and
+windows that appear predict from nothing before them; speed 10 picks
+intra by a rule, not a trial, and keeps its own); and a whole-sample
+vector that matches exactly is not refined. Measured on a synthetic
+desktop (1280×720, 90 frames: an editor whose text scrolls 3 and 6
+samples a frame, a terminal that types, a moving cursor, a window
+dragged across, drawn with DejaVu Sans Mono), one pass at
+150 kb/s to 1.2 Mb/s, four threads, BD-rate at the same PSNR-Y / FFmpeg's
+average:
+
+| | Against the same speed | Against libvpx with `-tune-content screen` |
+| --- | --- | --- |
+| Speed 6, `screen=1` | −23.6 / −24.2%, same time | −3.0 / −4.0% against good, `-cpu-used 2`, in 0.40 of its time |
+| Speed 9, `screen=1` | −0.8 / −0.8% | −62.0 / −62.0% against realtime 8 |
+| Speed 10, `screen=1` | 0.0 / 0.0% | −57.2 / −57.2% against realtime 8 |
+
+Speed 6 without it was 27% behind libvpx's good deadline on this clip
+(libvpx's alt-refs cost it little here; ours took 14 to 28 kB a golden
+interval). libvpx's own `-tune-content screen` changes nothing at the
+good deadline (the same bytes) and costs 40% at realtime 8 here, where it
+also overshoots the rate by 1.5 to 2.6 times.
+
+**Film** (`TuneContent::Film`, `-tune-content film`). What libvpx's
+film tuning does, in `vp9_rdopt.c`, applied in this encoder's RD search
+of inter frames (speeds 0 to 6; libvpx's realtime search has none of
+it): each candidate's RD cost, once it is coded, is raised by libvpx's
+`rd_variance_adjustment`, where the lower of the source's and the
+reconstruction's variance is at most 250 an 8×8 block (in a second pass
+500 for intra and compound candidates, 2500 for DC): by 2.5 times the
+share by which the reconstruction's variance falls short of the
+source's (a quarter of the share it is over), at most 2.5 times, twice
+that for intra and compound candidates (libvpx without film: at most
+16%, from 125). Before that, on blocks from 16×16 whose 8×8 parts differ
+in energy (libvpx's `vp9_get_sub_block_energy` range), an intra DC
+candidate's cost is raised by the range, other intra ones by a quarter
+of it, compound ones by a quarter. Grain is noise a smooth prediction
+drops; the penalties keep it. Not done: libvpx's film also searches
+more intra modes in its speed features, weakens its temporal filter by 2
+on 32×32 blocks of variance at most 2 a sample, and scales the 250 by
+the first pass's noise estimate of the group (this encoder has none).
+On the grainy pan, one pass and two at speed 5 (four threads) against
+FFmpeg's default and `-tune-content film`, BD-rate at the same PSNR-Y /
+FFmpeg's average, and the reconstruction's share of the source's
+variance in its flat 8×8 blocks (variance under 8 a sample: 77% of the
+blocks) at 1 to 4 Mb/s:
+
+| | BD-rate against the same without film | Grain kept, without → with film |
+| --- | --- | --- |
+| Speed 5, `film=1` | +2.6 / +5.5% | 25.5, 24.6, 25.2, 27.9% → 25.6, 24.8, 25.7, 29.0% |
+| Two passes, `film=1` | +4.9 / +7.9% | 25.0, 24.4, 24.4, 25.1% → 25.3, 24.7, 25.0, 26.6% |
+| libvpx `-tune-content film` | +1.7 / −0.1% | 25.2, 24.7, 24.8, 25.2% → 26.9, 25.5, 25.5, 26.3% |
+| Speed 5 `film=1` against libvpx `-tune-content film` | −31.3 / −41.2% | |
+
+Both keep a little more grain for a few percent of PSNR, ours more of it
+at the higher rates and libvpx's at the lowest; ours in 0.95 to 1.09 of
+the time without it.
+
+**SSIM tuning** (`Tune::Ssim`, `-tune ssim`). libvpx's scale of the RD
+lambda by 16×16 block (from the mean variance of its 8×8 blocks, by
+libvpx's fit 67.035434 (1 − e^(−0.0021489 var)) + 17.492222, over the
+scales' geometric mean in the frame), but a superblock's geometric mean
+of them, to the power 0.5, for every block in it: with a lambda per 16×16
+block the partition search weighed a block's rate against its parts' at
+different lambdas, and took 33 to 46% more bits at the
+same SSIM. One pass at 0.5/1 to 3/4 Mb/s, speed 5, BD-rate at the same
+SSIM-Y in dB (FFmpeg's `ssim` filter) / PSNR-Y, against no tuning:
+
+| | Three scenes | Still and jumps |
+| --- | --- | --- |
+| `ssim=1`, power 0.5 | +2.2 / +2.6% | −0.8 / +1.9% |
+| `ssim=1`, power 1 (libvpx's) | +8.0% / — | +9.0% / — |
+| libvpx `-tune ssim` against its default | +10.2% / — | −4.8% / — |
+| `ssim=1` against libvpx `-tune ssim` | +1.6% | −1.6% |
+
+Neither encoder gains SSIM by it on these clips; the grainy pan's SSIM
+stops rising at 15.3 dB from 1.7 Mb/s for both, so a BD-rate there means
+nothing. It is there for the option's sake, at what it costs.
+
+**Temporal denoiser** (`noise_sensitivity`, `-noise-sensitivity`). Before
+a picture is coded, each 16×16 block of its luma is pulled toward the last
+denoised picture along the block's motion (whole samples: the best of the
+zero vector, the block's last vector and its neighbours', refined by two
+and one samples, kept over zero only when it is an eighth better), by
+libvpx's `vp9_denoiser_filter` steps: a sample within 3 of the reference
+(4 from level 3) takes its value, the others move by 3, 4 or 6 toward it
+(one more at motion of up to 3 samples, two from level 3), and a block
+that would move by more than 2 (3) a sample on average is taken back by
+up to 3 a sample or left as it is; a block whose motion-compensated mean
+squared difference is over 144 is left as it is. The result is coded, and
+is the next picture's reference; chroma goes through as it is, as in
+libvpx. On the pan with noise of 34.7 dB added (60 frames, 720p; the
+clean pan is the truth), speed 9 at a constant bitrate, PSNR-Y against
+the clean picture at the same rate:
+
+| Rate | 1 Mb/s | 2 | 3 | 4 | 6 | 9 | 13 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Off | 36.26 dB | 37.84 | 38.77 | 39.14 | 38.36 | 37.58 | 37.36 |
+| `noise=1` | 36.24 | 37.77 | 38.90 | 39.26 | 39.30 | 38.73 | 38.03 |
+| `noise=3` | | | | 39.17 | 39.26 | 38.59 | 38.09 |
+
+Coded without it, the picture gets further from the clean one past 4
+Mb/s (the bits go to the noise); with it, up to 1.2 dB nearer. Against
+the noisy source it loses, as it should (1.2 to 1.9% BD-rate at 1 to 4
+Mb/s). It takes 3.7 ms a 720p picture on one thread (speed 9: from 0.89
+to 1.11 s for the 60 pictures). FFmpeg 6.1's `libvpx-vp9` here was built
+without libvpx's denoiser (`-noise-sensitivity 1` writes the same bytes),
+so there is no comparison.
+
+**Temporal layers** (`temporal_layers`, `-ts-parameters`). libvpx's
+patterns (`vpx_temporal_svc_encoder` modes 1 and 3): with two layers,
+layer 0 every second picture, reading and refreshing LAST, and layer 1
+the others, reading LAST and GOLDEN and refreshing GOLDEN; with three,
+pictures 0, 1, 2, 3 of each four in layers 0, 2, 1, 2, layer 0 reading
+and refreshing LAST, layer 1 reading LAST and refreshing GOLDEN, layer 2
+reading LAST (and GOLDEN on the fourth) and refreshing nothing. Every
+frame is error resilient: a decoder of fewer layers misses frames whose
+probabilities and motion the next frame would otherwise read (WebRTC
+sets libvpx's error resilience for the same reason). No lookahead, no
+alt-refs or golden frames of their own, cuts coded as inter frames, no
+reference pool. The rate control gives each layer's frames libvpx's
+usual split (60/40%; 60/20/20%) with a model of their own.
+`Vp9Encoder::temporal_layer` names the layer of the picture coded last
+(`vp9enc keep_layers=N` writes the packets of the lowest N). The packets
+of layers 0, and 0 and 1, decode alone to exactly the full stream's
+pictures in our decoder, FFmpeg's and libvpx's. Speed 9, three layers, a
+constant bitrate (1 s buffer), BD-rate at the same PSNR-Y / FFmpeg's
+average against libvpx's realtime 8 with `-ts-parameters` (the same
+pattern and split) and `-error-resilient default` (without it, its base
+layer does not decode alone):
+
+| | Three scenes | Still and jumps | Grainy pan |
+| --- | --- | --- | --- |
+| All layers | +11.0 / +7.2% | −15.2 / −15.5% | −52.7 / −50.5% |
+| Layer 0 alone (7.5 pictures a second) | +7.7 / +10.9% | +27.4 / +27.1% | −24.4 / −22.6% |
+| All layers, against one layer at the same speed | +57.0 / +46.1% | +98.2 / +89.9% | +0.2 / −1.0% |
+
+One layer at speed 9 is far ahead of libvpx on the first two clips by
+its reference pool, golden frames and cuts, which layers give up, and by
+the probabilities it carries from frame to frame; the base layer, whose
+pictures are four apart, is where libvpx stays ahead on two clips.
+
+**Region of interest map** (`Vp9Encoder::set_roi_map`, libvpx's
+`VP9E_SET_ROI_MAP`, FFmpeg's regions of interest). The caller's segment
+for every 8×8 block, and for each of the eight segments a quantizer
+delta, a loop filter level delta, one reference (inter frames) and skip
+(inter frames: no residual and the zero vector, as the bitstream implies
+them; not with the intra reference). The encoder keeps every block to one
+segment (a square that spans two is split), weighs each segment's rate
+against its error at the segment's own quantizer (with the frame's
+lambda a finer segment took the bits of its quantizer and came back no
+nearer), keeps each block of a reference segment to its reference, and
+codes a skip segment's blocks as the zero vector with no residual, never
+under 8×8; a map's lossless frames and hidden alt-refs are coded without
+it. Every feature decodes alike in FFmpeg's `vp9`, libvpx and ours
+(speeds 2, 6, 9 and 10, with and without alt-refs). The middle half of the
+three scenes (640×360 of 1280×720) 40 indices finer, 60 frames, PSNR-Y of
+the middle and of the whole picture:
+
+| | Rate | Middle | Whole |
+| --- | --- | --- | --- |
+| Speed 6, `q=120` | 2232 → 3212 kb/s | 40.35 → 43.30 dB | 43.06 → 44.19 |
+| Speed 9, 2 Mb/s constant bitrate | 1989 → 1975 kb/s | 34.87 → 36.03 | 38.32 → 37.41 |
+| libvpx realtime 8, 2 Mb/s CBR, `addroi=…:qoffset=-0.3` | 1959 → 2018 kb/s | 34.21 → 35.12 | 37.16 → 33.58 |
+
+At a bitrate the region's gain is paid for by the rest of the picture;
+here at a quarter of libvpx's cost to the whole picture for 1.3 times
+its gain in the region. libvpx (1.14 here) applies the map only at the
+realtime deadline: at the good deadline FFmpeg's `addroi` changes no
+byte.
+
+**Corpus VBR** (`corpus_complexity`, `-corpus-complexity`). In two
+passes, as libvpx's `vp9_init_second_pass`, a clip spends the bitrate
+times the mean of its pictures' normalized scores, each the square root
+of the picture's first-pass error over a tenth of the corpus complexity
+(libvpx's VBR bias of 50%): the square root of the clip's complexity
+over the corpus's (from a quarter to four times), so that easy clips
+leave bits to hard ones. The unit is libvpx's: a picture's error is its
+first pass's `coded_error` a macroblock (the prediction's squared error
+over 256, with libvpx's floor of 200 over the square root of the
+macroblocks), and a clip's complexity (`Vp9Encoder::first_pass_complexity`)
+the corpus value at which it would spend the bitrate. libvpx measures the
+error; here it is projected from the bits each first-pass picture took
+at its step (as a Gaussian residual takes them) and brought to libvpx's
+values on the three clips: libvpx's rates at `-corpus-complexity` 300
+and 3000 put them at about 305, 240 and 275; this encoder at 305, 196
+and 205. Before, the unit was this encoder's own (the three scenes at
+588) and the share linear in it, so that `-corpus-complexity 500` gave
+the three scenes more bits where libvpx gives fewer. The three scenes
+(60 frames) at 1.5 Mb/s, FFmpeg's two passes against `twopass=1`, kb/s
+/ PSNR-Y:
+
+| | libvpx 1.14 | Before | Now |
+| --- | --- | --- | --- |
+| none | 1483, 41.32 dB | 1479, 41.56 | 1477, 41.56 |
+| `-corpus-complexity 500` / `corpus=500` | 1135, 40.07 | 1648, 42.12 | 1158, 40.29 |
+| `-corpus-complexity 5000` / `corpus=5000` | 411, 35.02 | 418, 34.63 | 418, 34.63 |
+
+The three clips as a corpus at 2 Mb/s (complexities 305, 196 and 205;
+the corpus, weighed by length, 239), kb/s and PSNR-Y:
+
+| | Three scenes | Still and jumps | Grainy pan | All |
+| --- | --- | --- | --- | --- |
+| Each at the bitrate | 2054 kb/s, 43.07 dB | 2024, 44.01 | 1980, 44.29 | 2025 kB |
+| `corpus=239` | 2329, 43.83 | 1842, 44.00 | 1832, 44.22 | 2022 kB |
+| `corpus=300` | 2072, 43.11 | 1654, 43.93 | 1636, 44.11 | |
+| libvpx, none → `-corpus-complexity 300` | 2013 → 2008 | 1993 → 1666 | 1919 → 1875 | |
+
+**Key frames on cuts in two passes** (`-pass 1/2`). libvpx's two passes
+put a key frame on the scene cuts their first pass finds (within
+`kf-min-dist`); this encoder's put one on each cut its lookahead finds,
+at least `keyint_min` from the last key frame (by default every cut;
+`keyint_min` at `keyint` keeps cuts as golden frames, as FFmpeg's
+`-keyint_min 60 -g 60` does), and the rate control scales the new
+scene's step against the first key frame's as it did a cut's. One pass
+keeps cuts as golden frames unless `keyint_min` is set. The three scenes
+(60 frames, a cut at 30) at 1.5 Mb/s: libvpx key frames 0 and 30, 371
+kB / 41.32 dB; before 0 only, 370 / 41.56; now 0 and 30, 369 / 41.56.
+BD-rate against before (two passes at 1 to 4 Mb/s, four threads, PSNR-Y
+/ U / V / FFmpeg's average): the three scenes (90 frames, cuts at 30
+and 60) −0.9 / −0.0 / +0.0 / −0.6%; the still scene and the pan (no
+cuts) the same streams. Against libvpx's two passes (`-pass 1/2`,
+cpu-used 1, four threads): −11.6 / −5.6 / −10.3 / −10.3%, −39.4 /
+−35.6 / −35.4 / −37.3%, −20.1 / −33.2 / −32.8 / −26.7%.
+
+**Forced key frames in two passes** (`set_second_pass_with_keys`;
+`force_keyframes=` with `twopass=1`). libvpx's two passes take a forced
+key frame as the end of the key-frame and golden groups before it, and
+budget it and its group from the first pass. Here the second pass is
+told the forced pictures before it codes: the first pass's key frames
+and golden places are counted from each (they were taken every `keyint`
+and every golden interval from 0), each is a key frame's class in the
+plan, the golden group before one ends at the picture before it, and
+the scenes the first pass shows are planned from the start. A key frame
+forced inside a scene keeps the scene: it and the pictures after it take
+the scene's step (it started a scene of its own before, at the first key
+frame's step, so that the still scene after the cut went from its finer
+step to a coarser one at 45, its cost found only there), and the inter
+step rises at most by half from one frame to the next. The three scenes
+(60 frames, a cut at 30) at 1.5 Mb/s with key frames forced at 15 and
+45, kb/s / quantizers / PSNR-Y: libvpx key frames 0, 15, 30 and 45,
+1503 / 72–178 / 39.99 dB; before the same key frames, 1573 / 61–236
+(five frames after 45 at 236) / 40.01; now 1481 / 63–179 / 40.24
+(without forced key frames 1477 / 62–169). Forced at 45 alone: libvpx
+1530, before 1563 (67–236), now 1483 (59–175). Other places and clips,
+two passes, rate over the target with forced key frames (without):
+the three scenes at 15 and 45, 0.8 Mb/s +4.3% (+15.9%; the pictures
+after 45 still reach 236, as without forced key frames), 3 Mb/s −9.2%
+(−6.8%); at 10 and 40 +1.0%, at 20 and 50 −1.6% (before +2.8% with ten
+frames at 236, and +6.9%); the grainy pan at 20 and 40 +1.2% (+0.6%);
+the still scene and jumps (90 frames) at 15, 45 and 75 at 1 Mb/s +0.3%
+(+5.1%), the three scenes (90 frames) at 20, 50 and 70 at 2 Mb/s +2.0%
+(+2.7%). libvpx at the same: +1.5% at 0.8 Mb/s, 0.0% at 10 and 40,
++2.2% at 21 and 51. Streams without forced key frames are unchanged.
+
+**Temporal dependency model** (`enable_tpl`, `-enable-tpl`). libvpx's
+`vp9_tpl_model.c` over the source pictures of an alt-ref's golden group
+(the golden frame, the alt-ref, the pictures up to its target), on 16×16
+blocks: each block's intra cost (SATD of the best of DC, vertical and
+horizontal prediction from the source) and inter cost (SATD at the best
+whole-sample vector into the golden frame, the picture before or the
+alt-ref, a diamond search within 32 samples), and from the last picture
+back the dependency each block passes to the blocks of its reference its
+vector covers, by area, times the share of its cost prediction saves.
+libvpx 1.14's VP9 encoder uses it for the alt-ref's lambda by superblock
+(`get_rdmult_delta`: r0 over the superblock's own intra over dependency
+cost, half to 1.5 times); this encoder does that, and also codes the
+alt-ref at the square root of r0 over 0.3 of its step (0.7 to 1.3), the
+frame-level part libaom takes from it. Not done: libvpx's sub-sample
+vectors, its 8×8 blocks at small sizes, the model on the pictures past
+the alt-ref, and the lambdas of the group's other frames (libvpx has
+none either). Two passes at 1 to 4 Mb/s, four threads, BD-rate at the
+same PSNR-Y / U / V / FFmpeg's average:
+
+| | Three scenes | Still and jumps | Grainy pan |
+| --- | --- | --- | --- |
+| `tpl=1` against `tpl=0` | −0.8 / −1.2 / −1.1 / −0.9% | +1.8 / +2.5 / +2.2 / +1.9% | −5.2 / +0.3 / +0.3 / −2.2% |
+| lambda alone (summed over the clips) | +0.1, +2.0, −0.8 Y | | |
+| alt-ref step alone (summed) | −0.7, +5.5, −5.3 Y | | |
+| libvpx `-enable-tpl 1` against `0` | −0.4 / +0.5 / −0.1 / −0.2% | +0.3 / +2.5 / +2.4 / +1.2% | +0.8 / +2.0 / +1.8 / +1.4% |
+
+Both lose on the still scene; summed over the clips ours wins 4.2 points
+of PSNR-Y (1.2 averaged), libvpx's loses 0.7 (2.4). On the three scenes
+(60 frames, 1.5 Mb/s): libvpx 372.3 kB / 41.31 dB → 370.8 / 41.32 with
+it, ours 369.4 / 41.56 → 370.7 / 41.73. It takes 1.1 times the time of
+two passes without it (the model's searches; libvpx's 1.2). Off by
+default (libvpx's is on), as it loses on one clip of three.
+
+**Defaults that differ from FFmpeg's, on purpose.** FFmpeg's
+`libvpx-vp9` writes `frame_parallel_decoding_mode` 1 and colour space 0
+(unknown) when not told otherwise; this encoder writes 0 and BT.601.
+Frame-parallel mode (no backward adaptation of the probabilities) costs,
+BD-rate of `frame_parallel=1` against the default at the same PSNR-Y /
+FFmpeg's average: speed 5 +7.4 / +8.8% on the three scenes, +4.2 / +8.1%
+on the still scene, +5.0 / +7.6% on the pan; two passes +7.3 / +8.0%,
++7.7 / +9.3%, +9.2 / +12.1%. The colour space costs nothing, but the
+decoder hands the frames out with the colour space the stream signals,
+and the codec contract's default (and its tests) is BT.601. Also kept on
+purpose, where libvpx 1.14 differs: `drop_frame_pct` drops at a variable
+bitrate too (libvpx only in CBR); `undershoot_pct` and `overshoot_pct`
+act at a variable bitrate (libvpx 1.14 writes the same bytes with 0 or
+100, and refuses `overshoot` past 100); `tile_rows` is honoured (libvpx
+writes one tile row); `sharpness` is written to the header and filters
+edges less (libvpx writes 0 and uses it in its RD search); `level` is
+only named in `vpcC` (libvpx refuses a level the picture size is over).
+
+**Alpha** (`alpha`, `-pix_fmt yuva420p`). As in FFmpeg's `libvpxenc.c`,
+a second encoder takes the stream's options (quantizer, bitrate, speed,
+lookahead) and codes each alpha plane as the luma of an 8-bit 4:2:0
+picture whose chroma is 128. It codes a picture's alpha when the stream
+has coded the picture, from its own lookahead of the same pictures (so it
+has alt-refs of its own), a key frame wherever the stream has one (forced,
+so that a seek to any key frame finds alpha), and it drops none: the
+alpha of a picture the stream drops is passed over. The stream's packets
+are the ones the same options code without alpha. WebM stores each alpha
+packet as its block's BlockAdditional, BlockAddID 1, and the track's
+AlphaMode as 1 (`cutlass-matroska`; `vp9enc out.webm alpha=FILE`). The
+decoder decodes a packet's alpha with a second decoder and hands the
+plane out as the frame's alpha, as FFmpeg's `libvpx-vp9` decoder does
+(its native `vp9` decoder leaves alpha out); an alpha packet that fails
+leaves its picture without alpha. Checked both ways against FFmpeg 6.1
+(`tests/alpha_interop.rs` at 160×96, and by hand at 640×360 with the
+commands below): a WebM written by `vp9enc` and `cutlass-matroska`
+decodes in `ffmpeg -c:v libvpx-vp9` to the same Y, U, V and alpha as in
+`vp9dec`, every sample of all 60 pictures, and FFmpeg's own `libvpx-vp9`
+`yuva420p` WebM decodes in `vp9dec` (one thread and four) to the YUVA
+FFmpeg's `libvpx-vp9` decoder gives, every sample.
+
+```
+ffmpeg -f lavfi -i testsrc2=s=640x360:d=2:r=30 \
+  -f lavfi -i "nullsrc=s=640x360:d=2:r=30,format=gray,geq=lum='128+127*sin((X+6*N)/50)*cos((Y-3*N)/40)'" \
+  -filter_complex "[0][1]alphamerge,format=yuva420p" -f rawvideo src.yuva
+ffmpeg -f rawvideo -pix_fmt yuva420p -s 640x360 -i src.yuva -vf format=yuv420p -f rawvideo src.yuv
+ffmpeg -f rawvideo -pix_fmt yuva420p -s 640x360 -i src.yuva -vf extractplanes=a -f rawvideo src_alpha.y
+# Ours to FFmpeg: the two decodes are the same bytes.
+vp9enc src.yuv 640 360 ours.webm alpha=src_alpha.y crf=30 threads=4
+ffmpeg -c:v libvpx-vp9 -i ours.webm -pix_fmt yuva420p -f rawvideo ours_by_ffmpeg.yuva
+vp9dec ours.webm ours_by_us.yuva
+cmp ours_by_ffmpeg.yuva ours_by_us.yuva
+# FFmpeg's to ours: the same.
+ffmpeg -f rawvideo -pix_fmt yuva420p -s 640x360 -r 30 -i src.yuva \
+  -c:v libvpx-vp9 -pix_fmt yuva420p -crf 30 -b:v 0 -threads 4 ffmpeg.webm
+ffmpeg -c:v libvpx-vp9 -i ffmpeg.webm -pix_fmt yuva420p -f rawvideo ffmpeg_by_ffmpeg.yuva
+vp9dec ffmpeg.webm ffmpeg_by_us.yuva threads=4
+cmp ffmpeg_by_ffmpeg.yuva ffmpeg_by_us.yuva
+```
+
+Size and quality against FFmpeg at the same `-crf` (15 to 55; `crf=` here,
+speed 5 against FFmpeg's default `-cpu-used 1`, four threads), on that
+source (a moving sinusoidal gradient) and on the same picture with a
+moving soft-edged disc as its alpha, BD-rate of the alpha stream's bytes
+(the BlockAdditionals) at the same alpha PSNR:
+
+| crf | FFmpeg alpha bytes, PSNR | Ours | Ours, before "Synthetic pans" |
+| --- | --- | --- | --- |
+| 15 | 17015, 55.10 dB | 12739, 52.43 dB | 16818, 51.86 dB |
+| 25 | 13679, 53.64 dB | 9189, 50.94 dB | 11828, 50.63 dB |
+| 35 | 7952, 51.31 dB | 7008, 48.73 dB | 9378, 48.66 dB |
+| 45 | 5676, 48.40 dB | 5753, 46.04 dB | 7908, 45.93 dB |
+| 55 | 4643, 45.09 dB | 5217, 42.68 dB | 6902, 42.80 dB |
+
+The alpha stream takes +20% bits at the same alpha PSNR against
+libvpx's on the gradient (+65% before "Synthetic pans" in "Against
+FFmpeg's libvpx-vp9", which found why; the disc, +59% then, was not
+measured again); the colour stream of the same files +18% at the same
+PSNR-Y, as before (this synthetic picture is unlike the README's clips,
+where the encoder is ahead). Coding each alpha plane as a plain gray
+stream gives the same bytes on both sides (ours 9189 at `crf=25`,
+11828 before, libvpx's 13679 in an IVF less its headers), so the gap is
+the encoder's on these smooth planes, not the alpha path's. The alpha stream's own
+lookahead took it from +78% to +65% (coding each alpha picture as it
+came, with no lookahead, was the first version). Time at `crf=30`: 1.65 s
+against 1.15 s without alpha (FFmpeg's 3.2 s against 2.7 s).
+
+**Layered alt-refs** (`alt_ref_layers`, `-auto-alt-ref` 2 to 6). With
+the lookahead, once the golden group's alt-ref is coded, the span from
+the picture coded last to the nearest alt-ref ahead is halved by a
+further hidden alt-ref one layer down, while the layers allow and the
+span is 8 pictures or more (6 for the third layer): filtered from the
+pictures around its own target (at most half the span away), coded at
+0.84 (third layer 0.95) of the inter step, and reading the alt-ref ahead
+of it as ALTREF, as the pictures before it do. In its target's place it is
+shown as it is (`show_existing_frame`, one byte), as libvpx shows its
+mid-group alt-refs, and the next picture reads it as LAST. It takes its
+slot from 3 to 7 out of the reference pool while it waits, and joins the
+pool once shown. The streams decode alike in FFmpeg's `vp9` (frame
+threads and one thread), libvpx and ours. Two passes at speed 5 (lag 16),
+BD-rate at the same PSNR-Y / FFmpeg's average; libvpx two passes,
+`-lag-in-frames 25`:
+
+| | Three scenes | Still and jumps | Grainy pan |
+| --- | --- | --- | --- |
+| `arf_layers=2` against one layer | +1.5 / +1.2% | +3.5 / +5.4% | +0.8 / +1.6% |
+| `arf_layers=3` against one layer | +2.4 / +2.0% | +2.9 / +5.1% | +0.8 / +1.6% |
+| libvpx `-auto-alt-ref 2` against 1 | −8.0 / −6.2% | −6.7 / −2.4% | −5.3 / −3.0% |
+| libvpx `-auto-alt-ref 6` against 1 | −6.4 / −2.8% | −9.8 / +0.1% | −10.4 / −1.2% |
+| One layer against libvpx `-auto-alt-ref 1` | −6.3 / −5.5% | −37.6 / −35.9% | −14.6 / −22.6% |
+| `arf_layers=2` against libvpx `-auto-alt-ref 2` | +3.4 / +2.1% | −30.8 / −33.9% | −10.0 / −22.1% |
+| `arf_layers=3` against libvpx `-auto-alt-ref 6` | +2.8 / −0.2% | −29.0 / −37.3% | −9.9 / −23.6% |
+
+They lose here, in 1.0 to 1.1 times the time: this encoder's golden
+groups are short (12 pictures, 6 to 12 by motion in two passes), its
+reference pool already gives each picture near ones, and a mid-group
+alt-ref is a filtered picture shown in place of its source. Longer
+groups, where
+libvpx gains, cost more than layers win back: golden groups of up to 16
+with lag 25 took one layer 27.8 points (PSNR-Y, summed over the clips)
+over the default, and two layers won 6.5 of them back. Halving spans
+from 4 pictures lost 7.5 points summed (11.9 with the second layer at
+0.7 of the step, 19.9 at 0.56); an overlay coded in the target's place
+instead of `show_existing_frame` (with the slots taken from the pool for
+good) lost 15.6.
 
 Decoders: FFmpeg's `vp9` and `libvpx-vp9` decoders have no options of
 their own; of the generic ones, frame threads and slice (tile) threads
@@ -1380,13 +3696,14 @@ carries the colour space, range and render size.
 | Render size | yes | yes (added) |
 | Key, inter, hidden (alt-ref) frames, superframes | yes | yes |
 | Intra-only frames | yes | no (libvpx writes them for SVC and resilience) |
-| `show_existing_frame` | yes | no |
+| `show_existing_frame` | yes | yes (layered alt-refs, added) |
 | Error resilient, frame parallel | yes | yes (added) |
 | Scaled references (a size change mid-stream) | yes | no |
 | Lossless (WHT) | yes | yes |
 | Tile columns and rows | yes | yes |
-| Segmentation: quantizer | yes | yes (AQ) |
-| Segmentation: loop filter, reference, skip; temporal map | yes | no |
+| Segmentation: quantizer | yes | yes (AQ, complexity AQ, cyclic refresh, 360°) |
+| Segmentation: loop filter, reference, skip | yes | yes (ROI map, added) |
+| Segmentation: temporal map | yes | no |
 | Loop filter sharpness | yes | yes (added) |
 | Loop filter deltas (mode, reference) | yes | defaults only |
 | Compound prediction, switchable filters, 8 slots | yes | yes |
@@ -1406,25 +3723,26 @@ carries the colour space, range and render size.
   rectangular partitions below 4; probability updates of the
   coefficients and of every other updatable probability (modes, filter,
   references, partition, tx size, skip, vectors) at all speeds;
-  segmentation with adaptive quantization (`aq`, off by default).
-  Segment features other than the quantizer, temporal segment maps,
-  intra-only frames, scaled references (a size change within the
-  stream) and `show_existing_frame` are not written. Error resilient frames take no
+  segmentation with adaptive quantization (`aq`, `aq_mode`, off by
+  default), and a region of interest map's quantizer, loop filter,
+  reference and skip by segment (`set_roi_map`). Temporal segment maps,
+  intra-only frames and scaled references (a size change within the
+  stream) are not written; `show_existing_frame` only with layered
+  alt-refs. Error resilient frames take no
   compound prediction (with it their compressed headers did not parse
   back: to look into).
 - Against FFmpeg's `libvpx-vp9` as FFmpeg runs it ("Against FFmpeg's
   libvpx-vp9" above), the default speed takes fewer bits at the same
   PSNR-Y, PSNR-U, PSNR-V and averaged PSNR on every clip (1.1% to 55%),
-  in 0.55 to 0.82 of libvpx's time on one thread and on four; two passes
-  in about a third of its time (but 9.6% more bits at the same PSNR-U on
-  the three scenes); constant quality with 2.5% to 28% fewer bits at the
-  same 6:1:1 average (PSNR-Y level on the three scenes); speed 6 fewer
-  bits than libvpx's default on every clip at PSNR-Y and the averages
-  (+0.2% at PSNR-U on the three scenes), in 0.95 to 0.98 of speed 5's
-  time. Speed 10
-  takes 0.82 to 0.91 of libvpx realtime 8's time on four threads and
-  0.83 to 0.89 on one, with 4% to 74% fewer bits at the same PSNR; speed
-  9 takes 0.77 to 0.94 of it, with 12% to 76% fewer.
+  in 0.53 to 0.82 of libvpx's time on one thread and on four; two passes
+  fewer bits at every PSNR on every clip (0.9% to 38%) in 0.30 to 0.38 of
+  its time; constant quality with 4.3% to 46% fewer bits at every PSNR;
+  speed 6 fewer bits than libvpx's default at every PSNR on every clip
+  (1.0% to 50%), but in speed 5's time on the three scenes (0.93 to
+  1.00 of it). Speed 10 has 0.7% to 70% fewer bits than libvpx realtime
+  8 at every PSNR, in 0.85 to 0.90 of its time on one thread and 0.82 to
+  0.95 on four (see "The gaps"); speed 9 9% to 77% fewer, in 0.76 to
+  0.88 of it on four threads.
 - At equal time the encoder is within about 8% of libvpx's good presets
   on moving content (ahead with more time, and far ahead on still content
   and against the realtime presets), and its fastest speed takes libvpx

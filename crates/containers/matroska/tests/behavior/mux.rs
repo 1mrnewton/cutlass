@@ -3,7 +3,8 @@
 use std::io::Cursor;
 
 use cutlass_codec::{
-    CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp, UnknownCodec,
+    BlockAddition, CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
+    UnknownCodec,
 };
 use cutlass_container::{
     Demux, Landing, Language, Mux, MuxError, MuxStatus, NewStream, SeekTo, TrackDuration, TrackId,
@@ -873,4 +874,95 @@ fn a_late_or_wrong_cover_is_refused_and_the_file_goes_on() {
             .any(|child| child.0 == ids::ATTACHMENTS)
     );
     assert_eq!(all(&mut read_back(bytes)).len(), 2);
+}
+
+#[test]
+fn block_additions_round_trip_and_alpha_marks_a_vp9_track() {
+    let mut mux = MatroskaMux::webm(Cursor::new(Vec::new()));
+    let picture = mux.add_stream(video(CodecId::Vp9, &[], 1000)).expect("vp9");
+    for index in 0..6_u8 {
+        // Every frame but the fifth carries alpha; the third a second
+        // addition too.
+        let mut additions = Vec::new();
+        if index != 4 {
+            additions.push(BlockAddition {
+                id: 1,
+                data: vec![0xA0 | index; 7],
+            });
+        }
+        if index == 2 {
+            additions.push(BlockAddition {
+                id: 300,
+                data: vec![3, 0, 0],
+            });
+        }
+        let frame = packet(
+            picture,
+            vec![index; 40],
+            i64::from(index) * 40,
+            40,
+            1000,
+            index % 3 == 0,
+        )
+        .with_additions(additions);
+        mux.write_packet(&frame).expect("packet");
+    }
+    let bytes = finish(mux, &[(picture, 1000, 240)]);
+
+    // AlphaMode 1 in the track's Video element, as FFmpeg writes it.
+    let alpha_mode = [0x53, 0xC0, 0x81, 0x01];
+    assert!(bytes.windows(4).any(|window| window == alpha_mode));
+    let mut demux = read_back(bytes);
+    assert_eq!(demux.track_entries()[0].alpha_mode, 1);
+    let packets = all(&mut demux);
+    assert_eq!(packets.len(), 6);
+    for (index, packet) in packets.iter().enumerate() {
+        let index = u8::try_from(index).expect("index");
+        assert_eq!(packet.bytes(), vec![index; 40]);
+        assert_eq!(packet.keyframe(), index % 3 == 0, "{index}");
+        assert_eq!(
+            packet.timestamp().presentation(),
+            Some(i64::from(index) * 40)
+        );
+        assert_eq!(packet.timestamp().duration(), Some(40));
+        let alpha = (index != 4).then(|| vec![0xA0 | index; 7]);
+        assert_eq!(packet.addition(1).map(<[u8]>::to_vec), alpha, "{index}");
+        let ids: Vec<u64> = packet.additions().iter().map(|a| a.id).collect();
+        let want: &[u64] = match index {
+            2 => &[1, 300],
+            4 => &[],
+            _ => &[1],
+        };
+        assert_eq!(ids, want, "{index}");
+    }
+}
+
+#[test]
+fn a_track_without_alpha_has_no_alpha_mode_and_block_add_id_zero_is_refused() {
+    // Additions on an H.264 track ride along without AlphaMode.
+    let mut mux = MatroskaMux::new(Cursor::new(Vec::new()));
+    let picture = mux
+        .add_stream(video(CodecId::H264, AVCC, 1000))
+        .expect("h264");
+    let frame =
+        packet(picture, vec![1; 10], 0, 40, 1000, true).with_additions(vec![BlockAddition {
+            id: 1,
+            data: vec![2; 4],
+        }]);
+    mux.write_packet(&frame).expect("packet");
+    let bytes = finish(mux, &[(picture, 1000, 40)]);
+    let mut demux = read_back(bytes);
+    assert_eq!(demux.track_entries()[0].alpha_mode, 0);
+    let packets = all(&mut demux);
+    assert_eq!(packets[0].addition(1), Some(&[2_u8; 4][..]));
+
+    let mut mux = MatroskaMux::webm(Cursor::new(Vec::new()));
+    let picture = mux.add_stream(video(CodecId::Vp9, &[], 1000)).expect("vp9");
+    let frame =
+        packet(picture, vec![1; 10], 0, 40, 1000, true).with_additions(vec![BlockAddition {
+            id: 0,
+            data: vec![2; 4],
+        }]);
+    assert!(mux.write_packet(&frame).is_err());
+    assert_eq!(mux.status(), MuxStatus::Failed);
 }

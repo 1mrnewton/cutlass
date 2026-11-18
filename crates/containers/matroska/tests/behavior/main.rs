@@ -209,6 +209,93 @@ fn block_groups_give_block_duration_and_references_clear_the_keyframe() {
 }
 
 #[test]
+fn block_additions_ride_on_their_packet_with_the_default_id() {
+    let addition = |id: Option<u64>, data: &[u8]| {
+        let mut more = Vec::new();
+        if let Some(id) = id {
+            more.extend(uint(ids::BLOCK_ADD_ID, id));
+        }
+        more.extend(bytes(ids::BLOCK_ADDITIONAL, data));
+        element(ids::BLOCK_MORE, &more)
+    };
+    let with = |relative: i16, payload: &[u8], mores: &[Vec<u8>], reference: Option<i64>| {
+        let mut block = block_head(1, relative, 0);
+        block.extend_from_slice(payload);
+        let mut body = element(ids::BLOCK, &block);
+        body.extend(element(ids::BLOCK_ADDITIONS, &mores.concat()));
+        body.extend(uint(ids::BLOCK_DURATION, 40));
+        if let Some(reference) = reference {
+            body.extend(bytes(ids::REFERENCE_BLOCK, &reference.to_be_bytes()[7..]));
+        }
+        element(ids::BLOCK_GROUP, &body)
+    };
+    let vp9 = Track::video(1, "V_VP9").with_extra(&element(
+        ids::VIDEO,
+        &[
+            uint(ids::PIXEL_WIDTH, 64),
+            uint(ids::PIXEL_HEIGHT, 48),
+            uint(ids::ALPHA_MODE, 1),
+        ]
+        .concat(),
+    ));
+    let bytes_of = |frames: Vec<Vec<u8>>| {
+        file(
+            "webm",
+            &[
+                info(1_000_000, None),
+                tracks(std::slice::from_ref(&vp9)),
+                cluster(0, &frames),
+            ],
+        )
+    };
+    let good = bytes_of(vec![
+        // BlockAddID left out: 1, the schema's default.
+        with(0, b"key", &[addition(None, b"alpha0")], None),
+        with(
+            40,
+            b"p",
+            &[addition(Some(1), b"alpha1"), addition(Some(7), b"seven")],
+            Some(-40),
+        ),
+        group(1, 80, b"plain", Some(40), Some(-40)),
+    ]);
+    let mut demux = open(good).expect("open");
+    assert_eq!(demux.track_entries()[0].alpha_mode, 1);
+    let packets = all(&mut demux);
+    type Got = (Vec<u8>, bool, Vec<(u64, Vec<u8>)>);
+    let got: Vec<Got> = packets
+        .iter()
+        .map(|packet| {
+            (
+                packet.bytes().to_vec(),
+                packet.keyframe(),
+                packet
+                    .additions()
+                    .iter()
+                    .map(|addition| (addition.id, addition.data.clone()))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (b"key".to_vec(), true, vec![(1, b"alpha0".to_vec())]),
+            (
+                b"p".to_vec(),
+                false,
+                vec![(1, b"alpha1".to_vec()), (7, b"seven".to_vec())]
+            ),
+            (b"plain".to_vec(), false, vec![]),
+        ]
+    );
+    // A BlockAddID of 0 is outside the schema's range.
+    let zero = bytes_of(vec![with(0, b"key", &[addition(Some(0), b"a")], None)]);
+    let mut demux = open(zero).expect("open");
+    assert!(demux.read_packet().is_err());
+}
+
+#[test]
 fn a_block_duration_over_a_lace_is_shared_out() {
     let mut block = block_head(2, 0, 0x02);
     block.push(2);

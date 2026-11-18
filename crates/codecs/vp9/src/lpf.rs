@@ -294,7 +294,29 @@ fn paint_level(mask: &mut Mask, level: u8, shift_y: usize, bw: usize, bh: usize)
     }
 }
 
+/// Whether a mask built at base level `level` (no segment's own level)
+/// can take another base level by [`Mask::rebase`]: no block's level
+/// (the base and the reference deltas, ±1 or ±2 past 31) was clamped.
+pub fn rebasable(level: u8) -> bool {
+    (2..=61).contains(&level)
+}
+
 impl Mask {
+    /// The levels of a mask built at base level `from` as if it had been
+    /// built at `to` (both [`rebasable`], the reference and mode deltas
+    /// libvpx's defaults, no segment's own level): each block keeps its
+    /// delta from the base, scaled as `to`'s base scales it.
+    pub(crate) fn rebase(&mut self, from: u8, to: u8) {
+        let (from, to) = (i32::from(from), i32::from(to));
+        let (s0, s1) = (1 << (from >> 5), 1 << (to >> 5));
+        for v in &mut self.lfl_y {
+            if *v != 0 {
+                let k = (i32::from(*v) - from) / s0;
+                *v = clamp_level(to + k * s1);
+            }
+        }
+    }
+
     pub(crate) fn adjust(&mut self, mi_row: usize, mi_col: usize, mi_rows: usize, mi_cols: usize) {
         self.left_y[2] |= self.left_y[3];
         self.above_y[2] |= self.above_y[3];
@@ -376,5 +398,71 @@ fn clip_cols(mask: &mut Mask, columns: usize) {
     if columns == 5 {
         mask.left_uv[1] |= mask.left_uv[2] & 0xcccc;
         mask.left_uv[2] &= 0x3333;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Block, Mask, build, levels, rebasable};
+    use crate::geom;
+
+    /// A mask built at one base level and rebased to another is the mask
+    /// built at the other: intra and inter blocks, each reference, with and
+    /// without a residual, across the scale's step at 32.
+    #[test]
+    fn rebase_matches_a_build_at_the_level() {
+        let at = |level: u8| {
+            let mut h = crate::header::tests_header();
+            h.filter_level = level;
+            h.delta_enabled = true;
+            h.ref_deltas = [1, 0, -1, -1];
+            h.mode_deltas = [0, 0];
+            levels(&h)
+        };
+        let blocks: Vec<(Block, usize, usize)> = (0..16)
+            .map(|i| {
+                let (row, col) = ((i / 4) * 2, (i % 4) * 2);
+                let reference = (i % 4) as u8;
+                let block = Block {
+                    bsize: geom::BLOCK_16X16,
+                    tx: (i % 3) as u8,
+                    skip: i % 5 == 0,
+                    inter: reference != 0,
+                    seg: 0,
+                    mode: if reference == 0 {
+                        geom::TM
+                    } else if i % 2 == 0 {
+                        geom::NEAREST
+                    } else {
+                        geom::ZERO
+                    },
+                    reference,
+                    bw: 2,
+                    bh: 2,
+                };
+                (block, row, col)
+            })
+            .collect();
+        let mask_at = |level: u8| {
+            let l = at(level);
+            let mut m = Mask::default();
+            for (b, row, col) in &blocks {
+                build(&mut m, &l, b, *row, *col);
+            }
+            m
+        };
+        for from in [2u8, 9, 21, 31, 32, 40, 61] {
+            for to in [2u8, 5, 16, 30, 31, 32, 33, 50, 61] {
+                assert!(rebasable(from) && rebasable(to));
+                let mut m = mask_at(from);
+                m.rebase(from, to);
+                let want = mask_at(to);
+                assert_eq!(m.lfl_y, want.lfl_y, "{from} to {to}");
+                assert_eq!(m.left_y, want.left_y);
+                assert_eq!(m.above_y, want.above_y);
+                assert_eq!(m.int_y, want.int_y);
+            }
+        }
+        assert!(!rebasable(1) && !rebasable(62));
     }
 }

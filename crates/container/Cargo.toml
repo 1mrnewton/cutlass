@@ -7,7 +7,7 @@ license.workspace = true
 description = "Demux and mux traits."
 
 [dependencies]
-cutlass-codec = { path = "../codec", version = "0.1.0" }
+cutlass-codec = { path = "../codec", version = "0.8.0" }
 
 [lints]
 workspace = true

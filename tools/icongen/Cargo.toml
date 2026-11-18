@@ -13,7 +13,7 @@ license.workspace = true
 description = "Writes the icon table and the phone icon files from the free Hugeicons package."
 
 [dependencies]
-cutlass-icons = { path = "../../crates/icons", version = "0.1.0" }
+cutlass-icons = { path = "../../crates/icons", version = "0.8.0" }
 
 [lints]
 workspace = true

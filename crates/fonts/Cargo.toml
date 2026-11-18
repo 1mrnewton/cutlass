@@ -7,7 +7,7 @@ license.workspace = true
 description = "The title faces Cutlass ships: open families by other makers, with their licenses."
 
 [dev-dependencies]
-cutlass-font = { path = "../font", version = "0.1.0" }
+cutlass-font = { path = "../font", version = "0.8.0" }
 
 [lints]
 workspace = true

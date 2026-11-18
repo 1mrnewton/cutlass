@@ -15,9 +15,9 @@ license.workspace = true
 description = "Trains the H.264 codec's profile for a profile-guided build."
 
 [dependencies]
-cutlass-decode = { path = "../../crates/decode", version = "0.1.0" }
-cutlass-encode = { path = "../../crates/encode", version = "0.1.0" }
-cutlass-h264 = { path = "../../crates/codecs/h264", version = "0.1.0" }
+cutlass-decode = { path = "../../crates/decode", version = "0.8.0" }
+cutlass-encode = { path = "../../crates/encode", version = "0.8.0" }
+cutlass-h264 = { path = "../../crates/codecs/h264", version = "0.8.0" }
 
 [lints]
 workspace = true

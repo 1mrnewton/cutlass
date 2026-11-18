@@ -8,6 +8,7 @@ pub mod cloud;
 mod dialogs;
 mod face;
 mod gpu;
+pub mod gpu_trust;
 pub mod icons;
 pub mod jobs;
 pub mod mcp;

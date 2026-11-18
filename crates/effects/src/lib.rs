@@ -26,6 +26,7 @@ pub mod grade;
 pub mod look;
 pub mod lut;
 pub mod mask;
+pub mod matting;
 pub mod package;
 pub mod preview;
 pub mod recipe;
@@ -70,6 +71,9 @@ pub use mask::{
     MaskShape, STACK_FLOATS, STACK_WGSL, apply_drawn, apply_masks, art_fits, drawn_coverage,
     limit_drawn, limit_masks, listed_mask, listed_masks, masks_at, segment_color_mask,
     segment_color_masks, segment_mask, segment_masks, stack_coverage,
+};
+pub use matting::{
+    Brush, MATTING, Matting, MattingMode, Pick, PickClick, Stroke, StrokeStyle, segment_matting,
 };
 pub use package::{
     Located, MAX_PACKAGE_BYTES, MissingPackages, Package, PackageError, PackageStore,

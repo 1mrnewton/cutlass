@@ -69,6 +69,7 @@ mod proxy;
 pub use proxy::ProxyState;
 mod transition;
 pub use transition::TransitionDrop;
+mod matting;
 mod reframe;
 mod relight;
 mod render;
@@ -87,6 +88,9 @@ pub use update::RUNNING_VERSION;
 
 pub use inspector::{KeyedSetting, LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
 pub use masks::{MaskDraw, MaskFocus, MaskRow};
+pub use matting::{
+    Painting, PickRow, Trail, auto_model_here, follow_model_here, matte_model_question,
+};
 
 use crate::face::FaceTable;
 use crate::tokens;
@@ -900,6 +904,16 @@ pub struct Shell {
     detectors: Vec<cutlass_vision::Detector>,
     /// The object click-to-select is picking, while the preview takes clicks.
     picking: Option<select::Picking>,
+    /// Brush strokes being painted for Custom removal, while the preview
+    /// takes drags.
+    painting: Option<Painting>,
+    /// The draft revision mattes were last looked for at, so a trim or an
+    /// edit from the assistant that leaves a clip without its matte starts
+    /// one, once.
+    matte_swept: Option<u64>,
+    /// Mattes whose job failed, by what they would be made from, so they
+    /// are not tried again on every edit.
+    matte_failed: std::collections::HashSet<String>,
     /// A track being set up on the selected clip.
     tracking: Option<follow::Tracking>,
     /// A shape being drawn with the pen, while the preview takes presses.
@@ -1060,6 +1074,9 @@ impl Shell {
             vision: None,
             detectors: Vec::new(),
             picking: None,
+            painting: None,
+            matte_swept: None,
+            matte_failed: std::collections::HashSet::new(),
             tracking: None,
             pen: None,
             heard: std::collections::HashMap::new(),
@@ -1698,11 +1715,14 @@ impl Shell {
         cutlass_logger::info!("open project {}", path.display());
         let opened = self.open_folder_in(path);
         match &opened {
-            Ok(()) => cutlass_logger::info!(
-                "opened project {} at revision {}",
-                path.display(),
-                self.session.as_ref().map_or(0, Session::revision)
-            ),
+            Ok(()) => {
+                cutlass_logger::info!(
+                    "opened project {} at revision {}",
+                    path.display(),
+                    self.session.as_ref().map_or(0, Session::revision)
+                );
+                self.prune_mattes();
+            }
             Err(error) => cutlass_logger::error!("open project {}: {error}", path.display()),
         }
         opened
@@ -5576,7 +5596,8 @@ impl Shell {
     /// Land the job if it finished. True while one still runs.
     pub fn poll_job(&mut self) -> bool {
         let Some(running) = self.job.as_ref() else {
-            return false;
+            self.sweep_mattes();
+            return self.job.is_some();
         };
         let landing = match running.job.poll() {
             crate::jobs::Poll::Running => return true,
@@ -5588,6 +5609,8 @@ impl Shell {
         let same_project = running.project == self.path;
         let stopping = running.stopping;
         self.job = None;
+        // Another clip may still lack its matte.
+        self.matte_swept = None;
         let result = match landing {
             _ if stopping => Ok(()),
             Some(_) if !same_project => Err(ShellError::Unavailable(format!(
@@ -6452,13 +6475,49 @@ impl Shell {
         })
     }
 
+    /// Soften the selected picture's key edge by `feather` and pull it in
+    /// by `clean_up`, each 0 to 1. Refused with no key on.
+    pub fn set_chroma_edge(&mut self, feather: f64, clean_up: f64) -> Result<(), ShellError> {
+        let Some(was) = self.inspection().and_then(|inspection| inspection.chroma) else {
+            return Err(ShellError::Unavailable(
+                "turn Chroma key on first".to_owned(),
+            ));
+        };
+        self.put_chroma(
+            &was.hex(),
+            [
+                f64::from(was.strength),
+                f64::from(was.shadow),
+                feather.clamp(0.0, 1.0),
+                clean_up.clamp(0.0, 1.0),
+            ],
+        )
+    }
+
     /// Key `color` (`#rrggbb`) out of the selected picture with `strength`
-    /// and `shadow`, 0 to 1; an empty colour takes the key off.
+    /// and `shadow`, 0 to 1, its edge as it was; an empty colour takes the
+    /// key off.
     pub fn set_chroma(
         &mut self,
         color: &str,
         strength: f64,
         shadow: f64,
+    ) -> Result<(), ShellError> {
+        let edge = self
+            .inspection()
+            .and_then(|inspection| inspection.chroma)
+            .map_or((0.0, 0.0), |was| {
+                (f64::from(was.feather), f64::from(was.clean_up))
+            });
+        self.put_chroma(color, [strength, shadow, edge.0, edge.1])
+    }
+
+    /// Key `color` out of the selected picture with its strength, shadow,
+    /// feather and clean up, each 0 to 1, all at once.
+    pub fn put_chroma(
+        &mut self,
+        color: &str,
+        [strength, shadow, feather, clean_up]: [f64; 4],
     ) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("a chroma key belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
@@ -6470,6 +6529,8 @@ impl Shell {
             color: color.to_owned(),
             strength,
             shadow,
+            feather,
+            clean_up,
         }];
         let names = [KeyedSetting::ChromaStrength, KeyedSetting::ChromaShadow];
         if color.is_empty() {

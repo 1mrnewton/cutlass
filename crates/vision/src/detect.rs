@@ -193,9 +193,9 @@ impl Detector {
         let mut read = Vec::with_capacity(3);
         for (cls, obj, bbox) in heads {
             read.push((
-                values(cls.into_data())?,
-                values(obj.into_data())?,
-                values(bbox.into_data())?,
+                values(crate::read_back(cls)?)?,
+                values(crate::read_back(obj)?)?,
+                values(crate::read_back(bbox)?)?,
             ));
         }
         Ok(decode_faces(&read, scale))
@@ -220,8 +220,8 @@ impl Detector {
             &self.device,
         );
         let (scores, boxes) = model.forward(input);
-        let scores = values(scores.into_data())?;
-        let boxes = values(boxes.into_data())?;
+        let scores = values(crate::read_back(scores)?)?;
+        let boxes = values(crate::read_back(boxes)?)?;
         Ok(decode_people(&scores, &boxes, &fit))
     }
 
@@ -270,8 +270,8 @@ impl Detector {
             &self.device,
         );
         let (boxes, scores) = model.forward(input);
-        let scores = values(scores.into_data())?;
-        let boxes = values(boxes.into_data())?;
+        let scores = values(crate::read_back(scores)?)?;
+        let boxes = values(crate::read_back(boxes)?)?;
         #[allow(clippy::cast_precision_loss)]
         let (dx, dy) = (x as f32, y as f32);
         Ok(decode_ssd(

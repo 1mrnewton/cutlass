@@ -489,8 +489,7 @@ impl DepthModel {
             )
         };
         let depth = self.forward(frame, ph, pw)?;
-        let values = depth
-            .into_data()
+        let values = crate::read_back(depth)?
             .convert::<f32>()
             .try_into_vec::<f32>()
             .map_err(|error| VisionError::Model {
@@ -519,9 +518,7 @@ impl DepthModel {
             return Ok(tensor.clone());
         }
         let class = learned.clone().slice([0..1, 0..1]);
-        let patches = learned
-            .slice([0..1, 1..LEARNED * LEARNED + 1])
-            .into_data()
+        let patches = crate::read_back(learned.slice([0..1, 1..LEARNED * LEARNED + 1]))?
             .convert::<f32>()
             .try_into_vec::<f32>()
             .map_err(|error| VisionError::Model {

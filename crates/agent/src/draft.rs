@@ -717,6 +717,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::RemoveMask { .. } => "remove_mask",
         Request::MoveMask { .. } => "move_mask",
         Request::SetSelection { .. } => "set_selection",
+        Request::SetMatting { .. } => "set_matting",
         Request::Track { .. } => "track",
         Request::Untrack { .. } => "untrack",
         Request::SetColorMask { .. } => "set_color_mask",

@@ -254,7 +254,7 @@ set_wheel: Set a clip's color wheel lift, gamma or gain; x and y place the puck 
 set_lut: Put a LUT on a clip at strength 0 to 1; cube is the text of a 3D .cube file, kept under name; cube null keeps the clip's table and only sets strength (refused when it has none); an empty cube removes it. Except when removing, the LUT is stored anew under material_id, which must not name another material still in the draft.
 {"op":"set_lut","segment_id":"a","material_id":"a-lut","name":"film","cube":"LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n","strength":0.8}
 
-set_chroma: Key a color "#rrggbb" out of a clip on a video or sticker lane with strength and shadow 0 to 1; an empty color removes it.
+set_chroma: Key a color "#rrggbb" out of a clip on a video or sticker lane with strength and shadow 0 to 1, and optionally feather (softer edge) and clean_up (edge pulled in) 0 to 1; an empty color removes it.
 {"op":"set_chroma","segment_id":"a","material_id":"a-chroma","color":"#00ff00","strength":0.5,"shadow":0.2}
 
 set_mask: Set a clip's first mask on a video or sticker lane, or null to remove it; shape linear, mirror, circle, rectangle, heart or star; x and y -1 to 1 across the clip with y up (-2 to 2 allowed), width and height as parts of the clip's size (0 to 4), rotation -360 to 360 degrees counter-clockwise, feather and round 0 to 1, invert, and mode add, subtract or intersect (optional, add) for how it joins the masks before it.
@@ -271,6 +271,9 @@ remove_mask: Take the clip's mask at index off, with its keys; color as in add_m
 
 move_mask: Move the clip's mask at from to place to; color as in add_mask.
 {"op":"move_mask","segment_id":"a","from":1,"to":0}
+
+set_matting: Remove BG on a video clip, or null to remove: mode auto (a model finds the person or object) or custom (picks say what to keep and are followed through the clip); feather and clean_up 0 to 1 soften and pull in the edge; stroke null or an outline with style paper, glow, hand_drawn, straight, solid, offset or dotted, color "#rrggbb", size, spacing and texture 0 to 1; picks (custom only, in time order) each a source frame in microseconds with clicks (x, y 0 to 1 over the frame with y down, keep) and brushes (points, radius as a share of the short side, keep, smart). The cut-out is made by a job after and shows when it finishes.
+{"op":"set_matting","segment_id":"a","material_id":"a-matting","matting":{"mode":"auto","feather":0.2,"clean_up":0.0,"stroke":{"style":"glow","color":"#7fd3ff","size":0.35,"spacing":0.0,"texture":0.0},"picks":[]}}
 
 set_selection: Cut a video clip down to an object selection, or null to remove; width and height of the frame in pixels, runs alternating counts of unselected and selected pixels row by row starting unselected (summing to width times height), frame the source time in microseconds, invert. Normally made by the select tool, not by hand.
 {"op":"set_selection","segment_id":"a","material_id":"a-selection","selection":{"width":4,"height":2,"runs":[1,2,2,2,1],"frame":0,"invert":false}}

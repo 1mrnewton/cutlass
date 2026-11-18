@@ -881,7 +881,15 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             color,
             strength,
             shadow,
-        } => chroma::set_chroma(draft, segment_id, material_id, color, *strength, *shadow),
+            feather,
+            clean_up,
+        } => chroma::set_chroma(
+            draft,
+            segment_id,
+            material_id,
+            color,
+            [*strength, *shadow, *feather, *clean_up],
+        ),
         Request::SetMask {
             segment_id,
             material_id,
@@ -926,6 +934,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             selection,
         } => mask::set_selection(draft, segment_id, material_id, selection.as_ref()),
+        Request::SetMatting {
+            segment_id,
+            material_id,
+            matting,
+        } => mask::set_matting(draft, segment_id, material_id, matting.as_ref()),
         Request::Track {
             target,
             followers,

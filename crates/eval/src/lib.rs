@@ -26,6 +26,7 @@ mod gpu;
 mod heard;
 mod lottie;
 mod mask_art;
+mod matte;
 mod media;
 mod nest;
 mod reframe;
@@ -60,6 +61,7 @@ pub use freeze::{
 pub use gpu::{FrameLayers, GpuBackdrop, GpuLayer, GpuSource, SelectionCut, YuvSamples};
 pub use heard::{ClipAsk, Heard};
 pub use mask_art::text_mask_art;
+pub use matte::{MATTE_AUTO_MODEL, MATTE_FOLLOW_MODEL, MatteAsk, matte_ask, matte_ask_with};
 pub use media::OpenClips;
 pub use reframe::{REFRAME_MODEL, REFRAME_RATE, ReframeAsk, reframe_ask};
 pub use relight::{RELIGHT_MODEL, RelightAsk, relight_ask};

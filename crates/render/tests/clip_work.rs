@@ -230,6 +230,8 @@ fn a_clips_grade_lut_and_key_match() {
                 color: "#2a5fb0".to_owned(),
                 strength: 0.4,
                 shadow: 0.3,
+                feather: 0.5,
+                clean_up: 0.3,
             },
         ],
     );

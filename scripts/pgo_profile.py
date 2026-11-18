@@ -5,9 +5,9 @@ Usage: python3 scripts/pgo_profile.py path/to/av1.profdata
 It builds the `av1bench` example with instrumentation, decodes every IVF
 stream in the AV1 fixtures on one thread and on four, and merges the counts
 into the given file with the toolchain's `llvm-profdata` (the `llvm-tools`
-rustup component). The release build then passes
-`-Cprofile-use=<that file>` in RUSTFLAGS. The profile is for the host's
-target only.
+rustup component). The release build then names it in `PGO_MERGE` for
+`scripts/pgo.py`, which gives the merged profile to the workspace's crates.
+The profile is for the host's target only.
 
 The fixtures cover the coding tools rather than a typical stream, but their
 profile keeps most of what one from long 4K clips gives: on an M5, 2.7%
@@ -23,6 +23,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from pgo import build_wrapper, wrapped
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "crates" / "codecs" / "av1" / "fixtures"
@@ -57,8 +59,11 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as scratch:
         raw = Path(scratch) / "raw"
         target = Path(scratch) / "target"
-        env = dict(os.environ)
-        env["RUSTFLAGS"] = f"-Cprofile-generate={raw}"
+        # Instrumented through pgo.py's wrapper at the path pgo.py uses, so
+        # cutlass_av1 gets the -C metadata the release build gives it and
+        # the counts match its functions there.
+        wrapper = build_wrapper(ROOT / "target" / "pgo")
+        env = dict(os.environ, **wrapped(wrapper, f"-Cprofile-generate={raw}"))
         subprocess.run(
             [
                 "cargo", "build", "--release", "-p", "cutlass-av1",

@@ -343,7 +343,7 @@ jobs:
             echo run=false >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          pattern='^(\.github/workflows/|installer/|apps/desktop/icons/|apps/desktop/Cargo\.toml$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|scripts/(pgo|pgo_profile|macos_bundle|windows_installer|appimage|smoke)\.py$|tools/h264-pgo/|crates/codecs/h264(-kernels)?/)'
+          pattern='^(\.github/workflows/|installer/|apps/desktop/icons/|apps/desktop/Cargo\.toml$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|scripts/(pgo|pgo_profile|macos_bundle|windows_installer|appimage|smoke)\.py$|scripts/pgo_rustc\.rs$|tools/h264-pgo/|crates/codecs/h264(-kernels)?/)'
           matched=$(git diff --name-only HEAD^1 HEAD | grep -E "$pattern" || true)
           if [ -n "$matched" ]; then
             echo run=true >> "$GITHUB_OUTPUT"
@@ -427,8 +427,11 @@ jobs:
     # it runs on the self-hosted runner labelled cutlass-windows when
     # SELF_HOSTED_WINDOWS is 'true', and never for a pull request from a fork.
     # That machine needs NSIS installed beforehand and PowerShell 7 (pwsh).
+    # A build takes about 25 minutes; one that hangs is stopped at 90
+    # instead of holding the runner for GitHub's six hours.
     needs: packaging-changes
     if: needs.packaging-changes.outputs.run == 'true'
+    timeout-minutes: 90
     runs-on: >-
       ${{ vars.SELF_HOSTED_WINDOWS == 'true'
       && (github.event_name != 'pull_request'

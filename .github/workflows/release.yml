@@ -235,8 +235,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools
+      # On Arm, Windows' profile runtime writes counts llvm-profdata cannot
+      # read ("symbol name is empty", v0.8.0-rc.1), so the Arm build has no
+      # profile and its H.264 codec runs as an unprofiled build does.
       - name: Build
-        run: python scripts/pgo.py -p cutlass --features public-release
+        shell: bash
+        run: |
+          if [ "${{ matrix.arch }}" = aarch64 ]; then
+            cargo build --release -p cutlass --features public-release
+          else
+            python scripts/pgo.py -p cutlass --features public-release
+          fi
       - name: NSIS
         shell: bash
         run: |

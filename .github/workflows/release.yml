@@ -416,14 +416,22 @@ jobs:
     # the key, or for a pre-release tag, the app is only built, unsigned.
     # The draft release does not wait on this job. It runs on the self-hosted
     # Mac under SELF_HOSTED_MAC, as the Apple Silicon macOS job does; that
-    # Mac needs Xcode with the iOS platform installed.
+    # Mac needs Xcode 27 with the iOS platform installed. The project is in
+    # Xcode 27's format (project.xcproj), which Xcode 26 cannot open, so on
+    # GitHub it runs on the `xcode-27` image (a preview in Nov 2026) with
+    # the Xcode the project was last saved by.
     needs: version
     runs-on: >-
       ${{ vars.SELF_HOSTED_MAC == 'true'
       && fromJSON('["self-hosted", "cutlass-mac"]')
-      || 'macos-latest' }}
+      || 'xcode-27' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Xcode 27.2
+        if: runner.environment == 'github-hosted'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_27.2.app/Contents/Developer" >> "$GITHUB_ENV"
+      - name: Xcode version
+        run: xcodebuild -version
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios, aarch64-apple-ios-sim

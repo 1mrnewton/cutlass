@@ -80,8 +80,7 @@ const BUILT_IN_OFFERS: &[TransitionOffer] = &[
 ];
 
 /// Every transition the shelf offers: the built-in ones, then each
-/// bundled recipe, then each from the studio folder, each with its
-/// category. The studio's change as its files do.
+/// bundled recipe, each with its category.
 #[must_use]
 pub fn transition_offers() -> Vec<TransitionOffer> {
     let built_in = BUILT_IN_OFFERS.iter().map(|offer| TransitionOffer {

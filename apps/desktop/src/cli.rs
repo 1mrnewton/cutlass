@@ -8,8 +8,6 @@ use std::path::PathBuf;
 pub enum Command {
     /// The editor window, on the project folder or files named, if any.
     Window,
-    /// `cutlass studio`: the window, open on the effect studio.
-    Studio,
     /// `cutlass mcp [project]`: the editing tools on stdin and stdout.
     Mcp(Option<PathBuf>),
     /// `cutlass new <folder>`: an empty project under the folder.
@@ -51,9 +49,6 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Command {
     }
     if first == "new" {
         return Command::New(rest.map(PathBuf::from));
-    }
-    if first == "studio" {
-        return Command::Studio;
     }
     if first == "--" {
         return Command::Window;
@@ -102,8 +97,6 @@ Usage:
   cutlass mcp [project folder]
       Serve the editing tools on stdin and stdout for an MCP client, with
       no window.
-  cutlass studio [effect or transition id]
-      Open the editor on the effect studio.
   cutlass --help
       Show this.
   cutlass --version
@@ -168,7 +161,6 @@ mod tests {
             Command::New(Some(PathBuf::from("/tmp/films")))
         );
         assert_eq!(parse(words(&["new"])), Command::New(None));
-        assert_eq!(parse(words(&["studio", "recipe/shake"])), Command::Studio);
         assert_eq!(parse(words(&["sandbox"])), Command::Sandbox);
     }
 
@@ -195,13 +187,7 @@ mod tests {
     #[test]
     fn the_usage_names_every_command_a_person_runs() {
         let text = usage();
-        for word in [
-            "cutlass new",
-            "cutlass mcp",
-            "cutlass studio",
-            "--help",
-            "--version",
-        ] {
+        for word in ["cutlass new", "cutlass mcp", "--help", "--version"] {
             assert!(text.contains(word), "{word}");
         }
         assert!(!text.contains("sandbox"));

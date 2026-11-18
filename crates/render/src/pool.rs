@@ -238,4 +238,25 @@ impl Pool {
     pub(crate) fn created(&self) -> u64 {
         self.state().created
     }
+
+    /// Bytes of every texture the pool holds: after a frame ends, the
+    /// textures that frame used, kept for the next.
+    pub(crate) fn texture_bytes(&self) -> u64 {
+        let state = self.state();
+        let spare = state
+            .textures
+            .spare
+            .iter()
+            .map(|(key, list)| key.bytes() * list.len() as u64);
+        let taken = state.textures.taken.iter().map(|(key, _)| key.bytes());
+        spare.chain(taken).sum()
+    }
+}
+
+impl TextureKey {
+    /// Bytes the texture holds, one level, no padding.
+    fn bytes(&self) -> u64 {
+        let texel = self.format.block_copy_size(None).unwrap_or(4);
+        u64::from(self.size.0) * u64::from(self.size.1) * u64::from(texel)
+    }
 }

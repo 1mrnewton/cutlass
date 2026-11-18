@@ -274,6 +274,9 @@ impl TransitionRecipe {
                 .flat_map(|pass| pass.params.values())
                 .chain(self.cross.values()),
         )
+        .max(crate::recipe::passes_version(
+            self.outgoing.iter().chain(&self.incoming),
+        ))
     }
 
     /// The `effect_id` a material stores for it.
@@ -716,5 +719,28 @@ mod tests {
         ] {
             assert!(TransitionRecipe::read(text.as_bytes()).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn each_side_keeps_its_own_pictures_from_version_three() {
+        let text = r#"{"version":3,"id":"a","name":"A",
+            "outgoing":[{"block":"blur","save":"soft"},{"block":"blend","with":"soft"}],
+            "incoming":[{"block":"blend","params":{"mode":4}}]}"#;
+        let recipe = read(text);
+        assert_eq!(recipe.least_version(), 3);
+        let crossing = recipe.at(0.5);
+        assert_eq!(crossing.outgoing[0].save, Some(1));
+        assert_eq!(crossing.outgoing[1].with, Some(1));
+        assert_eq!(crossing.incoming[0].with, Some(0));
+        // A name saved on one side is not there on the other.
+        let crossed = r#"{"version":3,"id":"a","name":"A",
+            "outgoing":[{"block":"blur","save":"soft"}],
+            "incoming":[{"block":"blend","with":"soft"}]}"#;
+        assert!(matches!(
+            TransitionRecipe::read(crossed.as_bytes()),
+            Err(crate::RecipeError::Picture(_))
+        ));
+        let older = text.replace("\"version\":3", "\"version\":2");
+        assert!(TransitionRecipe::read(older.as_bytes()).is_err());
     }
 }

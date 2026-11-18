@@ -14640,6 +14640,15 @@ mod tests {
             .collect()
     }
 
+    /// The tone ends after four stereo frames; the rest of the asked window
+    /// is silence, so the device stays on time.
+    fn assert_tone_then_silence(bytes: &[u8]) {
+        let played = preview_samples(bytes);
+        assert_eq!(played.len(), cutlass_playback::PLAY_FRAMES as usize * 2);
+        assert_eq!(played[..8], [0.5; 8]);
+        assert!(played[8..].iter().all(|sample| *sample == 0.0));
+    }
+
     #[test]
     fn play_queues_the_mixed_tone_and_a_mute_or_a_host_with_no_device_stays_silent() {
         let temp = Temp::new();
@@ -14650,7 +14659,7 @@ mod tests {
         let revision = desktop.revision();
         desktop.play();
         assert!(desktop.audio_output_open());
-        assert_eq!(preview_samples(desktop.queued_preview()), vec![0.5; 8]);
+        assert_tone_then_silence(desktop.queued_preview());
         assert_eq!(desktop.revision(), revision);
         let picture = desktop.preview_bytes().unwrap();
         assert_eq!(picture.width, 2);
@@ -14661,7 +14670,7 @@ mod tests {
         assert!(desktop.queued_preview().is_empty());
         desktop.set_scrub_audio(true);
         desktop.seek(Micros(0));
-        assert_eq!(preview_samples(desktop.queued_preview()), vec![0.5; 8]);
+        assert_tone_then_silence(desktop.queued_preview());
         assert_eq!(desktop.revision(), revision);
 
         let audio = desktop
@@ -14833,15 +14842,16 @@ mod tests {
         readers.decoders_mut().register(CodecId::Jpeg, open_flat);
         desktop.set_readers(readers);
 
-        // The clip and its decode thread each open the movie.
+        // Opening the clip reads the movie twice, once to probe it and once
+        // to demux it, and its decode thread opens it a third time.
         let first = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 3);
         assert_ne!(first.rgba, [0x33, 0x66, 0x99, 0xFF].repeat(4));
         assert!(first.rgba.iter().any(|byte| *byte != 0));
 
         desktop.seek(Micros(10));
         let later = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 3);
         assert_eq!(later.rgba, first.rgba);
 
         let track = desktop.draft().unwrap().tracks[0].id.clone();
@@ -14849,15 +14859,17 @@ mod tests {
             .toggle_attribute(track.clone(), TrackAttribute::MUTE)
             .unwrap();
         desktop.seek(Micros(20));
+        // Muting changes the draft, not how the movie is read, so the open
+        // clip is kept.
         let muted = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 8);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 3);
         assert_eq!(muted.rgba, first.rgba);
 
         desktop
             .toggle_attribute(track, TrackAttribute::HIDE)
             .unwrap();
         let hidden = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 8);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 3);
         assert_eq!(hidden.rgba, vec![0; 16]);
     }
 

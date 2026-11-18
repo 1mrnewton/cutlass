@@ -4047,3 +4047,51 @@ fn two_passes_plan_key_frames_forced_inside_scenes() {
         "rate {forced:.3} of the target, {free:.3} without forced key frames"
     );
 }
+
+#[test]
+fn complexity_aq_in_one_pass_takes_libvpx_golden_budget() {
+    // At 500 bits a frame (2048 a frame is 256 a superblock here), a
+    // golden frame or alt-ref of one pass takes libvpx's budget of 5.3
+    // frames (`af_ratio_onepass_vbr` 10 over a group of 10), over the
+    // floor: one pass segments from it on, as libvpx does at 400 kb/s on
+    // a 720p picture (at 3.5 frames, under the floor, it made none).
+    // The key frame (a frame's budget here) and two passes (libvpx's give
+    // their alt-refs less) make none.
+    let (w, h) = (256u32, 128u32);
+    let frame = |i: u32| {
+        let mut f = moving(w, h, i / 4);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            if k as u32 % w >= 192 {
+                let n =
+                    ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 26;
+                *v = 60 + n as u8;
+            }
+        }
+        f
+    };
+    let opts = super::Vp9Options {
+        aq_mode: super::AqMode::Complexity,
+        bitrate: 15_000,
+        speed: 6,
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let segmented = |packets: &[Packet]| {
+        all_headers(packets)
+            .iter()
+            .filter(|hd| !hd.show_existing && hd.seg.enabled)
+            .map(|hd| hd.key_frame)
+            .collect::<Vec<bool>>()
+    };
+    let one = encode_with(opts, (w, h), 30, frame);
+    assert_decodes(&one, (w, h), 30);
+    let seg = segmented(&one);
+    assert!(seg.len() >= 10, "one pass: {} frames segmented", seg.len());
+    assert!(
+        seg.iter().all(|&key| !key),
+        "one pass: a key frame segmented"
+    );
+    let two = two_pass(opts, (w, h), 30, &frame);
+    assert_decodes(&two, (w, h), 30);
+    assert!(segmented(&two).is_empty(), "two passes segmented");
+}

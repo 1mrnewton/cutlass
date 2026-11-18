@@ -2184,10 +2184,15 @@ impl<P: EncPixel> Core<P> {
             // (`vp9_setup_in_frame_q_adj`), by their own budget
             // (`sb64_target_rate`), which for golden frames and alt-refs
             // their boost makes several frames'; the frames between keep
-            // what they chose. (A key frame here by a frame's budget.)
+            // what they chose. One pass at a variable bitrate: a golden
+            // frame or alt-ref takes libvpx's golden budget of one pass
+            // ([`complexity_golden_share`]); two passes keep their
+            // share. A key frame here takes a frame's (see
+            // [`COMPLEXITY_GOLDEN_BOOST`]).
             if kind < 2 {
                 let share = match (kind, self.opts.cbr_buffer_ms) {
                     (0, _) => 1.0,
+                    (_, 0) if self.rc.pass2.is_none() => complexity_golden_share(&self.opts),
                     (_, 0) => SHARE[1],
                     _ => SHARE_CBR[1],
                 };
@@ -4060,6 +4065,34 @@ const CORPUS_SCALE: (f64, f64) = (4.41, 0.5);
 /// (libvpx's `sb64_target_rate` floor; under it the segment ids cost more
 /// than they move).
 const COMPLEXITY_SB_BITS: f64 = 256.0;
+
+/// [`AqMode::Complexity`] in one pass at a variable bitrate: libvpx's
+/// golden boost (`af_ratio_onepass_vbr`), with which a golden frame or
+/// alt-ref of a group of `gf` frames takes `gf · 10 / (gf + 9)` frames'
+/// budget (`vp9_calc_pframe_target_size_one_pass_vbr`), 5.3 at libvpx's
+/// usual group of 10 (3.5 here before: at 720p it segmented from about
+/// 500 kb/s, libvpx from about 330). libvpx's two passes give their
+/// alt-refs less at a low bitrate (at 400 kb/s on the three scenes they
+/// segment their two key frames alone), and keep their share here. libvpx gives a key frame 25 frames'
+/// budget (`vp9_calc_iframe_target_size_one_pass_vbr`), with which it
+/// segments even at 10 kb/s on a 256×128 picture (every frame of 3 and of
+/// 30, lag 0 and 25; FFmpeg 6.1.1, libvpx 1.14); here a key frame keeps
+/// a frame's, under the floor up to about 1.7 Mb/s at 720p: the segments
+/// of a key frame cost 0.2 dB PSNR-Y at 1 Mb/s on the still scene and
+/// jumps and on the grainy pan.
+const COMPLEXITY_GOLDEN_BOOST: f64 = 10.0;
+
+/// The frames' budget a golden frame or alt-ref takes for
+/// [`AqMode::Complexity`]'s decision at a variable bitrate (see
+/// [`COMPLEXITY_GOLDEN_BOOST`]): libvpx's group, half the shortest and
+/// longest golden intervals held within 10 and 20 frames
+/// (`vp9_set_gf_update_one_pass_vbr`).
+fn complexity_golden_share(opts: &Vp9Options) -> f64 {
+    let (lo, hi) = opts.gf_range();
+    let gf = f64::from((lo + hi) / 2).clamp(10.0, 20.0);
+    let af = COMPLEXITY_GOLDEN_BOOST;
+    gf * af / (gf + af - 1.0)
+}
 
 /// Cyclic refresh ([`AqMode::CyclicRefresh`]): the share of the
 /// superblocks each inter frame refreshes, in percent (libvpx's

@@ -3030,7 +3030,7 @@ brackets). "Added" is new in this round; each has a test in
 | `-tune-content film` | `tune-content` | `tune_content: TuneContent::Film` (`film=1`, added): libvpx's RD penalties on grain lost; see "Options measured" |
 | `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ), or `aq_mode: AqMode::Variance` |
 | `-aq-mode 3` / `4` | cyclic refresh, equator360 | `aq_mode`: `AqMode::CyclicRefresh` (`aq=3`), `AqMode::Equator360` (`aq=4`), added |
-| `-aq-mode 2` | complexity AQ | `aq_mode: AqMode::Complexity` (`aq=2`, added): each superblock's segment by the rate its source's variance projects, before it is coded (libvpx's is the rate its search spent); at a bitrate, in one pass and two, segmented while golden frames' and alt-refs' budgets allow, as libvpx decides; see "Options measured" |
+| `-aq-mode 2` | complexity AQ | `aq_mode: AqMode::Complexity` (`aq=2`, added): each superblock's segment by the rate its source's variance projects, before it is coded (libvpx's is the rate its search spent); at a bitrate, in one pass and two, segmented while golden frames' and alt-refs' budgets allow, as libvpx decides (one pass with libvpx's golden budget of one pass); see "Options measured" |
 | `-noise-sensitivity` | `noise-sensitivity` | `noise_sensitivity` (`noise=`, added): a temporal denoiser of luma; see "Options measured" |
 | `-static-thresh` | `static-thresh` | `static_thresh` (`static_thresh=`, added) |
 | `-sharpness` | `sharpness` | `sharpness` (`sharpness=`, added): written to the header for the loop filter (libvpx 1.14 writes 0 and uses it in its RD search: an intentional difference) |
@@ -3218,16 +3218,32 @@ with it). With a bitrate, as in libvpx (`vp9_setup_in_frame_q_adj`), the
 segments are set up on key, golden and alt-ref frames, by their own
 budget, and the frames between keep what they chose: there is no
 segmentation while that budget's share a superblock is under 256 bits.
-A golden frame or alt-ref takes 3.5 frames' budget (a key frame here
-one), so at 720p and 30 pictures a second it segments from about 500
-kb/s. It decided on every frame by the average frame's budget before
+In one pass a golden frame or alt-ref takes libvpx's one-pass golden
+budget, 10·g / (g + 9) frames' for libvpx's group of g frames (half the
+shortest and longest golden intervals, held within 10 and 20: 5.3
+frames by default), so at 720p and 30 pictures a second it segments from
+about 330 kb/s, as libvpx's one pass does; two passes keep 3.5 frames'
+(from about 500 kb/s; libvpx's two passes give their alt-refs less at a
+low bitrate). A key frame takes one frame's budget, not libvpx's 25: at
+25, libvpx segments even at 10 kb/s on a 256×128 picture (every frame of
+3 and of 30, lag 0 and 25), where this encoder keeps to none, and a key
+frame's segments cost 0.2 dB PSNR-Y at 1 Mb/s on the still scene and
+jumps and on the grainy pan. It decided on every frame by the average frame's budget before
 (under about 1.7 Mb/s, none): the three scenes (60 frames) at 1.5 Mb/s,
 FFmpeg `-aq-mode 2` against `aq=2`, frames segmented, kB / PSNR-Y: one
 pass, libvpx 60 of 60, 393 / 39.65; before 0 of 63 (the stream of
 `aq=0`), 332 / 40.37; now 62 of 63, 333 / 40.21. Two passes: libvpx 70
 of 70, 370 / 40.38; before 0, 375 / 41.59; now 66 of 67, 373 / 41.49.
-At 400 kb/s libvpx segments 54 of 60, ours none (its alt-refs' budgets
-are under the floor; libvpx boosts them more). One pass at speed 5,
+At 400 kb/s, one pass: libvpx segments 54 of 60 (555 kb/s, 35.59 dB);
+before, at 3.5 frames' budget, ours none (424 kb/s, 35.19 dB); now 62 of
+63 (425 kb/s, 34.96 dB). Two passes: libvpx 2 of 67 (its key frames),
+ours none (404 kb/s, 35.07 dB). The segments cost PSNR there as
+libvpx's do (libvpx `-aq-mode 2` against 0 at 400 kb/s: −0.55, −1.89
+and −1.51 dB on the three clips): one pass at 0.3 to 3 Mb/s (four
+threads) against before, BD-rate at the same PSNR-Y / FFmpeg's average,
++0.5 / +0.3%, +2.8 / +2.4% and +2.2 / +1.7% on the three clips, all of
+it the point at 400 kb/s (−0.17, −0.61 and −0.61 dB); at 1 to 4 Mb/s
+(0.5 to 3 on the still scene and jumps) the same streams. One pass at speed 5,
 four threads, BD-rate at the same PSNR-Y / FFmpeg's average (measured
 before this change, at 1 to 4 Mb/s):
 

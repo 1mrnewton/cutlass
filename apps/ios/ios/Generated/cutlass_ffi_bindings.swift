@@ -690,6 +690,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func addFilter(filterId: String, atUs: Int64) throws  -> String
     
     /**
+     * Put a new mask of `shape`, a key from [`mask_shapes`], at the end of
+     * the list, and give back its place. One undo step.
+     */
+    func addMask(clipId: String, color: Bool, shape: String, atUs: Int64) throws  -> UInt32
+    
+    /**
      * Put a library picture at `at_us` on a row above main. Returns the clip.
      */
     func addOverlay(materialId: String, atUs: Int64) throws  -> String
@@ -757,6 +763,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func cuts() throws  -> [Cut]
     
     /**
+     * Make the pen mask at `index` the outline through the canvas points
+     * `corners` (x, y pairs), closed on the first. One undo step.
+     */
+    func drawMaskOutline(clipId: String, color: Bool, index: UInt32, atUs: Int64, corners: [Double]) throws 
+    
+    /**
      * Put a freehand stroke through `trace` at `at_us` as a smooth line on
      * a sticker row, `color` (`#RRGGBB`) and `width` canvas pixels wide.
      * One undo step. Returns the clip's id.
@@ -778,6 +790,13 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * curve `graph`, or make it straight with an empty name. One undo step.
      */
     func easeKeyframes(clipId: String, atUs: Int64, graph: String) throws 
+    
+    /**
+     * Make the mask at `index` into `mask` at `at_us`; a keyed mask is
+     * keyed there. Changes made while `live` join one undo step, so a
+     * slider drag is one step; its last change passes `live` false.
+     */
+    func editMask(clipId: String, color: Bool, index: UInt32, atUs: Int64, mask: ClipMask, live: Bool) throws 
     
     /**
      * Write the whole cut to `path` as an MP4, `short_side` pixels on its
@@ -869,11 +888,52 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func linkageEnabled() throws  -> Bool
     
     /**
+     * Take hold of the handle of the mask at `index` under canvas point
+     * `(x, y)` at `at_us`; `false` when none is there.
+     */
+    func maskBegin(clipId: String, color: Bool, index: UInt32, atUs: Int64, x: Double, y: Double) throws  -> Bool
+    
+    /**
+     * Move the handle taken hold of to canvas point `(x, y)`. The whole
+     * drag is one undo step.
+     */
+    func maskDrag(x: Double, y: Double) throws  -> ClipMask
+    
+    /**
+     * End the mask drag.
+     */
+    func maskEnd() throws 
+    
+    /**
+     * Where the handles of the mask at `index` are on the canvas at
+     * `at_us`; `None` when there is no such mask or the clip is not shown.
+     */
+    func maskHandles(clipId: String, color: Bool, index: UInt32, atUs: Int64) throws  -> MaskHandles?
+    
+    /**
+     * `clip_id`'s clip masks, or with `color` its colour masks, in order,
+     * each as its keys have it at `at_us`.
+     */
+    func masks(clipId: String, color: Bool, atUs: Int64) throws  -> [ClipMask]
+    
+    /**
      * Move a clip to `row` (top is 0) starting near `start_us`, as one undo
      * step. It snaps to a cut or the playhead within `snap_us`. Returns the
      * start it landed on.
      */
     func moveClip(clipId: String, row: UInt32, startUs: Int64, snapUs: Int64, playheadUs: Int64) throws  -> Int64
+    
+    /**
+     * Move the mask at `from` to `to` in the list. One undo step.
+     */
+    func moveMask(clipId: String, color: Bool, from: UInt32, to: UInt32) throws 
+    
+    /**
+     * Paint, or with `erase` rub out, a stroke `size` canvas pixels wide
+     * through the canvas points `trace` (x, y pairs) on the brush mask at
+     * `index`. One undo step.
+     */
+    func paintMask(clipId: String, color: Bool, index: UInt32, atUs: Int64, trace: [Double], size: Double, erase: Bool) throws 
     
     func pause() throws 
     
@@ -895,6 +955,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func redo() throws 
     
     func remove(clipId: String) throws 
+    
+    /**
+     * Take the mask at `index` off. One undo step.
+     */
+    func removeMask(clipId: String, color: Bool, index: UInt32) throws 
     
     /**
      * Take the transition off the cut after `outgoing_id`. One undo step.
@@ -976,6 +1041,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * Turn linkage on or off. Not an undo step; kept with the project.
      */
     func setLinkageEnabled(on: Bool) throws 
+    
+    /**
+     * Spell the text mask at `index` `text`. One undo step.
+     */
+    func setMaskText(clipId: String, color: Bool, index: UInt32, text: String) throws 
     
     /**
      * Make the picture `opacity` solid, 0 to 1. One undo step.
@@ -1330,6 +1400,23 @@ open func addFilter(filterId: String, atUs: Int64)throws  -> String  {
 }
     
     /**
+     * Put a new mask of `shape`, a key from [`mask_shapes`], at the end of
+     * the list, and give back its place. One undo step.
+     */
+open func addMask(clipId: String, color: Bool, shape: String, atUs: Int64)throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_add_mask(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(color),
+        FfiConverterString.lower(shape),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Put a library picture at `at_us` on a row above main. Returns the clip.
      */
 open func addOverlay(materialId: String, atUs: Int64)throws  -> String  {
@@ -1497,6 +1584,23 @@ open func cuts()throws  -> [Cut]  {
 }
     
     /**
+     * Make the pen mask at `index` the outline through the canvas points
+     * `corners` (x, y pairs), closed on the first. One undo step.
+     */
+open func drawMaskOutline(clipId: String, color: Bool, index: UInt32, atUs: Int64, corners: [Double])throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_draw_mask_outline(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(color),
+        FfiConverterUInt32.lower(index),
+        FfiConverterInt64.lower(atUs),
+        FfiConverterSequenceDouble.lower(corners),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Put a freehand stroke through `trace` at `at_us` as a smooth line on
      * a sticker row, `color` (`#RRGGBB`) and `width` canvas pixels wide.
      * One undo step. Returns the clip's id.
@@ -1550,6 +1654,25 @@ open func easeKeyframes(clipId: String, atUs: Int64, graph: String)throws   {try
         FfiConverterString.lower(clipId),
         FfiConverterInt64.lower(atUs),
         FfiConverterString.lower(graph),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Make the mask at `index` into `mask` at `at_us`; a keyed mask is
+     * keyed there. Changes made while `live` join one undo step, so a
+     * slider drag is one step; its last change passes `live` false.
+     */
+open func editMask(clipId: String, color: Bool, index: UInt32, atUs: Int64, mask: ClipMask, live: Bool)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_edit_mask(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(color),
+        FfiConverterUInt32.lower(index),
+        FfiConverterInt64.lower(atUs),
+        FfiConverterTypeClipMask_lower(mask),
+        FfiConverterBool.lower(live),uniffiCallStatus
     )
 }
 }
@@ -1768,6 +1891,84 @@ open func linkageEnabled()throws  -> Bool  {
 }
     
     /**
+     * Take hold of the handle of the mask at `index` under canvas point
+     * `(x, y)` at `at_us`; `false` when none is there.
+     */
+open func maskBegin(clipId: String, color: Bool, index: UInt32, atUs: Int64, x: Double, y: Double)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_mask_begin(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(color),
+        FfiConverterUInt32.lower(index),
+        FfiConverterInt64.lower(atUs),
+        FfiConverterDouble.lower(x),
+        FfiConverterDouble.lower(y),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Move the handle taken hold of to canvas point `(x, y)`. The whole
+     * drag is one undo step.
+     */
+open func maskDrag(x: Double, y: Double)throws  -> ClipMask  {
+    return try  FfiConverterTypeClipMask_lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_mask_drag(
+            self.uniffiCloneHandle(),
+        FfiConverterDouble.lower(x),
+        FfiConverterDouble.lower(y),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * End the mask drag.
+     */
+open func maskEnd()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_mask_end(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Where the handles of the mask at `index` are on the canvas at
+     * `at_us`; `None` when there is no such mask or the clip is not shown.
+     */
+open func maskHandles(clipId: String, color: Bool, index: UInt32, atUs: Int64)throws  -> MaskHandles?  {
+    return try  FfiConverterOptionTypeMaskHandles.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_mask_handles(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(color),
+        FfiConverterUInt32.lower(index),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * `clip_id`'s clip masks, or with `color` its colour masks, in order,
+     * each as its keys have it at `at_us`.
+     */
+open func masks(clipId: String, color: Bool, atUs: Int64)throws  -> [ClipMask]  {
+    return try  FfiConverterSequenceTypeClipMask.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_masks(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(color),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Move a clip to `row` (top is 0) starting near `start_us`, as one undo
      * step. It snaps to a cut or the playhead within `snap_us`. Returns the
      * start it landed on.
@@ -1784,6 +1985,41 @@ open func moveClip(clipId: String, row: UInt32, startUs: Int64, snapUs: Int64, p
         FfiConverterInt64.lower(playheadUs),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Move the mask at `from` to `to` in the list. One undo step.
+     */
+open func moveMask(clipId: String, color: Bool, from: UInt32, to: UInt32)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_move_mask(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(color),
+        FfiConverterUInt32.lower(from),
+        FfiConverterUInt32.lower(to),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Paint, or with `erase` rub out, a stroke `size` canvas pixels wide
+     * through the canvas points `trace` (x, y pairs) on the brush mask at
+     * `index`. One undo step.
+     */
+open func paintMask(clipId: String, color: Bool, index: UInt32, atUs: Int64, trace: [Double], size: Double, erase: Bool)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_paint_mask(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(color),
+        FfiConverterUInt32.lower(index),
+        FfiConverterInt64.lower(atUs),
+        FfiConverterSequenceDouble.lower(trace),
+        FfiConverterDouble.lower(size),
+        FfiConverterBool.lower(erase),uniffiCallStatus
+    )
+}
 }
     
 open func pause()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
@@ -1842,6 +2078,20 @@ open func remove(clipId: String)throws   {try rustCallWithError(FfiConverterType
     uniffi_cutlass_ffi_bindings_fn_method_editor_remove(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Take the mask at `index` off. One undo step.
+     */
+open func removeMask(clipId: String, color: Bool, index: UInt32)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_remove_mask(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(color),
+        FfiConverterUInt32.lower(index),uniffiCallStatus
     )
 }
 }
@@ -2035,6 +2285,21 @@ open func setLinkageEnabled(on: Bool)throws   {try rustCallWithError(FfiConverte
     uniffi_cutlass_ffi_bindings_fn_method_editor_set_linkage_enabled(
             self.uniffiCloneHandle(),
         FfiConverterBool.lower(on),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Spell the text mask at `index` `text`. One undo step.
+     */
+open func setMaskText(clipId: String, color: Bool, index: UInt32, text: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_mask_text(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(color),
+        FfiConverterUInt32.lower(index),
+        FfiConverterString.lower(text),uniffiCallStatus
     )
 }
 }
@@ -3338,6 +3603,118 @@ public func FfiConverterTypeClipFilter_lower(_ value: ClipFilter) -> RustBuffer 
 
 
 /**
+ * One mask of a clip's list, as its keys have it at the time asked for.
+ * `shape` is a key from [`mask_shapes`]; `mode` is `add`, `subtract` or
+ * `intersect`. The box is in the clip's own frame, -1 to 1 each way with
+ * y up; `rotation` is degrees anticlockwise.
+ */
+public struct ClipMask: Equatable, Hashable {
+    public var shape: String
+    public var mode: String
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+    public var rotation: Double
+    public var feather: Double
+    public var round: Double
+    public var invert: Bool
+    /**
+     * Its numbers have keys, so a change keys them at the time shown.
+     */
+    public var keyed: Bool
+    /**
+     * What a text mask says.
+     */
+    public var text: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(shape: String, mode: String, x: Double, y: Double, width: Double, height: Double, rotation: Double, feather: Double, round: Double, invert: Bool, 
+        /**
+         * Its numbers have keys, so a change keys them at the time shown.
+         */keyed: Bool, 
+        /**
+         * What a text mask says.
+         */text: String?) {
+        self.shape = shape
+        self.mode = mode
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.rotation = rotation
+        self.feather = feather
+        self.round = round
+        self.invert = invert
+        self.keyed = keyed
+        self.text = text
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ClipMask: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeClipMask: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ClipMask {
+        return
+            try ClipMask(
+                shape: FfiConverterString.read(from: &buf), 
+                mode: FfiConverterString.read(from: &buf), 
+                x: FfiConverterDouble.read(from: &buf), 
+                y: FfiConverterDouble.read(from: &buf), 
+                width: FfiConverterDouble.read(from: &buf), 
+                height: FfiConverterDouble.read(from: &buf), 
+                rotation: FfiConverterDouble.read(from: &buf), 
+                feather: FfiConverterDouble.read(from: &buf), 
+                round: FfiConverterDouble.read(from: &buf), 
+                invert: FfiConverterBool.read(from: &buf), 
+                keyed: FfiConverterBool.read(from: &buf), 
+                text: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ClipMask, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.shape, into: &buf)
+        FfiConverterString.write(value.mode, into: &buf)
+        FfiConverterDouble.write(value.x, into: &buf)
+        FfiConverterDouble.write(value.y, into: &buf)
+        FfiConverterDouble.write(value.width, into: &buf)
+        FfiConverterDouble.write(value.height, into: &buf)
+        FfiConverterDouble.write(value.rotation, into: &buf)
+        FfiConverterDouble.write(value.feather, into: &buf)
+        FfiConverterDouble.write(value.round, into: &buf)
+        FfiConverterBool.write(value.invert, into: &buf)
+        FfiConverterBool.write(value.keyed, into: &buf)
+        FfiConverterOptionString.write(value.text, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClipMask_lift(_ buf: RustBuffer) throws -> ClipMask {
+    return try FfiConverterTypeClipMask.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClipMask_lower(_ value: ClipMask) -> RustBuffer {
+    return FfiConverterTypeClipMask.lower(value)
+}
+
+
+/**
  * How a selected clip stands, and which clip tools can change it.
  */
 public struct ClipState: Equatable, Hashable {
@@ -4399,6 +4776,158 @@ public func FfiConverterTypeLane_lift(_ buf: RustBuffer) throws -> Lane {
 #endif
 public func FfiConverterTypeLane_lower(_ value: Lane) -> RustBuffer {
     return FfiConverterTypeLane.lower(value)
+}
+
+
+/**
+ * A mask's handles on the canvas, in canvas pixels with y down. `corners`
+ * and `line` are x, y pairs; `line` is empty unless the mask is a line or
+ * a mirror. `reach` is how far from a knob a finger still takes it.
+ */
+public struct MaskHandles: Equatable, Hashable {
+    public var canvasWidth: Double
+    public var canvasHeight: Double
+    public var middleX: Double
+    public var middleY: Double
+    public var corners: [Double]
+    public var turnX: Double
+    public var turnY: Double
+    public var featherX: Double
+    public var featherY: Double
+    public var line: [Double]
+    public var reach: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(canvasWidth: Double, canvasHeight: Double, middleX: Double, middleY: Double, corners: [Double], turnX: Double, turnY: Double, featherX: Double, featherY: Double, line: [Double], reach: Double) {
+        self.canvasWidth = canvasWidth
+        self.canvasHeight = canvasHeight
+        self.middleX = middleX
+        self.middleY = middleY
+        self.corners = corners
+        self.turnX = turnX
+        self.turnY = turnY
+        self.featherX = featherX
+        self.featherY = featherY
+        self.line = line
+        self.reach = reach
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MaskHandles: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaskHandles: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaskHandles {
+        return
+            try MaskHandles(
+                canvasWidth: FfiConverterDouble.read(from: &buf), 
+                canvasHeight: FfiConverterDouble.read(from: &buf), 
+                middleX: FfiConverterDouble.read(from: &buf), 
+                middleY: FfiConverterDouble.read(from: &buf), 
+                corners: FfiConverterSequenceDouble.read(from: &buf), 
+                turnX: FfiConverterDouble.read(from: &buf), 
+                turnY: FfiConverterDouble.read(from: &buf), 
+                featherX: FfiConverterDouble.read(from: &buf), 
+                featherY: FfiConverterDouble.read(from: &buf), 
+                line: FfiConverterSequenceDouble.read(from: &buf), 
+                reach: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MaskHandles, into buf: inout [UInt8]) {
+        FfiConverterDouble.write(value.canvasWidth, into: &buf)
+        FfiConverterDouble.write(value.canvasHeight, into: &buf)
+        FfiConverterDouble.write(value.middleX, into: &buf)
+        FfiConverterDouble.write(value.middleY, into: &buf)
+        FfiConverterSequenceDouble.write(value.corners, into: &buf)
+        FfiConverterDouble.write(value.turnX, into: &buf)
+        FfiConverterDouble.write(value.turnY, into: &buf)
+        FfiConverterDouble.write(value.featherX, into: &buf)
+        FfiConverterDouble.write(value.featherY, into: &buf)
+        FfiConverterSequenceDouble.write(value.line, into: &buf)
+        FfiConverterDouble.write(value.reach, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaskHandles_lift(_ buf: RustBuffer) throws -> MaskHandles {
+    return try FfiConverterTypeMaskHandles.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaskHandles_lower(_ value: MaskHandles) -> RustBuffer {
+    return FfiConverterTypeMaskHandles.lower(value)
+}
+
+
+/**
+ * A shape a mask can take: the key `add_mask` takes, and a tile's name.
+ */
+public struct MaskShapeChoice: Equatable, Hashable {
+    public var key: String
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(key: String, label: String) {
+        self.key = key
+        self.label = label
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MaskShapeChoice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaskShapeChoice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaskShapeChoice {
+        return
+            try MaskShapeChoice(
+                key: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MaskShapeChoice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.key, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaskShapeChoice_lift(_ buf: RustBuffer) throws -> MaskShapeChoice {
+    return try FfiConverterTypeMaskShapeChoice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaskShapeChoice_lower(_ value: MaskShapeChoice) -> RustBuffer {
+    return FfiConverterTypeMaskShapeChoice.lower(value)
 }
 
 
@@ -6532,6 +7061,7 @@ public enum ToolKind: Equatable, Hashable {
     case draw
     case videoEffects
     case shapeStyle
+    case mask
 
 
 
@@ -6626,6 +7156,8 @@ public struct FfiConverterTypeToolKind: FfiConverterRustBuffer {
         case 36: return .videoEffects
         
         case 37: return .shapeStyle
+        
+        case 38: return .mask
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -6781,6 +7313,10 @@ public struct FfiConverterTypeToolKind: FfiConverterRustBuffer {
         
         case .shapeStyle:
             writeInt(&buf, Int32(37))
+        
+        
+        case .mask:
+            writeInt(&buf, Int32(38))
         
         }
     }
@@ -6965,6 +7501,30 @@ fileprivate struct FfiConverterOptionTypeKeyframes: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeKeyframes.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeMaskHandles: FfiConverterRustBuffer {
+    typealias SwiftType = MaskHandles?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMaskHandles.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMaskHandles.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -7367,6 +7927,31 @@ fileprivate struct FfiConverterSequenceTypeClip: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeClipMask: FfiConverterRustBuffer {
+    typealias SwiftType = [ClipMask]
+
+    public static func write(_ value: [ClipMask], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeClipMask.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ClipMask] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ClipMask]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeClipMask.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeCut: FfiConverterRustBuffer {
     typealias SwiftType = [Cut]
 
@@ -7559,6 +8144,31 @@ fileprivate struct FfiConverterSequenceTypeLane: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeLane.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeMaskShapeChoice: FfiConverterRustBuffer {
+    typealias SwiftType = [MaskShapeChoice]
+
+    public static func write(_ value: [MaskShapeChoice], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMaskShapeChoice.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MaskShapeChoice] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MaskShapeChoice]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMaskShapeChoice.read(from: &buf))
         }
         return seq
     }
@@ -7989,6 +8599,16 @@ public func listProjects(root: String) -> [ProjectSummary]  {
 })
 }
 /**
+ * Every mask shape in the order the Mask panel shows them.
+ */
+public func maskShapes() -> [MaskShapeChoice]  {
+    return try!  FfiConverterSequenceTypeMaskShapeChoice.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_mask_shapes(uniffiCallStatus
+    )
+})
+}
+/**
  * The license text of notice `index`, word for word.
  */
 public func noticeText(index: UInt32) -> String  {
@@ -8247,6 +8867,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 22684) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_mask_shapes() != 62227) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_notice_text() != 58668) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8310,6 +8933,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_filter() != 22333) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_mask() != 55507) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay() != 34969) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8346,6 +8972,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_cuts() != 46999) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_mask_outline() != 15175) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_stroke() != 40878) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8356,6 +8985,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_ease_keyframes() != 37443) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_edit_mask() != 15780) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_export() != 5234) {
@@ -8403,7 +9035,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_linkage_enabled() != 52789) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_begin() != 2691) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_drag() != 24809) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_end() != 39803) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_mask_handles() != 25845) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_masks() != 3880) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_move_clip() != 64054) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_move_mask() != 57008) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_paint_mask() != 19993) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_pause() != 24082) {
@@ -8422,6 +9075,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_remove() != 65039) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_remove_mask() != 59234) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_remove_transition() != 61176) {
@@ -8464,6 +9120,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_linkage_enabled() != 48699) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_mask_text() != 63790) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_opacity() != 19016) {

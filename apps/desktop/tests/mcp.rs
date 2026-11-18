@@ -45,27 +45,48 @@ fn serving(home: &Home, project: &Path) -> Child {
         .stderr(Stdio::null())
         .spawn()
         .expect("cutlass mcp");
-    let rename = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-        "name":"draft_apply",
-        "arguments":{"expected_revision":0,
-            "requests":[{"op":"set_project_name","name":"kept"}]}}});
-    let stdin = child.stdin.as_mut().expect("stdin");
-    stdin
-        .write_all(format!("{rename}\n").as_bytes())
-        .and_then(|()| stdin.flush())
-        .expect("write");
     let stdout = child.stdout.take().expect("stdout");
     let (answers, answered) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut line = String::new();
-        if BufReader::new(stdout).read_line(&mut line).is_ok() {
-            let _ = answers.send(line);
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if answers.send(line).is_err() {
+                break;
+            }
         }
     });
-    let answer = answered
-        .recv_timeout(Duration::from_secs(60))
-        .expect("an answer to the rename");
-    assert!(answer.contains("revision=1 committed=true"), "{answer}");
+    let mut ask = |message: serde_json::Value| {
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin
+            .write_all(format!("{message}\n").as_bytes())
+            .and_then(|()| stdin.flush())
+            .expect("write");
+        answered
+            .recv_timeout(Duration::from_secs(60))
+            .expect("an answer")
+    };
+    // A project opens at a revision of its own, so the client reads it.
+    let read = ask(
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":"draft_query","arguments":{"input":"project"}}}),
+    );
+    let read: serde_json::Value = serde_json::from_str(&read).expect("an answer in JSON");
+    let revision: u64 = read["result"]["content"][0]["text"]
+        .as_str()
+        .and_then(|text| text.strip_prefix("revision="))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("no revision in {read}"));
+    let answer = ask(
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+        "name":"draft_apply",
+        "arguments":{"expected_revision":revision,
+            "requests":[{"op":"set_project_name","name":"kept"}]}}}),
+    );
+    assert!(
+        answer.contains(&format!("revision={} committed=true", revision + 1)),
+        "{answer}"
+    );
     child
 }
 

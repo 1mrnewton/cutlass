@@ -10,8 +10,8 @@ use std::path::{Component, Path, PathBuf};
 
 use cutlass_codec::access::{ChannelLayout, Pcm};
 use cutlass_engine::{
-    ClipPcm, EngineError, MapError, Media, ReaderFactory, map_timeline, media_path, placement_of,
-    speed_at,
+    ClipPcm, EngineError, MapError, Media, ReaderFactory, map_timeline, mean_speed, media_path,
+    placement_of,
 };
 use cutlass_model::{Draft, DraftId, Micros, Segment, SegmentId};
 
@@ -19,6 +19,9 @@ use crate::AudioError;
 
 /// Source frames one preview window may ask a file for.
 const MAX_SOURCE_FRAMES: u32 = 480_000;
+
+/// Files kept open across revisions. Past this a new revision closes them.
+const MAX_OPEN: usize = 64;
 
 /// What [`Heard::clip`] needs from the mix.
 pub struct ClipAsk<'a> {
@@ -32,7 +35,11 @@ pub struct ClipAsk<'a> {
     pub root: Option<&'a Path>,
 }
 
-/// Open audio files for one draft revision.
+/// Open audio files, by path.
+///
+/// A file stays open from one draft revision to the next: it reads the same
+/// sound whatever the draft says. A new revision drops a file that changed
+/// on disk, and the files past [`MAX_OPEN`].
 pub struct Heard {
     revision: u64,
     bound: bool,
@@ -84,7 +91,9 @@ impl Heard {
         let Some(path) = media_file(ask.root, stored) else {
             return Ok(ClipPcm::Missing);
         };
-        let Some(at) = source_at(owner, segment, ask.time) else {
+        let span = i64::try_from(u64::from(ask.frames) * 1_000_000 / u64::from(ask.rate.max(1)))
+            .unwrap_or(i64::MAX);
+        let Some(at) = source_at(owner, segment, ask.time, span) else {
             return Ok(ClipPcm::Missing);
         };
         let Ok(media) = self.cached(ask.readers, &path) else {
@@ -113,13 +122,24 @@ impl Heard {
         if self.bound && self.revision == revision {
             return;
         }
-        self.open.clear();
+        if self.open.len() > MAX_OPEN {
+            self.open.clear();
+        }
+        self.open.retain(|_, media| media.unchanged());
         self.revision = revision;
         self.bound = true;
     }
 
     fn cached(&mut self, readers: &ReaderFactory, path: &Path) -> Result<&mut Media, EngineError> {
         let key = path.to_string_lossy().into_owned();
+        // A proxy made or removed since the file opened changes what it reads.
+        if self
+            .open
+            .get(&key)
+            .is_some_and(|media| media.opened() != readers.stand_in(path))
+        {
+            self.open.remove(&key);
+        }
         if self.open.contains_key(&key) {
             return self.open.get_mut(&key).ok_or(EngineError::MissingSegment);
         }
@@ -173,10 +193,13 @@ struct SourceAt {
     read: Read,
 }
 
-fn source_at(draft: &Draft, segment: &Segment, time: Micros) -> Option<SourceAt> {
+/// Where the window that starts at `time` and runs `span` microseconds
+/// reads. It reads at the span's mean speed, as the mix stretches it, so on
+/// a speed curve the next window starts where this one stops.
+fn source_at(draft: &Draft, segment: &Segment, time: Micros, span: i64) -> Option<SourceAt> {
     match placement_of(draft, segment) {
         Ok(map) => {
-            let speed = speed_at(&map, time).ok()?;
+            let speed = mean_speed(&map, time, Micros(time.0.saturating_add(span))).ok()?;
             let source = map_timeline(&map, time).ok()?;
             let read = if map.freeze.is_some() {
                 Read::Silent

@@ -325,7 +325,7 @@ fn time_720p(compute: Compute) {
 }
 
 #[test]
-#[ignore = "needs a Metal GPU; a timing run, not a check"]
+#[ignore = "needs a GPU; a timing run, not a check"]
 fn denoise_720p_on_the_gpu() {
     time_720p(Compute::Gpu);
 }
@@ -422,8 +422,10 @@ fn the_real_weights_make_what_pytorch_makes() {
 }
 
 #[test]
-#[ignore = "needs a Metal GPU"]
+#[ignore = "needs a GPU"]
 fn the_real_weights_in_half_precision_stay_close_to_pytorch() {
+    // Trusted as the editor trusts a GPU that passed the check.
+    crate::trust_gpu(crate::check_gpu().ok());
     if let Some(worst) = worst_against_pytorch(Compute::Gpu) {
         assert!(worst <= 2, "{worst} levels from PyTorch");
     }

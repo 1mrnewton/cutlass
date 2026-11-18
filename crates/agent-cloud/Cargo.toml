@@ -7,9 +7,9 @@ license.workspace = true
 description = "The assistant's cloud model with the user's own key."
 
 [dependencies]
-cutlass-agent = { path = "../agent", version = "0.1.0" }
-cutlass-download = { path = "../download", version = "0.1.0", features = ["http"] }
-cutlass-settings = { path = "../settings", version = "0.1.0" }
+cutlass-agent = { path = "../agent", version = "0.8.0" }
+cutlass-download = { path = "../download", version = "0.8.0", features = ["http"] }
+cutlass-settings = { path = "../settings", version = "0.8.0" }
 serde_json = "1.0.154"
 
 [lints]

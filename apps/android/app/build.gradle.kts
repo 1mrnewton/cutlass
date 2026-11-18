@@ -24,7 +24,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.scytheralpha.cutlass"
+        applicationId = "com.scytheralpha.cutlassapp"
         minSdk = 28
         targetSdk = 36
         versionCode = workspaceVersionCode

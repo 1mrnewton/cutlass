@@ -7,11 +7,11 @@ license.workspace = true
 description = "The mp3 codec."
 
 [dependencies]
-cutlass-decode = { path = "../../decode", version = "0.1.0" }
-cutlass-encode = { path = "../../encode", version = "0.1.0" }
+cutlass-decode = { path = "../../decode", version = "0.8.0" }
+cutlass-encode = { path = "../../encode", version = "0.8.0" }
 
 [dev-dependencies]
-cutlass-mp3-container = { path = "../../containers/mp3", version = "0.1.0" }
+cutlass-mp3-container = { path = "../../containers/mp3", version = "0.8.0" }
 
 [[bench]]
 name = "speed"

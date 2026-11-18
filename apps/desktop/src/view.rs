@@ -24,6 +24,7 @@ mod cover;
 mod follow;
 mod grade;
 mod inspector;
+mod markdown;
 mod mask;
 mod motion_blur;
 mod reframe;
@@ -32,7 +33,8 @@ mod remove_bg;
 mod retouch;
 mod shape;
 mod speed;
-mod studio;
+
+pub(crate) use markdown::install_fonts;
 
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
@@ -225,6 +227,10 @@ pub struct ViewState {
     track_drag: Option<(f64, f64)>,
     /// A move, scale or turn of a clip on the preview in flight.
     stage_drag: Option<StageDrag>,
+    /// A drag on a handle of the mask in hand.
+    mask_drag: Option<cutlass_editor::MaskGesture>,
+    /// The canvas pixels a brush has gone through in this stroke.
+    brush_trace: Vec<(f64, f64)>,
     /// The selected clips' boxes as each recent revision of the draft
     /// placed them, newest last, so the box drawn matches the picture on
     /// the canvas and never runs ahead of it.
@@ -293,8 +299,6 @@ pub struct ViewState {
     lanes_down: f32,
     /// The assistant's conversation, and whether its panel is open.
     pub assistant: crate::assistant::Assistant,
-    /// The effect studio screen.
-    pub studio: studio::StudioView,
 }
 
 /// Where a track head's menu opened, and for which track.
@@ -345,6 +349,8 @@ impl Default for ViewState {
             preview_frame: Rect::NOTHING,
             track_drag: None,
             stage_drag: None,
+            mask_drag: None,
+            brush_trace: Vec::new(),
             stage_seen: Vec::new(),
             preview_guides: false,
             preview_full: false,
@@ -381,7 +387,6 @@ impl Default for ViewState {
             lanes_up: 0.0,
             lanes_down: 0.0,
             assistant: crate::assistant::Assistant::default(),
-            studio: studio::StudioView::default(),
         }
     }
 }
@@ -431,22 +436,9 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if shell.serve_forwarded() {
         ui.ctx().request_repaint();
     }
-    // The studio folder is looked at whichever screen is up, so a recipe
-    // saved or edited by hand shows on the shelves at once.
-    if shell.poll_studio() {
-        ui.ctx().request_repaint();
-    }
-    // With a recipe in the making the folder is looked at every second;
-    // otherwise only when something else draws a frame.
-    if view.studio.open || shell.studio_in_use() {
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_secs(1));
-    }
-    if std::mem::take(&mut view.studio.wants_clip) {
-        view.dialogs.studio_clip(parent);
-    }
     show_imported(shell, view);
-    view.assistant.follow(shell.assistant_chat_file());
+    view.assistant
+        .follow_for(shell.assistant_chat_file(), &shell.assistant_chat_project());
     if view.assistant.poll(shell) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(50));
@@ -460,15 +452,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if view.preview_full && shell.draft().is_none() {
         set_full_screen(ui, view, false);
     }
-    if view.studio.open {
-        studio::show(shell, ui, &mut view.studio, full);
-        #[cfg(not(target_os = "macos"))]
-        window_buttons(
-            shell,
-            ui,
-            Rect::from_min_size(full.min, Vec2::new(full.width(), tokens::HEAD_HEIGHT)),
-        );
-    } else if view.preview_full {
+    if view.preview_full {
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             set_full_screen(ui, view, false);
         }
@@ -637,7 +621,7 @@ fn job_strip(shell: &mut Shell, ui: &Ui, full: Rect) {
 }
 
 /// A wait as people say it: seconds under two minutes, then minutes.
-fn spoken_duration(left: std::time::Duration) -> String {
+pub(crate) fn spoken_duration(left: std::time::Duration) -> String {
     let seconds = left.as_secs().max(1);
     if seconds < 120 {
         format!("{seconds} s")
@@ -1017,6 +1001,7 @@ fn sizes(shell: &Shell, window: Vec2) -> Sizes {
 
 fn style(ui: &mut Ui) {
     ui.ctx().set_theme(egui::ThemePreference::Dark);
+    install_fonts(ui.ctx());
     ui.style_mut().interaction.selectable_labels = false;
     ui.ctx().global_style_mut(install_style);
     ui.ctx().style_mut_of(egui::Theme::Dark, install_style);
@@ -1357,10 +1342,6 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
         ui.close();
         view.settings_open = true;
     }
-    if ui.button("Effect studio").clicked() {
-        ui.close();
-        view.studio.open = true;
-    }
     if shell.draft().is_none() {
         return;
     }
@@ -1519,7 +1500,7 @@ fn to_text_field(ctx: &egui::Context, id: &str) -> bool {
 /// Run the menu bar item `id`: a window command, or a shortcut action.
 pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe::Frame>, id: &str) {
     use crate::menubar::{
-        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS, STUDIO,
+        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS,
     };
 
     let open = shell.draft().is_some();
@@ -1530,10 +1511,6 @@ pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe:
         }
         SETTINGS => {
             view.settings_open = true;
-            Ok(())
-        }
-        STUDIO => {
-            view.studio.open = true;
             Ok(())
         }
         LICENSES => {
@@ -2826,7 +2803,7 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                 let category = view.effect_category.as_str();
                 cards.retain(|card| {
                     cutlass_editor::effect_of_card(&card.id)
-                        .and_then(|id| cutlass_effects::recipe(&id))
+                        .and_then(|id| cutlass_effects::bundled_recipe(&id))
                         .is_some_and(|recipe| recipe.category == category)
                 });
             }
@@ -3577,28 +3554,6 @@ fn middle_ellipsis(ctx: &egui::Context, text: &str, font: &FontId, width: f32) -
 
 /// Read each card's picture or sound from the shell, asking for what is
 /// missing.
-/// What tells one still of a card from the next: nothing for a card the
-/// app ships, and for one from the studio folder the number that moves
-/// each time the studio's recipes change.
-fn studio_card_age(card_id: &str) -> i64 {
-    let studio = card_id
-        .strip_prefix(cutlass_editor::EFFECT_CARD_PREFIX)
-        .is_some_and(cutlass_effects::is_studio_recipe)
-        || card_id
-            .strip_prefix(cutlass_editor::TRANSITION_CARD_PREFIX)
-            .is_some_and(|id| {
-                cutlass_effects::is_studio_transition(&format!(
-                    "{}{id}",
-                    cutlass_effects::BUILT_IN_PREFIX
-                ))
-            });
-    if studio {
-        i64::try_from(cutlass_effects::studio_generation()).unwrap_or(i64::MAX)
-    } else {
-        0
-    }
-}
-
 fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
     let hover = ctx.data(|data| data.get_temp::<(String, f64)>(effect_hover_id()));
     let now = ctx.input(|input| input.time);
@@ -3623,11 +3578,9 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                             continue;
                         }
                     }
-                    // A studio card's still is kept for the recipe it was
-                    // drawn from: a saved change draws it again.
                     let key = cutlass_engine::ThumbKey {
                         path: card.id.clone().into(),
-                        time: Micros(studio_card_age(&card.id)),
+                        time: Micros(0),
                     };
                     if let Some(entry) = textures.shown.get_mut(&key) {
                         entry.1 = textures.frame;
@@ -4152,7 +4105,12 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     preview_wheel(ui, view, frame);
     // The preview drag lands before the canvas is drawn, on the canvas
     // where it was last drawn, so this frame's picture already has it.
-    let staging = shell.picking().is_none() && shell.tracking().is_none() && shell.pen().is_none();
+    let masking = shell.mask_page_showing();
+    let staging = shell.picking().is_none()
+        && shell.painting().is_none()
+        && shell.tracking().is_none()
+        && shell.pen().is_none()
+        && !masking;
     let hover = match (view.preview_canvas, canvas) {
         (Some(placed), Some(size)) if staging => stage_input(shell, ui, view, frame, placed, size),
         _ => {
@@ -4226,8 +4184,17 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
             stage_paint(shell, ui, view, frame, placed, size, hover);
         }
         pick_layer(shell, ui, frame, placed, size);
+        paint_layer(shell, ui, frame, placed, size);
         track_layer(shell, ui, view, frame, placed, size);
         pen_layer(shell, ui, frame, placed, size);
+    }
+    if shell.take_mask_page()
+        && let (Some(placed), Some(size)) = (view.preview_canvas, canvas)
+    {
+        mask::mask_layer(shell, ui, view, frame, placed, size);
+    } else {
+        view.mask_drag = None;
+        view.brush_trace.clear();
     }
     transport_bar(shell, ui, view, transport);
 }
@@ -4777,6 +4744,78 @@ fn pick_layer(shell: &mut Shell, ui: &mut Ui, frame: Rect, placed: Rect, size: V
             tokens::CLOSE
         };
         painter.circle(at, 5.0, colour, egui::Stroke::new(1.5, Color32::WHITE));
+    }
+}
+
+/// While Remove BG is painted by hand: a drag on the canvas paints a
+/// stroke, each stroke so far shows at its brush's width, kept green and
+/// erased red, and the brush rides the pointer.
+fn paint_layer(shell: &mut Shell, ui: &mut Ui, frame: Rect, placed: Rect, size: Vec2) {
+    if shell.painting().is_none() {
+        return;
+    }
+    let area = placed.intersect(frame);
+    let response = ui
+        .interact(area, ui.scope_id().with("preview-paint"), Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::None);
+    if (response.drag_started() || response.dragged())
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let (x, y) = canvas_pixel(placed, size, pos);
+        if let Err(error) = shell.paint_at(x, y) {
+            shell.notice_error(&error);
+        }
+    }
+    if response.drag_stopped() {
+        shell.end_stroke();
+    }
+    let Some(painting) = shell.painting() else {
+        return;
+    };
+    let scale = if size.x > 0.0 {
+        placed.width() / size.x
+    } else {
+        1.0
+    };
+    let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
+    let colour = |keep: bool| {
+        if keep {
+            tokens::EXPORT.gamma_multiply(0.35)
+        } else {
+            tokens::CLOSE.gamma_multiply(0.35)
+        }
+    };
+    for trail in painting.trails.iter().chain(painting.live_trail.as_ref()) {
+        #[allow(clippy::cast_possible_truncation)]
+        let radius = ((trail.radius as f32) * scale).max(1.0);
+        let fill = colour(trail.keep);
+        let points: Vec<Pos2> = trail
+            .points
+            .iter()
+            .map(|&p| screen_point(placed, size, p))
+            .collect();
+        // Round ends only: a dab at every point would stack the colour
+        // until the picture under it is hidden.
+        if let [first, .., last] = points.as_slice() {
+            painter.circle_filled(*first, radius, fill);
+            painter.circle_filled(*last, radius, fill);
+        } else if let [only] = points.as_slice() {
+            painter.circle_filled(*only, radius, fill);
+        }
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(radius * 2.0, fill),
+        ));
+    }
+    if let Some(pos) = response.hover_pos() {
+        let (x, y) = canvas_pixel(placed, size, pos);
+        #[allow(clippy::cast_possible_truncation)]
+        let radius = ((shell.brush_on_canvas(x, y).unwrap_or(0.0) as f32) * scale).max(2.0);
+        painter.circle_stroke(
+            pos,
+            radius,
+            egui::Stroke::new(1.5, colour(painting.keep).gamma_multiply(2.0)),
+        );
     }
 }
 
@@ -8360,7 +8399,8 @@ fn film_texture(
 ) -> egui::TextureId {
     let frame = textures.frame;
     let entry = textures.shown.entry(key).or_insert_with(|| {
-        let image = egui::ColorImage::from_rgba_unmultiplied(
+        // A thumbnail is premultiplied, as egui's own images are.
+        let image = egui::ColorImage::from_rgba_premultiplied(
             [thumb.width as usize, thumb.height as usize],
             &thumb.rgba,
         );
@@ -8957,6 +8997,12 @@ fn paint_clip(
             finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, spot, None);
         }
     }
+    if !ghost {
+        let top = parts
+            .header
+            .map_or(clip_rect.top(), |header| header.bottom());
+        paint_clip_effects(shell, ui, clip, clip_rect, top, (visible, body));
+    }
     drag_clip_edge(
         shell,
         ui,
@@ -8979,6 +9025,93 @@ fn paint_clip(
     paint_clip_beats(shell, ui, clip, lanes_left, row);
     if shell.is_selected(&clip.id) {
         paint_clip_keys(shell, ui, clip, clip_rect, row);
+    }
+}
+
+/// The effects running over `clip` alone, as a band of chips across the
+/// clip from `top`, one chip each and `Effect: name` when there is one,
+/// drawn inside `shown`. A click on a chip inside `reach`, clear of the
+/// trim edges, picks that effect, so the inspector and Delete act on it.
+fn paint_clip_effects(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    clip: &crate::shell::ClipSpan,
+    clip_rect: Rect,
+    top: f32,
+    (shown, reach): (Rect, Rect),
+) {
+    if clip.effects.is_empty() {
+        return;
+    }
+    let bottom = (top + tokens::CLIP_EFFECT_BAND).min(clip_rect.bottom());
+    if bottom - top < 8.0 {
+        return;
+    }
+    let band = Rect::from_min_max(
+        Pos2::new(clip_rect.left(), top),
+        Pos2::new(clip_rect.right(), bottom),
+    )
+    .shrink2(Vec2::new(2.0, 1.0));
+    #[allow(clippy::cast_precision_loss)]
+    let width = band.width() / clip.effects.len() as f32;
+    let fill = lane_color(&cutlass_model::TrackType::Effect);
+    for (place, effect) in clip.effects.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let left = band.left() + width * place as f32;
+        let chip = Rect::from_min_max(
+            Pos2::new(left, band.top()),
+            Pos2::new(left + width, band.bottom()),
+        )
+        .shrink2(Vec2::new(if place == 0 { 0.0 } else { 1.0 }, 0.0));
+        let painter = ui
+            .painter()
+            .with_clip_rect(shown.intersect(chip.expand(1.0)));
+        painter.rect_filled(chip, CornerRadius::same(3), fill);
+        let picked = shell.is_selected(&effect.segment_id);
+        if picked {
+            painter.rect_stroke(
+                chip,
+                CornerRadius::same(3),
+                egui::Stroke::new(1.5, Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
+        }
+        // The name stays in sight when the clip starts off the left edge.
+        let from = chip.left().max(shown.left()).min(chip.right() - 15.0);
+        let icon = Rect::from_min_size(
+            Pos2::new(from + 4.0, chip.center().y - 5.5),
+            Vec2::splat(11.0),
+        );
+        let _ = icons::paint(&painter, icon, "effects", tokens::CLIP_TEXT);
+        let label = if clip.effects.len() == 1 {
+            format!("Effect: {}", effect.name)
+        } else {
+            effect.name.clone()
+        };
+        painter.with_clip_rect(chip.shrink(1.0)).text(
+            Pos2::new(icon.right() + 4.0, chip.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(10.5),
+            tokens::CLIP_TEXT,
+        );
+        let hit = chip.intersect(reach);
+        if hit.width() <= 0.0 || hit.height() <= 0.0 {
+            continue;
+        }
+        let response = ui.interact(
+            hit,
+            ui.scope_id()
+                .with(("clip-effect", effect.segment_id.as_str())),
+            Sense::click(),
+        );
+        if response.hovered() {
+            ui.set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked() {
+            shell.select(Some(effect.segment_id.clone()));
+        }
+        response.on_hover_text(effect.name.clone());
     }
 }
 
@@ -10290,11 +10423,6 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
         Picker::Lut => shell.load_lut(&path),
         Picker::Replace => shell.start_replace(&path),
         Picker::Link => shell.start_link(&path),
-        Picker::StudioClip => {
-            shell.load_studio_clip(path);
-            view.studio.use_clip();
-            Ok(())
-        }
         Picker::Cover => {
             if let Some(dialog) = view.cover.as_mut() {
                 dialog.picked(path);
@@ -11698,9 +11826,13 @@ mod tests {
         for label in ["LUT", "Teal punch", "Intensity", "100", "Protect skin tone"] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
-        // The Remove BG page keys green out and shows the key's values, with
-        // the parts still to build marked Later.
+        // The Remove BG page keys green out and shows the key's values,
+        // its edge too, which a later change of strength keeps.
         shell.set_chroma("#00ff00", 0.4, 0.25).unwrap();
+        shell.set_chroma_edge(0.3, 0.6).unwrap();
+        shell.set_chroma("#00ff00", 0.4, 0.25).unwrap();
+        let key = shell.inspection().unwrap().chroma.unwrap();
+        assert_eq!((key.feather, key.clean_up), (0.3, 0.6));
         view.inspector.focus(inspector::Focus {
             tab: 0,
             page: 1,
@@ -11711,13 +11843,12 @@ mod tests {
         for label in [
             "Auto removal",
             "Stroke",
-            "Paper",
-            "Spacing",
-            "Object texture",
             "Custom removal",
             "Select object",
             "Smart brush",
-            "Apply",
+            "Smart eraser",
+            "Brush",
+            "Eraser",
             "Chroma key",
             "Color picker",
             "Green",
@@ -11726,8 +11857,28 @@ mod tests {
             "Shadow",
             "25",
             "Feather edge",
+            "30",
             "Clean up edge",
-            "Later",
+            "60",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        // With nothing removed yet, Stroke shows its outlines dimmed.
+        view.inspector.focus(inspector::Focus {
+            tab: 0,
+            page: 1,
+            section: Some("stroke"),
+        });
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
+        for label in [
+            "Paper",
+            "Glow",
+            "Hand-drawn",
+            "Dotted",
+            "Size",
+            "Spacing",
+            "Object texture",
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
@@ -11801,10 +11952,16 @@ mod tests {
             "Invert",
             "Track mask",
             "Direction",
-            "Later",
+            "Brush",
+            "Pen",
+            "Combine",
+            "Subtract",
+            "Intersect",
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
+        // Every shape is live now; nothing on the page waits for later.
+        assert!(!lines.iter().any(|line| line == "Later"), "{lines:?}");
         assert!(!lines.iter().any(|line| line == "Round corners"));
         shell
             .set_mask(Some(cutlass_effects::Mask {
@@ -12022,8 +12179,11 @@ mod tests {
             cutlass_model::TimeRange::new(0, 3_000_000),
         ));
         cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        // The model's answer is written before the project opens, so the
+        // project is put at the revision that answer names.
+        let opened_at = 5_000;
         let split = serde_json::json!({
-            "expected_revision": 0,
+            "expected_revision": opened_at,
             "requests": [{ "op": "split", "segment_id": "a", "at": 1_000_000, "right_id": "b" }],
         });
         let (port, server) = local_model(vec![
@@ -12041,6 +12201,8 @@ mod tests {
         let (decoders, encoders) = crate::register_codecs();
         let mut shell = Shell::new(decoders, encoders, settings);
         shell.open_folder(&temp).unwrap();
+        let session = shell.session().unwrap().clone().starting_at(opened_at);
+        shell.adopt_session(session).unwrap();
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
@@ -12141,7 +12303,7 @@ mod tests {
                 id: "s".to_owned(),
                 name: "draft.apply".to_owned(),
                 arguments: serde_json::json!({
-                    "expected_revision": 0,
+                    "expected_revision": shell.revision().unwrap(),
                     "requests": [{ "op": "split", "segment_id": "a",
                                    "at": 1_000_000, "right_id": "b" }],
                 })
@@ -12422,91 +12584,6 @@ mod tests {
         }
         drop(shell);
         let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    #[test]
-    fn the_effect_studio_opens_from_the_menu_and_draws_what_is_being_made() {
-        use crate::studio::{CurveKind, Slot, Stack};
-        let (decoders, encoders) = crate::register_codecs();
-        let mut shell = Shell::new(decoders, encoders, Settings::default());
-        let mut view = ViewState::new();
-        assert!(!view.studio.open);
-        run_menu(&mut shell, &mut view, None, crate::menubar::STUDIO);
-        assert!(view.studio.open);
-        let ctx = egui::Context::default();
-        let frame = |shell: &mut Shell, view: &mut ViewState| {
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
-                    ..Default::default()
-                },
-                |ui| show(shell, ui, view, None),
-            );
-            let painted = painted_text(&output);
-            output.textures_delta.clear();
-            painted
-        };
-        // Nothing open: the list, and what to do next. The editor's own
-        // screens are not drawn under it.
-        let painted = frame(&mut shell, &mut view);
-        for text in [
-            "Effect studio",
-            "New effect",
-            "Shake",
-            "Open an effect or a transition",
-        ] {
-            assert!(painted.contains(text), "{text} in {painted}");
-        }
-        assert!(!shell.chrome.project_bar && !shell.chrome.projects);
-
-        // An effect: its passes, the picked pass's values, its controls
-        // and its card. Without a GPU the preview says so.
-        shell.studio_mut().new_effect();
-        let slot = Slot::pass(Stack::Effect, 0, "radius");
-        shell.studio_mut().set_kind(&slot, CurveKind::Keys);
-        shell.studio_mut().pick_slot(Some(slot.clone()));
-        shell.studio_mut().pick_key(Some(1));
-        shell.studio_mut().add_control();
-        let painted = frame(&mut shell, &mut view);
-        for text in [
-            "Passes · 1 of 8",
-            "1  Blur",
-            "Radius",
-            "2 keys",
-            "Controls · 1 of 6",
-            "Radius of pass 1",
-            "On the shelf",
-            "Card scene",
-            "The preview needs the GPU.",
-            "Unsaved changes",
-            "Repeat",
-        ] {
-            assert!(painted.contains(text), "{text} in {painted}");
-        }
-        // The other ways a value moves draw their own numbers.
-        for kind in [CurveKind::Wave, CurveKind::Random, CurveKind::Fixed] {
-            shell.studio_mut().set_kind(&slot, kind);
-            frame(&mut shell, &mut view);
-        }
-
-        // A transition: two stacks and the swap, and no controls.
-        shell.studio_mut().new_transition();
-        let painted = frame(&mut shell, &mut view);
-        for text in [
-            "Outgoing picture · 0 of 8",
-            "Incoming picture · 0 of 8",
-            "The swap",
-            "Progress",
-            "Lasts",
-        ] {
-            assert!(painted.contains(text), "{text} in {painted}");
-        }
-        assert!(!painted.contains("Controls ·"), "{painted}");
-
-        // A document that cannot be saved says why.
-        shell.studio_mut().set_id("Not An Id");
-        let painted = frame(&mut shell, &mut view);
-        assert!(painted.contains("id or name is not usable"), "{painted}");
     }
 
     #[test]
@@ -15023,6 +15100,91 @@ mod tests {
             Some(cutlass_model::ShapeKind::Circle)
         );
         assert_eq!(shell.panel(), Some(cutlass_editor::Panel::Shape));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_drag_on_the_preview_paints_a_stroke_and_leaves_the_clip_still() {
+        let temp = std::env::temp_dir().join(format!("cutlass-paint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut movie = cutlass_model::MaterialVideo::new("movie");
+        (movie.width, movie.height) = (1920, 1080);
+        movie.duration = Micros(2_000_000);
+        draft.materials.videos.push(movie);
+        let mut clip = cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        );
+        clip.source_range = Some(cutlass_model::TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(clip);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1200.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(&mut shell, &mut view, Vec::new());
+        shell.start_painting().unwrap();
+        let before = shell.draft().unwrap().tracks[0].segments[0].clip.clone();
+        frame(&mut shell, &mut view, Vec::new());
+        let canvas = view.preview_canvas.expect("the preview is drawn");
+        let at = |x: f32, y: f32| canvas.min + canvas.size() * Vec2::new(x, y);
+        let (start, end) = (at(0.3, 0.5), at(0.6, 0.5));
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(start)],
+        );
+        frame(&mut shell, &mut view, vec![press(start, true)]);
+        for step in 1..=4 {
+            let pos = start + (end - start) * (step as f32 / 4.0);
+            frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(pos)]);
+        }
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(end), press(end, false)],
+        );
+        let painting = shell.painting().expect("still painting");
+        assert_eq!(painting.brushes.len(), 1, "{painting:?}");
+        let points = &painting.brushes[0].points;
+        assert!(points.len() >= 2, "{points:?}");
+        let (first, last) = (points[0], points[points.len() - 1]);
+        assert!(
+            (first[0] - 0.3).abs() < 0.02 && (first[1] - 0.5).abs() < 0.02,
+            "{first:?}"
+        );
+        assert!(
+            (last[0] - 0.6).abs() < 0.02 && (last[1] - 0.5).abs() < 0.02,
+            "{last:?}"
+        );
+        assert_eq!(painting.trails.len(), 1);
+        assert_eq!(
+            shell.draft().unwrap().tracks[0].segments[0].clip,
+            before,
+            "painting does not move the clip"
+        );
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -19662,6 +19824,204 @@ mod tests {
         assert!(!kinds.audio);
         assert!(kinds.text && kinds.overlay);
         assert!(harness.state().1.linkage_kinds.is_none());
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Remove BG driven through the window's own widgets on a real clip, by
+    /// the real renderer: the Auto removal switch makes the matte, the
+    /// Stroke switch and a tile outline it, and the Smart brush marks a pick
+    /// on the preview that Apply follows through the clip. Slow, so run by hand
+    /// with `--ignored`; with `CUTLASS_RENDER_DIR` set the window pictures
+    /// are kept there.
+    #[test]
+    #[ignore = "reads a real clip and runs the real models"]
+    fn remove_bg_works_in_the_drawn_window() {
+        use egui_kittest::kittest::Queryable;
+        let local =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let clip = local.join("7150172-hd_720_1280_50fps.mp4");
+        if !clip.is_file() || !crate::shell::auto_model_here() || !crate::shell::follow_model_here()
+        {
+            return;
+        }
+        let temp = std::env::temp_dir().join(format!("cutlass-remove-bg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.fps = 25.0;
+        (draft.canvas_config.width, draft.canvas_config.height) = (720, 1280);
+        let mut movie = cutlass_model::MaterialVideo::new("movie");
+        (movie.width, movie.height) = (720, 1280);
+        movie.duration = Micros(7_820_000);
+        movie.path = "party.mp4".into();
+        draft.materials.videos.push(movie);
+        let mut segment = cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 1_000_000),
+        );
+        segment.source_range = Some(cutlass_model::TimeRange::new(2_000_000, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        std::fs::copy(&clip, temp.join("party.mp4")).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        shell.seek(Micros(500_000));
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Filters;
+        view.inspector.focus(inspector::Focus {
+            tab: 0,
+            page: 1,
+            section: Some("auto-removal"),
+        });
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1600.0, 1000.0))
+            .wgpu()
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, view),
+            );
+        harness.run_steps(8);
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            harness.run_steps(8);
+            let image = window_image(harness);
+            if let Some(dir) = &keep {
+                std::fs::create_dir_all(dir).unwrap();
+                image.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+        };
+        let wait_for_job = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(900);
+            while harness.state().0.job().is_some() && std::time::Instant::now() < until {
+                harness.run_steps(1);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let switch = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            harness
+                .get_by_role_and_label(egui::accesskit::Role::CheckBox, name)
+                .click();
+        };
+        picture(&mut harness, "remove-bg-0-off");
+
+        // Auto removal: the switch starts the job; its matte cuts the clip.
+        switch(&harness, "Auto removal");
+        harness.run_steps(2);
+        assert!(harness.state().0.matte_progress().is_some());
+        picture(&mut harness, "remove-bg-1-working");
+        wait_for_job(&mut harness);
+        assert!(
+            harness.state().0.matte_made(),
+            "{}",
+            harness.state().0.notice()
+        );
+        picture(&mut harness, "remove-bg-2-auto");
+
+        // Stroke: the switch draws Paper; a tile picks Glow.
+        switch(&harness, "Stroke");
+        harness.run_steps(4);
+        let stroke = || harness.state().0.matting().and_then(|m| m.stroke);
+        assert_eq!(
+            stroke().map(|s| s.style),
+            Some(cutlass_effects::StrokeStyle::Paper)
+        );
+        harness.get_by_label("Glow").click();
+        harness.run_steps(4);
+        assert_eq!(
+            harness
+                .state()
+                .0
+                .matting()
+                .and_then(|m| m.stroke)
+                .map(|s| s.style),
+            Some(cutlass_effects::StrokeStyle::Glow)
+        );
+        assert!(
+            harness.state().0.job().is_none(),
+            "an outline needs no new matte"
+        );
+        picture(&mut harness, "remove-bg-3-glow");
+
+        // Custom removal: Auto off, then the Smart brush is drawn down the
+        // front girl on the preview, and Apply finds her and follows her
+        // through the clip.
+        switch(&harness, "Auto removal");
+        harness.run_steps(4);
+        assert_eq!(harness.state().0.matting(), None);
+        // Down the inspector to Custom removal, by the wheel.
+        harness.event(egui::Event::PointerMoved(Pos2::new(1400.0, 400.0)));
+        for _ in 0..4 {
+            harness.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -300.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+                source: egui::MouseWheelSource::Wheel,
+            });
+            harness.run_steps(2);
+        }
+        picture(&mut harness, "remove-bg-3b-custom-open");
+        harness.get_by_label("Smart brush").click();
+        harness.run_steps(4);
+        assert!(
+            harness.state().0.painting().is_some(),
+            "{}",
+            harness.state().0.notice()
+        );
+        harness.state_mut().0.set_brush_size(1.0);
+        let canvas = harness
+            .state()
+            .1
+            .preview_canvas
+            .expect("the preview is drawn");
+        let at = |x: f32, y: f32| canvas.min + canvas.size() * Vec2::new(x / 720.0, y / 1280.0);
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let path = [
+            (315.0, 560.0),
+            (300.0, 760.0),
+            (300.0, 960.0),
+            (290.0, 1180.0),
+        ];
+        harness.event(egui::Event::PointerMoved(at(path[0].0, path[0].1)));
+        harness.run_steps(1);
+        harness.event(press(at(path[0].0, path[0].1), true));
+        harness.run_steps(1);
+        for &(x, y) in &path[1..] {
+            for step in 1..=6 {
+                let from = at(x, y - 200.0);
+                let to = at(x, y);
+                harness.event(egui::Event::PointerMoved(
+                    from + (to - from) * (step as f32 / 6.0),
+                ));
+                harness.run_steps(1);
+            }
+        }
+        let end = at(path[3].0, path[3].1);
+        harness.event(press(end, false));
+        harness.run_steps(2);
+        let painting = harness.state().0.painting().unwrap();
+        assert_eq!(painting.brushes.len(), 1, "{painting:?}");
+        picture(&mut harness, "remove-bg-4-painted");
+        harness.get_by_label("Apply").click();
+        harness.run_steps(2);
+        assert!(harness.state().0.painting().is_none());
+        wait_for_job(&mut harness);
+        let matting = harness.state().0.matting().expect("Custom removal is on");
+        assert_eq!(matting.mode, cutlass_effects::MattingMode::Custom);
+        assert!(
+            harness.state().0.matte_made(),
+            "{}",
+            harness.state().0.notice()
+        );
+        picture(&mut harness, "remove-bg-5-custom");
         drop(harness);
         let _ = std::fs::remove_dir_all(&temp);
     }

@@ -442,6 +442,14 @@ unsafe extern "C" {
 
     pub static kCVImageBufferTransferFunctionKey: *const c_void;
 
+    pub static kCVImageBufferYCbCrMatrixKey: *const c_void;
+
+    pub static kCVImageBufferYCbCrMatrix_ITU_R_709_2: *const c_void;
+
+    pub static kCVImageBufferYCbCrMatrix_ITU_R_601_4: *const c_void;
+
+    pub static kCVImageBufferYCbCrMatrix_ITU_R_2020: *const c_void;
+
     pub static kCVImageBufferTransferFunction_ITU_R_709_2: *const c_void;
 
     pub static kCVImageBufferTransferFunction_ITU_R_2020: *const c_void;
@@ -451,6 +459,13 @@ unsafe extern "C" {
         key: *const c_void,
         mode: *mut u32,
     ) -> *mut c_void;
+
+    pub fn CVBufferSetAttachment(
+        buffer: *mut c_void,
+        key: *const c_void,
+        value: *const c_void,
+        mode: u32,
+    );
 
     pub fn CVPixelBufferCreate(
         allocator: *const c_void,

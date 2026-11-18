@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use cutlass_decode::Surface;
-use cutlass_effects::{BlendMode, CanvasMask, Colour, Lighting, Step, TransitionKind};
+use cutlass_effects::{BlendMode, CanvasMasks, Colour, Lighting, Step, TransitionKind};
 use cutlass_gpu::{Affine, Placement, YuvTone};
 use cutlass_picture::CpuBytes;
 
@@ -37,17 +37,17 @@ pub enum GpuSource {
     Nested(Box<FrameLayers>),
     /// A recipe effect over every layer before it, with its values at this
     /// frame's time, shown only inside its mask when it has one.
-    Effect(Vec<Step>, Option<CanvasMask>),
+    Effect(Vec<Step>, Option<CanvasMasks>),
     /// Colour work (a chroma key, grades, adjust sliders, a LUT) over every
     /// layer before it, its grain at `seed`, shown only inside its mask
     /// when it has one.
     Colour {
         colour: Box<Colour>,
         seed: u32,
-        mask: Option<CanvasMask>,
+        mask: Option<CanvasMasks>,
     },
-    /// Every layer before it, kept as much as a clip's mask keeps.
-    Cut(CanvasMask),
+    /// Every layer before it, kept as much as a clip's masks keep.
+    Cut(CanvasMasks),
     /// Every layer before it, kept only where a clip's selection is.
     Select(SelectionCut),
     /// Every layer before it, painted by an effect package's stand-in; for
@@ -131,7 +131,7 @@ impl GpuLayer {
     /// An effect over everything below it on a `width` by `height` canvas.
     pub(crate) fn effect(
         steps: Vec<Step>,
-        mask: Option<CanvasMask>,
+        mask: Option<CanvasMasks>,
         width: u32,
         height: u32,
     ) -> Self {
@@ -147,7 +147,7 @@ impl GpuLayer {
     pub(crate) fn colour(
         colour: Colour,
         seed: u32,
-        mask: Option<CanvasMask>,
+        mask: Option<CanvasMasks>,
         width: u32,
         height: u32,
     ) -> Self {

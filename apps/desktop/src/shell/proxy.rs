@@ -725,7 +725,12 @@ mod tests {
             .join("../../crates/engine/fixtures/pattern.png");
         let mut draft = cutlass_export::proxy_draft(&pattern, 64, 32, Micros(200_000), 30.0);
         draft.materials.videos[0].kind = "photo".to_owned();
-        let request = cutlass_export::proxy_request(&draft, 720);
+        // A bitrate no proxy asks for, so the source and its proxy differ in
+        // size even when a hardware encoder holds its rate constant.
+        let request = cutlass_export::ExportRequest {
+            bitrate: 1_000_000,
+            ..cutlass_export::proxy_request(&draft, 720)
+        };
         let (decoders, encoders) = crate::register_codecs();
         let readers = crate::readers::readers_with(decoders);
         let fonts = crate::face::FaceTable::default();

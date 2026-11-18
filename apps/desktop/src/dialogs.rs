@@ -22,7 +22,6 @@ pub(crate) enum Picker {
     Lut,
     Replace,
     Link,
-    StudioClip,
     Cover,
 }
 
@@ -90,18 +89,6 @@ impl Dialogs {
     pub(crate) fn link(&mut self, parent: Option<&eframe::Frame>) {
         let dialog = dialog(parent);
         self.start(Picker::Link, async move {
-            dialog
-                .pick_file()
-                .await
-                .map(|file| file.path().to_path_buf())
-        });
-    }
-
-    /// Ask for a video or a picture to run the effect studio's preview
-    /// over.
-    pub(crate) fn studio_clip(&mut self, parent: Option<&eframe::Frame>) {
-        let dialog = dialog(parent);
-        self.start(Picker::StudioClip, async move {
             dialog
                 .pick_file()
                 .await

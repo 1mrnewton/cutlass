@@ -276,7 +276,7 @@ fn a_mask_follower_lands_keyed_and_is_kept_when_fixing() {
             tracking_id: "t".into(),
             anchor: Micros(500_000),
             path,
-            masks: vec![("v".into(), own)],
+            masks: vec![("v".into(), own).into()],
         })
         .unwrap();
     let draft = shell.session_draft().unwrap();
@@ -450,7 +450,7 @@ fn a_video_clips_mask_sets_up_a_track_on_the_clip_itself() {
             tracking_id: "t".into(),
             anchor: Micros(500_000),
             path: slide(),
-            masks: vec![("v".into(), own)],
+            masks: vec![("v".into(), own).into()],
         })
         .unwrap();
     let following = shell.following().unwrap();

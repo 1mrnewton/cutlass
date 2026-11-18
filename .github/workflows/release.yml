@@ -97,7 +97,17 @@ jobs:
           - runner: macos-15-intel
             arch: x86_64
             lipo: x86_64
-    runs-on: ${{ matrix.runner }}
+    # The Apple Silicon app is built on the self-hosted Mac labelled
+    # cutlass-mac when the repository variable SELF_HOSTED_MAC is 'true'; set
+    # it to anything else while that Mac is away and the job goes back to
+    # GitHub. The Intel app stays on GitHub's Intel Mac: scripts/pgo_profile.py
+    # profiles the host's processor only. Releases come only from tags, which
+    # a fork cannot push here.
+    runs-on: >-
+      ${{ matrix.arch == 'aarch64'
+      && vars.SELF_HOSTED_MAC == 'true'
+      && fromJSON('["self-hosted", "cutlass-mac"]')
+      || matrix.runner }}
     env:
       DMG: Cutlass-${{ matrix.arch }}.dmg
     steps:
@@ -384,11 +394,16 @@ jobs:
     # it for distribution with certificates Apple keeps for the team (the
     # key needs the Admin role) and uploads it; the build then waits in
     # App Store Connect for testers to be given it. That needs the app's
-    # record in App Store Connect, under com.scytheralpha.cutlass. Without
+    # record in App Store Connect, under com.scytheralpha.cutlassapp. Without
     # the key, or for a pre-release tag, the app is only built, unsigned.
-    # The draft release does not wait on this job.
+    # The draft release does not wait on this job. It runs on the self-hosted
+    # Mac under SELF_HOSTED_MAC, as the Apple Silicon macOS job does; that
+    # Mac needs Xcode with the iOS platform installed.
     needs: version
-    runs-on: macos-latest
+    runs-on: >-
+      ${{ vars.SELF_HOSTED_MAC == 'true'
+      && fromJSON('["self-hosted", "cutlass-mac"]')
+      || 'macos-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

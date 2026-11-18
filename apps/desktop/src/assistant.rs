@@ -76,6 +76,13 @@ enum Event {
 struct Running {
     events: Receiver<Event>,
     stop: Arc<AtomicBool>,
+    /// The folder of the project the turn was asked in (none, with no
+    /// project open), once the turn has met the window. The turn's calls
+    /// run on that project and on no other.
+    project: Option<Option<PathBuf>>,
+    /// Where in the conversation what the turn's model was sent begins:
+    /// the turns before it are kept and were left out to fit.
+    sent_from: usize,
 }
 
 /// What a turn did to the project, kept so the user can take the whole
@@ -90,6 +97,11 @@ struct TurnEdits {
     end: u64,
     /// The draft the turn left, once the turn is over.
     after: Option<cutlass_model::Draft>,
+    /// Someone else edited the project while the turn ran: the user in
+    /// the window, or another host. Putting the draft back to `before`
+    /// would take that edit with the turn's, so the turn is not offered
+    /// to be taken back.
+    mixed: bool,
 }
 
 /// The conversation and the turn running now.
@@ -109,6 +121,13 @@ pub struct Assistant {
     pending: Option<Pending>,
     /// Where this conversation is kept; `None` keeps it nowhere.
     chat_file: Option<PathBuf>,
+    /// What the project this conversation is about calls itself, kept
+    /// with the conversation; empty when the host names none.
+    chat_project: String,
+    /// The file this conversation would be kept in, had it read: one that
+    /// did not, and could not be set aside, is asked for on every frame
+    /// and looked at once.
+    unkept: Option<PathBuf>,
     /// The edits of the turn running now, or of the last one.
     turn_edits: Option<TurnEdits>,
     /// A turn started and has not met the project yet.
@@ -181,13 +200,27 @@ impl Assistant {
     /// Note the project as a turn that just started finds it.
     fn meet(&mut self, shell: &Shell) {
         self.fresh = false;
+        if let Some(running) = self.running.as_mut() {
+            running.project = Some(shell.project_folder().map(std::path::Path::to_path_buf));
+        }
         self.turn_edits = shell.session().map(|session| TurnEdits {
             project: shell.project_folder().map(std::path::Path::to_path_buf),
             before: session.draft().clone(),
             start: session.revision(),
             end: session.revision(),
             after: None,
+            mixed: false,
         });
+    }
+
+    /// Before a call of the turn runs: note an edit that is not the
+    /// turn's, made since its last call left the project.
+    fn note_others(&mut self, shell: &Shell) {
+        if let (Some(edits), Some(session)) = (self.turn_edits.as_mut(), shell.session())
+            && session.revision() != edits.end
+        {
+            edits.mixed = true;
+        }
     }
 
     /// Note where a tool call of the turn left the project.
@@ -212,6 +245,7 @@ impl Assistant {
                 shell.project_folder() == edits.project.as_deref()
                     && session.revision() == edits.end
                     && edits.end != edits.start
+                    && !edits.mixed
                     && *session.draft() != edits.before
             })
             .map(|session| session.draft().clone());
@@ -238,6 +272,7 @@ impl Assistant {
         let outcome = if allow {
             let mut allowed = pending.allowed;
             allowed.push(pending.action);
+            self.note_others(shell);
             let run = shell.run_agent_tool(&pending.call, &allowed);
             self.edited(shell);
             if let Some(action) = run.wants {
@@ -293,18 +328,25 @@ impl Assistant {
         // A helper the model hands a look-up to runs on a model of its own,
         // the same kind, made when it is asked for.
         let cap = settings.step_cap;
+        let budget = history_budget(settings);
         let (settings, notes) = (settings.clone(), notes.to_owned());
         let child = move || build_model(&settings, &notes);
         // The model's own account of its last turn no longer holds.
-        let seen = if std::mem::take(&mut self.undone) {
+        let mut seen = if std::mem::take(&mut self.undone) {
             format!("{seen}; the user took back the edits of your last turn")
         } else {
             seen.to_owned()
         };
+        // The model is told when it no longer has the start of the talk.
+        cutlass_agent::shorten_results(&mut self.history, OLD_RESULT_LIMIT);
+        if cutlass_agent::first_sent(&self.history, budget) > 0 {
+            seen.push_str(LEFT_OUT);
+        }
         self.launch(
             model,
             Some(child),
             cap,
+            budget,
             &cutlass_agent::ask_with_view(&ask, &seen),
         );
     }
@@ -312,13 +354,27 @@ impl Assistant {
     /// Run `ask` on `model` on its own thread, with no helper to hand
     /// look-ups to.
     pub fn start<M: Model + Send + 'static>(&mut self, model: M, cap: u32, ask: &str) {
-        self.launch(model, None::<fn() -> Result<M, String>>, cap, ask);
+        self.launch(
+            model,
+            None::<fn() -> Result<M, String>>,
+            cap,
+            usize::MAX,
+            ask,
+        );
     }
 
     /// Run `ask` on `model` on its own thread. With `child`, the model may
-    /// hand a look-up to a helper on a model `child` makes.
-    pub fn launch<M, C, F>(&mut self, model: M, child: Option<F>, cap: u32, ask: &str)
-    where
+    /// hand a look-up to a helper on a model `child` makes. The model is
+    /// sent the newest earlier turns that fit `budget` characters; the
+    /// conversation itself is kept whole.
+    pub fn launch<M, C, F>(
+        &mut self,
+        model: M,
+        child: Option<F>,
+        cap: u32,
+        budget: usize,
+        ask: &str,
+    ) where
         M: Model + Send + 'static,
         C: Model + 'static,
         F: FnMut() -> Result<C, String> + Send + 'static,
@@ -328,7 +384,8 @@ impl Assistant {
         self.turn.clear();
         // Old listings and transcripts are not sent again in full.
         cutlass_agent::shorten_results(&mut self.history, OLD_RESULT_LIMIT);
-        let history = self.history.clone();
+        let sent_from = cutlass_agent::first_sent(&self.history, budget);
+        let history = self.history[sent_from..].to_vec();
         let ask = ask.to_owned();
         let watched = Watched {
             inner: model,
@@ -384,6 +441,8 @@ impl Assistant {
                 self.running = Some(Running {
                     events: received,
                     stop,
+                    project: None,
+                    sent_from,
                 });
                 // The last turn can no longer be taken back on its own.
                 self.turn_edits = None;
@@ -398,6 +457,20 @@ impl Assistant {
     /// Stop the turn running now. What it already changed stays, each
     /// change its own undo step.
     pub fn stop(&mut self) {
+        self.halt("Stopped.");
+    }
+
+    /// The project open now is not the one the running turn was asked in:
+    /// it was closed, or another was opened.
+    fn left_its_project(&self, shell: &Shell) -> bool {
+        self.running
+            .as_ref()
+            .and_then(|running| running.project.as_ref())
+            .is_some_and(|project| project.as_deref() != shell.project_folder())
+    }
+
+    /// [`Self::stop`], saying `notice` in the panel.
+    fn halt(&mut self, notice: &str) {
         self.pending = None;
         for entry in &mut self.entries {
             if let Entry::Ask {
@@ -428,7 +501,7 @@ impl Assistant {
                     *failed = true;
                 }
             }
-            self.entries.push(Entry::Notice("Stopped.".to_owned()));
+            self.entries.push(Entry::Notice(notice.to_owned()));
         }
     }
 
@@ -490,25 +563,86 @@ impl Assistant {
     /// leaves what is on screen. A turn running holds on to the file it
     /// started with.
     pub fn follow(&mut self, file: Option<PathBuf>) {
-        if self.busy() || file == self.chat_file {
+        self.follow_for(file, "");
+    }
+
+    /// [`Self::follow`], for the project that calls itself `project`. The
+    /// file is named by where the project is, and a new project made
+    /// where a deleted one was is at the same place: a conversation kept
+    /// there for another project is set aside, not shown, and not sent to
+    /// this one's model.
+    pub fn follow_for(&mut self, file: Option<PathBuf>, project: &str) {
+        let same = file == self.chat_file && (file.is_none() || project == self.chat_project);
+        if self.busy() || same || (file.is_some() && file == self.unkept) {
             return;
         }
+        self.unkept = None;
         if file.is_none() {
             self.chat_file = None;
             return;
         }
         self.pending = None;
-        self.history = file
-            .as_deref()
-            .map(|file| {
-                cutlass_agent::load_chat(file).unwrap_or_else(|error| {
-                    cutlass_logger::warn!("assistant chat: {error}");
-                    Vec::new()
-                })
-            })
-            .unwrap_or_default();
-        self.entries = shown(&self.history);
-        self.chat_file = file;
+        let Some(file) = file else {
+            return;
+        };
+        project.clone_into(&mut self.chat_project);
+        match cutlass_agent::load_chat_of(&file, project) {
+            Ok(history) => {
+                self.history = history;
+                self.entries = shown(&self.history);
+                self.chat_file = Some(file);
+            }
+            // The conversation of a project that was here before this
+            // one. It says nothing of this project, so it is moved out of
+            // the way without a word, and this one starts empty.
+            Err(cutlass_agent::ChatMiss::Another) => {
+                self.history.clear();
+                self.entries.clear();
+                let aside = file.with_extension(EARLIER_ENDING);
+                match std::fs::rename(&file, &aside) {
+                    Ok(()) => {
+                        cutlass_logger::info!(
+                            "assistant chat: an earlier project's conversation is kept as {}",
+                            aside.display()
+                        );
+                        self.chat_file = Some(file);
+                    }
+                    Err(error) => {
+                        cutlass_logger::warn!("assistant chat: {}: {error}", file.display());
+                        self.chat_file = None;
+                        self.unkept = Some(file);
+                    }
+                }
+            }
+            // The file is there and does not read: a newer build wrote it,
+            // or it is damaged. The next turn would write a new
+            // conversation over it, so it is first moved out of the way,
+            // where it can still be looked at.
+            Err(error) => {
+                cutlass_logger::warn!("assistant chat: {error}");
+                self.history.clear();
+                self.entries.clear();
+                let aside = file.with_extension(UNREAD_ENDING);
+                match std::fs::rename(&file, &aside) {
+                    Ok(()) => {
+                        cutlass_logger::warn!(
+                            "assistant chat: kept the unread file as {}",
+                            aside.display()
+                        );
+                        self.entries.push(Entry::Notice(UNREAD_KEPT.to_owned()));
+                        self.chat_file = Some(file);
+                    }
+                    // It could not be moved, so nothing is written there:
+                    // this conversation is kept nowhere.
+                    Err(error) => {
+                        cutlass_logger::warn!("assistant chat: {}: {error}", file.display());
+                        self.entries.push(Entry::Notice(UNREAD_LEFT.to_owned()));
+                        self.chat_file = None;
+                        self.unkept = Some(file);
+                    }
+                }
+            }
+        }
     }
 
     /// Write the conversation to its file; an empty one removes the file.
@@ -516,7 +650,7 @@ impl Assistant {
         let Some(file) = &self.chat_file else {
             return;
         };
-        if let Err(error) = cutlass_agent::save_chat(file, &self.history) {
+        if let Err(error) = cutlass_agent::save_chat_of(file, &self.chat_project, &self.history) {
             cutlass_logger::warn!("assistant chat: {error}");
         }
     }
@@ -532,6 +666,14 @@ impl Assistant {
         }
         if self.fresh {
             self.meet(shell);
+        }
+        // A turn edits the project it was asked in. Once that one is
+        // closed or another is opened, its next call would read and write
+        // a project the user never asked about, so the turn ends here.
+        if self.left_its_project(shell) {
+            self.halt(LEFT_PROJECT);
+            self.settle(shell);
+            return false;
         }
         loop {
             let Some(running) = self.running.as_ref() else {
@@ -578,6 +720,7 @@ impl Assistant {
                     }
                 }
                 Event::Tool { call, answer } => {
+                    self.note_others(shell);
                     let run = shell.run_agent_tool(&call, &[]);
                     self.edited(shell);
                     if let Some(action) = run.wants {
@@ -604,7 +747,10 @@ impl Assistant {
                     let _ = answer.send(outcome);
                 }
                 Event::Finished(result) => {
-                    self.running = None;
+                    let sent_from = self
+                        .running
+                        .take()
+                        .map_or(0, |running| running.sent_from);
                     match result {
                         Ok((text, messages)) => {
                             if text.is_empty() {
@@ -618,7 +764,11 @@ impl Assistant {
                                 self.entries.push(Entry::Said(text));
                             }
                             self.turn.clear();
-                            self.history = messages;
+                            // The turn hands back what it was sent and
+                            // what it added; the turns left out to fit
+                            // stay ahead of them.
+                            self.history.truncate(sent_from);
+                            self.history.extend(messages);
                             // The model looked during the turn; the frames
                             // are not kept, or sent with the next one.
                             cutlass_agent::forget_pictures(&mut self.history);
@@ -688,26 +838,74 @@ fn explain(error: String) -> String {
     error
 }
 
+/// Which model a turn runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chosen {
+    /// The cloud model: the conversation leaves this computer.
+    Cloud,
+    /// The model served on this machine.
+    Local,
+    /// Both are off.
+    Neither,
+}
+
+/// The model `settings` choose for a turn: the cloud one while it is on,
+/// whether or not the local one is, then the local one. The turn is built
+/// from this and the panel says it, so the two cannot disagree.
+#[must_use]
+pub fn chosen_model(settings: &Settings) -> Chosen {
+    if settings.model.cloud {
+        Chosen::Cloud
+    } else if settings.model.local {
+        Chosen::Local
+    } else {
+        Chosen::Neither
+    }
+}
+
+/// What the panel says of the model the next turn runs on, and where the
+/// conversation goes.
+#[must_use]
+pub fn model_source(settings: &Settings) -> String {
+    let model = &settings.model;
+    match chosen_model(settings) {
+        Chosen::Cloud => {
+            let name = model.cloud_name.trim();
+            let name = if name.is_empty() {
+                "The cloud model"
+            } else {
+                name
+            };
+            format!("{name} in the cloud: what you ask leaves this computer")
+        }
+        Chosen::Local => format!("{} on this machine", model.local_name),
+        Chosen::Neither => "Both models are off".to_owned(),
+    }
+}
+
 /// The local or the cloud model, whichever `settings` choose, told the
 /// user's `notes` while Memory is on.
 fn build_model(settings: &Settings, notes: &str) -> Result<AnyModel, String> {
     let context = cutlass_agent::prompt_context(settings, notes);
-    if settings.model.cloud {
-        let key = crate::cloud::key(&crate::cloud::keys_file(), &settings.model.cloud_provider);
-        let model = crate::cloud::model(settings, &key, &context)?;
-        return Ok(AnyModel::Cloud(CloudModel::from_settings(settings, model)));
-    }
-    if !settings.model.local {
-        return Err(
+    match chosen_model(settings) {
+        Chosen::Cloud => {
+            let key =
+                crate::cloud::key(&crate::cloud::keys_file(), &settings.model.cloud_provider);
+            let model = crate::cloud::model(settings, &key, &context)?;
+            Ok(AnyModel::Cloud(CloudModel::from_settings(settings, model)))
+        }
+        Chosen::Neither => Err(
             "Both models are off. Turn on the local model, or the cloud model with your own key, in Settings › Assistant."
                 .to_owned(),
-        );
+        ),
+        Chosen::Local => {
+            let transport =
+                LoopbackHttp::new(&settings.model.local_url).map_err(|error| error.to_string())?;
+            Ok(AnyModel::Local(
+                ChatModel::new(transport, &settings.model.local_name).with_context(&context),
+            ))
+        }
     }
-    let transport =
-        LoopbackHttp::new(&settings.model.local_url).map_err(|error| error.to_string())?;
-    Ok(AnyModel::Local(
-        ChatModel::new(transport, &settings.model.local_name).with_context(&context),
-    ))
 }
 
 /// The model a turn runs on.
@@ -767,6 +965,54 @@ const PENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// The longest tool result an earlier turn keeps; the rest of a longer one
 /// was used when it was read.
 const OLD_RESULT_LIMIT: usize = 2000;
+
+/// The ending the conversation of an earlier project at the same place is
+/// kept under.
+const EARLIER_ENDING: &str = "earlier";
+
+/// The ending a conversation file that does not read is kept under.
+const UNREAD_ENDING: &str = "unread";
+
+/// What the panel says when a kept conversation did not read and was moved
+/// out of the way.
+const UNREAD_KEPT: &str = "The conversation kept for this project could not be read. It was set \
+     aside, and a new one starts here.";
+
+/// What the panel says when a kept conversation did not read and could not
+/// be moved.
+const UNREAD_LEFT: &str = "The conversation kept for this project could not be read. It is left \
+     as it is, and what is said now is not kept.";
+
+/// What a model is told, after what the user looks at, when the start of
+/// the conversation is no longer sent to it.
+const LEFT_OUT: &str = "; the earlier turns of this conversation are no longer sent to you, so \
+     read the project rather than rely on them";
+
+/// The most of the earlier conversation, in characters, a turn sends a
+/// model on this machine. This host does not know a model's context, so
+/// it is a budget and not that limit: local runners commonly serve eight
+/// to thirty-two thousand tokens, a token is about four characters, and
+/// the prompt and the tool list come out of the same room.
+const LOCAL_HISTORY: usize = 40_000;
+
+/// [`LOCAL_HISTORY`] for a cloud model, whose context is far larger.
+const CLOUD_HISTORY: usize = 300_000;
+
+// A cloud model is never sent less than a local one.
+const _: () = assert!(CLOUD_HISTORY > LOCAL_HISTORY);
+
+/// How much of the earlier conversation a turn on the model `settings`
+/// choose is sent.
+fn history_budget(settings: &Settings) -> usize {
+    match chosen_model(settings) {
+        Chosen::Cloud => CLOUD_HISTORY,
+        Chosen::Local | Chosen::Neither => LOCAL_HISTORY,
+    }
+}
+
+/// What the panel says when a turn ends because its project is gone.
+const LEFT_PROJECT: &str = "The project changed, so the assistant stopped. What it had already \
+     changed stays in the project it was asked in.";
 
 /// Whether `call` polled a job that is still running.
 pub(crate) fn still_pending(call: &ToolCall, outcome: &ToolOutcome) -> bool {
@@ -960,6 +1206,115 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
+    #[test]
+    fn a_project_made_where_another_was_does_not_get_its_conversation() {
+        let (mut shell, path) = shell_with_project("earlier");
+        let file = path.join("chats").join("a.json");
+        let aside = path.join("chats").join("a.earlier");
+        let hello = |assistant: &mut Assistant, shell: &mut Shell, words: &str| {
+            assistant.start(
+                LocalModel::scripted(vec![completion("Hello.", Vec::new())]),
+                8,
+                words,
+            );
+            finish(assistant, shell);
+        };
+        // The first project's conversation is kept under its name.
+        let mut assistant = Assistant::default();
+        assistant.follow_for(Some(file.clone()), "project-2@1700");
+        hello(&mut assistant, &mut shell, "about the first project");
+        assert_eq!(assistant.history.len(), 2);
+        // It is read back for that project, as before.
+        let mut again = Assistant::default();
+        again.follow_for(Some(file.clone()), "project-2@1700");
+        assert_eq!(again.history.len(), 2);
+        // A project made later in the same folder starts with nothing
+        // shown and nothing to send, and the first one's words are put
+        // aside, whole.
+        let mut later = Assistant::default();
+        later.follow_for(Some(file.clone()), "project-2@1900");
+        assert!(later.history.is_empty() && later.entries.is_empty());
+        assert!(!file.exists());
+        assert_eq!(cutlass_agent::load_chat(&aside).unwrap(), assistant.history);
+        // What it says is kept as its own.
+        hello(&mut later, &mut shell, "about the second project");
+        assert_eq!(
+            cutlass_agent::load_chat_of(&file, "project-2@1900")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            cutlass_agent::load_chat_of(&file, "project-2@1700"),
+            Err(cutlass_agent::ChatMiss::Another)
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_kept_conversation_that_does_not_read_is_set_aside_and_not_written_over() {
+        let (mut shell, path) = shell_with_project("unread");
+        let file = path.join("chats").join("a.json");
+        let aside = path.join("chats").join("a.unread");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // What a newer build might write: a message this one does not know.
+        let newer = r#"{"version":2,"messages":[{"role":"narrator","text":"kept"}]}"#;
+        std::fs::write(&file, newer).unwrap();
+        let mut assistant = Assistant::default();
+        assistant.follow(Some(file.clone()));
+        assert!(assistant.history.is_empty());
+        assert_eq!(
+            assistant.entries,
+            [Entry::Notice(super::UNREAD_KEPT.to_owned())]
+        );
+        // The file is out of the way, whole.
+        assert!(!file.exists());
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), newer);
+        // A turn keeps a new conversation in the file's place, and what
+        // was set aside is untouched.
+        assistant.start(
+            LocalModel::scripted(vec![completion("Hello.", Vec::new())]),
+            8,
+            "hello",
+        );
+        finish(&mut assistant, &mut shell);
+        assert_eq!(cutlass_agent::load_chat(&file).unwrap().len(), 2);
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), newer);
+        // A file that is not there is simply an empty conversation.
+        let none = path.join("chats").join("none.json");
+        assistant.follow(Some(none.clone()));
+        assert!(assistant.entries.is_empty() && assistant.history.is_empty());
+        assert!(!none.with_extension(super::UNREAD_ENDING).exists());
+
+        // One that cannot be moved out of the way is left alone: nothing
+        // is kept in its place, and it is looked at once, not each frame.
+        let stuck = path.join("chats").join("stuck.json");
+        std::fs::write(&stuck, newer).unwrap();
+        let taken = stuck.with_extension(super::UNREAD_ENDING);
+        std::fs::create_dir_all(taken.join("in the way")).unwrap();
+        assistant.follow(Some(stuck.clone()));
+        assert_eq!(
+            assistant.entries,
+            [Entry::Notice(super::UNREAD_LEFT.to_owned())]
+        );
+        assistant.start(
+            LocalModel::scripted(vec![completion("Hello.", Vec::new())]),
+            8,
+            "hello",
+        );
+        finish(&mut assistant, &mut shell);
+        let said = assistant.entries.len();
+        assert!(said > 1);
+        assistant.follow(Some(stuck.clone()));
+        assert_eq!(
+            assistant.entries.len(),
+            said,
+            "the talk is not started over"
+        );
+        assert_eq!(std::fs::read_to_string(&stuck).unwrap(), newer);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
     fn split(revision: u64, clip: &str, at: i64, right: &str) -> Vec<ToolCall> {
         vec![ToolCall {
             id: format!("split-{right}"),
@@ -970,6 +1325,12 @@ mod tests {
             })
             .to_string(),
         }]
+    }
+
+    /// The revision the open project is at. Each open starts at a number
+    /// of its own, so a test reads it and does not assume 0.
+    fn at(shell: &Shell) -> u64 {
+        shell.session().unwrap().revision()
     }
 
     fn clips(shell: &Shell) -> usize {
@@ -983,8 +1344,8 @@ mod tests {
         // Nothing to take back before any turn.
         assert!(!assistant.can_undo_turn(&shell));
         let model = LocalModel::scripted(vec![
-            completion("", split(0, "a", 1_000_000, "b")),
-            completion("", split(1, "b", 2_000_000, "c")),
+            completion("", split(at(&shell), "a", 1_000_000, "b")),
+            completion("", split(at(&shell) + 1, "b", 2_000_000, "c")),
             completion("Cut in three.", Vec::new()),
         ]);
         assistant.start(model, 8, "cut it in three");
@@ -1017,7 +1378,7 @@ mod tests {
         let (mut shell, path) = shell_with_project("undo-moved");
         let mut assistant = Assistant::default();
         let model = LocalModel::scripted(vec![
-            completion("", split(0, "a", 1_000_000, "b")),
+            completion("", split(at(&shell), "a", 1_000_000, "b")),
             completion("Split.", Vec::new()),
         ]);
         assistant.start(model, 8, "split it");
@@ -1068,20 +1429,305 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
+    /// A model that answers each ask in a word and notes how many messages
+    /// it was sent.
+    struct Counting(std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
+
+    impl cutlass_agent::Model for Counting {
+        fn complete(
+            &mut self,
+            request: &cutlass_agent::CompletionRequest,
+        ) -> Result<Completion, cutlass_agent::ModelError> {
+            self.0.lock().unwrap().push(request.messages.len());
+            Ok(completion("Done.", Vec::new()))
+        }
+    }
+
+    #[test]
+    fn a_long_conversation_is_kept_whole_and_sent_only_as_far_back_as_fits() {
+        let (mut shell, path) = shell_with_project("fits");
+        let mut assistant = Assistant::default();
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut ask = |assistant: &mut Assistant, budget: usize, words: &str| {
+            assistant.launch(
+                Counting(std::sync::Arc::clone(&sent)),
+                None::<fn() -> Result<LocalModel, String>>,
+                8,
+                budget,
+                words,
+            );
+            finish(assistant, &mut shell);
+        };
+        // With room for it all, each turn is sent every turn before it.
+        ask(&mut assistant, usize::MAX, "first");
+        ask(&mut assistant, usize::MAX, "second");
+        assert_eq!(*sent.lock().unwrap(), [1, 3]);
+        assert_eq!(assistant.history.len(), 4);
+        // With room for one earlier turn, the first is left out, and with
+        // none, both are: the model gets the ask alone.
+        ask(&mut assistant, 12, "third");
+        ask(&mut assistant, 0, "fourth");
+        assert_eq!(*sent.lock().unwrap(), [1, 3, 3, 1]);
+        // Nothing was dropped from the conversation itself, in order.
+        let asks: Vec<&str> = assistant
+            .history
+            .iter()
+            .filter_map(|message| match message {
+                Message::User { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asks, ["first", "second", "third", "fourth"]);
+        assert_eq!(assistant.history.len(), 8);
+        // And a turn with room again is sent all of it.
+        ask(&mut assistant, usize::MAX, "fifth");
+        assert_eq!(sent.lock().unwrap().last(), Some(&9));
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn the_budget_for_earlier_turns_follows_the_model() {
+        let mut settings = cutlass_settings::Settings::default();
+        settings.model.local = true;
+        settings.model.cloud = false;
+        assert_eq!(super::history_budget(&settings), super::LOCAL_HISTORY);
+        settings.model.cloud = true;
+        assert_eq!(super::history_budget(&settings), super::CLOUD_HISTORY);
+    }
+
+    #[test]
+    fn the_panel_names_the_model_a_turn_runs_on() {
+        use super::{Chosen, chosen_model, model_source};
+        let mut settings = cutlass_settings::Settings::default();
+        settings.model.local_name = "qwen".to_owned();
+        settings.model.cloud_name = "claude-opus-5-5".to_owned();
+        // The local model alone.
+        settings.model.local = true;
+        settings.model.cloud = false;
+        assert_eq!(chosen_model(&settings), Chosen::Local);
+        assert_eq!(model_source(&settings), "qwen on this machine");
+        // Both on: the turn goes to the cloud, and the panel does not say
+        // it stays on this machine.
+        settings.model.cloud = true;
+        assert_eq!(chosen_model(&settings), Chosen::Cloud);
+        let source = model_source(&settings);
+        assert!(source.contains("claude-opus-5-5"), "{source}");
+        assert!(source.contains("leaves this computer"), "{source}");
+        assert!(!source.contains("on this machine"), "{source}");
+        // The cloud model alone, with no name typed yet.
+        settings.model.local = false;
+        settings.model.cloud_name = " ".to_owned();
+        assert_eq!(chosen_model(&settings), Chosen::Cloud);
+        assert!(model_source(&settings).starts_with("The cloud model in the cloud"));
+        // Neither: the turn says so too.
+        settings.model.cloud = false;
+        assert_eq!(chosen_model(&settings), Chosen::Neither);
+        assert_eq!(model_source(&settings), "Both models are off");
+        assert!(matches!(
+            super::build_model(&settings, ""),
+            Err(error) if error.starts_with("Both models are off")
+        ));
+    }
+
+    #[test]
+    fn a_turn_stops_when_its_project_is_closed_or_another_is_opened() {
+        let (mut shell, path) = shell_with_project("switch-from");
+        let (other, other_path) = shell_with_project("switch-to");
+        // Let go of the second project, so the window can open it.
+        drop(other);
+        // The second call is written for the project opened meanwhile, at
+        // the revision it will be at: the worst case, where it would land.
+        let there = 9_000;
+        // The model is held before its second answer until the project
+        // has changed, as a model that thinks for a while is.
+        let (go, held) = std::sync::mpsc::channel();
+        let model = Held {
+            steps: vec![
+                completion(
+                    "",
+                    vec![ToolCall {
+                        id: "read".to_owned(),
+                        name: "draft.query".to_owned(),
+                        arguments: "project".to_owned(),
+                    }],
+                ),
+                completion("", split(there, "a", 1_000_000, "b")),
+                completion("Split.", Vec::new()),
+            ]
+            .into(),
+            answered: 0,
+            hold_before: 1,
+            held,
+        };
+        let mut assistant = Assistant::default();
+        assistant.start(model, 8, "split it");
+        // The turn's first call runs on the project it was asked in.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !assistant.entries.iter().any(|entry| {
+            matches!(entry, Entry::Step { tool, result: Some(_), .. } if tool == "draft.query")
+        }) {
+            assert!(assistant.poll(&mut shell), "the turn ended early");
+            assert!(Instant::now() < deadline, "the first call did not run");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // The user opens another project while the model thinks.
+        shell.open_folder(&other_path).unwrap();
+        let pinned = shell.session().unwrap().clone().starting_at(there);
+        shell.adopt_session(pinned).unwrap();
+        go.send(()).unwrap();
+        finish(&mut assistant, &mut shell);
+        assert!(!assistant.busy());
+        // Nothing of the turn reached the project that is open now.
+        assert_eq!(clips(&shell), 1);
+        assert_eq!(at(&shell), there);
+        assert_eq!(
+            assistant.entries.last(),
+            Some(&Entry::Notice(super::LEFT_PROJECT.to_owned()))
+        );
+        assert!(!assistant.can_undo_turn(&shell));
+        // What the turn did before is remembered: the ask, the reply that
+        // called the read, and the read's result.
+        assert!(assistant.history.len() >= 3, "{:?}", assistant.history);
+
+        // Closing the project ends a turn the same way.
+        let (go, held) = std::sync::mpsc::channel();
+        let model = Held {
+            steps: vec![
+                completion(
+                    "",
+                    vec![ToolCall {
+                        id: "read-2".to_owned(),
+                        name: "draft.query".to_owned(),
+                        arguments: "project".to_owned(),
+                    }],
+                ),
+                completion("", split(there, "a", 1_000_000, "b")),
+            ]
+            .into(),
+            answered: 0,
+            hold_before: 1,
+            held,
+        };
+        let steps = assistant.entries.len();
+        assistant.start(model, 8, "split it");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !assistant.entries[steps..].iter().any(|entry| {
+            matches!(
+                entry,
+                Entry::Step {
+                    result: Some(_),
+                    ..
+                }
+            )
+        }) {
+            assert!(assistant.poll(&mut shell), "the turn ended early");
+            assert!(Instant::now() < deadline, "the first call did not run");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        shell.close_project().unwrap();
+        go.send(()).unwrap();
+        finish(&mut assistant, &mut shell);
+        assert_eq!(
+            assistant.entries.last(),
+            Some(&Entry::Notice(super::LEFT_PROJECT.to_owned()))
+        );
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_dir_all(&other_path);
+    }
+
+    /// A scripted model that waits to be told to go on before one of its
+    /// answers, so a test can act while it "thinks".
+    struct Held {
+        steps: std::collections::VecDeque<Completion>,
+        answered: usize,
+        /// The answer, counted from 0, it waits before.
+        hold_before: usize,
+        held: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl cutlass_agent::Model for Held {
+        fn complete(
+            &mut self,
+            _request: &cutlass_agent::CompletionRequest,
+        ) -> Result<Completion, cutlass_agent::ModelError> {
+            if self.answered == self.hold_before {
+                let _ = self.held.recv();
+            }
+            self.answered += 1;
+            self.steps
+                .pop_front()
+                .ok_or(cutlass_agent::ModelError::NoMoreSteps)
+        }
+    }
+
+    #[test]
+    fn a_turn_is_not_taken_back_with_an_edit_the_user_made_while_it_ran() {
+        let (mut shell, path) = shell_with_project("undo-mixed");
+        let mut assistant = Assistant::default();
+        let read = |id: &str| ToolCall {
+            id: id.to_owned(),
+            name: "draft.query".to_owned(),
+            arguments: "project".to_owned(),
+        };
+        // The turn splits, and after the user's edit only reads. The model
+        // is held before its second answer until the user has edited, as
+        // a model that thinks for a while is.
+        let (go, held) = std::sync::mpsc::channel();
+        let model = Held {
+            steps: vec![
+                completion("", split(at(&shell), "a", 1_000_000, "b")),
+                completion("", vec![read("look")]),
+                completion("Split.", Vec::new()),
+            ]
+            .into(),
+            answered: 0,
+            hold_before: 1,
+            held,
+        };
+        assistant.start(model, 8, "split it");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while clips(&shell) == 1 {
+            assert!(assistant.poll(&mut shell), "the turn ended early");
+            assert!(Instant::now() < deadline, "the split did not run");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // The user renames the project while the model thinks.
+        shell.set_project_name("named by the user").unwrap();
+        go.send(()).unwrap();
+        finish(&mut assistant, &mut shell);
+        assert_eq!(clips(&shell), 2);
+        // Taking the turn back would undo the rename with the split, so
+        // it is not offered, and asking for it changes nothing.
+        assert!(!assistant.can_undo_turn(&shell));
+        assistant.undo_turn(&mut shell);
+        assert_eq!(shell.draft().unwrap().name, "named by the user");
+        assert_eq!(clips(&shell), 2);
+        // The user steps back with undo, an edit at a time.
+        shell.undo().unwrap();
+        assert_eq!(clips(&shell), 2);
+        assert_ne!(shell.draft().unwrap().name, "named by the user");
+        shell.undo().unwrap();
+        assert_eq!(clips(&shell), 1);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
     #[test]
     fn a_turn_is_not_taken_back_in_another_project() {
         let (mut shell, path) = shell_with_project("undo-here");
         let (mut other, other_path) = shell_with_project("undo-there");
         let mut assistant = Assistant::default();
         let model = LocalModel::scripted(vec![
-            completion("", split(0, "a", 1_000_000, "b")),
+            completion("", split(at(&shell), "a", 1_000_000, "b")),
             completion("Split.", Vec::new()),
         ]);
         assistant.start(model, 8, "split it");
         finish(&mut assistant, &mut shell);
         // The other project is at the same revision after one edit of its
-        // own, and is not the one the turn edited.
-        let moved = other.run_agent_tool(&split(0, "a", 2_000_000, "z")[0], &[]);
+        // own, and is not the one the turn edited. Two opens never share
+        // their revisions, so it is put at the first one's.
+        let same = other.session().unwrap().clone().starting_at(at(&shell) - 1);
+        other.adopt_session(same).unwrap();
+        let moved = other.run_agent_tool(&split(at(&other), "a", 2_000_000, "z")[0], &[]);
         assert!(!moved.outcome.is_error, "{}", moved.outcome.content);
         assert_eq!(
             other.session().unwrap().revision(),
@@ -1107,7 +1753,7 @@ mod tests {
                     "function": {
                         "name": "draft_apply",
                         "arguments": serde_json::json!({
-                            "expected_revision": 0,
+                            "expected_revision": at(&shell),
                             "requests": [{ "op": "split", "segment_id": "a",
                                            "at": 1_000_000, "right_id": "b" }],
                         }).to_string(),
@@ -1380,7 +2026,7 @@ mod tests {
             completion("It is short.", Vec::new()),
         ]));
         let child = move || helper.take().ok_or_else(|| "one helper only".to_owned());
-        assistant.launch(parent, Some(child), 8, "how long?");
+        assistant.launch(parent, Some(child), 8, usize::MAX, "how long?");
         finish(&mut assistant, &mut shell);
         // The helper's read ran on the window; its seek never did.
         assert_eq!(shell.playhead(), Micros(0));
@@ -1668,7 +2314,7 @@ mod tests {
     fn a_real_local_model_looks_at_a_frame_and_says_what_it_sees() {
         let (mut shell, path) = shell_with_project("real-look");
         let red = serde_json::json!({
-            "expected_revision": 0,
+            "expected_revision": at(&shell),
             "requests": [{ "op": "set_canvas_background", "color": "#ff0000" }],
         });
         let set = shell.run_agent_tool(

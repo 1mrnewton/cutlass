@@ -7,9 +7,15 @@
 //! through the same sink as the parent's, so the host shows them and asks
 //! for any allow the same way. The parent's conversation keeps only the
 //! answer, not the child's reading, which keeps long look-ups out of it.
+//!
+//! The helpers of one turn share one allowance of rounds, the size of the
+//! turn's own step cap. A helper is given what is left of it, and with
+//! none left the hand-off is refused. A turn then makes at most twice the
+//! cap's requests to the model, where each helper once got the whole cap
+//! again and the cap bounded nothing.
 
 use crate::r#loop::{ToolOutcome, ToolSink, run};
-use crate::model::{Model, ToolCall, ToolDefinition};
+use crate::model::{Completion, CompletionRequest, Model, ModelError, ToolCall, ToolDefinition};
 use crate::tools::tool_definitions;
 
 /// The tool's name.
@@ -54,13 +60,25 @@ pub fn definitions_with_delegate() -> Vec<ToolDefinition> {
 pub struct Delegating<S, F> {
     inner: S,
     child: F,
-    cap: u32,
+    /// The rounds the turn's helpers have left between them.
+    left: u32,
 }
 
 impl<S, F> Delegating<S, F> {
-    /// Children get at most `cap` rounds each.
+    /// The helpers of the turn this sink serves get `cap` rounds between
+    /// them.
     pub fn new(inner: S, child: F, cap: u32) -> Self {
-        Self { inner, child, cap }
+        Self {
+            inner,
+            child,
+            left: cap,
+        }
+    }
+
+    /// The rounds the turn's helpers have left.
+    #[must_use]
+    pub fn rounds_left(&self) -> u32 {
+        self.left
     }
 
     /// The sink the other calls go to.
@@ -100,9 +118,21 @@ where
         if task.is_empty() {
             return failed("agent.delegate needs the task as its input".to_owned());
         }
-        let mut model = match (self.child)() {
+        if self.left == 0 {
+            return failed(
+                "this turn's helpers have used all their rounds; read what you need yourself"
+                    .to_owned(),
+            );
+        }
+        let model = match (self.child)() {
             Ok(model) => model,
             Err(error) => return failed(format!("the helper did not start: {error}")),
+        };
+        let allowance = self.left;
+        let mut used = 0;
+        let mut model = Counted {
+            inner: model,
+            used: &mut used,
         };
         let definitions: Vec<ToolDefinition> = tool_definitions()
             .into_iter()
@@ -115,7 +145,11 @@ where
             "Another assistant asks you this. Read what you need, then answer in full in plain text; \
              you cannot change the project, and only your last answer reaches it.\n\n{task}"
         );
-        match run(&mut model, &mut sink, self.cap, &ask, &definitions) {
+        let ran = run(&mut model, &mut sink, allowance, &ask, &definitions);
+        // What the helper asked of the model comes off the allowance,
+        // however it ended.
+        self.left = self.left.saturating_sub(used);
+        match ran {
             Ok(turn) if turn.completion.text.trim().is_empty() => {
                 failed("the helper finished without an answer".to_owned())
             }
@@ -126,6 +160,19 @@ where
             },
             Err(error) => failed(format!("the helper stopped: {error}")),
         }
+    }
+}
+
+/// A helper's model, counting the requests made of it.
+struct Counted<'a, M> {
+    inner: M,
+    used: &'a mut u32,
+}
+
+impl<M: Model> Model for Counted<'_, M> {
+    fn complete(&mut self, request: &CompletionRequest) -> Result<Completion, ModelError> {
+        *self.used = self.used.saturating_add(1);
+        self.inner.complete(request)
     }
 }
 
@@ -199,6 +246,72 @@ mod tests {
             calls: Vec::new(),
             proposed: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_helpers_of_a_turn_share_one_allowance_of_rounds() {
+        // Three hand-offs in a turn whose helpers have three rounds.
+        let mut parent = LocalModel::scripted(vec![
+            calls(DELEGATE, "first look-up"),
+            calls(DELEGATE, "second look-up"),
+            calls(DELEGATE, "third look-up"),
+            says("Done."),
+        ]);
+        let started = std::cell::Cell::new(0u32);
+        // Each helper reads once, then answers: two rounds.
+        let child = || {
+            started.set(started.get() + 1);
+            Ok::<_, String>(LocalModel::scripted(vec![
+                calls("draft.query", "project"),
+                says("read it"),
+            ]))
+        };
+        let mut sink = Delegating::new(Seen::default(), child, 3);
+        assert_eq!(sink.rounds_left(), 3);
+        let turn = run(
+            &mut parent,
+            &mut sink,
+            8,
+            "look things up",
+            &definitions_with_delegate(),
+        )
+        .unwrap();
+        let answers: Vec<(&str, bool)> = turn
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                crate::model::Message::Tool {
+                    name,
+                    content,
+                    is_error,
+                    ..
+                } if name == DELEGATE => Some((content.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers.len(), 3);
+        // The first has room for both its rounds.
+        assert_eq!(answers[0], ("read it", false));
+        // The second is given the one round left: it reads, and is
+        // stopped before it can answer.
+        assert!(answers[1].1, "{}", answers[1].0);
+        assert!(
+            answers[1].0.contains("the step cap 1 stopped the turn"),
+            "{}",
+            answers[1].0
+        );
+        // The third is refused before any model is made for it.
+        assert!(answers[2].1);
+        assert!(
+            answers[2].0.contains("used all their rounds"),
+            "{}",
+            answers[2].0
+        );
+        assert_eq!(started.get(), 2);
+        assert_eq!(sink.rounds_left(), 0);
+        // The helpers read twice between them, and the parent went on.
+        assert_eq!(sink.inner_mut().0, ["draft.query", "draft.query"]);
+        assert_eq!(turn.completion.text, "Done.");
     }
 
     #[test]

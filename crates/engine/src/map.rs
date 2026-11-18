@@ -84,6 +84,35 @@ pub fn speed_at(map: &TimelineMap, time: Micros) -> Result<f64, MapError> {
     }
 }
 
+/// Mean speed from `from` to `to` on the timeline: the source time the
+/// span reads divided by its length. `to` is clamped to the clip's end.
+///
+/// A window of sound read at this speed ends where the next window's read
+/// begins, which the speed at the window's start alone does not give on a
+/// curve. Positions are taken before reverse flips them, so a reversed
+/// clip has the same mean as a forward one.
+pub fn mean_speed(map: &TimelineMap, from: Micros, to: Micros) -> Result<f64, MapError> {
+    if map.freeze.is_some() {
+        return Ok(1.0);
+    }
+    let points = match &map.speed {
+        MapSpeed::Constant(speed) => return positive(*speed),
+        MapSpeed::Curve(points) => points,
+    };
+    let start = elapsed_in(map, from)?;
+    let end =
+        to.0.checked_sub(map.target.start.0)
+            .ok_or(MapError::Overflow)?
+            .clamp(start, map.target.duration.0);
+    if end == start {
+        return speed_at(map, from);
+    }
+    let duration = finite_f64(map.source.duration.0)?;
+    let read = source_fraction(points, finite_f64(end)? / duration)?
+        - source_fraction(points, finite_f64(start)? / duration)?;
+    positive(read * duration / finite_f64(end - start)?)
+}
+
 /// Source microsecond for `time` on the timeline.
 ///
 /// Freeze wins and skips the curve. Speed then maps the elapsed target time.
@@ -695,6 +724,56 @@ mod tests {
             ..map
         };
         assert_eq!(map_timeline(&reversed, Micros(10)), Ok(Micros(1_899)));
+    }
+
+    #[test]
+    fn windows_read_at_their_mean_speed_join_where_the_curve_puts_them() {
+        let ramp = vec![point(0.0, 1.0), point(1.0, 2.0)];
+        for reverse in [false, true] {
+            let map = TimelineMap {
+                target: TimeRange::new(0, 693_147),
+                source: TimeRange::new(0, 1_000_000),
+                freeze: None,
+                speed: MapSpeed::Curve(ramp.clone()),
+                reverse,
+            };
+            // Ten 20 ms windows: each one reads its mean speed times its
+            // length, and the reads add up to where the curve is.
+            let mut read = 0.0;
+            for window in 0..10 {
+                let from = window * 20_000;
+                let mean = mean_speed(&map, Micros(from), Micros(from + 20_000)).unwrap();
+                assert!(mean > speed_at(&map, Micros(from)).unwrap());
+                read += mean * 20_000.0;
+            }
+            let forward = TimelineMap {
+                reverse: false,
+                ..map.clone()
+            };
+            let curve_at = map_timeline(&forward, Micros(200_000)).unwrap().0 as f64;
+            assert!((read - curve_at).abs() < 2.0, "{read} vs {curve_at}");
+        }
+        // A window past the clip's end is cut at the end; a constant speed is
+        // itself; a freeze plays at one.
+        let map = TimelineMap {
+            target: TimeRange::new(0, 693_147),
+            source: TimeRange::new(0, 1_000_000),
+            freeze: None,
+            speed: MapSpeed::Curve(ramp),
+            reverse: false,
+        };
+        let tail = mean_speed(&map, Micros(693_000), Micros(800_000)).unwrap();
+        assert!((tail - 2.0).abs() < 0.01, "{tail}");
+        let constant = TimelineMap {
+            speed: MapSpeed::Constant(1.5),
+            ..map.clone()
+        };
+        assert_eq!(mean_speed(&constant, Micros(0), Micros(10)), Ok(1.5));
+        let frozen = TimelineMap {
+            freeze: Some(Micros(0)),
+            ..map
+        };
+        assert_eq!(mean_speed(&frozen, Micros(0), Micros(10)), Ok(1.0));
     }
 
     #[test]

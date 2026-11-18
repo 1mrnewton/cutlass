@@ -12,13 +12,26 @@
 //! present. A mistake there can run an instruction the CPU lacks. It
 //! cannot read or write out of bounds.
 //!
+//! One exception, approved for speed: the VP9 loop filter
+//! (`vp9::lf::avx2`, and `vp9::lf16::avx2` for 10 and 12 bits),
+//! interpolation (`vp9::mc::avx2`, `vp9::mc16::avx2`) and block
+//! distortion (`vp9::sad8::avx2`, and `vp9::sad16::avx2` for 10 and 12
+//! bits) load and store their rows with
+//! vector intrinsics on a region whose bounds they check once per edge or
+//! block; each such load or store
+//! states the check that proves it in bounds, and the kernel's scalar twin
+//! and its test cover it as before.
+//!
 //! Every kernel has a scalar twin written from the specification, and a
 //! test that compares the two on random and edge inputs. A target without
 //! a vector kernel runs the twin.
 //!
 //! The one other `unsafe` is [`shared_rows`]: a picture's final rows that
 //! one writer publishes top to bottom while other threads read the rows
-//! published so far, without copying them per reader.
+//! published so far, without copying them per reader. (`vp9::frame` does
+//! the same for VP9's pictures, and views a 16-bit picture's samples as
+//! their bytes; `vp9::prefetch` hints the cache with addresses inside a
+//! slice, which reads nothing and cannot fault.)
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod neon;
@@ -26,6 +39,7 @@ mod neon;
 pub mod av1;
 pub mod hevc;
 pub mod shared_rows;
+pub mod vp9;
 pub mod wide;
 
 /// Whether this build has vector kernels. Without them every entry runs

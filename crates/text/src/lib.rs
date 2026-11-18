@@ -15,6 +15,7 @@ mod faces;
 mod layout;
 mod linebreak;
 mod mesh;
+mod outline;
 mod paint;
 mod richtext;
 mod script;
@@ -32,6 +33,7 @@ pub use layout::{
 };
 pub use linebreak::{LINE_BREAK_WORDS, WordLists};
 pub use mesh::{GlyphRecord, TextMesh, build, build_text};
+pub use outline::{TextOutlines, text_outlines};
 pub use paint::{DrawnGlyph, paint_glyphs};
 pub use script::script_tag;
 pub use shape::{MAX_CHARS, Paragraph, Shaped, ShapedGlyph, shape, shape_text};

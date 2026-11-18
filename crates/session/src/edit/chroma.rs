@@ -6,8 +6,9 @@ use serde_json::json;
 
 use super::{EditError, ensure_unlocked};
 
-/// Key `color` (`#rrggbb`) out of `segment_id` with `strength` and
-/// `shadow`, each from 0 to 1. An empty colour takes the key off. A key
+/// Key `color` (`#rrggbb`) out of `segment_id` with `strength`, `shadow`,
+/// `feather` and `clean_up`, each from 0 to 1. An empty colour takes the
+/// key off. A key
 /// another clip shares is left to that clip; this clip gets its own,
 /// named `material_id`.
 pub fn set_chroma(
@@ -15,13 +16,15 @@ pub fn set_chroma(
     segment_id: &SegmentId,
     material_id: &MaterialId,
     color: &str,
-    strength: f64,
-    shadow: f64,
+    [strength, shadow, feather, clean_up]: [f64; 4],
 ) -> Result<(), EditError> {
     if !color.is_empty() && parse_hex(color).is_none() {
         return Err(EditError::CanvasColor);
     }
-    if !(0.0..=1.0).contains(&strength) || !(0.0..=1.0).contains(&shadow) {
+    if [strength, shadow, feather, clean_up]
+        .iter()
+        .any(|value| !(0.0..=1.0).contains(value))
+    {
         return Err(EditError::EffectStrength);
     }
     let (track_index, segment_index) = super::locate(draft, segment_id)?;
@@ -45,6 +48,8 @@ pub fn set_chroma(
             .insert("color".to_owned(), json!(color.to_ascii_lowercase()));
         raw.fields.insert("strength".to_owned(), json!(strength));
         raw.fields.insert("shadow".to_owned(), json!(shadow));
+        raw.fields.insert("feather".to_owned(), json!(feather));
+        raw.fields.insert("clean_up".to_owned(), json!(clean_up));
     };
     if let Some(id) = current {
         let shared = draft
@@ -108,15 +113,37 @@ mod tests {
     fn a_key_is_set_changed_and_taken_off() {
         let mut draft = draft();
         let a = SegmentId::new("a");
-        set_chroma(&mut draft, &a, &MaterialId::new("k"), "#00FF00", 0.5, 0.2).unwrap();
+        set_chroma(
+            &mut draft,
+            &a,
+            &MaterialId::new("k"),
+            "#00FF00",
+            [0.5, 0.2, 0.0, 0.0],
+        )
+        .unwrap();
         let key = segment_chroma(&draft, &draft.tracks[0].segments[0]).unwrap();
         assert_eq!(key.hex(), "#00ff00");
-        set_chroma(&mut draft, &a, &MaterialId::new("k2"), "#0000ff", 0.7, 0.0).unwrap();
+        set_chroma(
+            &mut draft,
+            &a,
+            &MaterialId::new("k2"),
+            "#0000ff",
+            [0.7, 0.0, 0.25, 0.5],
+        )
+        .unwrap();
         let key = segment_chroma(&draft, &draft.tracks[0].segments[0]).unwrap();
         assert_eq!(key.hex(), "#0000ff");
         assert!((key.strength - 0.7).abs() < 1e-6);
+        assert_eq!((key.feather, key.clean_up), (0.25, 0.5));
         assert_eq!(draft.materials.chromas.len(), 1);
-        set_chroma(&mut draft, &a, &MaterialId::new("k3"), "", 0.0, 0.0).unwrap();
+        set_chroma(
+            &mut draft,
+            &a,
+            &MaterialId::new("k3"),
+            "",
+            [0.0, 0.0, 0.0, 0.0],
+        )
+        .unwrap();
         assert!(segment_chroma(&draft, &draft.tracks[0].segments[0]).is_none());
         assert!(draft.materials.chromas.is_empty());
     }
@@ -127,11 +154,15 @@ mod tests {
         let a = SegmentId::new("a");
         let id = MaterialId::new("k");
         assert_eq!(
-            set_chroma(&mut draft, &a, &id, "green", 0.5, 0.0),
+            set_chroma(&mut draft, &a, &id, "green", [0.5, 0.0, 0.0, 0.0]),
             Err(EditError::CanvasColor)
         );
         assert_eq!(
-            set_chroma(&mut draft, &a, &id, "#00ff00", 1.5, 0.0),
+            set_chroma(&mut draft, &a, &id, "#00ff00", [1.5, 0.0, 0.0, 0.0]),
+            Err(EditError::EffectStrength)
+        );
+        assert_eq!(
+            set_chroma(&mut draft, &a, &id, "#00ff00", [0.5, 0.0, 0.0, -0.1]),
             Err(EditError::EffectStrength)
         );
         let mut words = Track::main("t");
@@ -141,7 +172,13 @@ mod tests {
             .push(Segment::new("t", "m", TimeRange::new(0, 1)));
         draft.tracks.push(words);
         assert_eq!(
-            set_chroma(&mut draft, &SegmentId::new("t"), &id, "#00ff00", 0.5, 0.0),
+            set_chroma(
+                &mut draft,
+                &SegmentId::new("t"),
+                &id,
+                "#00ff00",
+                [0.5, 0.0, 0.0, 0.0]
+            ),
             Err(EditError::EffectTarget)
         );
     }

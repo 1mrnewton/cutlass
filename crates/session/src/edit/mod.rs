@@ -23,6 +23,7 @@ mod lut;
 mod magnet;
 mod mark;
 mod mask;
+pub mod masks;
 mod mirror;
 mod move_segment;
 mod name;
@@ -202,6 +203,9 @@ pub enum EditError {
     Lut,
     /// A mask number is out of its range.
     Mask,
+    /// No mask is at that place on the clip, or the clip already lists as
+    /// many masks as it may.
+    MaskList,
     /// A track's path is empty, out of order, not numbers, or outside its
     /// clip, or a follower is not a picture clip on the path.
     Track,
@@ -233,7 +237,15 @@ pub enum EditError {
     FrameRate,
     /// The color space is not one the player keeps.
     ColorSpace,
+    /// A clip would end past [`MAX_TIMELINE`], or its length or start
+    /// does not fit a time at all.
+    TooLong,
 }
+
+/// The latest time a clip may end: 24 hours, in microseconds. Past it a
+/// timeline is a mistake, not a film, and an end near the `i64` limit
+/// cannot be added to without saturating.
+pub const MAX_TIMELINE: i64 = 24 * 60 * 60 * 1_000_000;
 
 impl std::fmt::Display for EditError {
     /// Why the request was refused, in words a person or a model can act on.
@@ -322,6 +334,9 @@ impl std::fmt::Display for EditError {
             Self::UnknownEffect => "that effect, filter or transition id is not one Cutlass ships",
             Self::Lut => "the text is not a 3D .cube table, or the clip has no LUT to change",
             Self::Mask => "a mask number is out of its range",
+            Self::MaskList => {
+                "there is no mask at that place on the clip, or it already has eight masks"
+            }
             Self::Track => {
                 "the path is empty, out of order or outside its clip, or a follower is not a \
                  picture clip that plays along the path"
@@ -345,6 +360,7 @@ impl std::fmt::Display for EditError {
             Self::LetterboxBlur => "the letterbox blur is outside 0 to 1",
             Self::FrameRate => "the frame rate is not one the project can use",
             Self::ColorSpace => "the color space is not one the project keeps",
+            Self::TooLong => "a clip would end past 24 hours (86400000000 microseconds)",
         };
         formatter.write_str(text)
     }
@@ -865,17 +881,64 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             color,
             strength,
             shadow,
-        } => chroma::set_chroma(draft, segment_id, material_id, color, *strength, *shadow),
+            feather,
+            clean_up,
+        } => chroma::set_chroma(
+            draft,
+            segment_id,
+            material_id,
+            color,
+            [*strength, *shadow, *feather, *clean_up],
+        ),
         Request::SetMask {
             segment_id,
             material_id,
             mask,
         } => mask::set_mask(draft, segment_id, material_id, mask.as_ref()),
+        Request::AddMask {
+            segment_id,
+            material_id,
+            mask,
+            art,
+            color,
+        } => masks::add_mask(draft, segment_id, material_id, mask, art.as_ref(), *color),
+        Request::EditMask {
+            segment_id,
+            index,
+            material_id,
+            mask,
+            art,
+            color,
+        } => masks::edit_mask(
+            draft,
+            segment_id,
+            *index,
+            material_id,
+            mask,
+            art.as_ref(),
+            *color,
+        ),
+        Request::RemoveMask {
+            segment_id,
+            index,
+            color,
+        } => masks::remove_mask(draft, segment_id, *index, *color),
+        Request::MoveMask {
+            segment_id,
+            from,
+            to,
+            color,
+        } => masks::move_mask(draft, segment_id, *from, *to, *color),
         Request::SetSelection {
             segment_id,
             material_id,
             selection,
         } => mask::set_selection(draft, segment_id, material_id, selection.as_ref()),
+        Request::SetMatting {
+            segment_id,
+            material_id,
+            matting,
+        } => mask::set_matting(draft, segment_id, material_id, matting.as_ref()),
         Request::Track {
             target,
             followers,
@@ -1083,7 +1146,33 @@ pub fn apply_all(
     // parted them.
     transition::drop_parted(draft, &blended);
     drop_emptied_lanes(draft, &held);
+    check_lengths(draft)?;
     sync_duration(draft);
+    Ok(())
+}
+
+/// Refuse a draft with a clip, at any depth, that ends past
+/// [`MAX_TIMELINE`] or whose end would overflow.
+fn check_lengths(draft: &Draft) -> Result<(), EditError> {
+    let fits = |range: &TimeRange| {
+        range
+            .start
+            .0
+            .checked_add(range.duration.0)
+            .is_some_and(|end| end <= MAX_TIMELINE)
+    };
+    for track in &draft.tracks {
+        for segment in &track.segments {
+            if !fits(&segment.target) {
+                return Err(EditError::TooLong);
+            }
+        }
+    }
+    for nest in &draft.materials.drafts {
+        if let Some(inside) = nest.draft.as_deref() {
+            check_lengths(inside)?;
+        }
+    }
     Ok(())
 }
 

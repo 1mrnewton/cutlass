@@ -232,23 +232,39 @@ impl Shell {
         self.agent_export = Some(AgentExport { id, path, done });
     }
 
+    /// An export job landed for `path`: written, or why not. When it is
+    /// the one the assistant asked for and still waits on, this is what a
+    /// poll of it answers from now on.
+    pub(super) fn agent_export_landed(
+        &mut self,
+        path: &std::path::Path,
+        written: Result<&(), &super::ShellError>,
+        left_out: Option<&crate::shell::LeftOut>,
+    ) {
+        let Some(export) = self.agent_export.as_mut() else {
+            return;
+        };
+        if export.done.is_some() || export.path != path {
+            return;
+        }
+        export.done = Some(match written {
+            Ok(()) => Ok(super::offscreen::wrote(&export.path, left_out)),
+            Err(error) => Err(error.to_string()),
+        });
+    }
+
     /// The assistant's last export and what a poll of it answers: `None`
     /// while it writes, the file once written, or why it failed.
     pub(crate) fn agent_export_now(&mut self) -> Option<(String, Result<Option<String>, String>)> {
         self.poll_job();
         let writing = self.job().is_some_and(|job| job.label == "Export");
-        let written = self.exported.clone();
-        let notice = self.notice.clone();
-        let left_out = self.export_left_out().cloned();
         let export = self.agent_export.as_mut()?;
+        // A job that landed has answered already. One that is neither
+        // writing nor landed was stopped, or its project closed under it.
+        // What the window says now is about some other export, and is not
+        // this one's answer.
         if export.done.is_none() && !writing {
-            export.done = Some(if written.as_deref() == Some(export.path.as_path()) {
-                Ok(super::offscreen::wrote(&export.path, left_out.as_ref()))
-            } else if notice.is_empty() {
-                Err("the export stopped before it finished".to_owned())
-            } else {
-                Err(notice)
-            });
+            export.done = Some(Err("the export stopped before it finished".to_owned()));
         }
         let state = match &export.done {
             None => Ok(None),
@@ -314,15 +330,25 @@ impl Shell {
     }
 
     fn run_agent_tool_in(&mut self, call: &ToolCall, allowed: &[ApprovalAction]) -> AgentRun {
+        let no_project = || AgentRun {
+            outcome: ToolOutcome {
+                content: "no project is open".to_owned(),
+                is_error: true,
+                picture: None,
+            },
+            wants: None,
+        };
+        if self.session.is_none() {
+            return no_project();
+        }
+        // Reading how the jobs stand lands one that has finished, and a
+        // landing may edit the project. The call takes its copy of the
+        // session after that: a copy taken before would be written back
+        // over the landed edit.
+        let tracks_now = self.agent_tracks_now();
+        let export_now = self.agent_export_now();
         let Some(session) = self.session.clone() else {
-            return AgentRun {
-                outcome: ToolOutcome {
-                    content: "no project is open".to_owned(),
-                    is_error: true,
-                    picture: None,
-                },
-                wants: None,
-            };
+            return no_project();
         };
         let before = session.revision();
         let (path, generation) = self
@@ -333,13 +359,13 @@ impl Shell {
         let jobs = std::mem::take(&mut self.agent_speech_jobs);
         let track_jobs = std::mem::take(&mut self.agent_track_jobs);
         let tracks = Tracks {
-            now: self.agent_tracks_now(),
+            now: tracks_now,
             started: None,
         };
         let exports = Exports {
             next: self.agent_export_next(),
             path: None,
-            now: self.agent_export_now(),
+            now: export_now,
         };
         let mut servers = std::mem::take(&mut self.mcp_servers);
         servers.configure(&self.settings.mcp_servers);
@@ -668,6 +694,68 @@ mod tests {
     }
 
     #[test]
+    fn a_job_that_lands_as_a_call_begins_keeps_its_edit() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.tracks[0].id = TrackId::new("main");
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "missing", TimeRange::new(0, 2_000_000)));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let read = desktop.revision().unwrap();
+        // A job of the user's has finished and waits to land: its landing
+        // edits the project.
+        let (done, finished) = std::sync::mpsc::channel();
+        desktop
+            .start_job("Rename", move |_| {
+                let _ = done.send(());
+                Box::new(|shell: &mut crate::shell::Shell| shell.set_project_name("landed"))
+            })
+            .unwrap();
+        finished.recv().unwrap();
+        // Its thread hands the landing over right after it says so.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // The assistant writes on the revision it read before the landing.
+        let split = |revision: u64| {
+            json!({
+                "expected_revision": revision,
+                "requests": [{
+                    "op": "split", "segment_id": "a", "at": 1_000_000, "right_id": "b",
+                }],
+            })
+            .to_string()
+        };
+        let stale = desktop
+            .run_agent_tool(&call("draft.apply", &split(read)), &[])
+            .outcome;
+        // The landing came first, so the write is on a revision that has
+        // moved: it is refused, and the landed edit is still there.
+        assert!(desktop.job().is_none(), "the job landed in the call");
+        assert!(stale.is_error, "{}", stale.content);
+        assert!(
+            stale.content.contains("does not match"),
+            "{}",
+            stale.content
+        );
+        assert_eq!(desktop.draft().unwrap().name, "landed");
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
+        // Read again, and both edits hold, each its own undo step.
+        let landed = desktop.revision().unwrap();
+        assert_eq!(landed, read + 1);
+        let fresh = desktop
+            .run_agent_tool(&call("draft.apply", &split(landed)), &[])
+            .outcome;
+        assert!(!fresh.is_error, "{}", fresh.content);
+        assert_eq!(desktop.draft().unwrap().name, "landed");
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().name, "landed");
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
+    }
+
+    #[test]
     fn the_assistant_reads_edits_and_moves_the_playhead_in_the_window() {
         let temp = Temp::new();
         let mut draft = Draft::empty("draft");
@@ -782,14 +870,14 @@ mod tests {
             .run_agent_tool(
                 &call(
                     "settings.set",
-                    r#"{"expected_generation":0,"changes":{"step_cap":40}}"#,
+                    r#"{"expected_generation":0,"changes":{"step_cap":16}}"#,
                 ),
                 &[],
             )
             .outcome;
         assert!(!set.is_error, "{}", set.content);
-        assert_eq!(desktop.settings().step_cap, 40);
-        assert_eq!(cutlass_settings::load(&file).unwrap().settings.step_cap, 40);
+        assert_eq!(desktop.settings().step_cap, 16);
+        assert_eq!(cutlass_settings::load(&file).unwrap().settings.step_cap, 16);
         // Turning on the cloud model waits for the user's allow.
         let cloud = desktop.run_agent_tool(
             &call(
@@ -880,6 +968,55 @@ mod tests {
             .outcome;
         assert!(refused.is_error && refused.content.contains(".png"));
         assert!(!photo.exists());
+
+        // The assistant starts another movie and does not ask after it.
+        // It finishes, and then the user exports a file of their own: a
+        // poll still answers for the assistant's file, where it answered
+        // with whatever the window said of the last export.
+        let second = temp.path.join("second.mp4");
+        let started = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", second.display())),
+                &[],
+            )
+            .outcome;
+        assert_eq!(started.content, "job=export-3", "{}", started.content);
+        crate::shell::tests::land_job(&mut desktop);
+        assert_eq!(&std::fs::read(&second).unwrap()[4..8], b"ftyp");
+        let own = temp.path.join("the users own.mp4");
+        desktop
+            .export(crate::shell::ExportRequest {
+                path: own.clone(),
+                codec: CodecId::H264,
+                ..crate::shell::ExportRequest::default()
+            })
+            .unwrap();
+        crate::shell::tests::land_job(&mut desktop);
+        assert_eq!(desktop.exported(), Some(own.as_path()));
+        let polled = desktop
+            .run_agent_tool(&call("export.poll", "export-3"), &[])
+            .outcome;
+        assert!(!polled.is_error, "{}", polled.content);
+        assert_eq!(
+            polled.content,
+            format!("finished: wrote {}", second.display())
+        );
+        // An export that was stopped says so, in its own words.
+        let third = temp.path.join("third.mp4");
+        let started = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", third.display())),
+                &[],
+            )
+            .outcome;
+        assert_eq!(started.content, "job=export-4", "{}", started.content);
+        desktop.cancel_job();
+        crate::shell::tests::land_job(&mut desktop);
+        let stopped = desktop
+            .run_agent_tool(&call("export.poll", "export-4"), &[])
+            .outcome;
+        assert!(stopped.is_error, "{}", stopped.content);
+        assert_eq!(stopped.content, "the export stopped before it finished");
     }
 
     #[test]

@@ -11,8 +11,14 @@ the binaries land where that build puts them. Before it:
 2. The counts are merged with `llvm-profdata` (`rustup component add
    llvm-tools`) and cut down to the functions of `cutlass-h264` and
    `cutlass-h264-kernels`.
-3. The build runs with `-Cprofile-use` on that profile. Every other crate
-   has no counts in it and is built as it would be without one.
+3. The build runs with `-Cprofile-use` on that profile.
+
+Both flags reach the workspace's own crates only, through
+`scripts/pgo_rustc.rs`, which this compiles and hands Cargo as
+`RUSTC_WORKSPACE_WRAPPER`. Dependencies are built as they would be without
+a profile: given to every crate in RUSTFLAGS, the profile made `pliron`
+(under burn's Vulkan backend) take hours to optimise on Windows instead of
+seconds.
 
 `PGO_MERGE` names other `.profdata` files, separated as in `PATH`, that are
 merged into that profile as they are, so one build carries the counts of
@@ -66,10 +72,14 @@ def main(args: list[str]) -> int:
     # crates are cleaned before each build: they are always built against
     # this run's profile, and their -C metadata is printed.
     at = ["--target", target] if target else []
+    # Both builds run through the same wrapper, which Cargo counts in a
+    # crate's -C metadata: built without it, the trainer's cutlass_h264
+    # would not match the release build's.
+    wrapper = build_wrapper(out)
     print(f"pgo: building {TRAINER} instrumented", flush=True)
     clean(["--target-dir", str(build), *at])
     train = ["build", "--release", "-p", TRAINER, "--target-dir", str(build), *at]
-    trained_meta = cargo(train, f"{flags} -Cprofile-generate={raw}")
+    trained_meta = cargo(train, flags, wrapped(wrapper, f"-Cprofile-generate={raw}"))
     if trained_meta is None:
         return fail("the instrumented build did not compile cutlass-h264")
     exe = build / (target or "") / "release" / (TRAINER + (".exe" if os.name == "nt" else ""))
@@ -98,7 +108,9 @@ def main(args: list[str]) -> int:
 
     target_dir = value_of(args, "--target-dir")
     clean(at + (["--target-dir", target_dir] if target_dir else []))
-    built_meta = cargo(["build", "--release", *args], f"{flags} -Cprofile-use={profile}")
+    built_meta = cargo(
+        ["build", "--release", *args], flags, wrapped(wrapper, f"-Cprofile-use={profile}")
+    )
     if built_meta is None:
         return fail(
             "the build did not compile cutlass-h264, so the profile was not used: "
@@ -172,10 +184,29 @@ def llvm_profdata() -> str:
     return str(path)
 
 
-def cargo(args: list[str], rustflags: str) -> str | None:
+def build_wrapper(out: pathlib.Path) -> pathlib.Path:
+    """Compiles `scripts/pgo_rustc.rs`, the wrapper that gives the profile
+    to the workspace's crates only."""
+    exe = out / ("pgo_rustc" + (".exe" if os.name == "nt" else ""))
+    source = ROOT / "scripts" / "pgo_rustc.rs"
+    out.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["rustc", "--edition", "2021", "-O", "-o", str(exe), str(source)],
+        cwd=ROOT,
+        check=True,
+    )
+    return exe
+
+
+def wrapped(wrapper: pathlib.Path, flag: str) -> dict[str, str]:
+    """The environment that has Cargo give `flag` to the workspace's crates."""
+    return {"RUSTC_WORKSPACE_WRAPPER": str(wrapper), "PGO_RUSTC_FLAG": flag}
+
+
+def cargo(args: list[str], rustflags: str, extra: dict[str, str] | None = None) -> str | None:
     """Runs cargo verbosely, prints all but its rustc command lines, and
     returns the `-C metadata` it gave cutlass_h264, if it compiled it."""
-    env = dict(os.environ, RUSTFLAGS=rustflags.strip())
+    env = dict(os.environ, RUSTFLAGS=rustflags.strip(), **(extra or {}))
     proc = subprocess.Popen(
         ["cargo", *args, "-v"], cwd=ROOT, env=env, stderr=subprocess.PIPE, text=True,
         encoding="utf-8", errors="replace",

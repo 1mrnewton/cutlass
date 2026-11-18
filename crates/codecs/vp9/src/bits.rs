@@ -241,6 +241,57 @@ impl BoolWriter {
         self.range = range;
     }
 
+    /// [`BoolWriter::write`] of each `(bit, prob)` in turn, the coder's
+    /// state kept in registers between them: the same bytes.
+    #[inline]
+    pub fn write_all(&mut self, syms: impl Iterator<Item = (u32, u32)>) {
+        if self.failed {
+            return;
+        }
+        let (mut low, mut range, mut count) = (self.low, self.range, self.count);
+        for (bit, prob) in syms {
+            let split = 1 + (((range - 1) * prob) >> 8);
+            if bit != 0 {
+                low = low.wrapping_add(split);
+                range -= split;
+            } else {
+                range = split;
+            }
+            let shift = u32::from(VPX_NORM[(range & 0xff) as usize]);
+            range <<= shift;
+            count += shift as i32;
+            if count < 0 {
+                low = low.wrapping_shl(shift);
+                continue;
+            }
+            // A byte is out (rarely, with a carry into the ones before).
+            let offset = shift as i32 - count;
+            if offset <= 0 {
+                self.failed = true;
+                return;
+            }
+            let offset = offset as u32;
+            if low.wrapping_shl(offset - 1) & 0x8000_0000 != 0 {
+                let mut at = self.buf.len();
+                while at > 0 && self.buf[at - 1] == 0xff {
+                    self.buf[at - 1] = 0;
+                    at -= 1;
+                }
+                if at == 0 {
+                    self.failed = true;
+                    return;
+                }
+                self.buf[at - 1] = self.buf[at - 1].wrapping_add(1);
+            }
+            self.buf.push(((low >> (24 - offset)) & 0xff) as u8);
+            low = (low.wrapping_shl(offset) & 0x00ff_ffff).wrapping_shl(count as u32);
+            count -= 8;
+        }
+        self.low = low;
+        self.range = range;
+        self.count = count;
+    }
+
     pub fn write_literal(&mut self, value: u32, bits: u32) {
         for shift in (0..bits).rev() {
             self.write((value >> shift) & 1, 128);
@@ -341,6 +392,45 @@ mod tests {
         }
         assert_eq!(dec.read_literal(12).expect("literal"), 0x15a);
         dec.finish().expect("padding");
+    }
+
+    /// `write_all` writes the bytes `write` does, symbol by symbol, over
+    /// long runs of skewed and even probabilities (carries included), and
+    /// in pieces.
+    #[test]
+    fn write_all_matches_write() {
+        let mut x = 0x9e37_79b9u32;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x
+        };
+        let syms: Vec<(u32, u32)> = (0..200_000)
+            .map(|i| {
+                let prob = match i % 3 {
+                    0 => 1 + next() % 255,
+                    1 => 250 + next() % 6,
+                    _ => 1 + next() % 6,
+                };
+                let bit = u32::from(next() % 256 >= prob);
+                (bit, prob)
+            })
+            .collect();
+        let mut one = BoolWriter::new();
+        for &(bit, prob) in &syms {
+            one.write(bit, prob);
+        }
+        let mut all = BoolWriter::new();
+        for part in syms.chunks(7919) {
+            all.write_all(part.iter().copied());
+        }
+        let (one, all) = (one.finish().expect("one"), all.finish().expect("all"));
+        assert_eq!(one, all);
+        let mut dec = BoolDecoder::new(&all).expect("decode");
+        for &(bit, prob) in &syms {
+            assert_eq!(dec.read(prob).expect("bit"), bit);
+        }
     }
 
     #[test]

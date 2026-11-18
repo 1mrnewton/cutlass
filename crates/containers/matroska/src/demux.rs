@@ -25,11 +25,21 @@
 //! after the first in a lace start at the block time plus the durations
 //! before them; with no duration known they have no presentation time.
 //! CodecDelay is reported as an edit, not subtracted from packet times.
+//!
+//! # Block additions
+//!
+//! A BlockGroup's BlockAdditions ride on its packet as
+//! [`cutlass_codec::BlockAddition`]s, each BlockMore's BlockAddID (1 when
+//! absent) with its BlockAdditional, in file order; on a laced block they
+//! ride on the first frame. With a VP8 or VP9 track whose AlphaMode is 1,
+//! id 1 is the alpha plane as a second stream of the same codec.
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek};
 
-use cutlass_codec::{CodecId, ContainerId, Packet, StreamCodec, Timescale, Timestamp};
+use cutlass_codec::{
+    BlockAddition, CodecId, ContainerId, Packet, StreamCodec, Timescale, Timestamp,
+};
 use cutlass_container::{
     Demux, Edit, Gap, Input, Language, Limits, OpenError, ReadError, SeekLanding, SeekTo, Stream,
     TrackId, Trim,
@@ -550,10 +560,12 @@ impl<R: Read + Seek> MatroskaDemux<R> {
         let mut duration = None;
         let mut referenced = false;
         let mut discard = 0_i64;
+        let mut additions = Vec::new();
         for child in Children::new(&group) {
             let child = child?;
             match child.id {
                 ids::BLOCK => block = Some(child.data),
+                ids::BLOCK_ADDITIONS => block_additions(child.data, &mut additions)?,
                 ids::BLOCK_DURATION => duration = Some(ebml::uint(child.id, child.data)?),
                 ids::REFERENCE_BLOCK => referenced = true,
                 ids::DISCARD_PADDING => discard = ebml::int(child.id, child.data)?,
@@ -572,7 +584,9 @@ impl<R: Read + Seek> MatroskaDemux<R> {
             block: duration,
             discard_ns: u64::try_from(discard).unwrap_or(0),
         };
-        self.emit_laced(index, cluster, header, body, blocks, !referenced)
+        // The additions ride on the block's first frame.
+        let first = self.emit_laced(index, cluster, header, body, blocks, !referenced)?;
+        Ok(first.map(|packet| packet.with_additions(additions)))
     }
 
     /// The largest block body: one access unit, or a full lace of them.
@@ -719,6 +733,39 @@ impl<R: Read + Seek> MatroskaDemux<R> {
         Packet::try_new(stream, bytes, timestamp, self.clock.timescale(), keyframe)
             .map_err(|error| Error::malformed(error.to_string()))
     }
+}
+
+/// The BlockMore elements of a BlockAdditions, each its BlockAddID (1 when
+/// absent, as the schema's default) and its BlockAdditional. A BlockMore
+/// without a BlockAdditional is passed over; a BlockAddID of 0 is
+/// malformed (the schema's range excludes it).
+fn block_additions(data: &[u8], out: &mut Vec<BlockAddition>) -> Result<()> {
+    for more in Children::new(data) {
+        let more = more?;
+        if more.id != ids::BLOCK_MORE {
+            continue;
+        }
+        let mut id = 1;
+        let mut additional = None;
+        for child in Children::new(more.data) {
+            let child = child?;
+            match child.id {
+                ids::BLOCK_ADD_ID => id = ebml::uint(child.id, child.data)?,
+                ids::BLOCK_ADDITIONAL => additional = Some(child.data),
+                _ => {}
+            }
+        }
+        if id == 0 {
+            return Err(Error::malformed("BlockAddID is 0"));
+        }
+        if let Some(data) = additional {
+            out.push(BlockAddition {
+                id,
+                data: data.to_vec(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// ProRes frames are stored without the frame size and `icpf`; put them back.

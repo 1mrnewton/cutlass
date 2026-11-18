@@ -343,7 +343,7 @@ jobs:
             echo run=false >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          pattern='^(\.github/workflows/|installer/|apps/desktop/icons/|apps/desktop/Cargo\.toml$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|scripts/(pgo|pgo_profile|macos_bundle|windows_installer|appimage|smoke)\.py$|tools/h264-pgo/|crates/codecs/h264(-kernels)?/)'
+          pattern='^(\.github/workflows/|installer/|apps/desktop/icons/|apps/desktop/Cargo\.toml$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|scripts/(pgo|pgo_profile|macos_bundle|windows_installer|appimage|smoke)\.py$|scripts/pgo_rustc\.rs$|tools/h264-pgo/|crates/codecs/h264(-kernels)?/)'
           matched=$(git diff --name-only HEAD^1 HEAD | grep -E "$pattern" || true)
           if [ -n "$matched" ]; then
             echo run=true >> "$GITHUB_OUTPUT"
@@ -423,16 +423,41 @@ jobs:
     # a code signing certificate is set up (SIGNTOOL_CERT). The installer is
     # run silently, the installed binary runs the smoke test, and the
     # uninstaller removes it and its registry keys; the installer is kept.
-    # It runs when packaging-changes says so.
+    # It runs when packaging-changes says so. Like the Windows desktop job,
+    # it runs on the self-hosted runner labelled cutlass-windows when
+    # SELF_HOSTED_WINDOWS is 'true', and never for a pull request from a fork.
+    # That machine needs NSIS installed beforehand and PowerShell 7 (pwsh).
+    # A build takes about 25 minutes; one that hangs is stopped at 90
+    # instead of holding the runner for GitHub's six hours.
     needs: packaging-changes
     if: needs.packaging-changes.outputs.run == 'true'
-    runs-on: windows-latest
+    timeout-minutes: 90
+    runs-on: >-
+      ${{ vars.SELF_HOSTED_WINDOWS == 'true'
+      && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+      && fromJSON('["self-hosted", "cutlass-windows"]')
+      || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Build folder kept between runs
+        # The desktop job's folder: the release build lands beside its debug
+        # build, and later runs rebuild only what changed. Past 40 GB it
+        # starts again from empty, so the disk never fills.
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          dir="${RUNNER_WORKSPACE}-target"
+          if [ -d "$dir" ] && [ "$(du -sk "$dir" | cut -f1)" -gt 41943040 ]; then
+            echo "Build folder is over 40 GB; emptying it."
+            rm -rf "$dir"
+          fi
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
@@ -441,10 +466,21 @@ jobs:
       - name: NSIS
         shell: bash
         run: |
-          command -v makensis || choco install nsis -y --no-progress
-          echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+          # A self-hosted runner's account is not an administrator, so
+          # NSIS must already be installed there; only GitHub's runner
+          # installs it.
+          nsis="C:/Program Files (x86)/NSIS"
+          if ! command -v makensis && [ ! -x "$nsis/makensis.exe" ]; then
+            if [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
+              choco install nsis -y --no-progress
+            else
+              echo "::error::NSIS is not installed on this runner; install it once as an administrator (choco install nsis)"
+              exit 1
+            fi
+          fi
+          echo "$nsis" >> "$GITHUB_PATH"
       - name: Package
-        run: python scripts/windows_installer.py target/release/cutlass.exe dist/Cutlass-setup.exe
+        run: python scripts/windows_installer.py ${{ env.CARGO_TARGET_DIR || 'target' }}/release/cutlass.exe dist/Cutlass-setup.exe
       - name: Install, smoke test and uninstall
         shell: pwsh
         run: |

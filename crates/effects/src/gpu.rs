@@ -146,7 +146,8 @@ fn chroma_pass(chroma: &Chroma) -> ColourPass<'static> {
     pass.values[0] = [r, g, b, chroma.strength];
     let reach = 0.05 + chroma.strength.clamp(0.0, 1.0) * 0.6;
     let key_luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    pass.values[1] = [chroma.shadow, reach, 0.15, key_luma];
+    pass.values[1] = [chroma.shadow, reach, chroma.soft(), key_luma];
+    pass.values[2] = [chroma.choke(), 0.0, 0.0, 0.0];
     pass
 }
 
@@ -266,6 +267,7 @@ fn colour_wrap(x: f32, m: f32) -> f32 {
 }
 
 // Chroma key. v[0]: key colour, strength. v[1]: shadow, reach, soft, key luma.
+// v[2].x: the share of the soft edge clean up takes out.
 fn chroma_of(c: vec3<f32>) -> vec2<f32> {
     let y = colour_luma(c);
     let scale = max(y, 0.1);
@@ -285,6 +287,10 @@ fn chroma_key(c: vec4<f32>) -> vec4<f32> {
     let d = chroma_of(colour) - chroma_of(key);
     let distance = sqrt(d.x * d.x + d.y * d.y);
     var keep = colour_smooth(reach, reach + soft, distance);
+    let choke = colour_params.v[2].x;
+    if (choke > 0.0) {
+        keep = clamp((keep - choke) / (1.0 - choke), 0.0, 1.0);
+    }
     if (shadow > 0.0 && keep < 1.0) {
         let darker = clamp((key_luma - colour_luma(colour)) / max(key_luma, 1e-3), 0.0, 1.0);
         keep = max(keep, darker * shadow);
@@ -550,6 +556,8 @@ mod tests {
             color: [0.0, 1.0, 0.0],
             strength: 0.0,
             shadow: 0.5,
+            feather: 0.0,
+            clean_up: 0.0,
         });
         colour.lut = Some(ClipLut {
             name: "none".into(),
@@ -566,6 +574,8 @@ mod tests {
                 color: [0.0, 1.0, 0.0],
                 strength: 0.4,
                 shadow: 0.0,
+                feather: 0.0,
+                clean_up: 0.0,
             }),
             lut: Some(ClipLut {
                 name: "id".into(),

@@ -7,12 +7,12 @@ license.workspace = true
 description = "Demux and mux for WAV and RF64."
 
 [dependencies]
-cutlass-codec = { path = "../../codec", version = "0.1.0" }
-cutlass-container = { path = "../../container", version = "0.1.0" }
+cutlass-codec = { path = "../../codec", version = "0.8.0" }
+cutlass-container = { path = "../../container", version = "0.8.0" }
 
 [dev-dependencies]
-cutlass-codec = { path = "../../codec", version = "0.1.0" }
-cutlass-container = { path = "../../container", version = "0.1.0" }
+cutlass-codec = { path = "../../codec", version = "0.8.0" }
+cutlass-container = { path = "../../container", version = "0.8.0" }
 
 [lints]
 workspace = true

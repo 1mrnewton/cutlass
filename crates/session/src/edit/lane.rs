@@ -183,5 +183,16 @@ mod tests {
             Err(EditError::BeforeZero)
         );
         session.apply(1, &[shift("sound", 2_000_000)]).unwrap();
+        // A start whose end passes a day, or would overflow, is refused,
+        // and the draft keeps its length.
+        let end = crate::MAX_TIMELINE - 1_000_000;
+        session.apply(2, &[shift("sound", end)]).unwrap();
+        for start in [end + 1, i64::MAX - 10, i64::MAX] {
+            assert_eq!(
+                session.apply(3, &[shift("sound", start)]),
+                Err(EditError::TooLong)
+            );
+        }
+        assert_eq!(session.draft().duration.0, crate::MAX_TIMELINE);
     }
 }

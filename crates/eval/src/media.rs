@@ -18,7 +18,9 @@
 //! drawn behind that fitted picture.
 //!
 //! [`OpenClips`] keeps a file open for one draft revision. A later time seeks
-//! that file. A failed open is not kept, so the next time tries again.
+//! that file. A failed open is not kept, so the next time tries again. A
+//! clip open at the last revision whose file and timing did not change is
+//! used again at the next one, with its decoded pictures and its thread.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -28,7 +30,7 @@ use cutlass_codec::access::{ColorPrimaries, ColorRange, PixelFormat, Transfer};
 use cutlass_color::{Matrix, Signal, SignalCurve};
 use cutlass_engine::{
     ClockKind, DecodedFrame, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture,
-    open_segment_from, open_segment_in,
+    open_plan, open_segment_from, segment_plan_from, segment_plan_in,
 };
 use cutlass_gpu::{Affine, Placement, ToneCurve, YuvMatrix, YuvTone};
 use cutlass_model::{
@@ -45,25 +47,50 @@ const READ_AHEAD: usize = 8;
 
 /// Open one clip and start its decode thread. A clip whose thread cannot
 /// start still decodes on the caller's thread.
+///
+/// `kept` is the clip as the last revision opened it. When it reads the
+/// same file with the same timing, it is used again instead.
 fn open_clip(
     media: &ReaderFactory,
     draft: &Draft,
     id: &SegmentId,
     root: Option<&Path>,
     patient: bool,
+    kept: Option<VideoSource>,
 ) -> Option<VideoSource> {
     // A clip with an enhanced copy draws from it; a copy that will not
     // open leaves the clip its own file.
-    let copy = crate::enhance::enhanced_copy(draft, root, id).and_then(|(path, from)| {
-        open_segment_from(media, draft, id, ClockKind::Export, 1, path, from).ok()
-    });
-    let mut source = match copy {
-        Some(source) => source,
-        None => open_segment_in(media, draft, id, ClockKind::Export, 1, root).ok()?,
-    };
+    let copy = crate::enhance::enhanced_copy(draft, root, id)
+        .and_then(|(path, from)| segment_plan_from(draft, id, path, from).ok());
+    if let (Some(plan), Some(source)) = (&copy, &kept)
+        && source.reads(media, plan)
+    {
+        return kept.map(|source| patient_as(source, patient));
+    }
+    if let Some(plan) = copy
+        && let Ok(source) = open_plan(media, plan, ClockKind::Export, 1)
+    {
+        return Some(started(media, source, patient));
+    }
+    let own = segment_plan_in(draft, id, root).ok()?;
+    if let Some(source) = kept
+        && source.reads(media, &own)
+    {
+        return Some(patient_as(source, patient));
+    }
+    let source = open_plan(media, own, ClockKind::Export, 1).ok()?;
+    Some(started(media, source, patient))
+}
+
+/// `source` with its decode thread started and `patient` set.
+fn started(media: &ReaderFactory, mut source: VideoSource, patient: bool) -> VideoSource {
     let _ = source.read_ahead(media, READ_AHEAD);
+    patient_as(source, patient)
+}
+
+fn patient_as(source: VideoSource, patient: bool) -> VideoSource {
     source.set_patient(patient);
-    Some(source)
+    source
 }
 
 /// Open the depth video that lights clip `id`, when it has one, decoding
@@ -76,6 +103,22 @@ fn open_depth(
     patient: bool,
 ) -> Option<VideoSource> {
     let (path, from) = crate::relight::relight_depth(draft, root, id)?;
+    let mut source = open_segment_from(media, draft, id, ClockKind::Export, 1, path, from).ok()?;
+    let _ = source.read_ahead(media, READ_AHEAD);
+    source.set_patient(patient);
+    Some(source)
+}
+
+/// Open the matte video that cuts clip `id`, when it has one, decoding
+/// ahead like the clip.
+fn open_matte(
+    media: &ReaderFactory,
+    draft: &Draft,
+    id: &SegmentId,
+    root: Option<&Path>,
+    patient: bool,
+) -> Option<VideoSource> {
+    let (path, from) = crate::matte::matte_video(draft, root, id)?;
     let mut source = open_segment_from(media, draft, id, ClockKind::Export, 1, path, from).ok()?;
     let _ = source.read_ahead(media, READ_AHEAD);
     source.set_patient(patient);
@@ -101,9 +144,17 @@ pub struct OpenClips {
     /// Project folder for a relative media path. An absolute path ignores it.
     root: Option<std::path::PathBuf>,
     sources: HashMap<SegmentId, VideoSource>,
+    /// The clips the last revision had open, waiting to be used again. One
+    /// whose file or timing changed is dropped when it is asked for.
+    kept: HashMap<SegmentId, VideoSource>,
+    /// The compounds the last revision had open, waiting the same way.
+    kept_nests: HashMap<SegmentId, OpenClips>,
     /// Relit clips' depth videos for this revision; `None` is a clip
     /// whose depth is not made yet.
     relights: HashMap<SegmentId, Option<VideoSource>>,
+    /// Cut-out clips' matte videos for this revision; `None` is a clip
+    /// whose matte is not made yet.
+    mattes: HashMap<SegmentId, Option<VideoSource>>,
     nests: HashMap<SegmentId, OpenClips>,
     images: HashMap<String, CpuBytes>,
     /// Title rasters by segment, with the density each was drawn at. A
@@ -135,7 +186,10 @@ impl OpenClips {
             bound: false,
             root: None,
             sources: HashMap::new(),
+            kept: HashMap::new(),
+            kept_nests: HashMap::new(),
             relights: HashMap::new(),
+            mattes: HashMap::new(),
             nests: HashMap::new(),
             images: HashMap::new(),
             texts: HashMap::new(),
@@ -156,6 +210,7 @@ impl OpenClips {
             .sources
             .values()
             .chain(self.relights.values().flatten())
+            .chain(self.mattes.values().flatten())
         {
             source.set_patient(patient);
         }
@@ -172,6 +227,7 @@ impl OpenClips {
             .sources
             .values()
             .chain(self.relights.values().flatten())
+            .chain(self.mattes.values().flatten())
         {
             stale |= source.take_stale();
         }
@@ -184,7 +240,10 @@ impl OpenClips {
     /// Drops every open file.
     pub fn clear(&mut self) {
         self.sources.clear();
+        self.kept.clear();
+        self.kept_nests.clear();
         self.relights.clear();
+        self.mattes.clear();
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
@@ -249,6 +308,33 @@ impl OpenClips {
         Some(lit)
     }
 
+    /// `segment`'s Remove BG settings, opening its matte video the first
+    /// time it is drawn this revision. `None` when it has none.
+    fn matting(
+        &mut self,
+        media: &ReaderFactory,
+        draft: &Draft,
+        segment: &Segment,
+    ) -> Option<cutlass_effects::Matting> {
+        let matting = cutlass_effects::segment_matting(draft, segment)?;
+        if !self.mattes.contains_key(&segment.id) {
+            let matte = open_matte(
+                media,
+                draft,
+                &segment.id,
+                self.root.as_deref(),
+                self.patient,
+            );
+            self.mattes.insert(segment.id.clone(), matte);
+        }
+        Some(matting)
+    }
+
+    /// The matte video opened for clip `id`.
+    fn matte(&self, id: &SegmentId) -> Option<&VideoSource> {
+        self.mattes.get(id).and_then(Option::as_ref)
+    }
+
     /// The depth video opened for clip `id`.
     fn depth(&self, id: &SegmentId) -> Option<&VideoSource> {
         self.relights.get(id).and_then(Option::as_ref)
@@ -289,6 +375,11 @@ impl OpenClips {
     pub(crate) fn child(&mut self, id: &SegmentId) -> &mut Self {
         let root = self.root.clone();
         let patient = self.patient;
+        if !self.nests.contains_key(id)
+            && let Some(kept) = self.kept_nests.remove(id)
+        {
+            self.nests.insert(id.clone(), kept);
+        }
         let child = self.nests.entry(id.clone()).or_default();
         if child.root.is_none() {
             child.root = root;
@@ -334,17 +425,8 @@ impl OpenClips {
                 {
                     continue;
                 }
-                if !self.sources.contains_key(&segment.id) {
-                    let Some(source) = open_clip(
-                        media,
-                        draft,
-                        &segment.id,
-                        self.root.as_deref(),
-                        self.patient,
-                    ) else {
-                        continue;
-                    };
-                    self.sources.insert(segment.id.clone(), source);
+                if !self.ensure_clip(media, draft, &segment.id) {
+                    continue;
                 }
                 if let Some(source) = self.sources.get(&segment.id) {
                     source.prefetch(segment.target.start);
@@ -353,13 +435,32 @@ impl OpenClips {
         }
     }
 
+    /// Open clip `id` unless it is open: used again from the last revision
+    /// when it reads the same file the same way. `false` when it will not
+    /// open.
+    fn ensure_clip(&mut self, media: &ReaderFactory, draft: &Draft, id: &SegmentId) -> bool {
+        if self.sources.contains_key(id) {
+            return true;
+        }
+        let kept = self.kept.remove(id);
+        let Some(source) = open_clip(media, draft, id, self.root.as_deref(), self.patient, kept)
+        else {
+            return false;
+        };
+        self.sources.insert(id.clone(), source);
+        true
+    }
+
     pub(crate) fn prepare(&mut self, draft: &Draft, revision: u64) {
         if self.bound && self.draft.as_ref() == Some(&draft.id) && self.revision == revision {
             return;
         }
-        self.sources.clear();
+        // Clips and compounds wait to be used again; a clip the new
+        // revision does not ask for is dropped at the revision after.
+        self.kept = std::mem::take(&mut self.sources);
+        self.kept_nests = std::mem::take(&mut self.nests);
         self.relights.clear();
-        self.nests.clear();
+        self.mattes.clear();
         self.images.clear();
         self.texts.clear();
         self.captions.clear();
@@ -426,6 +527,8 @@ pub(crate) struct Placed<'a> {
     steady: Option<cutlass_motion::Correction>,
     /// The clip's depth video and the light over it at this frame.
     relight: Option<(&'a VideoSource, cutlass_effects::Lighting)>,
+    /// The clip's matte video and its Remove BG settings.
+    matte: Option<(&'a VideoSource, cutlass_effects::Matting)>,
 }
 
 pub(crate) fn picture_transform(
@@ -569,28 +672,20 @@ pub(crate) fn video_layers<'a>(
             if transform.omitted() {
                 continue;
             }
-            if !clips.sources.contains_key(&segment.id) {
-                let Some(source) = open_clip(
-                    media,
-                    draft,
-                    &segment.id,
-                    clips.root.as_deref(),
-                    clips.patient,
-                ) else {
-                    continue;
-                };
-                clips.sources.insert(segment.id.clone(), source);
+            if !clips.ensure_clip(media, draft, &segment.id) {
+                continue;
             }
             let backdrop = backdrop_for(draft, segment, media, clips, width, height, time);
             let steady = crate::steady::steady_at(clips, draft, segment, time);
             let light = clips.light(media, draft, segment, time);
+            let matting = clips.matting(media, draft, segment);
             chosen.push((
                 segment.render_index,
                 track_index,
                 segment_index,
                 segment.id.clone(),
                 transform,
-                (crop, crop_scale, steady, light),
+                (crop, crop_scale, steady, light, matting),
                 backdrop,
             ));
         }
@@ -602,7 +697,7 @@ pub(crate) fn video_layers<'a>(
         segment_index,
         id,
         transform,
-        (crop, crop_scale, steady, light),
+        (crop, crop_scale, steady, light, matting),
         backdrop,
     ) in chosen
     {
@@ -610,6 +705,7 @@ pub(crate) fn video_layers<'a>(
             continue;
         };
         let relight = clips.depth(&id).zip(light);
+        let matte = clips.matte(&id).zip(matting);
         layers.push(VideoLayer {
             render_index,
             track_index,
@@ -624,6 +720,7 @@ pub(crate) fn video_layers<'a>(
                 backdrop,
                 steady,
                 relight,
+                matte,
             },
         });
     }
@@ -657,21 +754,16 @@ pub(crate) fn video_picture(
     if transform.omitted() {
         return None;
     }
-    if !clips.sources.contains_key(&segment.id) {
-        let source = open_clip(
-            media,
-            draft,
-            &segment.id,
-            clips.root.as_deref(),
-            clips.patient,
-        )?;
-        clips.sources.insert(segment.id.clone(), source);
+    if !clips.ensure_clip(media, draft, &segment.id) {
+        return None;
     }
     let backdrop = backdrop_for(draft, segment, media, clips, width, height, time);
     let steady = crate::steady::steady_at(clips, draft, segment, time);
     let light = clips.light(media, draft, segment, time);
+    let matting = clips.matting(media, draft, segment);
     let source = clips.sources.get(&segment.id)?;
     let relight = clips.depth(&segment.id).zip(light);
+    let matte = clips.matte(&segment.id).zip(matting);
     let placed = Placed {
         source,
         width,
@@ -682,6 +774,7 @@ pub(crate) fn video_picture(
         backdrop,
         steady,
         relight,
+        matte,
     };
     match placed.sample(time) {
         Sample::Ready(Picture::Cpu(bytes)) => Some(bytes),
@@ -791,6 +884,7 @@ impl PictureSource for Placed<'_> {
         match picture {
             Picture::Cpu(bytes) => {
                 let (bytes, display) = self.relit(bytes, time);
+                let (bytes, display) = self.cut_out(bytes, display, time);
                 finish_picture(
                     (self.width, self.height),
                     bytes,
@@ -830,6 +924,40 @@ impl Placed<'_> {
         )
     }
 
+    /// `picture`, turned by `display`, cut down to the clip's matte at
+    /// `time` and turned upright, when the clip has one and it is decoded.
+    fn cut_out(
+        &self,
+        picture: CpuBytes,
+        display: DisplayQuarter,
+        time: Micros,
+    ) -> (CpuBytes, DisplayQuarter) {
+        let Some(matte) = self.decoded_matte(time) else {
+            return (picture, display);
+        };
+        let Some((_, matting)) = &self.matte else {
+            return (picture, display);
+        };
+        let Some(upright) = orient(picture.clone(), display) else {
+            return (picture, display);
+        };
+        (
+            crate::matte::cut_out(upright, &matte, matting),
+            DisplayQuarter::Zero,
+        )
+    }
+
+    /// The clip's matte at `time`, upright, when it has one and it is
+    /// decoded.
+    fn decoded_matte(&self, time: Micros) -> Option<CpuBytes> {
+        let (matte, _) = self.matte.as_ref()?;
+        let Sample::Ready(Picture::Cpu(grey)) = matte.sample(time) else {
+            return None;
+        };
+        let grey = orient(grey, matte.display())?;
+        (grey.width() > 0 && grey.height() > 0).then_some(grey)
+    }
+
     /// This clip as GPU layers: a color backdrop, if any, then the decoded
     /// picture with the maps that place it, over a blurred copy of it when
     /// the backdrop is a blur.
@@ -837,10 +965,10 @@ impl Placed<'_> {
     /// `None` when the GPU path does not reproduce the CPU path: a picture
     /// that is not 8-bit 4:2:0, one whose matrix is not BT.709, BT.601 or
     /// BT.2020, one whose tags the color crate does not map, a crop
-    /// quad that is not a parallelogram, an image backdrop, or a relit
-    /// clip's blur. The caller then uses the CPU picture. A
-    /// relit clip whose depth is decoded is drawn upright on its own
-    /// canvas and lit there.
+    /// quad that is not a parallelogram, an image backdrop, or the blur of
+    /// a relit or cut-out clip. The caller then uses the CPU picture. A
+    /// relit clip whose depth is decoded, or a cut-out clip whose matte is,
+    /// is drawn upright on its own canvas, lit and cut there.
     pub(crate) fn gpu(&self, time: Micros) -> Option<Vec<GpuLayer>> {
         let (backdrop, blur) = match &self.backdrop {
             Backdrop::None => (None, None),
@@ -885,12 +1013,29 @@ impl Placed<'_> {
             tone,
         };
         let mut layers: Vec<GpuLayer> = backdrop.into_iter().collect();
-        if let Some((depth, lighting)) = self.lit_depth(time) {
-            // A blurred backdrop is a copy of the lit picture: the CPU's.
+        let lit = self.lit_depth(time);
+        let matte = self.decoded_matte(time);
+        if lit.is_some() || matte.is_some() {
+            // A blurred backdrop is a copy of the lit or cut picture: the
+            // CPU's.
             if blur.is_some() {
                 return None;
             }
-            layers.push(relit_layer(source, depth, lighting, placement));
+            let mut passes = Vec::new();
+            if let Some((depth, lighting)) = lit {
+                passes.push(GpuLayer {
+                    source: GpuSource::Relight { depth, lighting },
+                    placement: Placement::canvas(oriented.0, oriented.1),
+                    backdrop: None,
+                });
+            }
+            let mut under = None;
+            if let (Some(matte), Some((_, matting))) = (matte, &self.matte) {
+                let (cut, stroke) = crate::matte::matte_passes(&matte, matting, oriented)?;
+                passes.push(cut);
+                under = stroke;
+            }
+            layers.push(upright_layer(source, passes, under, placement));
             return Some(layers);
         }
         let backdrop = match blur {
@@ -928,13 +1073,15 @@ impl Placed<'_> {
     }
 }
 
-/// A relit clip as one layer: its decoded picture drawn upright on a
-/// canvas of its own oriented size, lit there from `depth`, then that
-/// canvas placed as `placement` places the picture, with no turn left.
-fn relit_layer(
+/// A relit or cut-out clip as one layer: its decoded picture drawn upright
+/// on a canvas of its own oriented size with `passes` over it (lit from
+/// its depth, cut to its matte), `under` beneath that (the matte's
+/// outline), then that canvas placed as `placement` places the picture,
+/// with no turn left.
+fn upright_layer(
     source: GpuSource,
-    depth: CpuBytes,
-    lighting: cutlass_effects::Lighting,
+    passes: Vec<GpuLayer>,
+    under: Option<GpuLayer>,
     placement: Placement,
 ) -> GpuLayer {
     let oriented = placement.oriented;
@@ -946,22 +1093,32 @@ fn relit_layer(
         to_texture: placement.to_texture,
         opacity: 1.0,
     };
-    let child = crate::gpu::FrameLayers {
+    let picture = GpuLayer {
+        source,
+        placement: upright,
+        backdrop: None,
+    };
+    let mut child = crate::gpu::FrameLayers {
         width: oriented.0,
         height: oriented.1,
-        layers: vec![
-            GpuLayer {
-                source,
-                placement: upright,
-                backdrop: None,
-            },
-            GpuLayer {
-                source: GpuSource::Relight { depth, lighting },
-                placement: Placement::canvas(oriented.0, oriented.1),
-                backdrop: None,
-            },
-        ],
+        layers: std::iter::once(picture).chain(passes).collect(),
     };
+    // The outline is drawn first on a canvas of its own, the cut picture
+    // over it, so the cut does not take the outline with it.
+    if let Some(under) = under {
+        child = crate::gpu::FrameLayers {
+            width: oriented.0,
+            height: oriented.1,
+            layers: vec![
+                under,
+                GpuLayer {
+                    source: GpuSource::Nested(Box::new(child)),
+                    placement: Placement::canvas(oriented.0, oriented.1),
+                    backdrop: None,
+                },
+            ],
+        };
+    }
     GpuLayer {
         source: GpuSource::Nested(Box::new(child)),
         placement: Placement {
@@ -984,10 +1141,9 @@ struct GpuSamples {
 }
 
 /// The samples of a picture the GPU converts as the CPU does: 8-bit 4:2:0
-/// whose matrix is BT.709 (or unnamed), BT.601 or BT.2020, in either
-/// range, or a platform surface, which is studio swing BT.709. `None` for
-/// every other picture: the CPU conversion reads its depth, chroma layout
-/// and matrix.
+/// or a platform surface standing for it, whose matrix is BT.709 (or
+/// unnamed), BT.601 or BT.2020, in either range. `None` for every other
+/// picture: the CPU conversion reads its depth, chroma layout and matrix.
 fn gpu_samples(frame: DecodedFrame) -> Option<GpuSamples> {
     match frame {
         DecodedFrame::Coded {
@@ -1019,16 +1175,24 @@ fn gpu_samples(frame: DecodedFrame) -> Option<GpuSamples> {
             height,
             primaries,
             transfer,
+            matrix,
+            range,
             surface,
-        } => Some(GpuSamples {
-            width,
-            height,
-            primaries,
-            transfer,
-            matrix: Matrix::Bt709,
-            full_range: false,
-            samples: YuvSamples::Surface(surface),
-        }),
+        } => {
+            let matrix = match Matrix::from_matrix(matrix).ok()? {
+                Matrix::Identity => return None,
+                named => named,
+            };
+            Some(GpuSamples {
+                width,
+                height,
+                primaries,
+                transfer,
+                matrix,
+                full_range: range == ColorRange::Full,
+                samples: YuvSamples::Surface(surface),
+            })
+        }
         DecodedFrame::Coded { .. } | DecodedFrame::Platform { .. } | DecodedFrame::Still(_) => None,
     }
 }
@@ -1906,6 +2070,41 @@ mod tests {
         }
     }
 
+    /// A platform surface standing for a 2x2 4:2:0 picture.
+    #[derive(Debug)]
+    struct HeldSurface;
+
+    impl cutlass_decode::PictureSurface for HeldSurface {
+        fn yuv420p(&self) -> Result<Arc<Vec<u8>>, cutlass_codec::access::CodecError> {
+            Ok(Arc::new(vec![16, 16, 16, 16, 128, 128]))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn a_surface_keeps_its_matrix_and_range_on_the_gpu_and_the_cpu() {
+        use cutlass_color::Matrix;
+        let surface = DecodedFrame::Surface {
+            width: 2,
+            height: 2,
+            primaries: ColorPrimaries::Bt601,
+            transfer: Transfer::Bt709,
+            matrix: ColorMatrix::Bt601,
+            range: ColorRange::Full,
+            surface: cutlass_decode::Surface::new(Arc::new(HeldSurface)),
+        };
+        let cpu = surface.on_cpu().expect("copied out").into_owned();
+        let DecodedFrame::Coded { matrix, range, .. } = cpu else {
+            panic!("not coded");
+        };
+        assert_eq!((matrix, range), (ColorMatrix::Bt601, ColorRange::Full));
+        let gpu = gpu_samples(surface).expect("taken");
+        assert_eq!((gpu.matrix, gpu.full_range), (Matrix::Bt601, true));
+    }
+
     #[test]
     fn the_gpu_takes_the_pictures_it_converts_as_the_cpu_does() {
         use cutlass_color::Matrix;
@@ -2739,5 +2938,93 @@ mod tests {
         let picture = colored(2, 1, &[[9, 0, 0, 255], [8, 0, 0, 255]]);
         let outside = quad([1.0, 0.0, 2.0, 0.0, 1.0, 1.0, 2.0, 1.0]);
         assert_eq!(cropped(picture, outside, 1.0), vec![0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    mod kept {
+        use std::fs::File;
+        use std::path::{Path, PathBuf};
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        use cutlass_codec::CodecId;
+        use cutlass_codec::access::CodecParams;
+        use cutlass_container::{Demux, Input, OpenError, Probe, ProbeResult};
+        use cutlass_decode::{CodecError, Decoder};
+        use cutlass_engine::ReaderFactory;
+        use cutlass_model::{Draft, MaterialVideo, Segment, SegmentId, TimeRange};
+        use cutlass_png::PngDecoder;
+        use cutlass_still::{StillDemux, StillProbe, still_limits};
+
+        use super::super::OpenClips;
+
+        static OPENS: AtomicU32 = AtomicU32::new(0);
+
+        fn probe_still(header: &[u8]) -> ProbeResult {
+            StillProbe.probe(header)
+        }
+
+        fn open_counted(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+            OPENS.fetch_add(1, Ordering::SeqCst);
+            let file = File::open(path).map_err(|error| OpenError::Source {
+                message: error.to_string(),
+            })?;
+            let len = file
+                .metadata()
+                .map_err(|error| OpenError::Source {
+                    message: error.to_string(),
+                })?
+                .len();
+            Ok(Box::new(StillDemux::open(Input::random(
+                file,
+                len,
+                still_limits(),
+            ))?))
+        }
+
+        fn open_png(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+            Ok(Box::new(PngDecoder::open(params)?))
+        }
+
+        fn opens() -> u32 {
+            OPENS.swap(0, Ordering::SeqCst)
+        }
+
+        #[test]
+        fn an_unchanged_clip_stays_open_from_one_revision_to_the_next() {
+            let mut media = ReaderFactory::new();
+            media.register_container(probe_still, open_counted);
+            media.decoders_mut().register(CodecId::Png, open_png);
+            let path =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/fixtures/pattern.png");
+            let mut draft = Draft::empty("kept");
+            let mut video = MaterialVideo::new("still");
+            video.path = path.display().to_string();
+            draft.materials.videos.push(video);
+            let mut segment = Segment::new("still", "still", TimeRange::new(0, 100));
+            segment.source_range = Some(TimeRange::new(0, 100));
+            draft.tracks[0].segments.push(segment);
+            let id = SegmentId::new("still");
+
+            let mut clips = OpenClips::new();
+            clips.prepare(&draft, 1);
+            assert!(clips.ensure_clip(&media, &draft, &id));
+            assert!(opens() > 0, "the first revision opens the clip");
+
+            // Another revision that leaves the clip as it was keeps it open.
+            clips.prepare(&draft, 2);
+            assert!(clips.ensure_clip(&media, &draft, &id));
+            assert_eq!(opens(), 0);
+
+            // A trim changes what it shows: it opens again.
+            draft.tracks[0].segments[0].source_range = Some(TimeRange::new(10, 90));
+            clips.prepare(&draft, 3);
+            assert!(clips.ensure_clip(&media, &draft, &id));
+            assert!(opens() > 0, "a changed clip opens again");
+
+            // A clip one revision did not ask for is closed at the next.
+            clips.prepare(&draft, 4);
+            clips.prepare(&draft, 5);
+            assert!(clips.ensure_clip(&media, &draft, &id));
+            assert!(opens() > 0, "a clip left out is opened again");
+        }
     }
 }

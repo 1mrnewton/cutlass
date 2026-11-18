@@ -95,8 +95,10 @@ fn the_cpu_matches_transformers() {
 }
 
 #[test]
-#[ignore = "needs a Metal GPU"]
+#[ignore = "needs a GPU"]
 fn the_gpu_matches_transformers() {
+    // Trusted as the editor trusts a GPU that passed the check.
+    crate::trust_gpu(crate::check_gpu().ok());
     if let Some((worst, mean)) = against_transformers(Compute::Gpu) {
         assert!(worst < 5e-3 && mean < 5e-4, "worst {worst}, mean {mean}");
     }

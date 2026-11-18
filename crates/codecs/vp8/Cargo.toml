@@ -7,13 +7,13 @@ license.workspace = true
 description = "The vp8 codec."
 
 [dependencies]
-cutlass-decode = { path = "../../decode", version = "0.1.0" }
-cutlass-encode = { path = "../../encode", version = "0.1.0" }
+cutlass-decode = { path = "../../decode", version = "0.8.0" }
+cutlass-encode = { path = "../../encode", version = "0.8.0" }
 
 [dev-dependencies]
-cutlass-codec = { path = "../../codec", version = "0.1.0" }
-cutlass-container = { path = "../../container", version = "0.1.0" }
-cutlass-isobmff = { path = "../../containers/isobmff", version = "0.1.0" }
+cutlass-codec = { path = "../../codec", version = "0.8.0" }
+cutlass-container = { path = "../../container", version = "0.8.0" }
+cutlass-isobmff = { path = "../../containers/isobmff", version = "0.8.0" }
 
 [lints]
 workspace = true

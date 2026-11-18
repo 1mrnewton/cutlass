@@ -259,7 +259,7 @@ impl Shell {
         else {
             return None;
         };
-        let recipe = cutlass_effects::recipe(&effect.effect_id)?;
+        let recipe = cutlass_effects::bundled_recipe(&effect.effect_id)?;
         // Keyed controls show where the playhead is.
         let stored = cutlass_effects::keyed_controls(
             recipe,
@@ -292,7 +292,7 @@ impl Shell {
         else {
             return None;
         };
-        let recipe = cutlass_effects::recipe(&effect.effect_id)?;
+        let recipe = cutlass_effects::bundled_recipe(&effect.effect_id)?;
         let control = recipe
             .controls
             .iter()
@@ -562,7 +562,21 @@ impl Shell {
     pub fn setting_keys(&self, setting: KeyedSetting) -> Option<cutlass_editor::ClipKeys> {
         let segment_id = self.selected()?;
         let draft = self.draft()?;
-        cutlass_editor::value_keys(draft, segment_id, self.playhead, setting.names())
+        let names = self.setting_names(setting);
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        cutlass_editor::value_keys(draft, segment_id, self.playhead, &names)
+    }
+
+    /// The key names `setting` is stored under on the selected clip: a
+    /// mask setting's are the names of the mask in hand.
+    pub(super) fn setting_names(&self, setting: KeyedSetting) -> Vec<String> {
+        self.mask_setting_names(setting).unwrap_or_else(|| {
+            setting
+                .names()
+                .iter()
+                .map(|&name| name.to_owned())
+                .collect()
+        })
     }
 
     /// Whether the selected clip has keys on `setting`.
@@ -597,11 +611,7 @@ impl Shell {
             return self.apply(Request::UnkeyValues {
                 segment_id,
                 offset,
-                properties: setting
-                    .names()
-                    .iter()
-                    .map(|&name| name.to_owned())
-                    .collect(),
+                properties: self.setting_names(setting),
             });
         }
         let values = self.setting_values(setting).ok_or_else(|| {
@@ -677,18 +687,12 @@ impl Shell {
                 self.keys()?;
                 self.pose_values(setting, &inspection)?
             }
-            KeyedSetting::Mask => mask_values(&inspection.mask?).to_vec(),
-            KeyedSetting::MaskPosition
+            KeyedSetting::Mask
+            | KeyedSetting::MaskPosition
             | KeyedSetting::MaskSize
             | KeyedSetting::MaskRotation
             | KeyedSetting::MaskFeather
-            | KeyedSetting::MaskRound => {
-                let values = mask_values(&inspection.mask?);
-                let (_, range) = KeyedSetting::MASK_PARTS
-                    .into_iter()
-                    .find(|(part, _)| *part == setting)?;
-                values[range].to_vec()
-            }
+            | KeyedSetting::MaskRound => self.mask_setting_values(setting)?,
             KeyedSetting::Volume => vec![inspection.volume],
             KeyedSetting::Adjust(key) => {
                 self.adjust_segment().ok()?;
@@ -763,10 +767,8 @@ impl Shell {
             }
         };
         Some(
-            setting
-                .names()
-                .iter()
-                .map(|&name| name.to_owned())
+            self.setting_names(setting)
+                .into_iter()
                 .zip(values)
                 .collect(),
         )
@@ -811,10 +813,9 @@ impl Shell {
         Some(Request::KeyValues {
             segment_id: self.selected()?.clone(),
             offset,
-            values: setting
-                .names()
-                .iter()
-                .map(|&name| name.to_owned())
+            values: self
+                .setting_names(setting)
+                .into_iter()
                 .zip(values)
                 .collect(),
         })
@@ -875,9 +876,11 @@ impl Shell {
     ) -> Result<(), ShellError> {
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
+        let names = self.setting_names(setting);
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let request = self
             .setting_keys(setting)
-            .and_then(|keys| keys.ease_only(&segment_id, graph, setting.names()))
+            .and_then(|keys| keys.ease_only(&segment_id, graph, &names))
             .ok_or_else(|| {
                 ShellError::Unavailable(
                     "move the playhead between two keyframes to ease them".to_owned(),
@@ -1781,7 +1784,7 @@ pub fn mask_values(mask: &cutlass_effects::Mask) -> [f64; 7] {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use cutlass_model::{
         Draft, MaterialAudio, MaterialColorConfig, MaterialEffect, MaterialText, MaterialVideo,
         MaterialVideoEffect, RawMaterial, Segment, SegmentId, TimeRange, Track, TrackAttribute,
@@ -1806,7 +1809,7 @@ mod tests {
     }
 
     /// One clip of each kind, each on its own row from one to three seconds.
-    fn every_kind(temp: &Temp) -> Shell {
+    pub(in crate::shell) fn every_kind(temp: &Temp) -> Shell {
         let mut draft = Draft::empty("draft");
         draft.materials.videos.push(MaterialVideo::new("movie"));
         let mut photo = MaterialVideo::new("photo");

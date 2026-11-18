@@ -28,6 +28,7 @@ mod inspector;
 mod keys;
 mod lane;
 mod library;
+mod mask;
 mod media_place;
 mod pen;
 mod project_choices;
@@ -72,9 +73,9 @@ pub use clipboard::{ClipboardMiss, CopiedClip, copy_clips, paste_requests, rehom
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
 pub use effect_shelf::{
     ADJUSTMENT_CARD, ClipEffect, EFFECT_CARD_PREFIX, EFFECT_LENGTH, EffectCard, EffectPlace,
-    FILTER_CARD_PREFIX, effect_cards, effect_categories, effect_of_card, effect_requests,
-    effect_row_for, effect_target, effect_title, effects_on, filter_cards, filter_categories,
-    filter_of_card,
+    FILTER_CARD_PREFIX, carries_clip_effects, effect_cards, effect_categories, effect_of_card,
+    effect_requests, effect_row_for, effect_target, effect_title, effects_by_clip, effects_on,
+    filter_cards, filter_categories, filter_of_card, rides_on_clip,
 };
 pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
 pub use fling::{
@@ -104,6 +105,10 @@ pub use library::{
     LIBRARY_TOP, LibraryFile, LibraryShelf, LibrarySort, NEW_FOLDER_NAME, add_folder,
     delete_folder, folder_trail, hide_file, library_cut, library_files, library_folders,
     next_folder_name, parent_of, picked_files, place, rename_folder,
+};
+pub use mask::{
+    ClipFrame, MaskGesture, MaskHandle, MaskHandles, box_point, brush_art, brush_stroke,
+    mask_edit_requests, mask_handles, mask_pick, pen_art, text_box,
 };
 pub use media_place::{MediaPlace, extract_request, media_requests, sound_row};
 pub use pen::{FREEHAND_TOLERANCE, PEN_DRAG_MIN, PenPath, PenPress, freehand};

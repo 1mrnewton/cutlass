@@ -24,6 +24,7 @@ import uniffi.cutlass_ffi_bindings.AnimationPreset
 import uniffi.cutlass_ffi_bindings.Background
 import uniffi.cutlass_ffi_bindings.CanvasRatio
 import uniffi.cutlass_ffi_bindings.Clip
+import uniffi.cutlass_ffi_bindings.ClipMask
 import uniffi.cutlass_ffi_bindings.ClipAnimations
 import uniffi.cutlass_ffi_bindings.ClipState
 import uniffi.cutlass_ffi_bindings.EffectChoice
@@ -33,6 +34,7 @@ import uniffi.cutlass_ffi_bindings.Frame
 import uniffi.cutlass_ffi_bindings.Keyframes
 import uniffi.cutlass_ffi_bindings.Lane
 import uniffi.cutlass_ffi_bindings.LaneKind
+import uniffi.cutlass_ffi_bindings.MaskHandles
 import uniffi.cutlass_ffi_bindings.Stage
 import uniffi.cutlass_ffi_bindings.TextInfo
 import uniffi.cutlass_ffi_bindings.TextPattern
@@ -46,6 +48,7 @@ import uniffi.cutlass_ffi_bindings.cropRatios
 import uniffi.cutlass_ffi_bindings.effectChoices
 import uniffi.cutlass_ffi_bindings.flingStart
 import uniffi.cutlass_ffi_bindings.flingStep
+import uniffi.cutlass_ffi_bindings.maskShapes
 import uniffi.cutlass_ffi_bindings.Font as FaceInfo
 
 /**
@@ -128,6 +131,30 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
 
     /** The Animations panel's presets; they never change. */
     val animationList: List<AnimationPreset> = animationPresets()
+
+    /** The selected clip's masks, in the order they combine, as at the playhead. */
+    var masks by mutableStateOf(emptyList<ClipMask>())
+        private set
+
+    /** The place of the mask in hand in [masks]. */
+    var maskIndex by mutableIntStateOf(0)
+        private set
+
+    /** Where the mask in hand's knobs are on the canvas. */
+    var maskHandles by mutableStateOf<MaskHandles?>(null)
+        private set
+
+    /** What a finger on the preview does while the Mask panel is open. */
+    var maskTool by mutableStateOf(MaskTool.HANDLES)
+
+    /** The brush width in canvas pixels. */
+    var maskBrushSize by mutableStateOf(40.0)
+
+    /** The pen outline drawn so far, in canvas pixels. */
+    var penPoints by mutableStateOf(emptyList<Offset>())
+
+    /** The Mask panel's shape tiles; they never change. */
+    val maskShapeList = maskShapes()
 
     /** dp per microsecond on the timeline, as iOS uses points. Rust holds it inside what the cut allows. */
     var pixelSize by mutableStateOf(60.0 / 1_000_000)
@@ -616,6 +643,128 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
         if (now) stage = box
         keys = clip?.let { runCatching { editor?.keyframes(it, at) }.getOrNull() }
         animations = clip?.let { runCatching { editor?.animations(it) }.getOrNull() }
+        masks = clip?.let { runCatching { editor?.masks(it, false, at) }.getOrNull() } ?: emptyList()
+        refreshMaskHandles()
+    }
+
+    // Masks
+
+    /** The mask in hand, kept inside the list. */
+    val maskInHand: ClipMask? get() = masks.getOrNull(maskIndex)
+
+    /** Take the mask at `index` in hand. */
+    fun chooseMask(index: Int) {
+        maskIndex = index
+        refreshMaskHandles()
+    }
+
+    private fun refreshMaskHandles() {
+        if (masks.isNotEmpty() && maskIndex >= masks.size) maskIndex = masks.size - 1
+        val clip = selectedClip
+        val index = maskIndex.coerceAtLeast(0).toUInt()
+        maskHandles = if (clip == null || masks.isEmpty()) {
+            null
+        } else {
+            runCatching { editor?.maskHandles(clip, false, index, playheadUs) }.getOrNull()
+        }
+    }
+
+    /** Put a new mask of `shape` at the end of the list and take it in hand. */
+    fun addMask(shape: String) {
+        val editor = editor ?: return
+        val clip = selectedClip ?: return
+        pause()
+        try {
+            val index = editor.addMask(clip, false, shape, playheadUs)
+            editor.save()
+            reload()
+            chooseMask(index.toInt())
+        } catch (error: Exception) {
+            show(error)
+            reload()
+        }
+    }
+
+    /** Make the mask in hand `mask`. Changes while `live` join one undo step; the last, not live, saves. */
+    fun editMask(mask: ClipMask, live: Boolean) {
+        val clip = selectedClip ?: return
+        val index = maskIndex.toUInt()
+        val at = playheadUs
+        edit(save = !live) { it.editMask(clip, false, index, at, mask, live) }
+    }
+
+    fun removeMask() {
+        val clip = selectedClip ?: return
+        if (maskInHand == null) return
+        val index = maskIndex.toUInt()
+        edit { it.removeMask(clip, false, index) }
+    }
+
+    /** Move the mask in hand one place earlier in the list, or later. */
+    fun moveMask(up: Boolean) {
+        val clip = selectedClip ?: return
+        val to = if (up) maskIndex - 1 else maskIndex + 1
+        if (maskInHand == null || to !in masks.indices) return
+        val from = maskIndex.toUInt()
+        maskIndex = to
+        edit { it.moveMask(clip, false, from, to.toUInt()) }
+    }
+
+    fun setMaskText(text: String) {
+        val clip = selectedClip ?: return
+        val index = maskIndex.toUInt()
+        edit { it.setMaskText(clip, false, index, text) }
+    }
+
+    /** Paint, or rub out, a stroke through canvas points on the brush mask in hand. */
+    fun paintMask(points: List<Offset>, erase: Boolean) {
+        val clip = selectedClip ?: return
+        val index = maskIndex.toUInt()
+        val at = playheadUs
+        val trace = points.flatMap { listOf(it.x.toDouble(), it.y.toDouble()) }
+        val size = maskBrushSize
+        edit { it.paintMask(clip, false, index, at, trace, size, erase) }
+    }
+
+    /** Make the pen mask in hand the outline through the pen points, then put the pen down. */
+    fun finishOutline() {
+        val clip = selectedClip ?: return
+        val index = maskIndex.toUInt()
+        val at = playheadUs
+        val corners = penPoints.flatMap { listOf(it.x.toDouble(), it.y.toDouble()) }
+        penPoints = emptyList()
+        maskTool = MaskTool.HANDLES
+        edit { it.drawMaskOutline(clip, false, index, at, corners) }
+    }
+
+    /** Take hold of a knob of the mask in hand at a canvas point. False when none is there. */
+    fun beginMaskDrag(point: Offset): Boolean {
+        val editor = editor ?: return false
+        val clip = selectedClip ?: return false
+        if (maskInHand == null) return false
+        pause()
+        return runCatching {
+            editor.maskBegin(clip, false, maskIndex.toUInt(), playheadUs, point.x.toDouble(), point.y.toDouble())
+        }.getOrDefault(false)
+    }
+
+    /** Move the knob held to a canvas point. Rust keeps one undo step. */
+    fun dragMask(point: Offset) {
+        val editor = editor ?: return
+        try {
+            editor.maskDrag(point.x.toDouble(), point.y.toDouble())
+        } catch (error: Exception) {
+            show(error)
+            return
+        }
+        refreshStage()
+        draw()
+    }
+
+    /** End the mask drag and save. */
+    fun endMaskDrag() {
+        val editor = editor ?: return
+        edit { editor.maskEnd() }
     }
 
     /** The keyframe button: remove the keyframe under the playhead, else key the selected clip there. */

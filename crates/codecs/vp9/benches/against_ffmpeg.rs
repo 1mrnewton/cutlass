@@ -381,7 +381,7 @@ fn tight(plane: &Plane) -> Result<Vec<u8>, String> {
     let width = usize::try_from(plane.width).map_err(|_| "plane width".to_string())?;
     let height = usize::try_from(plane.height).map_err(|_| "plane height".to_string())?;
     if plane.stride == width {
-        return Ok(plane.samples.clone());
+        return Ok(plane.samples.to_vec());
     }
     let mut out = Vec::new();
     for row in 0..height {

@@ -25,12 +25,32 @@ fn main() -> ExitCode {
                 Err(_) => ExitCode::FAILURE,
             };
         }
-        Command::Window | Command::Studio | Command::Mcp(_) | Command::New(_) => {}
+        Command::GpuCheck => {
+            // Started by the editor, which reads the answer: no log, no
+            // window. A driver that aborts ends only this process.
+            let kernels = cutlass::shell::Shell::home().cache().join("kernels");
+            return match cutlass::gpu_trust::serve(&kernels) {
+                Ok(said) => say(&format!("{said}\n")),
+                Err(error) => {
+                    let _ = std::io::Write::write_all(
+                        &mut std::io::stderr(),
+                        format!("{error}\n").as_bytes(),
+                    );
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Command::Window | Command::Mcp(_) | Command::New(_) => {}
     }
     let _opened = cutlass::boot(None);
+    if !matches!(command, Command::New(_)) {
+        cutlass::gpu_trust::start_check();
+    }
     let opened = match command {
         Command::Mcp(path) => {
-            return match cutlass::mcp::run(path.as_deref()) {
+            let served = cutlass::mcp::run(path.as_deref());
+            cutlass::gpu_trust::stop_check();
+            return match served {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => fail("cutlass mcp", &error),
             };
@@ -49,10 +69,9 @@ fn main() -> ExitCode {
                 Err(error) => fail("cutlass new", &error.to_string()),
             };
         }
-        // `cutlass studio`: the window, open on the effect studio.
-        Command::Studio => cutlass::window::run_studio(),
         _ => cutlass::window::run(),
     };
+    cutlass::gpu_trust::stop_check();
     if let Err(error) = opened {
         cutlass::report_error(&error.to_string());
     }

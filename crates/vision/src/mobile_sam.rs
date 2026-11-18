@@ -93,8 +93,8 @@ impl MobileSam {
         let (scores, logits) =
             self.decoder
                 .forward(frame.embeddings.clone(), coords, labels, no_mask, has_mask);
-        let scores = read(scores.into_data())?;
-        let logits = read(logits.into_data())?;
+        let scores = read(crate::read_back(scores)?)?;
+        let logits = read(crate::read_back(logits)?)?;
         if scores.len() != CANDIDATES || logits.len() != CANDIDATES * LOW_RES * LOW_RES {
             return Err(VisionError::Model {
                 message: format!(
@@ -380,16 +380,15 @@ mod tests {
         matches_onnxruntime(Compute::Cpu);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "needs a Metal GPU and about half a minute of kernel warm-up"]
-    fn the_mac_gpu_matches_onnxruntime() {
+    #[ignore = "needs a GPU and about half a minute of kernel warm-up"]
+    fn the_gpu_matches_onnxruntime() {
+        crate::trust_gpu(crate::check_gpu().ok());
         matches_onnxruntime(Compute::Gpu);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "needs a Metal GPU; run alone, because the kernel folder is set for the whole process"]
+    #[ignore = "needs a GPU; run alone, because the kernel folder is set for the whole process"]
     fn compiled_kernels_land_in_the_folder_given() {
         let Some(reference) = reference("landscape") else {
             return;

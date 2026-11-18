@@ -110,7 +110,7 @@ mod tests {
                 });
             }
             Ok(vec![Packet::video(
-                input.frame.y.samples.clone(),
+                input.frame.y.samples.to_vec(),
                 input.pts,
                 input.duration,
                 input.timescale,

@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "id": "ghost",
+  "name": "Ghost",
+  "category": "Motion",
+  "preview": "dancer",
+  "poster": 1,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "ghost", "name": "Ghost", "default": 0.5, "min": 0, "max": 1, "unit": "percent", "set": [[2, "amount"]]}
+  ],
+  "passes": [
+    { "block": "transform", "params": {"scale": 1.08, "x": {"wave": {"period": 2, "from": -0.06, "to": 0.06}}} },
+    { "block": "blur", "params": {"radius": 0.004} },
+    { "block": "blend", "params": {"mode": 4, "amount": 0.5} }
+  ]
+}

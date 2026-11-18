@@ -14,13 +14,13 @@ license.workspace = true
 description = "Times the editor's playback, scrub and export on a three-layer cut."
 
 [dependencies]
-cutlass-codec = { path = "../../crates/codec", version = "0.1.0" }
-cutlass-eval = { path = "../../crates/eval", version = "0.1.0" }
-cutlass-export = { path = "../../crates/export", version = "0.1.0" }
-cutlass-ffi = { path = "../../crates/ffi", version = "0.1.0" }
-cutlass-model = { path = "../../crates/model", version = "0.1.0" }
-cutlass-render = { path = "../../crates/render", version = "0.1.0" }
-cutlass-session = { path = "../../crates/session", version = "0.1.0" }
+cutlass-codec = { path = "../../crates/codec", version = "0.8.0" }
+cutlass-eval = { path = "../../crates/eval", version = "0.8.0" }
+cutlass-export = { path = "../../crates/export", version = "0.8.0" }
+cutlass-ffi = { path = "../../crates/ffi", version = "0.8.0" }
+cutlass-model = { path = "../../crates/model", version = "0.8.0" }
+cutlass-render = { path = "../../crates/render", version = "0.8.0" }
+cutlass-session = { path = "../../crates/session", version = "0.8.0" }
 serde_json = "1.0.154"
 
 [lints]

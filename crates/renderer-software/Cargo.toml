@@ -7,7 +7,7 @@ license.workspace = true
 description = "The CPU device."
 
 [dependencies]
-cutlass-gpu = { path = "../gpu", version = "0.1.0" }
+cutlass-gpu = { path = "../gpu", version = "0.8.0" }
 
 [lints]
 workspace = true

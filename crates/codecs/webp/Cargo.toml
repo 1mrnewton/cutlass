@@ -7,8 +7,8 @@ license.workspace = true
 description = "The webp codec."
 
 [dependencies]
-cutlass-decode = { path = "../../decode", version = "0.1.0" }
-cutlass-encode = { path = "../../encode", version = "0.1.0" }
+cutlass-decode = { path = "../../decode", version = "0.8.0" }
+cutlass-encode = { path = "../../encode", version = "0.8.0" }
 
 [lints]
 workspace = true
@@ -18,7 +18,7 @@ name = "throughput"
 harness = false
 
 [dev-dependencies]
-cutlass-png = { path = "../png", version = "0.1.0" }
-cutlass-codec = { path = "../../codec", version = "0.1.0" }
-cutlass-container = { path = "../../container", version = "0.1.0" }
-cutlass-still = { path = "../../containers/still", version = "0.1.0" }
+cutlass-png = { path = "../png", version = "0.8.0" }
+cutlass-codec = { path = "../../codec", version = "0.8.0" }
+cutlass-container = { path = "../../container", version = "0.8.0" }
+cutlass-still = { path = "../../containers/still", version = "0.8.0" }

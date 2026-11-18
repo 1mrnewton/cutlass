@@ -27,8 +27,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cutlass_decode::{
-    CodecError, CodecId, CodecParams, ColorPrimaries, Decoder, Output, Packet, PictureInfo,
-    PictureOutput, PictureSamples, PixelFormat, Surface, Transfer,
+    CodecError, CodecId, CodecParams, ColorMatrix, ColorPrimaries, Decoder, Output, Packet,
+    PictureInfo, PictureOutput, PictureSamples, PixelFormat, Surface, Transfer,
 };
 use cutlass_encode::{AudioInput, CpuFrame, Encoder, FrameInput, FrameTime, PictureInput};
 
@@ -1418,13 +1418,7 @@ fn copy_planar(
 ) -> Result<PictureOutput, CodecError> {
     let (width, height) = nv12_size(image)?;
     let bytes = copy_nv12(image)?;
-    let (primaries, transfer) = buffer_color(image);
-    PictureOutput::cpu(
-        PictureInfo::new(width, height, PixelFormat::Yuv420p, primaries, transfer),
-        bytes,
-        pts,
-        timescale,
-    )
+    PictureOutput::cpu(buffer_info(image, width, height), bytes, pts, timescale)
 }
 
 /// Keep an IOSurface-backed NV12 buffer as a [`Surface`]. A buffer that is
@@ -1448,13 +1442,50 @@ fn surface_picture(
         return planar_picture(image, pts, timescale);
     }
     let surface = super::surface::VtSurface::retain(image, width, height)?;
-    let (primaries, transfer) = buffer_color(image);
     PictureOutput::surface(
-        PictureInfo::new(width, height, PixelFormat::Yuv420p, primaries, transfer),
+        buffer_info(image, width, height),
         Surface::new(Arc::new(surface)),
         pts,
         timescale,
     )
+}
+
+/// The 4:2:0 picture `image` stands for, with the colour VideoToolbox
+/// attached to it. The buffer is `420v`, studio swing, which an unspecified
+/// range already means.
+fn buffer_info(image: *mut std::ffi::c_void, width: u32, height: u32) -> PictureInfo {
+    let (primaries, transfer) = buffer_color(image);
+    let mut info = PictureInfo::new(width, height, PixelFormat::Yuv420p, primaries, transfer);
+    info.matrix = buffer_matrix(image);
+    info.cicp_matrix = match info.matrix {
+        ColorMatrix::Bt709 => 1,
+        ColorMatrix::Bt601 => 6,
+        ColorMatrix::Bt2020 => 9,
+        _ => 2,
+    };
+    info
+}
+
+/// The Y′CbCr matrix VideoToolbox attached to `image`. A missing or
+/// other tag is unspecified, which converts as BT.709: SMPTE 240M, which
+/// the colour crate has no matrix for, is within 0.001 of it.
+fn buffer_matrix(image: *mut std::ffi::c_void) -> ColorMatrix {
+    // SAFETY: callers pass a live `CVPixelBuffer`. The key and the names are
+    // CoreVideo's constant strings, set at load and never written.
+    unsafe {
+        match attachment(image, sys::kCVImageBufferYCbCrMatrixKey) {
+            Some(tag) if same(&tag, sys::kCVImageBufferYCbCrMatrix_ITU_R_709_2) => {
+                ColorMatrix::Bt709
+            }
+            Some(tag) if same(&tag, sys::kCVImageBufferYCbCrMatrix_ITU_R_601_4) => {
+                ColorMatrix::Bt601
+            }
+            Some(tag) if same(&tag, sys::kCVImageBufferYCbCrMatrix_ITU_R_2020) => {
+                ColorMatrix::Bt2020
+            }
+            _ => ColorMatrix::Unspecified,
+        }
+    }
 }
 
 /// The primaries and transfer VideoToolbox attached to `image`.
@@ -2394,6 +2425,46 @@ mod tests {
             assert_eq!(copied.as_slice(), bytes);
             assert!(Arc::ptr_eq(&copied, &surface.yuv420p().expect("again")));
         }
+    }
+
+    #[test]
+    fn a_buffer_names_the_matrix_its_attachment_names() {
+        let tagged = |tag: Option<*const std::ffi::c_void>| {
+            let mut raw = ptr::null_mut();
+            // SAFETY: plain sizes and format, no attributes, and a live out
+            // pointer. The buffer is owned (Create rule) and goes to `Cf`.
+            let status = unsafe {
+                sys::CVPixelBufferCreate(ptr::null(), 64, 48, sys::NV12, ptr::null(), &mut raw)
+            };
+            assert_eq!(status, 0);
+            let buffer = Cf::from_owned(raw).expect("buffer");
+            if let Some(tag) = tag {
+                // SAFETY: a live buffer, CoreVideo's constant key and name,
+                // and mode 1, `kCVAttachmentMode_ShouldPropagate`.
+                unsafe {
+                    sys::CVBufferSetAttachment(
+                        buffer.as_mut(),
+                        sys::kCVImageBufferYCbCrMatrixKey,
+                        tag,
+                        1,
+                    );
+                }
+            }
+            let info = buffer_info(buffer.as_mut(), 64, 48);
+            (info.matrix, info.cicp_matrix)
+        };
+        // SAFETY: CoreVideo's constant names, set at load.
+        let (bt601, bt2020, bt709) = unsafe {
+            (
+                sys::kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+                sys::kCVImageBufferYCbCrMatrix_ITU_R_2020,
+                sys::kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            )
+        };
+        assert_eq!(tagged(Some(bt601)), (ColorMatrix::Bt601, 6));
+        assert_eq!(tagged(Some(bt2020)), (ColorMatrix::Bt2020, 9));
+        assert_eq!(tagged(Some(bt709)), (ColorMatrix::Bt709, 1));
+        assert_eq!(tagged(None), (ColorMatrix::Unspecified, 2));
     }
 
     #[test]

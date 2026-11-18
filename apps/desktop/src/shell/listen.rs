@@ -92,6 +92,11 @@ impl Shell {
         };
         let ran = !waiting.is_empty();
         for forwarded in waiting {
+            // Its caller gave up while the calls ahead of it ran, and
+            // takes it not to have run.
+            if forwarded.caller_left() {
+                continue;
+            }
             let run = self.run_agent_tool(&forwarded.call, &[]);
             let outcome = match run.wants {
                 Some(action) => ToolOutcome {

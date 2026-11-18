@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "id": "double-exposure",
+  "name": "Double Exposure",
+  "category": "Light",
+  "preview": "beach",
+  "poster": 1,
+  "controls": [
+    {"id": "speed", "name": "Speed", "default": 1, "min": 0.25, "max": 3, "unit": "times", "speed": true},
+    {"id": "mix", "name": "Mix", "default": 0.75, "min": 0, "max": 1, "unit": "percent", "set": [[2, "amount"]]}
+  ],
+  "passes": [
+    { "block": "transform", "params": {"scale": {"keys": [[0, 1.5], [3, 1.7]], "repeat": 1}, "y": -0.08} },
+    { "block": "grade", "params": {"saturation": 0.3, "brightness": -0.05, "contrast": 1.15} },
+    { "block": "blend", "params": {"mode": 1, "amount": 0.75} }
+  ]
+}

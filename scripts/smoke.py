@@ -41,53 +41,65 @@ def main() -> None:
             "material_id": "media",
             "target_timerange": {"start": 0, "duration": 1_000_000},
         }
-        messages = [
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-            {"jsonrpc": "2.0", "method": "notifications/initialized"},
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
-            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-             "params": {"name": "draft_query", "arguments": {"input": "project"}}},
-            {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-             "params": {"name": "draft_apply", "arguments": {
-                 "expected_revision": 0,
-                 # A place names a material the draft holds, so the
-                 # picture is imported in the same step.
-                 "requests": [
-                     {"op": "import", "medium": {"video": {
-                         "id": "media", "type": "video", "duration": 1_000_000}}},
-                     {"op": "place", "track_id": "main", "segment": segment},
-                 ],
-             }}},
-            # The local sandbox: a Rhai script in a child process.
-            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
-             "params": {"name": "sandbox_run", "arguments": {
-                 "source": "let t = 0; for c in input.clips { t += c } #{ total: t }",
-                 "input": {"clips": [1, 2, 3]},
-             }}},
-            # A script naming the project folder is refused before it runs.
-            {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
-             "params": {"name": "sandbox_run", "arguments": {
-                 "source": "1", "input": {"path": str(project)},
-             }}},
-        ]
-        served = subprocess.run(
+        served = subprocess.Popen(
             [binary, "mcp", project],
-            input="".join(json.dumps(message) + "\n" for message in messages),
-            env=env, capture_output=True, text=True, timeout=120,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, text=True,
         )
-        assert served.returncode == 0, served.stderr
-        answers = [json.loads(line) for line in served.stdout.splitlines() if line.strip()]
-        assert len(answers) == 6, served.stdout
-        assert answers[0]["result"]["serverInfo"]["name"] == "cutlass", answers[0]
-        assert len(answers[1]["result"]["tools"]) > 10, answers[1]
-        read = answers[2]["result"]["content"][0]["text"]
-        assert "revision=0" in read, read
-        applied = answers[3]["result"]["content"][0]["text"]
-        assert applied == "revision=1 committed=true", answers[3]
-        ran = answers[4]["result"]
-        assert not ran["isError"] and json.loads(ran["content"][0]["text"]) == {"total": 6}, ran
-        refused = answers[5]["result"]
-        assert refused["isError"] and "project" in refused["content"][0]["text"], refused
+
+        def send(message: dict) -> None:
+            served.stdin.write(json.dumps(message) + "\n")
+            served.stdin.flush()
+
+        def ask(message: dict) -> dict:
+            send(message)
+            line = served.stdout.readline()
+            assert line, served.stderr.read()
+            return json.loads(line)
+
+        def call(id: int, name: str, arguments: dict) -> dict:
+            return ask({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                        "params": {"name": name, "arguments": arguments}})["result"]
+
+        try:
+            hello = ask({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+            assert hello["result"]["serverInfo"]["name"] == "cutlass", hello
+            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            tools = ask({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+            assert len(tools["result"]["tools"]) > 10, tools
+
+            # A project opens at a revision of its own, so read it first.
+            read = call(3, "draft_query", {"input": "project"})["content"][0]["text"]
+            assert read.startswith("revision="), read
+            revision = int(read.split()[0].removeprefix("revision="))
+            applied = call(4, "draft_apply", {
+                "expected_revision": revision,
+                # A place names a material the draft holds, so the
+                # picture is imported in the same step.
+                "requests": [
+                    {"op": "import", "medium": {"video": {
+                        "id": "media", "type": "video", "duration": 1_000_000}}},
+                    {"op": "place", "track_id": "main", "segment": segment},
+                ],
+            })["content"][0]["text"]
+            assert applied == f"revision={revision + 1} committed=true", applied
+
+            # The local sandbox: a Rhai script in a child process.
+            ran = call(5, "sandbox_run", {
+                "source": "let t = 0; for c in input.clips { t += c } #{ total: t }",
+                "input": {"clips": [1, 2, 3]},
+            })
+            assert not ran["isError"] and json.loads(ran["content"][0]["text"]) == {"total": 6}, ran
+            # A script naming the project folder is refused before it runs.
+            refused = call(6, "sandbox_run", {"source": "1", "input": {"path": str(project)}})
+            assert refused["isError"] and "project" in refused["content"][0]["text"], refused
+
+            served.stdin.close()
+            assert served.wait(timeout=120) == 0, served.stderr.read()
+        finally:
+            if served.poll() is None:
+                served.kill()
+                served.wait()
 
         draft = json.loads((project / "draft_info.json").read_text())
         placed = [segment["id"] for track in draft["tracks"] for segment in track["segments"]]

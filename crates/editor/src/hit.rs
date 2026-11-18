@@ -1,5 +1,6 @@
 use cutlass_model::{Draft, Micros, SegmentId, TimeRange};
 
+use crate::effect_shelf::rides_on_clip;
 use crate::lane::{Lane, lanes_for};
 
 /// A point on the timeline. `x` is pixels from time zero. `y` is pixels from the top lane.
@@ -53,7 +54,7 @@ pub fn hit_test(
     let segment_id = draft
         .tracks
         .get(lane.track_index)
-        .and_then(|track| segment_at(track, time));
+        .and_then(|track| segment_at(draft, track, time));
     Ok(Some(Hit {
         lane,
         time,
@@ -91,11 +92,13 @@ pub(crate) fn time_at(pixel_size: f64, x: f64) -> Option<Micros> {
     Some(Micros(rounded as i64))
 }
 
-fn segment_at(track: &cutlass_model::Track, time: Micros) -> Option<SegmentId> {
-    track
-        .segments
-        .iter()
-        .find_map(|segment| contains(&segment.target, time).then(|| segment.id.clone()))
+/// The clip on `track` at `time`. An effect riding on a clip is drawn on
+/// that clip, not on this row, so it is not hit here.
+fn segment_at(draft: &Draft, track: &cutlass_model::Track, time: Micros) -> Option<SegmentId> {
+    track.segments.iter().find_map(|segment| {
+        (contains(&segment.target, time) && !rides_on_clip(draft, segment))
+            .then(|| segment.id.clone())
+    })
 }
 
 fn contains(range: &TimeRange, time: Micros) -> bool {
@@ -236,6 +239,31 @@ mod tests {
         assert_eq!(
             hit.segment_id.as_ref().map(SegmentId::as_str),
             Some("s-127")
+        );
+    }
+
+    #[test]
+    fn an_effect_riding_on_a_clip_is_not_hit_on_its_row() {
+        let mut draft = draft_with(0, 100);
+        let clip = draft.tracks[0].segments[0].id.clone();
+        let mut row = cutlass_model::Track::main("fx");
+        row.kind = cutlass_model::TrackType::Effect;
+        let mut riding = Segment::new("riding", "m", TimeRange::new(0, 100));
+        riding.bind_to(Some(&clip));
+        row.segments.push(riding);
+        row.segments
+            .push(Segment::new("over-all", "m", TimeRange::new(200, 100)));
+        draft.tracks.push(row);
+        let at = |x: f64| {
+            hit_test(&draft, scale(), Pointer { x, y: 41.0 })
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(at(50.0).lane.track_id.as_str(), "fx");
+        assert_eq!(at(50.0).segment_id, None);
+        assert_eq!(
+            at(250.0).segment_id.as_ref().map(SegmentId::as_str),
+            Some("over-all")
         );
     }
 }

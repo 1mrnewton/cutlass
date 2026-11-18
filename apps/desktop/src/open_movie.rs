@@ -738,6 +738,17 @@ fn split_yuv(width: u32, height: u32, bytes: &[u8]) -> Option<Yuv420p> {
 /// One parity case: a name and an edit to the movie draft.
 type Edit = fn(&mut Draft);
 
+/// A layer, or one nested in it, cuts by a picture of its own.
+fn cut_on_gpu(source: &cutlass_eval::GpuSource) -> bool {
+    match source {
+        cutlass_eval::GpuSource::Select(_) => true,
+        cutlass_eval::GpuSource::Nested(child) => {
+            child.layers.iter().any(|inner| cut_on_gpu(&inner.source))
+        }
+        _ => false,
+    }
+}
+
 /// A layer, or a compound's child layer, is a decoded picture the GPU converts.
 fn decodes_on_gpu(frame: &cutlass_eval::FrameLayers) -> bool {
     frame.layers.iter().any(|layer| match &layer.source {
@@ -1074,6 +1085,105 @@ fn a_relit_movie_lights_on_the_gpu_like_the_cpu() {
 
 /// The movie lit by preset `PRESET` of a few: a warm key, a rim from
 /// behind, and coloured moving spots.
+/// The movie cut out by a matte the job kept in the project: the GPU
+/// cuts its upright picture as the CPU does, with the edge worked and an
+/// outline drawn, moved and turned or not.
+#[test]
+fn a_cut_out_movie_cuts_on_the_gpu_like_the_cpu() {
+    let movies = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    let path = movies.join("IMG_8143.MP4");
+    if !path.is_file() {
+        eprintln!("skipped: ../local-files/IMG_8143.MP4 is missing");
+        return;
+    }
+    let Some(renderer) = importing_renderer() else {
+        eprintln!("skipped: no GPU");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("cutlass-matte-gpu-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    // The matte "video" is a still whose red varies across it, smaller
+    // than the movie so it is stretched.
+    let mut draft = movie_draft(&path, 848, 608, true).unwrap();
+    matted_with::<0>(&mut draft);
+    let ask = cutlass_eval::matte_ask(&draft, Some(&root), &"movie".into()).unwrap();
+    let matte =
+        cutlass_store::matte_file(&root, &ask.key(), &TimeRange::new(0, 1_000_000)).unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/engine/fixtures/pattern.jpg"),
+        &matte,
+    )
+    .unwrap();
+    let fonts = crate::face::installed();
+    let readers = crate::readers::installed_readers();
+    let cases: [(&str, (u32, u32), Edit); 4] = [
+        ("cut out", (848, 608), matted_with::<0>),
+        ("cut out, edge worked", (848, 608), matted_with::<1>),
+        ("cut out, outlined, shrunk", (424, 304), matted_with::<2>),
+        ("cut out, glowing, moved and turned", (848, 608), |draft| {
+            matted_with::<3>(draft);
+            let clip = &mut draft.tracks[0].segments[1].clip;
+            clip.scale.x = 0.6;
+            clip.scale.y = 0.5;
+            clip.rotation = 25.0;
+            clip.alpha = 0.8;
+        }),
+    ];
+    for (name, size, edit) in cases {
+        gpu_matches_cpu_in(
+            &renderer,
+            &fonts,
+            &readers,
+            &path,
+            name,
+            size,
+            edit,
+            Some(&root),
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Auto removal on the movie: plain, with its edge cleaned and feathered,
+/// outlined solid, or glowing.
+fn matted_with<const LOOK: usize>(draft: &mut Draft) {
+    let mut matting = cutlass_effects::Matting::auto();
+    match LOOK {
+        1 => {
+            matting.clean_up = 0.4;
+            matting.feather = 0.6;
+        }
+        2 => {
+            matting.stroke = Some(cutlass_effects::Stroke::new(
+                cutlass_effects::StrokeStyle::Solid,
+            ));
+        }
+        3 => {
+            matting.feather = 0.3;
+            matting.stroke = Some(cutlass_effects::Stroke::new(
+                cutlass_effects::StrokeStyle::Glow,
+            ));
+        }
+        _ => {}
+    }
+    draft
+        .materials
+        .common_mask
+        .push(cutlass_model::RawMaterial {
+            id: "matting".into(),
+            kind: cutlass_effects::MATTING.into(),
+            fields: matting.to_fields(),
+        });
+    let movie = draft
+        .tracks
+        .iter_mut()
+        .flat_map(|track| &mut track.segments)
+        .find(|segment| segment.id.as_str() == "movie")
+        .unwrap();
+    movie.extra_material_refs.push("matting".into());
+}
+
 fn relit_with<const PRESET: usize>(draft: &mut Draft) {
     let preset = ["warm_key", "rim_glow", "rainbow_spots"][PRESET];
     draft.materials.videos[0].video_algorithm = Some(cutlass_model::VideoAlgorithm {
@@ -1213,6 +1323,12 @@ fn gpu_matches_cpu_in(
         assert!(
             decodes_in_place(&layers),
             "{name}: the movie was copied off the GPU"
+        );
+    }
+    if name.starts_with("cut out") {
+        assert!(
+            layers.layers.iter().any(|layer| cut_on_gpu(&layer.source)),
+            "{name}: the movie was not cut on the GPU"
         );
     }
     if name.starts_with("relit") {

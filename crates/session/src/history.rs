@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use cutlass_model::Draft;
 
 use crate::edit::EditError;
@@ -7,13 +9,13 @@ struct OpenHistory {
     /// The draft at `begin` or `record`.
     draft: Draft,
     /// The redo stack at that moment, which `rollback` gives back.
-    redo: Vec<Draft>,
+    redo: Vec<Arc<Draft>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct RecordedStep {
-    before: Draft,
-    after: Draft,
+    before: Arc<Draft>,
+    after: Arc<Draft>,
 }
 
 /// Undo steps kept. Each step is a whole draft, so an uncapped stack grows
@@ -26,10 +28,22 @@ pub const UNDO_LIMIT: usize = 100;
 pub const UNDO_BYTES: usize = 256 * 1024 * 1024;
 
 /// One undo step and its size.
+///
+/// A step's draft is never changed once it is on the stack, so the copies
+/// of a history share it: a host that edits a copy of the session and
+/// hands it back, as the assistant's tools do on every call, copies the
+/// open draft and not the hundred behind it.
 #[derive(Clone, Debug)]
 struct Step {
-    draft: Draft,
+    draft: Arc<Draft>,
     bytes: usize,
+}
+
+/// The draft a step held, for the session to open: taken when this
+/// history is the only one that holds it, copied when a copy of the
+/// history holds it too.
+fn opened(draft: Arc<Draft>) -> Draft {
+    Arc::try_unwrap(draft).unwrap_or_else(|shared| (*shared).clone())
 }
 
 /// Undo and redo stacks, and one open transaction.
@@ -47,7 +61,7 @@ pub struct History {
     undo_bytes: usize,
     /// The most the undo steps may add up to, [`UNDO_BYTES`] outside tests.
     byte_budget: usize,
-    redo: Vec<Draft>,
+    redo: Vec<Arc<Draft>>,
     open: Option<OpenHistory>,
     recording: bool,
     steps: Vec<RecordedStep>,
@@ -94,10 +108,10 @@ impl History {
         if self.open.is_some() {
             return;
         }
-        self.push_step(draft);
+        self.push_step(Arc::new(draft));
     }
 
-    fn push_step(&mut self, draft: Draft) {
+    fn push_step(&mut self, draft: Arc<Draft>) {
         let bytes = json_bytes(&draft);
         self.undo_bytes = self.undo_bytes.saturating_add(bytes);
         self.undo.push(Step { draft, bytes });
@@ -132,15 +146,15 @@ impl History {
     pub fn pop_undo(&mut self) -> Option<Draft> {
         let step = self.undo.pop()?;
         self.undo_bytes = self.undo_bytes.saturating_sub(step.bytes);
-        Some(step.draft)
+        Some(opened(step.draft))
     }
 
     pub fn push_redo(&mut self, draft: Draft) {
-        self.redo.push(draft);
+        self.redo.push(Arc::new(draft));
     }
 
     pub fn pop_redo(&mut self) -> Option<Draft> {
-        self.redo.pop()
+        self.redo.pop().map(opened)
     }
 
     pub fn clear_redo(&mut self) {
@@ -185,11 +199,13 @@ impl History {
         };
         self.recording = false;
         if open.draft != *draft {
+            // The step and the record of it hold the one draft.
+            let before = Arc::new(open.draft);
             self.steps.push(RecordedStep {
-                before: open.draft.clone(),
-                after: draft.clone(),
+                before: Arc::clone(&before),
+                after: Arc::new(draft.clone()),
             });
-            self.push_step(open.draft);
+            self.push_step(before);
         }
         Ok(())
     }
@@ -206,7 +222,7 @@ impl History {
         self.open = None;
         self.recording = false;
         if let Some(last) = self.steps.last_mut() {
-            last.after = draft.clone();
+            last.after = Arc::new(draft.clone());
         }
         Ok(())
     }
@@ -230,11 +246,70 @@ impl History {
 
     #[must_use]
     pub fn recorded_before(&self) -> Option<&Draft> {
-        self.steps.last().map(|step| &step.before)
+        self.steps.last().map(|step| &*step.before)
     }
 
     #[must_use]
     pub fn recorded_after(&self) -> Option<&Draft> {
-        self.steps.last().map(|step| &step.after)
+        self.steps.last().map(|step| &*step.after)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use cutlass_model::Draft;
+
+    use super::History;
+
+    fn named(name: &str) -> Draft {
+        let mut draft = Draft::empty("draft");
+        name.clone_into(&mut draft.name);
+        draft
+    }
+
+    #[test]
+    fn a_copy_of_a_history_shares_its_steps_and_neither_changes_the_others() {
+        let mut history = History::default();
+        for name in ["one", "two", "three"] {
+            history.push_undo(named(name));
+        }
+        history.push_redo(named("ahead"));
+        let mut copy = history.clone();
+        // The copy holds the same drafts, not copies of them: copying a
+        // session costs its open draft, however long its history.
+        assert_eq!(copy.undo.len(), 3);
+        for (ours, theirs) in history.undo.iter().zip(&copy.undo) {
+            assert!(Arc::ptr_eq(&ours.draft, &theirs.draft));
+        }
+        assert!(Arc::ptr_eq(&history.redo[0], &copy.redo[0]));
+        assert_eq!(copy.undo_bytes(), history.undo_bytes());
+        // Each steps back and forward on its own, through the same drafts.
+        assert_eq!(copy.pop_undo().unwrap().name, "three");
+        assert_eq!(copy.pop_undo().unwrap().name, "two");
+        assert_eq!(copy.pop_redo().unwrap().name, "ahead");
+        assert_eq!(history.undo.len(), 3);
+        assert_eq!(history.pop_undo().unwrap().name, "three");
+        assert_eq!(history.pop_redo().unwrap().name, "ahead");
+        assert_eq!(history.pop_undo().unwrap().name, "two");
+        assert_eq!(history.pop_undo().unwrap().name, "one");
+        assert!(history.pop_undo().is_none());
+        assert_eq!(history.undo_bytes(), 0);
+        // What the copy took stays as it was after the first is done.
+        assert_eq!(copy.pop_undo().unwrap().name, "one");
+        // A step made after the copy is the maker's alone.
+        history.push_undo(named("later"));
+        assert!(!copy.can_undo());
+        // A transaction's step and the record of it are the one draft.
+        let mut recorded = History::default();
+        recorded.begin(&named("before")).unwrap();
+        recorded.commit(&named("after")).unwrap();
+        assert!(Arc::ptr_eq(
+            &recorded.undo[0].draft,
+            &recorded.steps[0].before
+        ));
+        assert_eq!(recorded.recorded_before().unwrap().name, "before");
+        assert_eq!(recorded.recorded_after().unwrap().name, "after");
     }
 }

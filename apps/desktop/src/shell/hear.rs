@@ -5,7 +5,57 @@
 use cutlass_model::TrackAttribute;
 use cutlass_transcription::{FileSource, HeardClip};
 
-use super::{Shell, ShellError, heard_words, load_speech, speech_model};
+use super::{Shell, ShellError, heard_words_or_silence, load_speech, speech_model};
+
+/// One word a hearing answers with: where it starts and ends on the
+/// timeline, in microseconds, and the word.
+type Word = (i64, i64, String);
+
+/// A clip that has sound and could not be heard: its id, the part of the
+/// asked stretch it plays in, and why.
+struct Unheard {
+    clip: String,
+    from: i64,
+    to: i64,
+    why: String,
+}
+
+/// What a hearing answers: the words in the order they are said, one a
+/// line, or why there are none.
+///
+/// Words are answered only when every clip with sound was heard. A stretch
+/// with one clip's words missing has a gap where that clip plays, and a
+/// reader that takes gaps for silence, as removing pauses does, would cut
+/// speech it was never shown. So the answer is the clips that could not be
+/// heard, for the caller to ask again without them or mend their files.
+fn answer(mut words: Vec<Word>, unheard: &[Unheard]) -> Result<String, String> {
+    if !unheard.is_empty() {
+        let named: Vec<String> = unheard
+            .iter()
+            .map(|miss| {
+                format!(
+                    "{} from {} to {} ({})",
+                    miss.clip, miss.from, miss.to, miss.why
+                )
+            })
+            .collect();
+        return Err(format!(
+            "could not hear every clip in that stretch, so no words are given, as the parts \
+             not heard would read as silence: {}. Hear a stretch without them, or mend their \
+             files",
+            named.join("; ")
+        ));
+    }
+    if words.is_empty() {
+        return Err("nothing was heard".to_owned());
+    }
+    words.sort();
+    Ok(words
+        .iter()
+        .map(|(from, to, text)| format!("{from} {to} {text}"))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
 
 impl Shell {
     /// Start hearing `[start_us, start_us + duration_us)`: every clip with
@@ -67,39 +117,39 @@ impl Shell {
                     load_speech()
                 }
             };
-            let mut lines: Vec<(i64, i64, String)> = Vec::new();
-            let mut failed = None;
+            let mut words: Vec<Word> = Vec::new();
+            let mut unheard = Vec::new();
             if let Ok(recognizer) = &recognizer {
                 progress.stage("Listening");
                 for (clip, file) in &clips {
-                    match heard_words(recognizer, &mut FileSource::new(file), clip) {
-                        Ok(words) => {
-                            let base = clip.target.start.0;
+                    let base = clip.target.start.0;
+                    match heard_words_or_silence(recognizer, &mut FileSource::new(file), clip) {
+                        Ok(Some(heard)) => {
                             for ((start, end_ms), text) in
-                                words.start_time.iter().zip(&words.end_time).zip(words.text)
+                                heard.start_time.iter().zip(&heard.end_time).zip(heard.text)
                             {
                                 let from = base.saturating_add(start.saturating_mul(1000));
                                 let to = base.saturating_add(end_ms.saturating_mul(1000));
                                 if to > start_us && from < end {
-                                    lines.push((from, to, text));
+                                    words.push((from, to, text));
                                 }
                             }
                         }
-                        Err(error) => failed = Some(error.to_string()),
+                        // The clip's file has no sound in it: it was
+                        // heard, and says nothing.
+                        Ok(None) => {}
+                        Err(error) => unheard.push(Unheard {
+                            clip: clip.source_id.as_str().to_owned(),
+                            from: base.max(start_us),
+                            to: base.saturating_add(clip.target.duration.0).min(end),
+                            why: error.to_string(),
+                        }),
                     }
                 }
             }
-            lines.sort();
             let heard = match &recognizer {
                 Err(error) => Err(error.to_string()),
-                Ok(_) if lines.is_empty() => {
-                    Err(failed.unwrap_or_else(|| "nothing was heard".to_owned()))
-                }
-                Ok(_) => Ok(lines
-                    .iter()
-                    .map(|(from, to, text)| format!("{from} {to} {text}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")),
+                Ok(_) => answer(words, &unheard),
             };
             let kept = recognizer.ok();
             Box::new(move |shell: &mut Shell| {
@@ -134,6 +184,38 @@ mod tests {
     use cutlass_store::Folder;
 
     use crate::shell::tests::{Temp, shell};
+
+    #[test]
+    fn words_are_answered_only_when_every_clip_with_sound_was_heard() {
+        use super::{Unheard, answer};
+        let said = |from: i64, text: &str| (from, from + 400_000, text.to_owned());
+        // Every clip heard: the words, in the order they are said.
+        let heard = answer(
+            vec![said(2_000_000, "there"), said(1_000_000, "hello")],
+            &[],
+        );
+        assert_eq!(
+            heard.unwrap(),
+            "1000000 1400000 hello\n2000000 2400000 there"
+        );
+        // One clip of two could not be read. Its words would be a gap, so
+        // none are given, and the clip and where it plays are named.
+        let offline = Unheard {
+            clip: "b".to_owned(),
+            from: 3_000_000,
+            to: 5_000_000,
+            why: "the clip has no sound to hear".to_owned(),
+        };
+        let partial = answer(vec![said(1_000_000, "hello")], &[offline]).unwrap_err();
+        assert!(!partial.contains("hello"), "{partial}");
+        assert!(
+            partial.contains("b from 3000000 to 5000000 (the clip has no sound to hear)"),
+            "{partial}"
+        );
+        assert!(partial.contains("would read as silence"), "{partial}");
+        // No words and nothing unheard is a stretch where no one speaks.
+        assert_eq!(answer(Vec::new(), &[]).unwrap_err(), "nothing was heard");
+    }
 
     #[test]
     fn hearing_needs_a_stretch_with_sound_and_names_its_job() {

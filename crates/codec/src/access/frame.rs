@@ -8,6 +8,7 @@ use std::fmt;
 
 use super::error::CodecError;
 use super::pixel::{ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Transfer};
+use super::samples::Samples;
 
 /// One sample plane, row-major, with `stride` bytes from one row to the next.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,10 +16,27 @@ pub struct Plane {
     pub width: u32,
     pub height: u32,
     pub stride: usize,
-    pub samples: Vec<u8>,
+    pub samples: Samples,
 }
 
 impl Plane {
+    /// The visible rows, packed with no padding: `width` samples of
+    /// `sample_bytes` each a row (the samples whatever the stride).
+    #[must_use]
+    pub fn packed(&self, sample_bytes: usize) -> Vec<u8> {
+        let row = self.width as usize * sample_bytes;
+        let rows = self.height as usize;
+        if self.stride == row {
+            return self.samples[..(row * rows).min(self.samples.len())].to_vec();
+        }
+        let mut out = Vec::with_capacity(row * rows);
+        for r in 0..rows {
+            let at = r * self.stride;
+            out.extend_from_slice(&self.samples[at..(at + row).min(self.samples.len())]);
+        }
+        out
+    }
+
     /// A plane whose rows are packed with no padding.
     pub fn tight(width: u32, height: u32, samples: Vec<u8>) -> Result<Self, CodecError> {
         let stride = usize::try_from(width).map_err(|_| CodecError::Limit {
@@ -39,7 +57,7 @@ impl Plane {
             width,
             height,
             stride,
-            samples,
+            samples: samples.into(),
         })
     }
 
@@ -71,7 +89,7 @@ impl Plane {
             width,
             height,
             stride,
-            samples,
+            samples: samples.into(),
         })
     }
 
@@ -90,7 +108,7 @@ impl Plane {
             width,
             height,
             stride,
-            samples: vec![0; need],
+            samples: vec![0; need].into(),
         })
     }
 

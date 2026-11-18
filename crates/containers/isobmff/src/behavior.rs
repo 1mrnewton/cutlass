@@ -1461,3 +1461,59 @@ fn a_local_fragmented_file_without_an_index_seeks_to_two_seconds() {
     }
     assert!(covered);
 }
+
+#[test]
+fn the_indexed_end_is_the_latest_end_reading_every_packet_finds() {
+    // Reordered pictures: the last one in decode order is not the last shown.
+    let pictures = vec![
+        packet(0, 1, 1, b"I", true, 30),
+        packet(1, 4, 1, b"P", false, 30),
+        packet(2, 2, 1, b"B", false, 30),
+        packet(3, 3, 1, b"B", false, 30),
+    ];
+    let sound = vec![
+        packet(0, 0, 1024, b"A0", true, 48_000),
+        packet(1024, 1024, 1000, b"A1", true, 48_000),
+    ];
+    let bytes = write_movie(
+        MuxOptions::default(),
+        vec![(video(), pictures), (audio(), sound)],
+    );
+    let mut file = IsoBmffFile::open(Cursor::new(bytes)).expect("open");
+    let streams = cutlass_container::Demux::streams(&file).to_vec();
+    let mut read = std::collections::HashMap::new();
+    while let Some(packet) = cutlass_container::Demux::read_packet(&mut file).expect("read") {
+        let timestamp = packet.timestamp();
+        let end = timestamp.presentation().expect("pts") + timestamp.duration().expect("duration");
+        let latest = read.entry(packet.stream()).or_insert(end);
+        *latest = (*latest).max(end);
+    }
+    for stream in &streams {
+        assert_eq!(
+            cutlass_container::Demux::indexed_end(&file, stream.id()),
+            read.get(&stream.id().get()).copied(),
+        );
+    }
+    assert_eq!(
+        cutlass_container::Demux::indexed_end(&file, streams[0].id()),
+        Some(5)
+    );
+    assert_eq!(
+        cutlass_container::Demux::indexed_end(&file, cutlass_container::TrackId::new(99)),
+        None
+    );
+
+    // A fragmented file loads its later samples as it reads, so its index
+    // is not complete at open.
+    let fragmented = write_movie(
+        MuxOptions {
+            fragmented: true,
+            samples_per_fragment: 1,
+            ..MuxOptions::default()
+        },
+        vec![(video(), vec![packet(0, 0, 1, b"I", true, 30)])],
+    );
+    let file = IsoBmffFile::open(Cursor::new(fragmented)).expect("open");
+    let id = cutlass_container::Demux::streams(&file)[0].id();
+    assert_eq!(cutlass_container::Demux::indexed_end(&file, id), None);
+}

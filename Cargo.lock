@@ -1235,6 +1235,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "c2rust-bitfields"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46dc7d2bffa0d0b3d47eb2dc69973466858281446c2ac9f6d8a10e92ab1017df"
+dependencies = [
+ "c2rust-bitfields-derive",
+]
+
+[[package]]
+name = "c2rust-bitfields-derive"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebe1117afa5937ce280034e31fa1e84ed1824a252f75380327eed438535333f8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "cairo-sys-rs"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2199,6 +2219,7 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c644cb7afff37320c3df8edf6d41ace041e9f70edf37d38a104e97fdfd5074b1"
 dependencies = [
+ "ash",
  "bytemuck",
  "cfg-if",
  "cfg_aliases",
@@ -2223,6 +2244,7 @@ dependencies = [
  "pliron",
  "sanitize-filename",
  "thiserror 2.0.21",
+ "tracel-ash",
  "wasm-bindgen-futures",
  "wgpu",
 ]
@@ -2422,7 +2444,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cutlass"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "ctrlc",
  "cutlass-aac",
@@ -2510,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-aac"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -2518,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-ac3"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -2529,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-adts"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -2537,12 +2559,13 @@ dependencies = [
 
 [[package]]
 name = "cutlass-agent"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-agent",
  "cutlass-model",
  "cutlass-session",
  "cutlass-settings",
+ "pulldown-cmark",
  "rhai",
  "serde",
  "serde_json",
@@ -2550,7 +2573,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-agent-cloud"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-agent",
  "cutlass-download",
@@ -2560,7 +2583,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-aiff"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -2568,7 +2591,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-alac"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -2579,14 +2602,14 @@ dependencies = [
 
 [[package]]
 name = "cutlass-audio"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
 ]
 
 [[package]]
 name = "cutlass-av1"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -2595,7 +2618,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-avi"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -2604,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-caf"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -2614,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-captions"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-model",
  "cutlass-text",
@@ -2622,18 +2645,18 @@ dependencies = [
 
 [[package]]
 name = "cutlass-codec"
-version = "0.1.0"
+version = "0.8.0"
 
 [[package]]
 name = "cutlass-color"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
 ]
 
 [[package]]
 name = "cutlass-compositor"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-gpu",
  "cutlass-model",
@@ -2643,21 +2666,21 @@ dependencies = [
 
 [[package]]
 name = "cutlass-container"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
 ]
 
 [[package]]
 name = "cutlass-decode"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
 ]
 
 [[package]]
 name = "cutlass-download"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-download",
  "serde",
@@ -2668,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-editor"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-captions",
  "cutlass-effects",
@@ -2679,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-effects"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-jpeg",
@@ -2692,14 +2715,14 @@ dependencies = [
 
 [[package]]
 name = "cutlass-encode"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
 ]
 
 [[package]]
 name = "cutlass-engine"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-audio",
  "cutlass-codec",
@@ -2719,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-eval"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-captions",
  "cutlass-codec",
@@ -2751,7 +2774,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-export"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-aac",
  "cutlass-ac3",
@@ -2795,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-ffi"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-aac",
  "cutlass-ac3",
@@ -2855,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-ffi-bindings"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-ffi",
  "uniffi",
@@ -2863,7 +2886,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-flac"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -2871,7 +2894,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-flac-container"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -2882,18 +2905,18 @@ dependencies = [
 
 [[package]]
 name = "cutlass-font"
-version = "0.1.0"
+version = "0.8.0"
 
 [[package]]
 name = "cutlass-fonts"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-font",
 ]
 
 [[package]]
 name = "cutlass-generated"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-lottie",
  "cutlass-model",
@@ -2902,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-gif"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -2910,11 +2933,11 @@ dependencies = [
 
 [[package]]
 name = "cutlass-gpu"
-version = "0.1.0"
+version = "0.8.0"
 
 [[package]]
 name = "cutlass-h264"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -2923,11 +2946,11 @@ dependencies = [
 
 [[package]]
 name = "cutlass-h264-kernels"
-version = "0.1.0"
+version = "0.8.0"
 
 [[package]]
 name = "cutlass-h264-pgo"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -2936,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-hevc"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -2949,11 +2972,11 @@ dependencies = [
 
 [[package]]
 name = "cutlass-icons"
-version = "0.1.0"
+version = "0.8.0"
 
 [[package]]
 name = "cutlass-isobmff"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -2961,7 +2984,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-jpeg"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -2969,7 +2992,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-licenses"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2977,21 +3000,21 @@ dependencies = [
 
 [[package]]
 name = "cutlass-logger"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "cutlass-lottie"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "cutlass-matroska"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -2999,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-mjpeg"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -3008,7 +3031,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-model"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3016,11 +3039,11 @@ dependencies = [
 
 [[package]]
 name = "cutlass-motion"
-version = "0.1.0"
+version = "0.8.0"
 
 [[package]]
 name = "cutlass-mp3"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -3029,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-mp3-container"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -3037,7 +3060,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-mpeg2"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -3048,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-mpeg4"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -3059,7 +3082,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-mpegts"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-adts",
  "cutlass-codec",
@@ -3069,7 +3092,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-ogg"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -3077,7 +3100,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-opus"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -3089,7 +3112,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-pcm"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -3097,7 +3120,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-picture"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-gpu",
  "cutlass-model",
@@ -3105,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-platform-android"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-av1",
  "cutlass-color",
@@ -3117,7 +3140,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-platform-apple"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -3130,11 +3153,11 @@ dependencies = [
 
 [[package]]
 name = "cutlass-platform-linux"
-version = "0.1.0"
+version = "0.8.0"
 
 [[package]]
 name = "cutlass-platform-windows"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-aac",
  "cutlass-color",
@@ -3146,7 +3169,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-playback"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-container",
  "cutlass-editor",
@@ -3170,7 +3193,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-png"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -3178,11 +3201,11 @@ dependencies = [
 
 [[package]]
 name = "cutlass-pool"
-version = "0.1.0"
+version = "0.8.0"
 
 [[package]]
 name = "cutlass-probe"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-adts",
  "cutlass-aiff",
@@ -3205,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-prores"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -3217,7 +3240,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-render"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-compositor",
  "cutlass-decode",
@@ -3230,6 +3253,7 @@ dependencies = [
  "cutlass-lottie",
  "cutlass-model",
  "cutlass-picture",
+ "cutlass-png",
  "cutlass-renderer-software",
  "cutlass-session",
  "cutlass-storage",
@@ -3239,14 +3263,14 @@ dependencies = [
 
 [[package]]
 name = "cutlass-renderer-software"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-gpu",
 ]
 
 [[package]]
 name = "cutlass-riff"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -3254,7 +3278,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-session"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-effects",
  "cutlass-model",
@@ -3264,7 +3288,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-settings"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3272,11 +3296,11 @@ dependencies = [
 
 [[package]]
 name = "cutlass-simd"
-version = "0.1.0"
+version = "0.8.0"
 
 [[package]]
 name = "cutlass-stickers"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
@@ -3287,7 +3311,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-still"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -3295,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-storage"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-download",
  "serde",
@@ -3304,7 +3328,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-store"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-model",
  "cutlass-motion",
@@ -3314,7 +3338,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-text"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-font",
@@ -3326,7 +3350,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-transcription"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -3342,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-update"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-download",
  "serde",
@@ -3351,7 +3375,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-vision"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "burn",
  "burn-store",
@@ -3369,7 +3393,9 @@ dependencies = [
  "cutlass-model",
  "cutlass-motion",
  "cutlass-picture",
+ "cutlass-png",
  "cutlass-session",
+ "cutlass-still",
  "cutlass-store",
  "image",
  "safetensors 0.8.0",
@@ -3377,7 +3403,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-vorbis"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -3388,7 +3414,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-vp8"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -3399,15 +3425,19 @@ dependencies = [
 
 [[package]]
 name = "cutlass-vp9"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-matroska",
+ "cutlass-simd",
 ]
 
 [[package]]
 name = "cutlass-webp"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
@@ -3737,7 +3767,7 @@ dependencies = [
 
 [[package]]
 name = "editor-bench"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-eval",
@@ -3843,6 +3873,7 @@ dependencies = [
  "profiling",
  "raw-window-handle",
  "web-time",
+ "webbrowser",
  "windows-sys 0.61.2",
  "winit",
 ]
@@ -5028,7 +5059,7 @@ dependencies = [
 
 [[package]]
 name = "icongen"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-icons",
 ]
@@ -5585,7 +5616,7 @@ dependencies = [
 
 [[package]]
 name = "licenses"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "serde_json",
 ]
@@ -5765,7 +5796,7 @@ dependencies = [
 
 [[package]]
 name = "media-bench"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "cutlass-aac",
  "cutlass-ac3",
@@ -7087,6 +7118,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "pulp"
 version = "0.22.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8363,6 +8405,17 @@ dependencies = [
 
 [[package]]
 name = "syn"
+version = "1.0.109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
@@ -8794,6 +8847,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracel-ash"
+version = "0.39.5+sdk1.4.357"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9802d90b2e66f00a395a3acf337ddd49dd1e90cb3287fc31a4148f875d7be7c5"
+dependencies = [
+ "ash",
+ "c2rust-bitfields",
+]
+
+[[package]]
 name = "tracel-llvm-bundler"
 version = "23.1.0-4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9118,7 +9181,7 @@ version = "2.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 dependencies = [
- "rand 0.9.5",
+ "rand 0.10.3",
 ]
 
 [[package]]
@@ -9165,6 +9228,12 @@ checksum = "e1b88fcfe09e89d3866a5c11019378088af2d24c3fbd4f0543f96b479ec90697"
 dependencies = [
  "version_check",
 ]
+
+[[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-general-category"
@@ -9621,6 +9690,22 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webbrowser"
+version = "1.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2c8ddfbbf66e501434657400268cefe51b95140a0266236415cda7627732df7"
+dependencies = [
+ "jni",
+ "log",
+ "ndk-context",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "url",
+ "web-sys",
 ]
 
 [[package]]

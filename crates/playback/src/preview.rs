@@ -155,7 +155,8 @@ mod tests {
     use cutlass_session::{Request, Session};
 
     use super::{
-        PreviewMix, clip_to_full_scale, preview_frames, queue_mix, queue_mix_peak, window_bytes,
+        PLAY_FRAMES, PreviewMix, clip_to_full_scale, preview_frames, queue_mix, queue_mix_peak,
+        window_bytes,
     };
     use crate::apple::{AudioHost, AudioOutput};
     use crate::playhead::Player;
@@ -278,8 +279,12 @@ mod tests {
         let mut player = Player::new();
         player.set_readers(readers);
         player.play(&session).expect("play");
-        assert_eq!(samples(player.output().queued()), vec![0.5; 8]);
-        assert_eq!(player.output().queued().len(), 4 * 8);
+        // The file ends after four frames; the rest of the asked window is
+        // silence, so the device stays on time.
+        let played = samples(player.output().queued());
+        assert_eq!(played.len(), PLAY_FRAMES as usize * 2);
+        assert_eq!(played[..8], [0.5; 8]);
+        assert!(played[8..].iter().all(|sample| *sample == 0.0));
         assert_eq!(preview_frames(1_000_000), 8_192);
         assert_eq!(preview_frames(0), 0);
         let _ = std::fs::remove_file(&path);

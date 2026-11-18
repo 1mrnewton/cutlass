@@ -33,8 +33,9 @@ pub struct Feature {
 /// are not supported stay in the list. A subtitle track, and a track whose
 /// frames are compressed or encrypted (`zlib-bzlib-lzo`, `encryption`),
 /// still opens as a stream with an unknown codec tag and the stored bytes;
-/// `false` there means nothing more is done with them. BlockAdditions are
-/// skipped.
+/// `false` there means nothing more is done with them. BlockAdditions ride
+/// on their packet both ways (`cutlass_codec::BlockAddition`), and a VP8 or
+/// VP9 track whose packets carry BlockAddID 1 is written with AlphaMode 1.
 pub const FEATURES: &[Feature] = &[
     Feature {
         name: "matroska",
@@ -198,8 +199,8 @@ pub const FEATURES: &[Feature] = &[
     },
     Feature {
         name: "block-additions",
-        demux: false,
-        mux: false,
+        demux: true,
+        mux: true,
     },
     Feature {
         name: "subtitles",
@@ -229,6 +230,7 @@ mod tests {
             "block-group",
             "codec-delay",
             "discard-padding",
+            "block-additions",
         ] {
             let row = feature(name);
             assert!(row.demux && row.mux, "{name}");

@@ -11,6 +11,7 @@ mod packet;
 mod params;
 mod pixel;
 mod sample;
+mod samples;
 mod still;
 
 pub use error::CodecError;
@@ -26,6 +27,7 @@ pub use pixel::{
     Transfer,
 };
 pub use sample::{Channel, ChannelLayout, LayoutError, Pcm, SampleFormat, StandardLayout};
+pub use samples::{Samples, SharedBytes};
 pub use still::{
     BitDepth, ColorType, ImageError, PhysicalPixel, Rgb8, StillImage, TextItem, Transparency,
 };

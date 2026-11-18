@@ -318,6 +318,10 @@ impl<R: Read + Seek + Send> cutlass_container::Demux for IsoBmffFile<R> {
         &[]
     }
 
+    fn indexed_end(&self, track: cutlass_container::TrackId) -> Option<i64> {
+        self.movie.indexed_end(track.get())
+    }
+
     fn read_packet(
         &mut self,
     ) -> Result<Option<cutlass_codec::Packet>, cutlass_container::ReadError> {
@@ -471,6 +475,25 @@ impl IsoBmff {
             timescale,
             keyframe: sample.keyframe,
         }))
+    }
+
+    /// The latest `pts + duration` of track `track_id`'s samples, from the
+    /// sample table. `None` for a fragmented file, whose later samples are
+    /// not loaded at open, and for a track with no samples.
+    fn indexed_end(&self, track_id: u32) -> Option<i64> {
+        if self.fragments.is_some() {
+            return None;
+        }
+        let index = self
+            .streams
+            .iter()
+            .position(|stream| stream.params.track_id == track_id)?;
+        self.tracks
+            .get(index)?
+            .samples
+            .iter()
+            .map(|sample| sample.pts.saturating_add(i64::from(sample.duration)))
+            .max()
     }
 
     fn span_contains(&self, index: usize, ticks: i64) -> bool {

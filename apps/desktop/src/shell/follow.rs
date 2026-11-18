@@ -496,7 +496,7 @@ impl Shell {
                     .into_iter()
                     .map(|id| {
                         clip_path(draft, &id, &path)
-                            .map(|own| (id, own))
+                            .map(|own| (id, own).into())
                             .ok_or_else(|| {
                                 ShellError::Unavailable(
                                     "a clip whose mask follows is not drawn along the track"

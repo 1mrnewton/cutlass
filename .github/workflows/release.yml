@@ -384,7 +384,7 @@ jobs:
     # it for distribution with certificates Apple keeps for the team (the
     # key needs the Admin role) and uploads it; the build then waits in
     # App Store Connect for testers to be given it. That needs the app's
-    # record in App Store Connect, under com.scytheralpha.cutlass. Without
+    # record in App Store Connect, under com.scytheralpha.cutlassapp. Without
     # the key, or for a pre-release tag, the app is only built, unsigned.
     # The draft release does not wait on this job.
     needs: version

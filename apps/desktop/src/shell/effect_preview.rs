@@ -10,7 +10,7 @@ use super::Shell;
 /// The recipe and scene an effect card shows.
 fn card_effect(card_id: &str) -> Option<(&'static cutlass_effects::Recipe, &'static PreviewScene)> {
     let effect_id = cutlass_editor::effect_of_card(card_id)?;
-    let recipe = cutlass_effects::recipe(&effect_id)?;
+    let recipe = cutlass_effects::bundled_recipe(&effect_id)?;
     Some((recipe, preview_scene(recipe.preview_scene())?))
 }
 

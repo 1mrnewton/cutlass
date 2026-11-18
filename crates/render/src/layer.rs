@@ -139,18 +139,18 @@ pub enum Layer<'a> {
         blur: Option<(Placement, u32)>,
     },
     /// An effect over everything drawn before it in the same list.
-    Effect(&'a [Step], Option<&'a cutlass_effects::CanvasMask>),
+    Effect(&'a [Step], Option<&'a cutlass_effects::CanvasMasks>),
     /// Colour work (a chroma key, grades, adjust sliders, a LUT) over
     /// everything drawn before it in the same list, shown only inside
     /// `mask` when it has one. `seed` moves the grain.
     Colour {
         colour: &'a cutlass_effects::Colour,
         seed: u32,
-        mask: Option<&'a cutlass_effects::CanvasMask>,
+        mask: Option<&'a cutlass_effects::CanvasMasks>,
     },
     /// Everything drawn before it in the same list, kept as much as the
-    /// mask keeps: a clip's own mask.
-    Cut(&'a cutlass_effects::CanvasMask),
+    /// masks keep: a clip's own masks.
+    Cut(&'a cutlass_effects::CanvasMasks),
     /// Everything drawn before it in the same list, kept only where a
     /// clip's selection is.
     Select(crate::Selected<'a>),

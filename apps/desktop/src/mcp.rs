@@ -52,6 +52,15 @@ pub fn run(path: Option<&Path>) -> Result<(), String> {
     )
 }
 
+/// The project folder as a path from the root, for one typed from the
+/// folder `cutlass mcp` was started in. The sandbox refuses a script that
+/// names the project folder, by its text: given `.` as that folder it
+/// refused every script with a dot in it, and given `film` any that said
+/// film, while the folder's real path went unchecked.
+fn project_root(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Ends the serving loop from outside it, as a closed stdin ends it from
 /// inside: the project is closed and its lock let go.
 struct Stop(Sender<Event>);
@@ -109,6 +118,7 @@ fn serve_with(
     let Some(path) = path else {
         return Err("name the project folder: cutlass mcp /path/to/project".to_owned());
     };
+    let path = &project_root(path);
     let (events, waiting) = channel();
     stopper(Stop(events.clone()));
     let socket = events.clone();
@@ -268,8 +278,10 @@ impl Own {
         })
     }
 
-    /// Run `call`, then save what it changed and take up a settings change.
+    /// Run `call` on the settings as they are now, then save what it
+    /// changed and take up a settings change it made.
     fn run(&mut self, call: &ToolCall) -> ToolOutcome {
+        self.read_settings_again();
         let outcome = self.registry.run_tool(call);
         match self.settle() {
             Ok(()) => outcome,
@@ -277,24 +289,54 @@ impl Own {
         }
     }
 
+    /// Take up the settings file when it was written since this host read
+    /// it: the user changed something in the Cutlass window, or another
+    /// host did. A host that kept the settings it started with went on
+    /// calling a server, or running code, the user had since turned off,
+    /// and its own `settings.set` was refused from then on, as the
+    /// generation it held was no longer the file's. A file that is gone or
+    /// does not read leaves the settings held as they are.
+    fn read_settings_again(&mut self) {
+        let path = self.registry.settings.path().to_path_buf();
+        let Ok(loaded) = cutlass_settings::load(&path) else {
+            return;
+        };
+        if loaded.generation == self.registry.settings.generation() {
+            return;
+        }
+        cutlass_logger::info!(
+            "mcp: the settings changed outside this host; now at generation {}",
+            loaded.generation
+        );
+        self.registry.settings = SettingsTool::held(path, loaded.generation, loaded.settings);
+        self.set_up();
+    }
+
+    /// Set the servers, sandbox and skills up again when the settings held
+    /// are not the ones they were set up from.
+    fn set_up(&mut self) {
+        let generation = self.registry.settings.generation();
+        if generation == self.settings {
+            return;
+        }
+        self.settings = generation;
+        let settings = self.registry.settings.settings().clone();
+        self.registry
+            .mcp
+            .transport_mut()
+            .configure(&settings.mcp_servers);
+        self.registry.sandbox = Switched::from_settings(
+            &settings,
+            crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(&self.path)),
+        );
+        self.registry.skills = SkillLibrary::bundled().with_folders(&settings.skill_folders);
+    }
+
     /// Save the folder when the draft moved, and set the servers, sandbox
     /// and skills up again when the settings did, so a change made through
     /// `settings.set` holds from the next call on.
     fn settle(&mut self) -> Result<(), String> {
-        let generation = self.registry.settings.generation();
-        if generation != self.settings {
-            self.settings = generation;
-            let settings = self.registry.settings.settings().clone();
-            self.registry
-                .mcp
-                .transport_mut()
-                .configure(&settings.mcp_servers);
-            self.registry.sandbox = Switched::from_settings(
-                &settings,
-                crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(&self.path)),
-            );
-            self.registry.skills = SkillLibrary::bundled().with_folders(&settings.skill_folders);
-        }
+        self.set_up();
         let session = self.registry.draft.session();
         if session.revision() != self.saved {
             let mut shell = self.shell.borrow_mut();
@@ -385,6 +427,16 @@ impl Host {
             let Place::Own(own) = &mut self.place else {
                 return;
             };
+            // Its caller gave up while the calls ahead of it ran, a long
+            // export among them, and takes it not to have run. A window
+            // that stopped waiting for the project is not handed it.
+            if forwarded.caller_left() {
+                cutlass_logger::info!(
+                    "mcp: dropped {} from a caller that stopped waiting",
+                    forwarded.call.name
+                );
+                continue;
+            }
             if forwarded.call.name != cutlass_agent::YIELD {
                 let started = Instant::now();
                 let outcome = own.run(&forwarded.call);
@@ -499,10 +551,18 @@ impl Player for Headless {
     /// No screen is needed to draw one frame: it is drawn as a still
     /// export is, on the device opened with no window.
     fn look(&mut self, time_us: Option<i64>) -> Result<cutlass_agent::Frame, String> {
-        self.0
-            .borrow_mut()
-            .look(time_us)
-            .map_err(|error| error.to_string())
+        let mut shell = self.0.borrow_mut();
+        settle(&mut shell);
+        shell.look(time_us).map_err(|error| error.to_string())
+    }
+}
+
+/// Run every job the project is waiting on to its end, as the window would
+/// over its frames: a clip with Remove BG is cut only once its matte is
+/// made, so a frame or a file drawn before would show it uncut.
+fn settle(shell: &mut Shell) {
+    while shell.poll_job() {
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -575,6 +635,7 @@ impl Export for Headless {
             cutlass_codec::CodecId::H264
         };
         let mut shell = self.0.borrow_mut();
+        settle(&mut shell);
         shell
             .export(ExportRequest {
                 path: path.clone(),
@@ -759,8 +820,36 @@ mod tests {
     #[test]
     fn a_client_reads_edits_and_the_edit_is_saved() {
         let project = Project::new("edit");
+        let (client, heard, host) = typed_host(&project.0);
+        let line = |message: Value| format!("{message}\n").into_bytes();
+        client
+            .send(line(
+                json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            ))
+            .unwrap();
+        client
+            .send(line(
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            ))
+            .unwrap();
+        client
+            .send(line(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})))
+            .unwrap();
+        assert_eq!(
+            heard.answer(1, || {})["result"]["serverInfo"]["name"],
+            "cutlass"
+        );
+        assert!(
+            heard.answer(2, || {})["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .len()
+                > 10
+        );
+        // The client reads the revision, then sends it with its write.
+        let opened_at = read_revision(&client, &heard, 3, || {});
         let place = json!({
-            "expected_revision": 0,
+            "expected_revision": opened_at,
             "requests": [{
                 "op": "import",
                 "medium": {"video": {"id": "media", "type": "video", "duration": 1_000_000}},
@@ -775,39 +864,21 @@ mod tests {
                 .unwrap(),
             }],
         });
-        let input = lines(&[
-            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
-            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
-            json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
-                "params":{"name":"draft_query","arguments":{"input":"project"}}}),
-            json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
-                "params":{"name":"draft_apply","arguments":place}}),
-            json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
-                "params":{"name":"player_play","arguments":{}}}),
-        ]);
-        let mut output = Vec::new();
-        serve(
-            Some(&project.0),
-            std::io::Cursor::new(input.into_bytes()),
-            &mut output,
-        )
-        .unwrap();
-        let answers: Vec<Value> = String::from_utf8(output)
+        client.send(call_line(4, "draft_apply", place)).unwrap();
+        assert_eq!(
+            said(&heard.answer(4, || {})),
+            format!("revision={} committed=true", opened_at + 1)
+        );
+        client.send(call_line(5, "player_play", json!({}))).unwrap();
+        assert_eq!(heard.answer(5, || {})["result"]["isError"], true);
+        // A notification is not answered: five messages got an answer.
+        let answered = String::from_utf8(heard.0.lock().unwrap().clone())
             .unwrap()
             .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(answers.len(), 5);
-        assert_eq!(answers[0]["result"]["serverInfo"]["name"], "cutlass");
-        assert!(answers[1]["result"]["tools"].as_array().unwrap().len() > 10);
-        let read = answers[2]["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(read.contains("revision=0"), "{read}");
-        assert_eq!(
-            answers[3]["result"]["content"][0]["text"],
-            "revision=1 committed=true"
-        );
-        assert_eq!(answers[4]["result"]["isError"], true);
+            .count();
+        assert_eq!(answered, 5);
+        drop(client);
+        host.join().unwrap().unwrap();
         let opened = cutlass_store::open(&project.0).unwrap();
         assert_eq!(opened.folder.draft.tracks[0].segments.len(), 1);
         // The lock was let go when stdin closed.
@@ -1063,8 +1134,9 @@ mod tests {
             crate::shell::Shell::new(decoders, encoders, cutlass_settings::Settings::default());
         desktop.open_folder(&project.0).unwrap();
         desktop.listen(std::sync::Arc::new(|| {}));
+        let opened_at = desktop.revision().unwrap();
         let place = json!({
-            "expected_revision": 0,
+            "expected_revision": opened_at,
             "requests": [{
                 "op": "import",
                 "medium": {"video": {"id": "media", "type": "video", "duration": 1_000_000}},
@@ -1108,7 +1180,7 @@ mod tests {
         assert_eq!(answers.len(), 2);
         assert_eq!(
             answers[1]["result"]["content"][0]["text"],
-            "revision=1 committed=true"
+            format!("revision={} committed=true", opened_at + 1)
         );
         // The window holds the edit, as one undo step.
         assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
@@ -1226,6 +1298,29 @@ mod tests {
             .to_owned()
     }
 
+    /// The revision an answer that starts `revision=N` names.
+    fn revision_of(text: &str) -> u64 {
+        text.strip_prefix("revision=")
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|number| number.parse().ok())
+            .unwrap_or_else(|| panic!("no revision in {text}"))
+    }
+
+    /// The project's revision, read as message `id` from the host `lines`
+    /// types to. A project opens at a number of its own each time, so a
+    /// client reads it and does not assume 0.
+    fn read_revision(
+        lines: &std::sync::mpsc::Sender<Vec<u8>>,
+        heard: &Heard,
+        id: i64,
+        tick: impl FnMut(),
+    ) -> u64 {
+        lines
+            .send(call_line(id, "draft_query", json!({"input": "project"})))
+            .unwrap();
+        revision_of(&said(&heard.answer(id, tick)))
+    }
+
     fn rename(revision: u64, name: &str) -> Value {
         json!({"expected_revision": revision,
             "requests": [{"op": "set_project_name", "name": name}]})
@@ -1247,10 +1342,14 @@ mod tests {
                 move |stop| stops.send(stop).unwrap(),
             )
         });
+        let opened_at = read_revision(&lines, &heard, 1, || {});
         lines
-            .send(call_line(1, "draft_apply", rename(0, "kept")))
+            .send(call_line(2, "draft_apply", rename(opened_at, "kept")))
             .unwrap();
-        assert_eq!(said(&heard.answer(1, || {})), "revision=1 committed=true");
+        assert_eq!(
+            said(&heard.answer(2, || {})),
+            format!("revision={} committed=true", opened_at + 1)
+        );
         // What a signal does. The client still holds stdin open: `lines`
         // is alive until the test ends.
         stop.recv().unwrap().stop();
@@ -1275,16 +1374,13 @@ mod tests {
     fn a_second_client_attaches_to_the_host_that_holds_the_project() {
         let project = Project::new("second");
         let (first, heard, host) = typed_host(&project.0);
-        first
-            .send(call_line(1, "draft_query", json!({"input": "project"})))
-            .unwrap();
-        assert!(said(&heard.answer(1, || {})).contains("revision=0"));
+        let opened_at = read_revision(&first, &heard, 1, || {});
         // The second finds the project held, and its edit lands on the
         // first's session: one writer, one undo stack.
         let input = lines(&[
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
-                "params":{"name":"draft_apply","arguments":rename(0, "from the second")}}),
+                "params":{"name":"draft_apply","arguments":rename(opened_at, "from the second")}}),
         ]);
         let mut output = Vec::new();
         serve(
@@ -1294,13 +1390,26 @@ mod tests {
         )
         .unwrap();
         let second = answers(output);
-        assert_eq!(said(&second[1]), "revision=1 committed=true");
+        let edited_at = opened_at + 1;
+        assert_eq!(
+            said(&second[1]),
+            format!("revision={edited_at} committed=true")
+        );
         first
             .send(call_line(2, "draft_query", json!({"input": "project"})))
             .unwrap();
         let read = said(&heard.answer(2, || {}));
-        assert!(read.contains("revision=1 name=from the second"), "{read}");
-        first.send(call_line(3, "draft_undo", json!({}))).unwrap();
+        assert!(
+            read.contains(&format!("revision={edited_at} name=from the second")),
+            "{read}"
+        );
+        first
+            .send(call_line(
+                3,
+                "draft_undo",
+                json!({"input": edited_at.to_string()}),
+            ))
+            .unwrap();
         assert_eq!(heard.answer(3, || {})["result"]["isError"], false);
         drop(first);
         host.join().unwrap().unwrap();
@@ -1314,14 +1423,19 @@ mod tests {
     fn the_window_takes_the_project_from_a_host_with_no_window_which_then_forwards() {
         let project = Project::new("handover");
         let (client, heard, host) = typed_host(&project.0);
+        let opened_at = read_revision(&client, &heard, 10, || {});
         client
             .send(call_line(
                 1,
                 "draft_apply",
-                rename(0, "edited with no window"),
+                rename(opened_at, "edited with no window"),
             ))
             .unwrap();
-        assert_eq!(said(&heard.answer(1, || {})), "revision=1 committed=true");
+        let held = opened_at + 1;
+        assert_eq!(
+            said(&heard.answer(1, || {})),
+            format!("revision={held} committed=true")
+        );
         // The window opens the same project: the host saves, lets go, and
         // the window reads what it saved.
         let (decoders, encoders) = crate::register_codecs();
@@ -1337,15 +1451,33 @@ mod tests {
         let read = said(&heard.answer(2, || {
             desktop.serve_forwarded();
         }));
-        assert!(
-            read.contains("revision=0 name=edited with no window"),
-            "{read}"
-        );
+        assert!(read.contains("name=edited with no window"), "{read}");
+        let in_window = revision_of(&read);
+        assert_eq!(Some(in_window), desktop.revision());
+        // The window made one edit of its own, as the client had. The
+        // revision the client holds from the host is not the window's, so
+        // its write on it is refused and the window's draft stays.
+        desktop.set_project_name("named in the window").unwrap();
+        assert_ne!(desktop.revision(), Some(held));
+        client
+            .send(call_line(
+                11,
+                "draft_apply",
+                rename(held, "written on a revision it never read"),
+            ))
+            .unwrap();
+        let stale = heard.answer(11, || {
+            desktop.serve_forwarded();
+        });
+        assert_eq!(stale["result"]["isError"], true, "{stale}");
+        assert!(said(&stale).contains("does not match"), "{stale}");
+        assert_eq!(desktop.draft().unwrap().name, "named in the window");
+        desktop.undo().unwrap();
         client
             .send(call_line(
                 3,
                 "draft_apply",
-                rename(0, "edited in the window"),
+                rename(desktop.revision().unwrap(), "edited in the window"),
             ))
             .unwrap();
         heard.answer(3, || {
@@ -1386,8 +1518,13 @@ mod tests {
         desktop.open_folder(&project.0).unwrap();
         desktop.listen(std::sync::Arc::new(|| {}));
         let (client, heard, host) = typed_host(&project.0);
+        let in_window = desktop.revision().unwrap();
         client
-            .send(call_line(1, "draft_apply", rename(0, "in the window")))
+            .send(call_line(
+                1,
+                "draft_apply",
+                rename(in_window, "in the window"),
+            ))
             .unwrap();
         heard.answer(1, || {
             desktop.serve_forwarded();
@@ -1406,7 +1543,9 @@ mod tests {
             .send(call_line(3, "draft_query", json!({"input": "project"})))
             .unwrap();
         let read = said(&heard.answer(3, || {}));
-        assert!(read.contains("revision=0 name=in the window"), "{read}");
+        assert!(read.contains("name=in the window"), "{read}");
+        // The project is opened anew here, at a revision of its own.
+        assert_ne!(revision_of(&read), in_window + 1);
         drop(client);
         host.join().unwrap().unwrap();
         assert!(cutlass_store::hold(&project.0).is_ok());
@@ -1451,6 +1590,89 @@ mod tests {
         // test program and not `cutlass`, so it has no answer).
         let on = said(&heard.answer(5, || {}));
         assert!(!on.contains("running code is off"), "{on}");
+        drop(client);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_project_named_from_the_folder_it_is_in_is_served_by_its_full_path() {
+        use cutlass_agent::{Sandbox, SandboxError};
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(super::project_root(std::path::Path::new(".")), here);
+        assert_eq!(
+            super::project_root(std::path::Path::new("film")),
+            here.join("film")
+        );
+        let full = here.join("already").join("full");
+        assert_eq!(super::project_root(&full), full);
+        // The runner here is a program that is not there, so a script that
+        // gets past the checks fails to start, and one that does not is
+        // refused for the folder it names.
+        let runner = || std::path::PathBuf::from("/no/such/cutlass");
+        let script = "let half = 1.5; half * 2.0";
+        // As typed, `.` is the project folder and every dot names it.
+        let typed = crate::sandbox::local_sandbox(runner(), Some(std::path::Path::new(".")))
+            .run(script, "{}");
+        assert_eq!(typed, Err(SandboxError::ProjectPath));
+        // By its full path the script is let through to the runner, and a
+        // script that does name the folder is still refused.
+        let root = super::project_root(std::path::Path::new("."));
+        let mut sandbox = crate::sandbox::local_sandbox(runner(), Some(&root));
+        assert!(
+            matches!(sandbox.run(script, "{}"), Err(SandboxError::Executor(_))),
+            "the script reached the runner"
+        );
+        let naming = format!("let folder = \"{}\"; folder", root.display());
+        assert_eq!(sandbox.run(&naming, "{}"), Err(SandboxError::ProjectPath));
+    }
+
+    #[test]
+    fn a_setting_changed_in_the_window_holds_here_from_the_next_call() {
+        let project = Project::new("settings-outside");
+        // The settings are a file of this test's own, not the user's.
+        let settings = project.0.join("settings-home").join("settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let (client, heard, host) = typed_host_with(&project.0, &settings);
+        client
+            .send(call_line(1, "settings_get", json!({})))
+            .unwrap();
+        let read: Value = serde_json::from_str(&said(&heard.answer(1, || {}))).unwrap();
+        let generation = read["generation"].as_u64().unwrap();
+        assert_eq!(read["settings"]["sandbox"]["local"], true);
+        // The user turns running code off in the Cutlass window, which
+        // writes the file this host read when it started.
+        let mut changed = cutlass_settings::Settings::default();
+        changed.sandbox.local = false;
+        let written = cutlass_settings::save(&settings, generation, &changed).unwrap();
+        assert_ne!(written, generation);
+        // The very next call is refused: no script runs on what was read
+        // at the start.
+        client
+            .send(call_line(2, "sandbox_run", json!({"source": "1 + 1"})))
+            .unwrap();
+        let off = heard.answer(2, || {});
+        assert_eq!(off["result"]["isError"], true, "{}", said(&off));
+        assert!(said(&off).contains("running code is off"), "{}", said(&off));
+        // It reads the file's generation now, so its own change is taken
+        // and not refused for ever as written on an old one.
+        client
+            .send(call_line(3, "settings_get", json!({})))
+            .unwrap();
+        let read: Value = serde_json::from_str(&said(&heard.answer(3, || {}))).unwrap();
+        assert_eq!(read["generation"].as_u64(), Some(written));
+        assert_eq!(read["settings"]["sandbox"]["local"], false);
+        client
+            .send(call_line(
+                4,
+                "settings_set",
+                json!({"expected_generation": written, "changes": {"step_cap": 16}}),
+            ))
+            .unwrap();
+        let set = heard.answer(4, || {});
+        assert_eq!(set["result"]["isError"], false, "{}", said(&set));
+        let kept = cutlass_settings::load(&settings).unwrap().settings;
+        assert_eq!(kept.step_cap, 16);
+        assert!(!kept.sandbox.local, "the window's change is kept");
         drop(client);
         host.join().unwrap().unwrap();
     }
@@ -1508,10 +1730,18 @@ mod tests {
         .unwrap();
         let answers = answers(output);
         let started = answers[1]["result"]["content"][0]["text"].as_str().unwrap();
-        assert_eq!(started, "job=track-1 revision=0");
+        // The job is started on the revision the project opened at, and
+        // its path lands as the next one.
+        let opened_at = started
+            .strip_prefix("job=track-1 ")
+            .map(revision_of)
+            .unwrap_or_else(|| panic!("{started}"));
         let polled = answers[2]["result"]["content"][0]["text"].as_str().unwrap();
         eprintln!("{polled}");
-        assert!(polled.starts_with("revision=1 frames="), "{polled}");
+        assert!(
+            polled.starts_with(&format!("revision={} frames=", opened_at + 1)),
+            "{polled}"
+        );
         let opened = cutlass_store::open(&project.0).unwrap();
         let draft = &opened.folder.draft;
         assert_eq!(draft.materials.video_trackings.len(), 1);

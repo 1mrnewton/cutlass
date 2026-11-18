@@ -44,10 +44,10 @@ pub const FIELD: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x1e);
 pub const SWITCH_OFF: Color32 = Color32::from_rgb(0x1a, 0x1a, 0x1a);
 /// A section heading in a dialog.
 pub const SECTION: Color32 = Color32::from_rgb(0x80, 0x80, 0x80);
-/// Close, minimize, and zoom, in that order.
+/// A problem: the red of the macOS close button.
 pub const CLOSE: Color32 = Color32::from_rgb(0xff, 0x5f, 0x57);
-pub const MINIMIZE: Color32 = Color32::from_rgb(0xfe, 0xbc, 0x2e);
-pub const MAXIMIZE: Color32 = Color32::from_rgb(0x28, 0xc8, 0x40);
+/// The window's close button under the pointer, off macOS.
+pub const CAPTION_CLOSE_HOVER: Color32 = Color32::from_rgb(0xc4, 0x2b, 0x1c);
 /// The scrim behind a dialog.
 pub const SCRIM: Color32 = Color32::from_black_alpha(140);
 /// A card, bubble, or field that sits on a panel.
@@ -159,7 +159,10 @@ pub const COVER_WIDTH: f32 = 72.0;
 pub const TRACK_HEAD: f32 = 130.0;
 pub const TRANSPORT_HEIGHT: f32 = 52.0;
 pub const ICON_BUTTON_SIZE: f32 = 28.0;
+/// A dialog's close dot.
 pub const WINDOW_BUTTON: f32 = 12.0;
+/// The width of one window button (minimize, maximize, close) off macOS.
+pub const CAPTION_BUTTON: f32 = 46.0;
 
 pub const LIBRARY_WIDTH: f32 = 380.0;
 pub const INSPECTOR_WIDTH: f32 = 380.0;
@@ -193,6 +196,9 @@ pub const CLIP_TEXT: Color32 = Color32::from_rgb(224, 224, 224);
 /// The row across the top of a main-track or audio clip that holds its
 /// name chip, and on the main track its length chip.
 pub const CLIP_HEADER: f32 = 18.0;
+/// The band under a clip's header that names the effects running over
+/// that clip alone, one chip each.
+pub const CLIP_EFFECT_BAND: f32 = 16.0;
 
 /// The share of a main-track clip's body under the header that its sound
 /// band takes: the stored `wave_ratio` fallback, 30.

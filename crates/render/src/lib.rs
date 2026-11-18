@@ -31,6 +31,7 @@ mod mix;
 mod package;
 mod pool;
 mod relight;
+mod stack;
 mod target;
 mod transition;
 mod vector;
@@ -488,7 +489,7 @@ impl Renderer {
                         let kept = blur::scratch(&self.pool, device, size);
                         let mask = scaled_mask(mask, scale);
                         self.keep
-                            .run(device, queue, encoder, &before, &result, &kept, &mask);
+                            .run(device, queue, encoder, &before, &result, &kept, &mask)?;
                         result = kept;
                     }
                     bound.clear();
@@ -505,7 +506,8 @@ impl Renderer {
                     Self::paint(&self.layers, encoder, &first, &bound);
                     let kept = blur::scratch(&self.pool, device, size);
                     let mask = scaled_mask(mask, scale);
-                    self.cuts.mask(device, queue, encoder, &first, &kept, &mask);
+                    self.cuts
+                        .mask(device, queue, encoder, &first, &kept, &mask)?;
                     bound.clear();
                     bound.push(self.layers.bind(
                         &self.pool,
@@ -573,24 +575,20 @@ impl Renderer {
                     }
                     // What is drawn so far becomes one picture the steps
                     // run over, and that result is the bottom layer again.
+                    // The steps leave their input as it was, so a masked
+                    // effect keeps it as the picture outside the mask.
                     let first = blur::scratch(&self.pool, device, size);
-                    let second = blur::scratch(&self.pool, device, size);
                     Self::paint(&self.layers, encoder, &first, &bound);
-                    let before = mask.map(|_| {
-                        let before = blur::scratch(&self.pool, device, size);
-                        Self::paint(&self.layers, encoder, &before, &bound);
-                        before
-                    });
+                    let before = mask.map(|_| first.clone());
                     let mut result = self
                         .effects
-                        .run(device, queue, encoder, &first, &second, size, steps)
-                        .clone();
+                        .run(device, queue, encoder, &first, size, steps);
                     // A masked effect shows only inside its shape.
                     if let (Some(mask), Some(before)) = (mask, before) {
                         let kept = blur::scratch(&self.pool, device, size);
                         let mask = scaled_mask(mask, scale);
                         self.keep
-                            .run(device, queue, encoder, &before, &result, &kept, &mask);
+                            .run(device, queue, encoder, &before, &result, &kept, &mask)?;
                         result = kept;
                     }
                     let uploaded = layer::Uploaded {
@@ -658,14 +656,12 @@ impl Renderer {
             (incoming, &crossing.incoming),
         ] {
             let first = blur::scratch(&self.pool, device, size);
-            let second = blur::scratch(&self.pool, device, size);
             let bound = [self.layers.bind(&self.pool, device, queue, side, canvas)];
             Self::paint(&self.layers, encoder, &first, &bound);
-            let result = self
-                .effects
-                .run(device, queue, encoder, &first, &second, size, steps)
-                .clone();
-            sides.push(result);
+            sides.push(
+                self.effects
+                    .run(device, queue, encoder, &first, size, steps),
+            );
         }
         let mixed = blur::scratch(&self.pool, device, size);
         self.cross.run(
@@ -756,6 +752,14 @@ impl Renderer {
     pub fn read(&self, canvas: &Canvas) -> Result<Vec<u8>, RenderError> {
         canvas.read(&self.device, &self.queue)
     }
+
+    /// Bytes of the working textures kept from the last frame for the
+    /// next: the pictures its layers, effects and blurs drew into.
+    /// Canvases are the caller's and are not counted.
+    #[must_use]
+    pub fn texture_bytes(&self) -> u64 {
+        self.pool.texture_bytes()
+    }
 }
 
 /// `placement`, laid out on a full-size canvas, for a canvas `scale` times
@@ -773,20 +777,16 @@ fn shrunk(placement: Placement, scale: (f64, f64)) -> Placement {
     }
 }
 
-/// `mask`, laid out on a full-size canvas, for a canvas `scale` times that
-/// size each way: a target pixel centre at `p` is the canvas point
+/// `masks`, laid out on a full-size canvas, for a canvas `scale` times
+/// that size each way: a target pixel centre at `p` is the canvas point
 /// `p / scale`.
 fn scaled_mask(
-    mask: &cutlass_effects::CanvasMask,
+    masks: &cutlass_effects::CanvasMasks,
     scale: (f64, f64),
-) -> cutlass_effects::CanvasMask {
-    let (sx, sy) = scale;
-    if sx == 1.0 && sy == 1.0 {
-        return *mask;
-    }
-    cutlass_effects::CanvasMask {
-        frame: scaled_frame(mask.frame, scale),
-        ..*mask
+) -> cutlass_effects::CanvasMasks {
+    cutlass_effects::CanvasMasks {
+        frame: scaled_frame(masks.frame, scale),
+        masks: masks.masks.clone(),
     }
 }
 
@@ -941,6 +941,47 @@ mod tests {
             .unwrap();
         assert_eq!(renderer.read(&one).unwrap(), small);
         assert!(renderer.pool.created() > first);
+    }
+
+    /// The working textures a frame used are counted, kept at that, and
+    /// let go when a frame no longer needs them.
+    #[test]
+    fn texture_bytes_count_the_last_frames_textures() {
+        let Some(renderer) = renderer() else { return };
+        assert_eq!(renderer.texture_bytes(), 0);
+        let (width, height) = (8u32, 4u32);
+        let canvas = renderer.canvas(width, height).unwrap();
+        let red: Vec<u8> = [255, 0, 0, 255].repeat((width * height) as usize);
+        let picture = Rgba {
+            width,
+            height,
+            bytes: &red,
+        };
+        let plain = [Layer::Rgba(picture, Placement::canvas(width, height))];
+        renderer.draw(&canvas, &plain).unwrap();
+        let alone = renderer.texture_bytes();
+        // The picture's own upload, at least.
+        assert!(alone >= u64::from(width * height * 4), "{alone}");
+
+        let invert = [cutlass_effects::Step::new(
+            cutlass_effects::Block::Invert,
+            [0.0; cutlass_effects::MAX_VALUES],
+        )];
+        let with_effect = [
+            Layer::Rgba(picture, Placement::canvas(width, height)),
+            Layer::Effect(&invert, None),
+        ];
+        renderer.draw(&canvas, &with_effect).unwrap();
+        let effect = renderer.texture_bytes();
+        // Two working pictures for the effect's steps.
+        assert!(
+            effect >= alone + 2 * u64::from(width * height * 4),
+            "{effect} vs {alone}"
+        );
+        renderer.draw(&canvas, &with_effect).unwrap();
+        assert_eq!(renderer.texture_bytes(), effect, "a frame like the last");
+        renderer.draw(&canvas, &plain).unwrap();
+        assert_eq!(renderer.texture_bytes(), alone, "the effect's are let go");
     }
 
     #[test]

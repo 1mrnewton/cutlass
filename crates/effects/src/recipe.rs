@@ -6,6 +6,12 @@
 //! step. The GPU runs the blocks; a recipe never carries shader code, so a
 //! recipe from anywhere can only ask for what the blocks already do.
 //!
+//! A pass may keep its result under a name (`"save"`), and a [`Block::Blend`]
+//! pass lays a kept picture back over the picture so far (`"with"`). The
+//! picture as it entered the effect is always kept as [`ORIGINAL`]. Names
+//! are checked when the recipe is read: one read before it is saved, or
+//! more than [`MAX_SAVED`] of them, is refused.
+//!
 //! Every value a curve can reach is checked against the parameter's range
 //! when the recipe is read, so [`Recipe::steps_at`] has nothing to refuse.
 //! Positions and sizes are fractions of the frame, so an effect looks the
@@ -19,10 +25,17 @@ use cutlass_model::Micros;
 use serde::{Deserialize, Serialize};
 
 /// The recipe format this app reads. A recipe with a higher version needs
-/// blocks or fields this app does not have. Version 2 added eased keys.
-pub const RECIPE_VERSION: u32 = 2;
+/// blocks or fields this app does not have. Version 2 added eased keys,
+/// version 3 kept pictures and [`Block::Blend`].
+pub const RECIPE_VERSION: u32 = 3;
 /// The first version whose keys may name an [`Ease`].
 pub const EASE_VERSION: u32 = 2;
+/// The first version whose passes may save and blend pictures.
+pub const PICTURE_VERSION: u32 = 3;
+/// The most names one list of passes may save pictures under.
+pub const MAX_SAVED: usize = 3;
+/// The picture as it entered the effect, which a blend may always read.
+pub const ORIGINAL: &str = "original";
 /// The most passes one recipe may run.
 pub const MAX_PASSES: usize = 8;
 /// The most keyframes one curve may hold.
@@ -125,6 +138,9 @@ pub enum Block {
     /// card can be a white-edged photo print with a shadow, over a soft,
     /// dim copy of the picture.
     Place,
+    /// Lay a kept picture over the picture so far: added, screened,
+    /// multiplied, the lighter of the two, or mixed in.
+    Blend,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -220,12 +236,18 @@ const BULGE: &[Param] = &[
     param("x", 0.0, -0.5, 0.5),
     param("y", 0.0, -0.5, 0.5),
 ];
-/// Light above `threshold` spreads as far as `radius`, a fraction of the
-/// shorter side.
+/// Light above `threshold`, a level of the picture as it is shown, spreads
+/// as far as `radius`, a fraction of the shorter side. `knee` softens the
+/// threshold, from a hard edge at 0 to a ramp as wide as the threshold at
+/// 1; `red`, `green` and `blue` tint the light that spreads.
 const GLOW: &[Param] = &[
     param("amount", 0.0, 0.0, 3.0),
     param("radius", 0.03, 0.0, 0.2),
     param("threshold", 0.6, 0.0, 1.0),
+    param("knee", 0.5, 0.0, 1.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 1.0, 0.0, 1.0),
+    param("blue", 1.0, 0.0, 1.0),
 ];
 /// `x` and `y` place the light from the middle, in frames; `size` is a
 /// fraction of the shorter side.
@@ -394,10 +416,14 @@ const HALFTONE: &[Param] = &[
     param("amount", 1.0, 0.0, 1.0),
     param("color", 0.0, 0.0, 1.0),
 ];
+/// `mode` 0 adds the kept picture's light, 1 screens it, 2 multiplies by
+/// it, 3 keeps the lighter of the two and 4 mixes toward it. `amount` 0
+/// leaves the picture so far and 1 is the mode's whole result.
+const BLEND: &[Param] = &[param("mode", 0.0, 0.0, 4.0), param("amount", 1.0, 0.0, 1.0)];
 
 impl Block {
     /// Every block, in the order of their codes.
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 38] = [
         Self::Transform,
         Self::RgbSplit,
         Self::Slices,
@@ -435,6 +461,7 @@ impl Block {
         Self::Rays,
         Self::Focus,
         Self::Place,
+        Self::Blend,
     ];
 
     /// The parameters in the order the shader reads them.
@@ -478,6 +505,7 @@ impl Block {
             Self::Rays => RAYS,
             Self::Focus => FOCUS,
             Self::Place => PLACE,
+            Self::Blend => BLEND,
         }
     }
 
@@ -522,6 +550,7 @@ impl Block {
             Self::Rays => 34,
             Self::Focus => 35,
             Self::Place => 36,
+            Self::Blend => 37,
         }
     }
 }
@@ -789,6 +818,26 @@ pub struct Pass {
     pub block: Block,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, Curve>,
+    /// The name this pass's result is kept under, for a later blend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save: Option<String>,
+    /// The kept picture a [`Block::Blend`] pass lays over; none is
+    /// [`ORIGINAL`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with: Option<String>,
+}
+
+impl Pass {
+    /// A pass of `block` with every value at its default, keeping nothing.
+    #[must_use]
+    pub fn new(block: Block) -> Self {
+        Self {
+            block,
+            params: BTreeMap::new(),
+            save: None,
+            with: None,
+        }
+    }
 }
 
 // What a written recipe leaves out: a field at the value a reader gives it.
@@ -843,6 +892,25 @@ pub struct Step {
     pub block: Block,
     /// In the order of [`Block::params`]; the rest are zero.
     pub values: [f32; MAX_VALUES],
+    /// Where this step's result is kept: 1 to [`MAX_SAVED`].
+    pub save: Option<u8>,
+    /// The kept picture a blend reads: 0 is the picture as it entered the
+    /// effect, 1 to [`MAX_SAVED`] one a step saved. `None` for any other
+    /// block.
+    pub with: Option<u8>,
+}
+
+impl Step {
+    /// A step of `block` with `values` that keeps and reads nothing.
+    #[must_use]
+    pub const fn new(block: Block, values: [f32; MAX_VALUES]) -> Self {
+        Self {
+            block,
+            values,
+            save: None,
+            with: None,
+        }
+    }
 }
 
 /// Why a recipe was refused.
@@ -869,6 +937,10 @@ pub enum RecipeError {
     /// hold its default, a speed that can reach zero, a target that names
     /// no pass or parameter, or more than [`MAX_CONTROLS`] of them.
     Control(String),
+    /// A kept picture is misused: a name read before it is saved, a name
+    /// that is not a name, more than [`MAX_SAVED`] of them, or a picture
+    /// read by a block that is not a blend. Says which.
+    Picture(String),
 }
 
 impl fmt::Display for RecipeError {
@@ -895,6 +967,7 @@ impl fmt::Display for RecipeError {
             }
             Self::Curve { block, name } => write!(formatter, "{block:?} {name} has a broken curve"),
             Self::Control(id) => write!(formatter, "the control {id} is not usable"),
+            Self::Picture(reason) => write!(formatter, "a kept picture is misused: {reason}"),
         }
     }
 }
@@ -986,6 +1059,7 @@ impl Recipe {
     #[must_use]
     pub fn least_version(&self) -> u32 {
         least_version(self.passes.iter().flat_map(|pass| pass.params.values()))
+            .max(passes_version(&self.passes))
     }
 
     fn check_controls(&self) -> Result<(), RecipeError> {
@@ -1085,6 +1159,7 @@ impl Recipe {
             .product();
         // Seconds as f64 first: a long timeline keeps its fraction.
         let seconds = (time.0.max(0) as f64 / 1_000_000.0 * speed) as f32;
+        let mut kept = Kept::default();
         self.passes
             .iter()
             .enumerate()
@@ -1110,9 +1185,12 @@ impl Recipe {
                     }
                     *slot = value.clamp(param.min, param.max);
                 }
+                let (save, with) = kept.pass(pass);
                 Step {
                     block: pass.block,
                     values,
+                    save,
+                    with,
                 }
             })
             .collect()
@@ -1204,6 +1282,95 @@ pub(crate) fn least_version<'a>(curves: impl IntoIterator<Item = &'a Curve>) -> 
     if eased { EASE_VERSION } else { 1 }
 }
 
+/// The lowest format version that can hold `passes`' kept pictures.
+pub(crate) fn passes_version<'a>(passes: impl IntoIterator<Item = &'a Pass>) -> u32 {
+    let kept = passes
+        .into_iter()
+        .any(|pass| pass.block == Block::Blend || pass.save.is_some() || pass.with.is_some());
+    if kept { PICTURE_VERSION } else { 1 }
+}
+
+/// The names a list of passes has saved, in the order first saved: the
+/// slot a name is kept in is its place here, plus one.
+#[derive(Default)]
+struct Kept<'a> {
+    names: Vec<&'a str>,
+}
+
+impl<'a> Kept<'a> {
+    /// `pass`'s slots, the one it saves to and the one it reads, as
+    /// [`Step::save`] and [`Step::with`], once its names are checked by
+    /// [`Self::check`].
+    fn pass(&mut self, pass: &'a Pass) -> (Option<u8>, Option<u8>) {
+        let with = (pass.block == Block::Blend).then(|| {
+            pass.with
+                .as_deref()
+                .and_then(|name| self.slot(name))
+                .unwrap_or(0)
+        });
+        let save = pass.save.as_deref().map(|name| {
+            if !self.names.contains(&name) {
+                self.names.push(name);
+            }
+            self.slot(name).unwrap_or(0)
+        });
+        (save, with)
+    }
+
+    /// The slot `name` is kept in: 0 for [`ORIGINAL`].
+    fn slot(&self, name: &str) -> Option<u8> {
+        if name == ORIGINAL {
+            return Some(0);
+        }
+        let index = self.names.iter().position(|kept| *kept == name)?;
+        u8::try_from(index + 1).ok()
+    }
+
+    /// Refuse `pass` if it reads a picture not yet kept, reads one without
+    /// being a blend, or saves under a bad or a fourth name.
+    fn check(&mut self, pass: &'a Pass) -> Result<(), RecipeError> {
+        let refuse = |reason: String| Err(RecipeError::Picture(reason));
+        if let Some(with) = pass.with.as_deref() {
+            if pass.block != Block::Blend {
+                return refuse(format!(
+                    "only a blend reads a picture, not {:?}",
+                    pass.block
+                ));
+            }
+            if self.slot(with).is_none() {
+                return refuse(format!("{with} is read before it is saved"));
+            }
+        }
+        if let Some(name) = pass.save.as_deref() {
+            if !picture_name_ok(name) {
+                return refuse(format!("{name:?} is not a picture name"));
+            }
+            if !self.names.contains(&name) {
+                if self.names.len() == MAX_SAVED {
+                    return refuse(format!("more than {MAX_SAVED} names"));
+                }
+                self.names.push(name);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A name a picture is saved under: a lowercase letter, then up to 15
+/// more of lowercase letters, digits and underscores, and not
+/// [`ORIGINAL`], which is always kept.
+fn picture_name_ok(name: &str) -> bool {
+    name.len() <= 16
+        && name != ORIGINAL
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 /// A recipe that names `version` may use what `least` first had.
 pub(crate) fn check_version(version: u32, least: u32) -> Result<(), RecipeError> {
     if version < least {
@@ -1216,7 +1383,9 @@ pub(crate) fn check_version(version: u32, least: u32) -> Result<(), RecipeError>
 
 /// Every parameter of `passes` is one its block has, inside its range.
 pub(crate) fn check_passes(passes: &[Pass]) -> Result<(), RecipeError> {
+    let mut kept = Kept::default();
     for pass in passes {
+        kept.check(pass)?;
         for (name, curve) in &pass.params {
             let Some(param) = pass.block.params().iter().find(|p| p.name == name) else {
                 return Err(RecipeError::UnknownParam {
@@ -1297,7 +1466,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 200] = [
+const BUNDLED_FILES: [&str; 205] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -1498,6 +1667,11 @@ const BUNDLED_FILES: [&str; 200] = [
     include_str!("../recipes/liquid.json"),
     include_str!("../recipes/melt.json"),
     include_str!("../recipes/bubble.json"),
+    include_str!("../recipes/daydream.json"),
+    include_str!("../recipes/double-exposure.json"),
+    include_str!("../recipes/ghost.json"),
+    include_str!("../recipes/neon-trace.json"),
+    include_str!("../recipes/watercolor.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.
@@ -1842,6 +2016,110 @@ mod tests {
         assert_eq!(read(&json).unwrap(), eased);
     }
 
+    /// A version 3 recipe with `passes`, a JSON list.
+    fn kept(passes: &str) -> Result<Recipe, RecipeError> {
+        read(&format!(
+            r#"{{"version":3,"id":"a","name":"A","passes":[{passes}]}}"#
+        ))
+    }
+
+    #[test]
+    fn a_pass_keeps_its_picture_by_name_and_a_blend_reads_it_back() {
+        let recipe = kept(
+            r#"{"block":"blur","save":"soft"},{"block":"edges","save":"lines"},
+               {"block":"blend","params":{"mode":1},"with":"soft"},
+               {"block":"blend","params":{"mode":2}},
+               {"block":"blend","with":"lines","save":"soft"}"#,
+        )
+        .unwrap();
+        let steps = recipe.steps_at(Micros(0));
+        let slots: Vec<_> = steps.iter().map(|step| (step.save, step.with)).collect();
+        assert_eq!(
+            slots,
+            [
+                (Some(1), None),
+                (Some(2), None),
+                (None, Some(1)),
+                // No `with` reads the picture as it entered the effect.
+                (None, Some(0)),
+                // Saving a name again keeps it where it was.
+                (Some(1), Some(2)),
+            ]
+        );
+        assert_eq!(steps[2].values[..2], [1.0, 1.0]);
+        // A recipe that keeps nothing has nothing to say about pictures.
+        let plain = read(r#"{"version":1,"id":"a","name":"A","passes":[{"block":"blur"}]}"#)
+            .unwrap()
+            .steps_at(Micros(0));
+        assert_eq!((plain[0].save, plain[0].with), (None, None));
+    }
+
+    #[test]
+    fn a_kept_picture_misused_is_refused_and_says_why() {
+        let refused = |passes: &str, cause: &str| match kept(passes) {
+            Err(RecipeError::Picture(reason)) => {
+                assert!(reason.contains(cause), "{reason} lacks {cause}");
+            }
+            other => panic!("{passes}: {other:?}"),
+        };
+        refused(
+            r#"{"block":"blend","with":"soft"},{"block":"blur","save":"soft"}"#,
+            "read before it is saved",
+        );
+        refused(r#"{"block":"blend","with":"nowhere"}"#, "read before");
+        refused(r#"{"block":"blur","with":"original"}"#, "only a blend");
+        for bad in ["original", "Soft", "1st", "", "a-b", "seventeen_letters"] {
+            refused(
+                &format!(r#"{{"block":"blur","save":"{bad}"}}"#),
+                "not a picture name",
+            );
+        }
+        refused(
+            r#"{"block":"blur","save":"a"},{"block":"blur","save":"b"},
+               {"block":"blur","save":"c"},{"block":"blur","save":"d"}"#,
+            "more than 3",
+        );
+        // Three names, each saved twice, are three.
+        assert!(
+            kept(
+                r#"{"block":"blur","save":"a"},{"block":"blur","save":"b"},
+                   {"block":"blur","save":"c"},{"block":"blur","save":"a"}"#
+            )
+            .is_ok()
+        );
+        // A blend's own save comes after it reads.
+        refused(r#"{"block":"blend","with":"x","save":"x"}"#, "read before");
+        // A field not in the format is refused as a shape.
+        assert!(matches!(
+            kept(r#"{"block":"blend","keep":"x"}"#),
+            Err(RecipeError::Shape(_))
+        ));
+    }
+
+    #[test]
+    fn kept_pictures_need_version_three_and_a_plain_recipe_stays_older() {
+        for passes in [
+            r#"{"block":"blur","save":"soft"},{"block":"blend","with":"soft"}"#,
+            r#"{"block":"blend"}"#,
+        ] {
+            let at_two = format!(r#"{{"version":2,"id":"a","name":"A","passes":[{passes}]}}"#);
+            assert!(
+                matches!(read(&at_two), Err(RecipeError::Shape(_))),
+                "{passes}"
+            );
+            let recipe = kept(passes).unwrap();
+            let json = recipe.to_json().unwrap();
+            assert!(json.contains("\"version\": 3"), "{json}");
+            assert_eq!(read(&json).unwrap(), recipe);
+        }
+        let plain = kept(r#"{"block":"blur"}"#).unwrap().to_json().unwrap();
+        assert!(plain.contains("\"version\": 1"), "{plain}");
+        assert!(
+            !plain.contains("save") && !plain.contains("with"),
+            "{plain}"
+        );
+    }
+
     #[test]
     fn a_recipe_that_would_not_read_back_is_not_written() {
         let mut recipe =
@@ -1862,8 +2140,8 @@ mod tests {
     #[test]
     fn a_newer_recipe_asks_for_an_update_even_with_blocks_this_app_lacks() {
         assert_eq!(
-            read(r#"{"version":3,"id":"a","name":"A","passes":[{"block":"bloom"}]}"#),
-            Err(RecipeError::Newer(3))
+            read(r#"{"version":4,"id":"a","name":"A","passes":[{"block":"bloom"}]}"#),
+            Err(RecipeError::Newer(4))
         );
         assert!(matches!(
             read(r#"{"id":"a","name":"A","passes":[{"block":"blur"}]}"#),

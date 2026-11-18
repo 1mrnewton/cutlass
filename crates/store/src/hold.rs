@@ -9,6 +9,12 @@
 //! without, releases the lock and leaves the file in place. A file still
 //! saying open when the next hold takes it was left by a process that did
 //! not close: an app that crashed.
+//!
+//! The token is what lets a caller edit the project through the holder,
+//! so on Unix the file is this user's alone to read: made that way, and
+//! narrowed when an earlier build left it wider. A volume that keeps no
+//! permissions, as an exFAT drive does, cannot be narrowed and is left as
+//! it is.
 
 #[cfg(not(windows))]
 use std::fs::TryLockError;
@@ -22,6 +28,10 @@ pub(crate) const LOCK_FILE: &str = ".locked";
 const ABSENT_ADDRESS: &[u8] = b"{\"address\":null}\n";
 const OPEN_MARK: &[u8] = b"\"open\":true";
 const HELD_OPEN: &[u8] = b"{\"address\":null,\"open\":true}\n";
+/// The lock file's mode on Unix: its owner reads and writes it, and no one
+/// else reads the token in it.
+#[cfg(unix)]
+const PRIVATE_MODE: u32 = 0o600;
 /// Another process has the file open for writing.
 #[cfg(windows)]
 const ERROR_SHARING_VIOLATION: i32 = 32;
@@ -100,6 +110,11 @@ pub fn hold(path: &Path) -> Result<Hold, StoreError> {
     let lock_path = root.join(LOCK_FILE);
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(PRIVATE_MODE);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -146,6 +161,14 @@ pub fn hold(path: &Path) -> Result<Hold, StoreError> {
                 message: error.to_string(),
             });
         }
+    }
+    // A file an earlier build made keeps the mode it was made with. It is
+    // narrowed only now, once it is known to be the folder's own file and
+    // not a link out of it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_MODE));
     }
     let mut before = Vec::new();
     // A file that cannot be read is no sign of a crash.
@@ -232,6 +255,45 @@ mod tests {
         assert_eq!(held_address(&root), None, "let go, it names no socket");
         let third = hold(&root).unwrap();
         assert!(!third.unclean());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_file_is_its_owners_alone_to_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let temp = Temp::new();
+        // A new lock file is made private, whatever the umask leaves.
+        let root = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let mut held = hold(&root).unwrap();
+        assert_eq!(mode(held.path()), 0o600);
+        held.set_address("127.0.0.1:4321", "secret").unwrap();
+        assert_eq!(mode(held.path()), 0o600);
+        drop(held);
+        assert_eq!(mode(&root.join(".locked")), 0o600);
+        // One an earlier build left for everyone to read is narrowed
+        // before a token is written into it.
+        let older = temp.path().join("older");
+        fs::create_dir(&older).unwrap();
+        let lock = older.join(".locked");
+        fs::write(&lock, b"{\"address\":null}\n").unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+        let held = hold(&older).unwrap();
+        assert_eq!(mode(&lock), 0o600);
+        drop(held);
+        // A link out of the folder is refused, and what it points at keeps
+        // its mode.
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let external = outside.join("held");
+        fs::write(&external, b"keep").unwrap();
+        fs::set_permissions(&external, fs::Permissions::from_mode(0o644)).unwrap();
+        let linked = temp.path().join("linked");
+        fs::create_dir(&linked).unwrap();
+        std::os::unix::fs::symlink(&external, linked.join(".locked")).unwrap();
+        assert!(hold(&linked).is_err());
+        assert_eq!(mode(&external), 0o644);
     }
 
     #[test]

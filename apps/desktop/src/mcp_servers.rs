@@ -117,9 +117,9 @@ impl McpWire for Wire {
         }
     }
 
-    fn receive(&mut self) -> Result<String, McpError> {
+    fn receive(&mut self, within: Duration) -> Result<String, McpError> {
         match self {
-            Self::Process(process) => process.receive(),
+            Self::Process(process) => process.receive(within),
             Self::Remote(remote) => remote.receive(),
         }
     }
@@ -192,8 +192,10 @@ impl Process {
         })
     }
 
-    fn receive(&mut self) -> Result<String, McpError> {
-        match self.lines.recv_timeout(ANSWER_WITHIN) {
+    /// The server's next line, waited for no longer than `within`, which
+    /// is what is left of the time it has to answer the request.
+    fn receive(&mut self, within: Duration) -> Result<String, McpError> {
+        match self.lines.recv_timeout(within.min(ANSWER_WITHIN)) {
             Ok(line) => Ok(line),
             Err(RecvTimeoutError::Timeout) => {
                 self.closed = true;

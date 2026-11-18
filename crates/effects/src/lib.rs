@@ -5,9 +5,7 @@
 //! [`catalog`], not a shader-host enum. The compositor is not in this crate.
 //!
 //! [`recipe`] holds effects as data: passes over blocks the GPU runs, with
-//! values that move over time. Ten recipes ship in the app.
-//! [`studio`] reads the studio folder, where the desktop's effect studio
-//! saves the recipes being made, and runs them beside the bundled ones.
+//! values that move over time.
 //!
 //! There is no script host and no shader dialect. A checksum proves that
 //! published bytes arrived intact. It does not authorize running those bytes.
@@ -28,13 +26,13 @@ pub mod grade;
 pub mod look;
 pub mod lut;
 pub mod mask;
+pub mod matting;
 pub mod package;
 pub mod preview;
 pub mod recipe;
 pub mod relight;
 pub mod selection;
 pub mod source;
-pub mod studio;
 pub mod transitions;
 
 pub use adjust::{
@@ -68,8 +66,14 @@ pub use look::{
 };
 pub use lut::{ClipLut, KEPT_SIZE, LUT, Lut, LutError, MAX_CUBE_SIZE, segment_lut};
 pub use mask::{
-    COLOR_MASK, CanvasMask, MASK, MASK_WGSL, Mask, MaskShape, listed_mask, segment_color_mask,
-    segment_mask,
+    ArtPicture, BrushStroke, COLOR_MASK, CanvasMask, CanvasMasks, DrawnMask, ListedMask, MASK,
+    MASK_WGSL, MAX_ART_POINTS, MAX_MASK_TEXT, MAX_STACK, MAX_STROKES, Mask, MaskArt, MaskMode,
+    MaskShape, STACK_FLOATS, STACK_WGSL, apply_drawn, apply_masks, art_fits, drawn_coverage,
+    limit_drawn, limit_masks, listed_mask, listed_masks, masks_at, segment_color_mask,
+    segment_color_masks, segment_mask, segment_masks, stack_coverage,
+};
+pub use matting::{
+    Brush, MATTING, Matting, MattingMode, Pick, PickClick, Stroke, StrokeStyle, segment_matting,
 };
 pub use package::{
     Located, MAX_PACKAGE_BYTES, MissingPackages, Package, PackageError, PackageStore,
@@ -82,9 +86,9 @@ pub use preview::{
 };
 pub use recipe::{
     Block, Control, ControlUnit, Curve, EASE_VERSION, EFFECT_CATEGORIES, Ease, Jitter,
-    MAX_CONTROLS, MAX_JITTER_RATE, MAX_KEYS, MAX_PASSES, MAX_RECIPE_BYTES, MAX_VALUES, Param, Pass,
-    RECIPE_PREFIX, RECIPE_VERSION, Recipe, RecipeError, Step, Target, Wave, bundled,
-    bundled_recipe, gap_ease,
+    MAX_CONTROLS, MAX_JITTER_RATE, MAX_KEYS, MAX_PASSES, MAX_RECIPE_BYTES, MAX_SAVED, MAX_VALUES,
+    ORIGINAL, PICTURE_VERSION, Param, Pass, RECIPE_PREFIX, RECIPE_VERSION, Recipe, RecipeError,
+    Step, Target, Wave, bundled, bundled_recipe, gap_ease,
 };
 pub use relight::{
     CUSTOM_COLOR, Light, Lighting, MAX_LIGHTS, RELIGHT_PRESETS, RELIGHT_UNIFORM_BYTES,
@@ -97,12 +101,6 @@ pub use selection::{
 pub use source::{
     AnimSpan, EffectSource, PACKAGE_UNIFORM_BYTES, PACKAGE_WGSL, PackagePaint, PackagePass,
     Progress, progress, segment_pass,
-};
-pub use studio::{
-    Loaded, MAX_STUDIO_FILES, Refused, STUDIO_EFFECTS, STUDIO_TRANSITIONS, StudioError,
-    clear_studio, is_studio_recipe, is_studio_transition, load_studio, recipe, recipes,
-    remove_studio_recipe, remove_studio_transition, studio_generation, studio_recipes,
-    studio_stamp, studio_transitions, write_studio_recipe, write_studio_transition,
 };
 pub use transitions::{
     BUILT_IN_PREFIX, TRANSITION_WGSL, TransitionKind, blur_radius as transition_blur_radius,

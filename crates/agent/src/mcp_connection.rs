@@ -5,6 +5,8 @@
 //! posts. It hands this module one JSON-RPC message at a time through
 //! [`McpWire`]. This module does not spawn a process or open a socket.
 
+use std::time::{Duration, Instant};
+
 use serde_json::{Value, json};
 
 use crate::mcp::McpError;
@@ -14,10 +16,14 @@ use crate::mcp_server::MCP_PROTOCOL_VERSION;
 pub trait McpWire {
     /// Send one message, a line of JSON.
     fn send(&mut self, message: &str) -> Result<(), McpError>;
-    /// The next message from the server. The host gives up after its own
-    /// time limit and answers with an error.
-    fn receive(&mut self) -> Result<String, McpError>;
+    /// The next message from the server, waited for no longer than
+    /// `within`: past it the host gives up and answers with an error.
+    fn receive(&mut self, within: Duration) -> Result<String, McpError>;
 }
+
+/// How long a server has to answer one request, whatever else it sends
+/// meanwhile.
+pub const ANSWER_WITHIN: Duration = Duration::from_secs(120);
 
 /// The tool name `mcp.call` takes to list a server's tools.
 pub const LIST_TOOLS: &str = "tools/list";
@@ -33,6 +39,7 @@ pub struct McpConnection<W> {
     next_id: u64,
     ready: bool,
     server: String,
+    answer_within: Duration,
 }
 
 impl<W: McpWire> McpConnection<W> {
@@ -44,7 +51,16 @@ impl<W: McpWire> McpConnection<W> {
             next_id: 1,
             ready: false,
             server: server.to_owned(),
+            answer_within: ANSWER_WITHIN,
         }
+    }
+
+    /// Give the server `limit` to answer each request, not
+    /// [`ANSWER_WITHIN`].
+    #[must_use]
+    pub fn answering_within(mut self, limit: Duration) -> Self {
+        self.answer_within = limit;
+        self
     }
 
     /// The host's half.
@@ -131,8 +147,23 @@ impl<W: McpWire> McpConnection<W> {
         self.wire.send(
             &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string(),
         )?;
+        // One limit for the whole wait. A limit that started again with
+        // each message let a server that sends a progress note now and
+        // then, and never its answer, hold the caller for good.
+        let asked = Instant::now();
         loop {
-            let line = self.wire.receive()?;
+            let left = self
+                .answer_within
+                .checked_sub(asked.elapsed())
+                .filter(|left| !left.is_zero());
+            let Some(left) = left else {
+                return Err(McpError::Transport(format!(
+                    "{} did not answer {method} within {} seconds",
+                    self.server,
+                    self.answer_within.as_secs_f32()
+                )));
+            };
+            let line = self.wire.receive(left)?;
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
                 // A server may print something that is not a message.
                 continue;
@@ -236,6 +267,7 @@ fn show_tools(result: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
 
@@ -288,7 +320,7 @@ mod tests {
             Ok(())
         }
 
-        fn receive(&mut self) -> Result<String, McpError> {
+        fn receive(&mut self, _within: Duration) -> Result<String, McpError> {
             self.queue
                 .pop_front()
                 .ok_or_else(|| McpError::Transport("closed".to_owned()))
@@ -333,7 +365,7 @@ mod tests {
             Ok(())
         }
 
-        fn receive(&mut self) -> Result<String, McpError> {
+        fn receive(&mut self, _within: Duration) -> Result<String, McpError> {
             self.queue
                 .pop_front()
                 .ok_or_else(|| McpError::Transport("closed".to_owned()))
@@ -398,5 +430,47 @@ mod tests {
             sent.iter()
                 .any(|message| message["id"] == "s1" && message.get("result").is_some())
         );
+    }
+
+    /// A server that sends a note whenever it is waited on and never the
+    /// answer.
+    struct Chatty {
+        waits: Vec<Duration>,
+    }
+
+    impl McpWire for Chatty {
+        fn send(&mut self, _message: &str) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        fn receive(&mut self, within: Duration) -> Result<String, McpError> {
+            self.waits.push(within);
+            std::thread::sleep(within.min(Duration::from_millis(5)));
+            Ok(json!({"jsonrpc":"2.0","method":"notifications/progress","params":{}}).to_string())
+        }
+    }
+
+    #[test]
+    fn a_server_that_only_sends_notes_is_given_up_on() {
+        let limit = Duration::from_millis(60);
+        let mut connection =
+            McpConnection::new(Chatty { waits: Vec::new() }, "chatty").answering_within(limit);
+        let asked = Instant::now();
+        let error = connection.call("weather", "{}").unwrap_err();
+        let took = asked.elapsed();
+        assert!(
+            error
+                .to_string()
+                .contains("chatty did not answer initialize"),
+            "{error}"
+        );
+        // It is the whole wait that is limited, with room for a slow
+        // machine, and each wait handed to the host is what is left of it.
+        assert!(took >= limit, "{took:?}");
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        let waits = &connection.wire_mut().waits;
+        assert!(waits.len() > 1, "{waits:?}");
+        assert!(waits.iter().all(|wait| *wait <= limit), "{waits:?}");
+        assert!(waits.first() > waits.last(), "{waits:?}");
     }
 }

@@ -16,18 +16,15 @@ use cutlass_color::{Depth, Input, Layout, Matrix, Outcome, Picture as ColorPictu
 use cutlass_container::DisplayQuarter;
 use cutlass_decode::StillImage;
 use cutlass_gpu::Extent;
-use cutlass_model::{Draft, Micros, SegmentId};
+use cutlass_model::{Draft, Micros, Segment, SegmentId};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, PlatformBuffer, Sample, rgba_len};
 
 use crate::ahead::ReadAhead;
 use crate::cache::FrameWindow;
-use crate::clock::{ClockKind, MediaClock};
+use crate::clock::ClockKind;
 use crate::error::EngineError;
-use crate::filmstrip::{self, StripCell};
 use crate::map::{self, TimelineMap};
-use crate::preload::Preload;
-use crate::reader::{DecodedFrame, MAX_AUDIO_FRAMES, Media, MediaInfo, ReaderFactory};
-use crate::waveform::{MAX_BUCKETS, Waveform};
+use crate::reader::{DecodedFrame, Media, MediaInfo, ReaderFactory};
 
 /// Decoded pictures for one segment.
 pub struct VideoSource {
@@ -35,8 +32,7 @@ pub struct VideoSource {
     media: RefCell<Media>,
     pub(crate) map: TimelineMap,
     cache: RefCell<FrameWindow<DecodedFrame>>,
-    clock: RefCell<MediaClock>,
-    preload: RefCell<Preload>,
+    clock: ClockKind,
     decodes: Cell<u32>,
     display: DisplayQuarter,
     /// A decode thread an export-clock read waits on instead of decoding here.
@@ -57,7 +53,7 @@ impl VideoSource {
     /// The thread opens the file again through `factory`. An export-clock
     /// read then waits on it instead of decoding on the caller's thread, and
     /// moving forward finds the next picture already decoded. Playback-clock
-    /// reads, filmstrip cells, and waveforms are unchanged.
+    /// reads are unchanged.
     pub fn read_ahead(
         &mut self,
         factory: &ReaderFactory,
@@ -71,6 +67,19 @@ impl VideoSource {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Whether this source reads `plan` from the file `factory` would open
+    /// for it now, unchanged since it was opened. Such a source shows the
+    /// same pictures a new one would, with its decoded pictures and its
+    /// thread already there.
+    #[must_use]
+    pub fn reads(&self, factory: &ReaderFactory, plan: &SegmentPlan) -> bool {
+        let media = self.media.borrow();
+        self.path == plan.path
+            && self.map == plan.map
+            && factory.stand_in(&plan.path) == media.opened()
+            && media.unchanged()
     }
 
     #[must_use]
@@ -95,10 +104,6 @@ impl VideoSource {
         self.cache.borrow().len()
     }
 
-    pub fn advance_audio(&self, frames: u32, rate: u32) -> Result<Micros, EngineError> {
-        self.clock.borrow_mut().advance_audio(frames, rate)
-    }
-
     /// The picture's own time at timeline `time`, wrapped into one round
     /// for an animated still.
     fn source_at(&self, time: Micros) -> Result<Micros, map::MapError> {
@@ -107,23 +112,6 @@ impl VideoSource {
             Some(round) => Micros(source.0.rem_euclid(round)),
             None => source,
         })
-    }
-
-    /// Decode into the window unless playback is already past `time`.
-    pub fn fill(&self, time: Micros) -> Result<Sample, EngineError> {
-        let source = self.source_at(time)?;
-        let held = self.decode(source)?;
-        let clock = self.clock.borrow();
-        let late = clock.kind() == ClockKind::Playback && clock.audio_time().0 > time.0;
-        drop(clock);
-        if late {
-            return Ok(Sample::Miss);
-        }
-        let frame = held.frame.clone();
-        self.cache
-            .borrow_mut()
-            .insert(held.start.0, held.end.0, held.frame);
-        self.deliver(&frame)
     }
 
     /// The picture at `time`. Playback misses without decoding. Export decodes and waits.
@@ -168,7 +156,7 @@ impl VideoSource {
         if let Some(frame) = cached {
             return Ok(frame);
         }
-        if self.clock.borrow().kind() == ClockKind::Playback {
+        if self.clock == ClockKind::Playback {
             return Err(EngineError::NotReady);
         }
         let held = match &self.ahead {
@@ -196,61 +184,9 @@ impl VideoSource {
         Ok(frame)
     }
 
-    /// The filmstrip cell for `time`, if a fill already stored one.
-    ///
-    /// A miss is [`EngineError::NotReady`] and does not decode. A time outside
-    /// the segment is [`EngineError::Outside`].
-    pub fn strip_at(&self, time: Micros) -> Result<StripCell, EngineError> {
-        let source = self.source_at(time)?;
-        self.preload.borrow().strip(source)
-    }
-
-    /// Decode `time` and store one filmstrip cell.
-    ///
-    /// The cell's long side is at most [`crate::MAX_EDGE`]. A platform buffer is
-    /// [`EngineError::NotReady`] and is not stored. This does not wait on the
-    /// audio clock and does not fill the playback window.
-    pub fn fill_strip(&self, time: Micros) -> Result<(), EngineError> {
-        let source = self.source_at(time)?;
-        let held = self.decode(source)?;
-        let picture = decoded_picture(&held.frame)?;
-        let Picture::Cpu(bytes) = picture else {
-            return Err(EngineError::NotReady);
-        };
-        let cell = filmstrip::fit(held.start, bytes.width(), bytes.height(), bytes.rgba())?;
-        self.preload.borrow_mut().store_picture(cell);
-        Ok(())
-    }
-
-    /// The waveform already stored for this file.
-    ///
-    /// A miss is [`EngineError::NotReady`] and does not decode.
-    pub fn waveform(&self) -> Result<Waveform, EngineError> {
-        self.preload.borrow().waveform()
-    }
-
-    /// Read a bounded prefix of the file and store its peaks.
-    ///
-    /// A file with no audio is [`EngineError::NotMedia`]. The peaks cover the
-    /// frames that were read, at most the mix window. A full window sets
-    /// [`Waveform::capped`] when another buffer remains, and that buffer is
-    /// not folded into the peaks. This does not decode a picture.
-    pub fn fill_waveform(&self) -> Result<(), EngineError> {
-        let wave = {
-            let mut media = self.media.borrow_mut();
-            peaks_from(&mut media, MAX_AUDIO_FRAMES)?
-        };
-        self.preload.borrow_mut().store_waveform(wave);
-        Ok(())
-    }
-
     fn decode(&self, source: Micros) -> Result<crate::reader::HeldFrame, EngineError> {
         self.decodes.set(self.decodes.get().saturating_add(1));
         self.media.borrow_mut().decode_at(source, &self.map.source)
-    }
-
-    fn deliver(&self, frame: &DecodedFrame) -> Result<Sample, EngineError> {
-        to_picture(frame).map(Sample::Ready)
     }
 }
 
@@ -289,6 +225,52 @@ pub fn open_segment_in(
     window: usize,
     root: Option<&Path>,
 ) -> Result<VideoSource, EngineError> {
+    open_plan(factory, segment_plan_in(draft, id, root)?, clock, window)
+}
+
+/// The file and the time map a segment's pictures are read with.
+///
+/// Two sources opened from equal plans, on an unchanged file, show the
+/// same pictures. See [`VideoSource::reads`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SegmentPlan {
+    pub path: PathBuf,
+    pub map: TimelineMap,
+}
+
+/// What [`open_segment_in`] opens for segment `id`, without opening it.
+pub fn segment_plan_in(
+    draft: &Draft,
+    id: &SegmentId,
+    root: Option<&Path>,
+) -> Result<SegmentPlan, EngineError> {
+    let segment = media_segment(draft, id)?;
+    let Some(stored) = map::media_path(draft, segment) else {
+        return Err(EngineError::MissingFile {
+            path: PathBuf::new(),
+        });
+    };
+    let path = located_media(root, stored).ok_or_else(|| EngineError::MissingFile {
+        path: PathBuf::from(stored),
+    })?;
+    Ok(SegmentPlan {
+        path,
+        map: map::placement_of(draft, segment)?,
+    })
+}
+
+/// Open the pictures `plan` names.
+pub fn open_plan(
+    factory: &ReaderFactory,
+    plan: SegmentPlan,
+    clock: ClockKind,
+    window: usize,
+) -> Result<VideoSource, EngineError> {
+    open_at(factory, plan.map, clock, window, plan.path)
+}
+
+/// The segment `id` on `draft`, when it is a decoder input.
+fn media_segment<'a>(draft: &'a Draft, id: &SegmentId) -> Result<&'a Segment, EngineError> {
     let segment = draft
         .tracks
         .iter()
@@ -298,21 +280,7 @@ pub fn open_segment_in(
     if map::is_graphic(draft, segment) {
         return Err(EngineError::NotMedia);
     }
-    let Some(stored) = map::media_path(draft, segment) else {
-        return Err(EngineError::MissingFile {
-            path: PathBuf::new(),
-        });
-    };
-    let path = located_media(root, stored).ok_or_else(|| EngineError::MissingFile {
-        path: PathBuf::from(stored),
-    })?;
-    open_at(
-        factory,
-        map::placement_of(draft, segment)?,
-        clock,
-        window,
-        path,
-    )
+    Ok(segment)
 }
 
 /// Opens the pictures of segment `id` from `path`, a file that holds the
@@ -329,15 +297,22 @@ pub fn open_segment_from(
     path: PathBuf,
     held_from: Micros,
 ) -> Result<VideoSource, EngineError> {
-    let segment = draft
-        .tracks
-        .iter()
-        .flat_map(|track| track.segments.iter())
-        .find(|segment| segment.id == *id)
-        .ok_or(EngineError::MissingSegment)?;
-    if map::is_graphic(draft, segment) {
-        return Err(EngineError::NotMedia);
-    }
+    open_plan(
+        factory,
+        segment_plan_from(draft, id, path, held_from)?,
+        clock,
+        window,
+    )
+}
+
+/// What [`open_segment_from`] opens, without opening it.
+pub fn segment_plan_from(
+    draft: &Draft,
+    id: &SegmentId,
+    path: PathBuf,
+    held_from: Micros,
+) -> Result<SegmentPlan, EngineError> {
+    let segment = media_segment(draft, id)?;
     let mut map = map::placement_of(draft, segment)?;
     let shift = |time: Micros| {
         time.0
@@ -348,7 +323,7 @@ pub fn open_segment_from(
     };
     map.source.start = shift(map.source.start)?;
     map.freeze = map.freeze.map(shift).transpose()?;
-    open_at(factory, map, clock, window, path)
+    Ok(SegmentPlan { path, map })
 }
 
 fn open_at(
@@ -370,8 +345,7 @@ fn open_at(
         media: RefCell::new(media),
         map,
         cache: RefCell::new(FrameWindow::new(window)?),
-        clock: RefCell::new(MediaClock::new(clock)),
-        preload: RefCell::new(Preload::new()),
+        clock,
         decodes: Cell::new(0),
         display,
         ahead: None,
@@ -412,23 +386,6 @@ fn located_media(root: Option<&Path>, stored: &str) -> Option<PathBuf> {
         Some(root) => media_in_project(root, stored),
         None => Some(PathBuf::from(stored)),
     }
-}
-
-/// Peaks for at most `frames` from the start of `media`.
-///
-/// A shorter file is not marked capped. A file that continues past `frames`
-/// is capped, and the next buffer is discarded.
-pub(crate) fn peaks_from(media: &mut Media, frames: u32) -> Result<Waveform, EngineError> {
-    let pcm = media.audio_from(Micros(0), frames)?;
-    let capped = if pcm.samples == frames {
-        media.pull_audio()?.is_some()
-    } else {
-        false
-    };
-    let Some(samples) = pcm.as_f32() else {
-        return Err(EngineError::Layout);
-    };
-    Waveform::from_interleaved(samples, pcm.layout.len(), MAX_BUCKETS, pcm.samples, capped)
 }
 
 /// The CPU or platform picture for one decoded frame.

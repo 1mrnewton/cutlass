@@ -6,10 +6,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod blur;
+
 use std::fmt;
 
 use cutlass_gpu::{Extent, TexelSource};
 use cutlass_model::Micros;
+
+pub use blur::blur_mask;
 
 /// Why CPU bytes could not be built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

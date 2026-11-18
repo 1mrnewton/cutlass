@@ -9,6 +9,7 @@
 //! clip is an error. Playback can pass [`ClockKind::Playback`] and skip that
 //! clip.
 
+use cutlass_codec::access::Pcm;
 use cutlass_engine::{
     ClipPcm, ClockKind, Mix, MixResult, MixSpan, clip_part, contributes_sound, map_timeline,
     mix_inputs, placement_of, render,
@@ -119,7 +120,12 @@ where
             frames: clip.frames,
             ..window
         };
-        match compound_pcm(draft, segment, from, part, clock, fill, ancestors)? {
+        let nest = Nest {
+            time: from,
+            window: part,
+            speed: clip.speed,
+        };
+        match compound_pcm(draft, segment, nest, clock, fill, ancestors)? {
             Compound::Media => {
                 clip.pcm = fill(&segment.id, from, part.frames, part.rate)?;
                 keep.push(true);
@@ -155,11 +161,31 @@ enum Compound {
     Drop,
 }
 
+/// A compound clip's part of the parent window: where it starts on the
+/// parent timeline, its frames there, and the mean speed the parent's mix
+/// will stretch it by.
+#[derive(Clone, Copy)]
+struct Nest {
+    time: Micros,
+    window: MixWindow,
+    speed: f64,
+}
+
+/// Child frames one parent window may ask for: 100 s at 48 kHz, so a
+/// stored speed of thousands does not mix minutes of child per window.
+const MAX_CHILD_FRAMES: u32 = 4_800_000;
+
+/// The child's mix for one parent window, on the child's own clock.
+///
+/// The parent's mix stretches the slice by the segment's speed, so the child
+/// is mixed for the frames that speed reads: twice the window at 2x. A
+/// reversed segment maps to the last child microsecond still to play, so
+/// the child is mixed for the samples whose last is there, none before the
+/// source range's start, and played last sample first.
 fn compound_pcm<F>(
     draft: &Draft,
     segment: &Segment,
-    time: Micros,
-    window: MixWindow,
+    nest: Nest,
     clock: ClockKind,
     fill: &mut F,
     ancestors: &[DraftId],
@@ -180,16 +206,81 @@ where
     let Ok(map) = placement_of(draft, segment) else {
         return Ok(Compound::Drop);
     };
-    let Ok(mapped) = map_timeline(&map, time) else {
+    let Ok(mapped) = map_timeline(&map, nest.time) else {
         return Ok(Compound::Drop);
     };
-    let chain = descend(ancestors, &draft.id);
-    let mixed = mix_at(&Snapshot::new(child), mapped, window, clock, fill, &chain)?;
-    if mixed.pcm.samples == 0 {
-        Ok(Compound::Drop)
+    let rate = nest.window.rate;
+    let speed = if nest.speed.is_finite() && nest.speed > 0.0 {
+        nest.speed
     } else {
-        Ok(Compound::Slice(mixed))
+        1.0
+    };
+    let wanted = (f64::from(nest.window.frames) * speed)
+        .ceil()
+        .min(f64::from(MAX_CHILD_FRAMES)) as u32;
+    let (start, frames) = if map.reverse {
+        // Samples whose last is at `mapped`, none before the source start,
+        // so each lands on the child time its parent sample maps to.
+        let room = mapped.0.saturating_sub(map.source.start.0);
+        if room < 0 {
+            return Ok(Compound::Drop);
+        }
+        let frames = micros_to_frames_down(room, rate)
+            .saturating_add(1)
+            .min(wanted);
+        let back = frames_to_micros(frames.saturating_sub(1), rate);
+        (Micros(mapped.0.saturating_sub(back)), frames)
+    } else {
+        (mapped, wanted)
+    };
+    if frames == 0 {
+        return Ok(Compound::Drop);
     }
+    let child_window = MixWindow {
+        frames,
+        ..nest.window
+    };
+    let chain = descend(ancestors, &draft.id);
+    let mut mixed = mix_at(
+        &Snapshot::new(child),
+        start,
+        child_window,
+        clock,
+        fill,
+        &chain,
+    )?;
+    if mixed.pcm.samples == 0 {
+        return Ok(Compound::Drop);
+    }
+    if map.reverse {
+        mixed.pcm = reversed(&mixed.pcm).ok_or(AudioError::Mix)?;
+    }
+    Ok(Compound::Slice(mixed))
+}
+
+/// `frames` samples at `rate`, in microseconds, rounded down.
+fn frames_to_micros(frames: u32, rate: u32) -> i64 {
+    if rate == 0 {
+        return 0;
+    }
+    i64::try_from(i128::from(frames) * 1_000_000 / i128::from(rate)).unwrap_or(i64::MAX)
+}
+
+/// Whole sample periods at `rate` in `micros`, rounded down.
+fn micros_to_frames_down(micros: i64, rate: u32) -> u32 {
+    if micros <= 0 {
+        return 0;
+    }
+    let frames = i128::from(micros) * i128::from(rate) / 1_000_000;
+    u32::try_from(frames).unwrap_or(u32::MAX)
+}
+
+/// `pcm` with its frames in the other order and each frame's channels kept.
+fn reversed(pcm: &Pcm) -> Option<Pcm> {
+    let samples = pcm.as_f32()?;
+    let channels = pcm.layout.len().max(1);
+    let flipped: Vec<f32> = samples.chunks(channels).rev().flatten().copied().collect();
+    Pcm::from_f32(pcm.rate, pcm.layout.clone(), flipped).ok()
 }
 
 /// The segments [`mix_inputs`] lists for `span`, in its order.
@@ -197,10 +288,8 @@ fn audible(draft: &Draft, span: MixSpan) -> Vec<&Segment> {
     let mut segments = Vec::new();
     for track in &draft.tracks {
         for segment in &track.segments {
-            if !contributes_sound(draft, segment) {
-                continue;
-            }
-            if clip_part(&segment.target, span).is_some() {
+            // The window first, as the engine's list checks it.
+            if clip_part(&segment.target, span).is_some() && contributes_sound(draft, segment) {
                 segments.push(segment);
             }
         }
@@ -755,6 +844,73 @@ mod tests {
         let samples = mixed.pcm.as_f32().expect("f32");
         assert_eq!(samples[0], 0.5);
         assert!((samples[3] - 2_003.0 / 4_000.0).abs() < 1.0e-6);
+    }
+
+    /// One parent window of `window()` at `time`, with every clip asked for
+    /// a buffer whose samples are their own child time in seconds.
+    fn timed(draft: &Draft, time: i64) -> (Vec<f32>, Vec<(Micros, u32)>) {
+        let mut asks = Vec::new();
+        let mixed = audio_slice(
+            &Snapshot::new(draft),
+            Micros(time),
+            window(),
+            ClockKind::Export,
+            |_, when, frames, rate| {
+                asks.push((when, frames));
+                let samples = (0..frames)
+                    .map(|k| {
+                        let micros = when.0 + i64::from(k) * 1_000_000 / i64::from(rate);
+                        micros as f32 / 1_000_000.0
+                    })
+                    .collect();
+                Ok(ClipPcm::Ready(
+                    Pcm::from_f32(rate, ChannelLayout::mono(), samples).expect("pcm"),
+                ))
+            },
+        )
+        .expect("mix");
+        (mixed.pcm.as_f32().expect("f32").to_vec(), asks)
+    }
+
+    #[test]
+    fn a_compound_at_twice_the_speed_mixes_twice_the_child_and_fills_its_window() {
+        let mut fast = compound_audio(
+            "parent",
+            child_tone("child", 1.0, 0, 2_000_000),
+            1.0,
+            span(0, 2_000_000),
+            span(0, 1_000_000),
+        );
+        fast.tracks[0].segments[0].speed = 2.0;
+        fast.tracks[0].segments[0].is_tone_modify = true;
+        let (heard, asks) = timed(&fast, 0);
+        // The child is asked for the 2 ms that 1 ms of the parent reads.
+        assert_eq!(asks, [(Micros(0), 8)]);
+        assert_eq!(heard.len(), 4);
+        assert!(heard[1..].iter().all(|sample| *sample > 0.0), "{heard:?}");
+        // The next window starts where this one stopped in the child.
+        let (_, asks) = timed(&fast, 1_000);
+        assert_eq!(asks, [(Micros(2_000), 8)]);
+    }
+
+    #[test]
+    fn a_reversed_compound_plays_its_child_backward_over_the_whole_window() {
+        let mut backward = compound_audio(
+            "parent",
+            child_tone("child", 1.0, 0, 1_000_000),
+            1.0,
+            span(0, 1_000_000),
+            span(0, 1_000_000),
+        );
+        backward.tracks[0].segments[0].reverse = true;
+        let (heard, asks) = timed(&backward, 0);
+        // The parent's first sample is the child's last microsecond.
+        assert_eq!(asks, [(Micros(999_249), 4)]);
+        let expected = [0.999_999_f32, 0.999_749, 0.999_499, 0.999_249];
+        for (sample, want) in heard.iter().zip(expected) {
+            assert!((sample - want).abs() < 1e-6, "{heard:?}");
+        }
+        assert_eq!(heard.len(), 4);
     }
 
     #[test]

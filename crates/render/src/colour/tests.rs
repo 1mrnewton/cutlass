@@ -52,6 +52,8 @@ fn on_gpu(
     seed: u32,
     mask: Option<&CanvasMask>,
 ) -> Vec<u8> {
+    let mask = mask.map(|mask| cutlass_effects::CanvasMasks::from(*mask));
+    let mask = mask.as_ref();
     let canvas = renderer.canvas(size.0, size.1).expect("canvas");
     let picture = Rgba {
         width: size.0,
@@ -205,6 +207,8 @@ fn a_chroma_key_matches_the_cpu() {
                 color,
                 strength: 0.5,
                 shadow,
+                feather: 0.0,
+                clean_up: 0.0,
             }),
             ..Colour::default()
         };
@@ -254,6 +258,8 @@ fn all_of_it_at_once_matches_the_cpu() {
             color: [0.2, 0.8, 0.2],
             strength: 0.3,
             shadow: 0.2,
+            feather: 0.0,
+            clean_up: 0.0,
         }),
         lut: Some(ClipLut {
             name: "id".into(),
@@ -304,6 +310,75 @@ fn colour_inside_a_mask_matches_the_cpu_limit() {
     });
     let got = on_gpu(&renderer, &bytes, size, &colour, 0, Some(&mask));
     matches("masked", &got, &expected, 2);
+}
+
+#[test]
+fn colour_inside_a_stack_of_masks_matches_the_cpu_limit() {
+    let Some(renderer) = renderer() else { return };
+    let size = (42u32, 30u32);
+    let bytes = scene(size.0, size.1);
+    let mut colour = Colour::default();
+    colour.adjust.set(AdjustKey::Exposure, 0.8);
+    let frame = [
+        2.0 / size.0 as f32,
+        0.0,
+        -1.0,
+        0.0,
+        -2.0 / size.1 as f32,
+        1.0,
+    ];
+    let side = 17_u32;
+    let alpha: Vec<u8> = (0..side * side)
+        .map(|index| if index % side < side / 2 { 255 } else { 40 })
+        .collect();
+    let masks = vec![
+        cutlass_effects::DrawnMask::shape(Mask {
+            feather: 0.4,
+            ..Mask::new(MaskShape::Rectangle)
+        }),
+        cutlass_effects::DrawnMask {
+            mask: Mask {
+                x: 0.3,
+                width: 0.4,
+                height: 0.4,
+                mode: cutlass_effects::MaskMode::Subtract,
+                ..Mask::new(MaskShape::Text)
+            },
+            art: Some(cutlass_effects::ArtPicture {
+                width: side,
+                height: side,
+                alpha: alpha.into(),
+                reach: 1.0,
+            }),
+        },
+    ];
+    let mut expected = on_cpu(&bytes, size, &colour, 0);
+    cutlass_effects::limit_drawn(&masks, &bytes, &mut expected, size.0, |x, y| {
+        let [a, b, c, d, e, f] = frame;
+        Some((a * x + b * y + c, d * x + e * y + f))
+    });
+    let stack = cutlass_effects::CanvasMasks { masks, frame };
+    let canvas = renderer.canvas(size.0, size.1).expect("canvas");
+    let picture = Rgba {
+        width: size.0,
+        height: size.1,
+        bytes: &bytes,
+    };
+    renderer
+        .draw(
+            &canvas,
+            &[
+                Layer::Rgba(picture, Placement::canvas(size.0, size.1)),
+                Layer::Colour {
+                    colour: &colour,
+                    seed: 0,
+                    mask: Some(&stack),
+                },
+            ],
+        )
+        .expect("draw");
+    let got = renderer.read(&canvas).expect("read");
+    matches("stacked", &got, &expected, 2);
 }
 
 #[test]

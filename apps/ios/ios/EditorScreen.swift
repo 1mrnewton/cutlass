@@ -30,7 +30,7 @@ struct EditorScreen: View {
     /// The tool panel open over the tool bar.
     enum Panel: Equatable {
         case volume, speed, effects, ratio, background, graphs, animations
-        case crop, opacity, fade
+        case crop, opacity, fade, mask
         case filters, adjust, clipEffects
         case stickers, draw, transitions, shapeStyle
         /// Add text, or change the text clip with this id.
@@ -163,6 +163,8 @@ struct EditorScreen: View {
             }
             if panel == .draw {
                 DrawOverlay(model: model)
+            } else if panel == .mask, model.selectedClip != nil {
+                MaskOverlay(model: model)
             } else if !model.isPlaying {
                 StageOverlay(model: model) { panel = .text($0) }
             }
@@ -275,6 +277,10 @@ struct EditorScreen: View {
             ShapeStylePanel(model: model, clip: clip) { self.panel = nil }
                 .id(clip)
                 .transition(.move(edge: .bottom))
+        } else if panel == .mask, let clip = model.selectedClip {
+            MaskPanel(model: model) { self.panel = nil }
+                .id(clip)
+                .transition(.move(edge: .bottom))
         } else if panel == .transitions, model.cut != nil {
             TransitionsPanel(model: model) { self.panel = nil }
                 .transition(.move(edge: .bottom))
@@ -290,7 +296,7 @@ struct EditorScreen: View {
                 case .crop: CropPanel(model: model) { self.panel = nil }
                 case .opacity: OpacityPanel(model: model) { self.panel = nil }
                 case .fade: FadePanel(model: model, clip: clip) { self.panel = nil }
-                case .text, .effects, .ratio, .background, .graphs, .animations,
+                case .text, .effects, .ratio, .background, .graphs, .animations, .mask,
                      .filters, .adjust, .clipEffects, .stickers, .draw, .transitions, .shapeStyle:
                     EmptyView()
                 }
@@ -337,6 +343,9 @@ struct EditorScreen: View {
             panel = .background
         case .duplicate: model.duplicate()
         case .crop: panel = .crop
+        case .mask:
+            model.pause()
+            panel = .mask
         case .mirror: model.toggleMirror()
         case .rotate: model.turn()
         case .opacity: panel = .opacity

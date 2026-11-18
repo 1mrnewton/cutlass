@@ -8,6 +8,7 @@ pub mod cloud;
 mod dialogs;
 mod face;
 mod gpu;
+pub mod gpu_trust;
 pub mod icons;
 pub mod jobs;
 pub mod mcp;
@@ -20,7 +21,6 @@ pub mod sandbox;
 #[cfg(test)]
 mod open_movie;
 pub mod shell;
-pub mod studio;
 pub mod tokens;
 pub mod ui;
 pub mod view;

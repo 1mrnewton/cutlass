@@ -1,0 +1,20 @@
+{
+  "version": 3,
+  "id": "watercolor",
+  "name": "Watercolor",
+  "category": "Retro",
+  "preview": "flowers",
+  "controls": [
+    {"id": "lines", "name": "Lines", "default": 0.7, "min": 0, "max": 1, "unit": "percent", "set": [[7, "amount"]]}
+  ],
+  "passes": [
+    { "block": "edges", "params": {"only": 1} },
+    { "block": "gradient_map", "params": {"amount": 1, "low_red": 1, "low_green": 1, "low_blue": 1, "high_red": 0.3, "high_green": 0.28, "high_blue": 0.26} },
+    { "block": "blur", "save": "lines", "params": {"radius": 0.0015} },
+    { "block": "blend", "params": {"mode": 4, "amount": 1} },
+    { "block": "blur", "params": {"radius": 0.01} },
+    { "block": "posterize", "params": {"levels": 12} },
+    { "block": "grade", "params": {"brightness": 0.08, "contrast": 0.85, "saturation": 1.2} },
+    { "block": "blend", "with": "lines", "params": {"mode": 2, "amount": 0.7} }
+  ]
+}

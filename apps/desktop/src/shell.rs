@@ -43,8 +43,8 @@ use cutlass_settings::{SeekDuringPlayback, Settings};
 use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
 use cutlass_transcription::{
-    FileSource, HeardClip, HeardMiss, ParakeetUnified, PcmSource, PrepareError, RecognizeError,
-    Recognizer, caption_requests, columns, fit, words_on_timeline,
+    FileSource, HeardClip, HeardMiss, ParakeetUnified, Pcm, PcmSource, PrepareError,
+    RecognizeError, Recognizer, caption_requests, columns, fit, words_on_timeline,
 };
 
 mod assistant;
@@ -53,12 +53,12 @@ mod cover;
 mod effect_preview;
 mod follow;
 mod group;
-pub mod studio;
 pub(crate) use follow::clip_path;
 mod enhance;
 mod hear;
 mod inspector;
 mod listen;
+mod masks;
 mod offscreen;
 #[cfg(test)]
 pub(crate) use offscreen::tests::{
@@ -69,6 +69,7 @@ mod proxy;
 pub use proxy::ProxyState;
 mod transition;
 pub use transition::TransitionDrop;
+mod matting;
 mod reframe;
 mod relight;
 mod render;
@@ -86,6 +87,10 @@ pub use speech_model::SPEECH_MODEL_QUESTION;
 pub use update::RUNNING_VERSION;
 
 pub use inspector::{KeyedSetting, LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
+pub use masks::{MaskDraw, MaskFocus, MaskRow};
+pub use matting::{
+    Painting, PickRow, Trail, auto_model_here, follow_model_here, matte_model_question,
+};
 
 use crate::face::FaceTable;
 use crate::tokens;
@@ -279,8 +284,10 @@ pub struct Picture {
     pub rgba: Vec<u8>,
 }
 
-/// Each lane with its clips, in drawing order.
+/// Each lane with its clips, in drawing order. An effect riding on a clip
+/// is drawn on that clip, so its own row leaves it out.
 fn build_lanes(draft: &Draft) -> Vec<LaneView> {
+    let mut riding = cutlass_editor::effects_by_clip(draft);
     cutlass_editor::lanes_for(draft, true)
         .into_iter()
         .filter_map(|lane| {
@@ -288,7 +295,9 @@ fn build_lanes(draft: &Draft) -> Vec<LaneView> {
             let clips = track
                 .segments
                 .iter()
+                .filter(|segment| !cutlass_editor::rides_on_clip(draft, segment))
                 .map(|segment| ClipSpan {
+                    effects: riding.remove(&segment.id).unwrap_or_default(),
                     id: segment.id.clone(),
                     name: clip_name(draft, segment),
                     start: segment.target.start,
@@ -361,6 +370,8 @@ pub struct ClipSpan {
     /// The speed curve the clip runs on: `x` the share of the clip, `y`
     /// the speed there.
     pub speed_curve: Option<Vec<(f64, f64)>>,
+    /// The effects that run over this clip alone, drawn on it.
+    pub effects: Vec<cutlass_editor::ClipEffect>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -773,6 +784,12 @@ pub struct Shell {
     readers: ReaderFactory,
     transport: Transport,
     preview_cache: RefCell<FrameCache>,
+    /// The mask the Mask page has in hand.
+    mask_focus: MaskFocus,
+    /// The Mask page showed since the preview last looked.
+    mask_page_seen: bool,
+    /// A pen or brush mask being drawn on the preview.
+    mask_draw: Option<MaskDraw>,
     /// Stretches of the timeline drawn ahead, which the preview plays.
     renders: render::Renders,
     proxies: proxy::Proxies,
@@ -788,8 +805,6 @@ pub struct Shell {
     presets_file: Option<PathBuf>,
     /// The assistant's notes, when this shell has a file for them.
     notes_file: Option<PathBuf>,
-    /// The effect studio: its document, folder and preview pictures.
-    studio: studio::StudioState,
     saved_looks: Vec<cutlass_editor::SavedLook>,
     /// Files dropped on the window, imported one job after another.
     waiting_imports: std::collections::VecDeque<PathBuf>,
@@ -889,6 +904,16 @@ pub struct Shell {
     detectors: Vec<cutlass_vision::Detector>,
     /// The object click-to-select is picking, while the preview takes clicks.
     picking: Option<select::Picking>,
+    /// Brush strokes being painted for Custom removal, while the preview
+    /// takes drags.
+    painting: Option<Painting>,
+    /// The draft revision mattes were last looked for at, so a trim or an
+    /// edit from the assistant that leaves a clip without its matte starts
+    /// one, once.
+    matte_swept: Option<u64>,
+    /// Mattes whose job failed, by what they would be made from, so they
+    /// are not tried again on every edit.
+    matte_failed: std::collections::HashSet<String>,
     /// A track being set up on the selected clip.
     tracking: Option<follow::Tracking>,
     /// A shape being drawn with the pen, while the preview takes presses.
@@ -983,6 +1008,9 @@ impl Shell {
             ),
             transport: Transport::new(),
             preview_cache: RefCell::new(FrameCache::new()),
+            mask_focus: MaskFocus::default(),
+            mask_page_seen: false,
+            mask_draw: None,
             renders: render::Renders::new(Self::home().renders()),
             proxies: proxy::Proxies::new(proxy::home_folder()),
             lanes_cache: RefCell::new(None),
@@ -991,7 +1019,6 @@ impl Shell {
             settings_file: None,
             presets_file: None,
             notes_file: None,
-            studio: studio::StudioState::new(),
             saved_looks: Vec::new(),
             waiting_imports: std::collections::VecDeque::new(),
             session: None,
@@ -1047,6 +1074,9 @@ impl Shell {
             vision: None,
             detectors: Vec::new(),
             picking: None,
+            painting: None,
+            matte_swept: None,
+            matte_failed: std::collections::HashSet::new(),
             tracking: None,
             pen: None,
             heard: std::collections::HashMap::new(),
@@ -1312,6 +1342,18 @@ impl Shell {
         // The notes sit in the Assistant folder of the Cutlass folder.
         let root = notes.parent()?.parent()?;
         Some(Home::at(root).ok()?.assistant_chat_file(project))
+    }
+
+    /// What the open project calls itself to the assistant's kept
+    /// conversation: its id and when it was made. A project made where a
+    /// deleted one was has the same folder and the same id, and was made
+    /// at another time. Empty with no project open.
+    #[must_use]
+    pub fn assistant_chat_project(&self) -> String {
+        self.folder
+            .as_ref()
+            .map(|folder| format!("{}@{}", folder.draft.id, folder.draft.create_time))
+            .unwrap_or_default()
     }
 
     /// The assistant's notes; empty when there are none.
@@ -1673,11 +1715,14 @@ impl Shell {
         cutlass_logger::info!("open project {}", path.display());
         let opened = self.open_folder_in(path);
         match &opened {
-            Ok(()) => cutlass_logger::info!(
-                "opened project {} at revision {}",
-                path.display(),
-                self.session.as_ref().map_or(0, Session::revision)
-            ),
+            Ok(()) => {
+                cutlass_logger::info!(
+                    "opened project {} at revision {}",
+                    path.display(),
+                    self.session.as_ref().map_or(0, Session::revision)
+                );
+                self.prune_mattes();
+            }
             Err(error) => cutlass_logger::error!("open project {}: {error}", path.display()),
         }
         opened
@@ -1728,7 +1773,7 @@ impl Shell {
                 self.face.name()
             );
         }
-        let mut session = Session::open_project(draft);
+        let mut session = Session::open_project(draft).starting_at(opening_revision());
         session.set_linkage(linkage);
         self.outer.clear();
         self.saved = Some((session.revision(), Instant::now()));
@@ -4451,6 +4496,7 @@ impl Shell {
         self.selected_transition = None;
         self.selected_keys.clear();
         self.selection.clear();
+        self.mask_focus.index = 0;
         if let Some(id) = id {
             self.selection = self.group_mates(&id);
             self.selection.push(id);
@@ -5550,7 +5596,8 @@ impl Shell {
     /// Land the job if it finished. True while one still runs.
     pub fn poll_job(&mut self) -> bool {
         let Some(running) = self.job.as_ref() else {
-            return false;
+            self.sweep_mattes();
+            return self.job.is_some();
         };
         let landing = match running.job.poll() {
             crate::jobs::Poll::Running => return true,
@@ -5562,6 +5609,8 @@ impl Shell {
         let same_project = running.project == self.path;
         let stopping = running.stopping;
         self.job = None;
+        // Another clip may still lack its matte.
+        self.matte_swept = None;
         let result = match landing {
             _ if stopping => Ok(()),
             Some(_) if !same_project => Err(ShellError::Unavailable(format!(
@@ -6426,13 +6475,49 @@ impl Shell {
         })
     }
 
+    /// Soften the selected picture's key edge by `feather` and pull it in
+    /// by `clean_up`, each 0 to 1. Refused with no key on.
+    pub fn set_chroma_edge(&mut self, feather: f64, clean_up: f64) -> Result<(), ShellError> {
+        let Some(was) = self.inspection().and_then(|inspection| inspection.chroma) else {
+            return Err(ShellError::Unavailable(
+                "turn Chroma key on first".to_owned(),
+            ));
+        };
+        self.put_chroma(
+            &was.hex(),
+            [
+                f64::from(was.strength),
+                f64::from(was.shadow),
+                feather.clamp(0.0, 1.0),
+                clean_up.clamp(0.0, 1.0),
+            ],
+        )
+    }
+
     /// Key `color` (`#rrggbb`) out of the selected picture with `strength`
-    /// and `shadow`, 0 to 1; an empty colour takes the key off.
+    /// and `shadow`, 0 to 1, its edge as it was; an empty colour takes the
+    /// key off.
     pub fn set_chroma(
         &mut self,
         color: &str,
         strength: f64,
         shadow: f64,
+    ) -> Result<(), ShellError> {
+        let edge = self
+            .inspection()
+            .and_then(|inspection| inspection.chroma)
+            .map_or((0.0, 0.0), |was| {
+                (f64::from(was.feather), f64::from(was.clean_up))
+            });
+        self.put_chroma(color, [strength, shadow, edge.0, edge.1])
+    }
+
+    /// Key `color` out of the selected picture with its strength, shadow,
+    /// feather and clean up, each 0 to 1, all at once.
+    pub fn put_chroma(
+        &mut self,
+        color: &str,
+        [strength, shadow, feather, clean_up]: [f64; 4],
     ) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("a chroma key belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
@@ -6444,6 +6529,8 @@ impl Shell {
             color: color.to_owned(),
             strength,
             shadow,
+            feather,
+            clean_up,
         }];
         let names = [KeyedSetting::ChromaStrength, KeyedSetting::ChromaShadow];
         if color.is_empty() {
@@ -6490,81 +6577,24 @@ impl Shell {
         self.apply_requests(&requests)
     }
 
-    /// Put `mask` on the selected picture, in its own frame, or take its
-    /// mask off.
-    /// With mask keys, the mask is keyed at the playhead too, and taking
-    /// the mask off takes its keys off.
+    /// Make the clip mask in hand on the selected picture `mask`, in the
+    /// picture's own frame, or take it off; with no mask yet, `mask` is its
+    /// first. With keys on a part of it, a changed part is keyed at the
+    /// playhead too, and taking the mask off takes its keys off.
     pub fn set_mask(&mut self, mask: Option<cutlass_effects::Mask>) -> Result<(), ShellError> {
-        let segment_id = self.picture_segment("a mask belongs on a picture")?;
-        self.refuse_locked(&segment_id)?;
-        let material_id = MaterialId::new(self.fresh("mask"));
-        let mut requests = vec![Request::SetMask {
-            segment_id: segment_id.clone(),
-            material_id,
-            mask,
-        }];
-        match mask {
-            Some(mask) => {
-                // Each keyed part that changed is keyed here; the others
-                // are only stored.
-                let values = inspector::mask_values(&mask);
-                let was = self
-                    .inspection()
-                    .and_then(|inspection| inspection.mask)
-                    .map(|mask| inspector::mask_values(&mask));
-                for (part, range) in KeyedSetting::MASK_PARTS {
-                    let changed = was.is_none_or(|was| was[range.clone()] != values[range.clone()]);
-                    if changed {
-                        requests.extend(self.key_setting_here(part, values[range].to_vec()));
-                    }
-                }
-            }
-            None if self.setting_keyed(KeyedSetting::Mask) => {
-                let draft = self.session_draft()?;
-                if let Some((segment, _)) = placed(draft, &segment_id) {
-                    let keyframes = segment
-                        .common_keyframes
-                        .iter()
-                        .filter(|group| {
-                            !cutlass_model::MASK_KEYS.contains(&group.property_type.as_str())
-                        })
-                        .cloned()
-                        .collect();
-                    requests.push(Request::SetKeyframes {
-                        segment_id,
-                        keyframes,
-                    });
-                }
-            }
-            None => {}
-        }
-        self.apply_requests(&requests)
+        self.mask_focus.color = false;
+        self.set_focused_mask(mask)
     }
 
     /// Keep the selected picture's colour work, or the selected adjustment
-    /// layer or effect, inside `mask`, or take that limit off.
+    /// layer or effect, inside `mask`, the colour mask in hand, or take
+    /// that limit off.
     pub fn set_color_mask(
         &mut self,
         mask: Option<cutlass_effects::Mask>,
     ) -> Result<(), ShellError> {
-        let segment_id = match self.selected() {
-            Some(segment_id)
-                if matches!(
-                    placed(self.session_draft()?, segment_id),
-                    Some((_, TrackType::Effect))
-                ) =>
-            {
-                segment_id.clone()
-            }
-            _ => self.adjust_segment()?,
-        };
-        self.refuse_locked(&segment_id)?;
-        let material_id = MaterialId::new(self.fresh("color-mask"));
-        self.apply(Request::SetColorMask {
-            segment_id,
-            material_id,
-            mask,
-        })
+        self.mask_focus.color = true;
+        self.set_focused_mask(mask)
     }
 
     /// Set the strength of the selected picture's LUT, from 0 to 1.
@@ -7907,6 +7937,7 @@ impl Shell {
         Ok(ExportPlan {
             draft,
             outputs: main.into_iter().chain(gif).collect(),
+            replace: request.replace,
             captions,
             folder: request
                 .path
@@ -8097,6 +8128,17 @@ impl Shell {
                     renderer: renderer.as_ref(),
                     encoders: &encoders,
                 };
+                // An export that may not replace a file found its place
+                // free before it started, and writing takes a while. So
+                // it is written beside its place and moved there only if
+                // the place is still free: a file that appeared meanwhile
+                // is not written over unasked.
+                let staged = if plan.replace {
+                    None
+                } else {
+                    staged_path(path)
+                };
+                let path = staged.as_deref().unwrap_or(path);
                 written = match output {
                     ExportOutput::Movie { request, .. } => {
                         cutlass_export::write_movie(&sources, request, path, &mut report)
@@ -8119,8 +8161,17 @@ impl Shell {
                     )
                     .map(|_| ()),
                 };
+                if let Some(staged) = &staged {
+                    written = written.and_then(|()| {
+                        place_new(staged, output.path())
+                            .map_err(|error| cutlass_export::ExportError::File(error.to_string()))
+                    });
+                    if written.is_err() {
+                        let _ = std::fs::remove_file(staged);
+                    }
+                }
                 if let Err(error) = &written {
-                    cutlass_logger::error!("export {}: {error}", path.display());
+                    cutlass_logger::error!("export {}: {error}", output.path().display());
                     break;
                 }
             }
@@ -8139,7 +8190,12 @@ impl Shell {
                 .map(|_| ());
             }
             Box::new(move |shell: &mut Shell| {
-                written.map_err(export_failure)?;
+                let written = written.map_err(export_failure);
+                // An export the assistant asked for is answered from what
+                // became of this job, not from whatever the window shows
+                // when the assistant next asks.
+                shell.agent_export_landed(&first, written.as_ref(), left_out.as_ref());
+                written?;
                 shell.set_notice(format!("Exported {name}"));
                 shell.exported = Some(first);
                 shell.export_left_out = left_out;
@@ -8790,6 +8846,8 @@ struct ExportPlan {
     draft: Draft,
     /// The main file first, then a GIF beside it.
     outputs: Vec<ExportOutput>,
+    /// The export may put its files where files already are.
+    replace: bool,
     /// A caption file written alone, when there is no movie to carry it.
     captions: Option<(cutlass_export::SidecarRequest, String)>,
     folder: PathBuf,
@@ -8880,6 +8938,38 @@ fn export_failure(error: cutlass_export::ExportError) -> ShellError {
     }
 }
 
+/// Where a file that must not replace another is written before it is
+/// put at `path`: beside it, under a name that keeps its ending.
+fn staged_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    Some(path.with_file_name(format!(".placing.{name}")))
+}
+
+/// Put the file at `staged` at `path` if nothing is there, and refuse if
+/// something is: what is there stays as it is. A hard link is made only
+/// where no file is, in one step; on a volume that has no hard links the
+/// place is looked at and then taken, a moment apart.
+fn place_new(staged: &Path, path: &Path) -> std::io::Result<()> {
+    let taken = || {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "a file appeared at {} while the export was written, and was left as it is",
+                path.display()
+            ),
+        )
+    };
+    match std::fs::hard_link(staged, path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(staged);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(taken()),
+        Err(_) if path.exists() => Err(taken()),
+        Err(_) => std::fs::rename(staged, path),
+    }
+}
+
 fn write_replaced(path: &Path, bytes: &[u8]) -> Result<(), ShellError> {
     if path.is_dir() {
         return Err(ShellError::Io("the export path is a folder".to_owned()));
@@ -8909,6 +8999,42 @@ fn write_replaced(path: &Path, bytes: &[u8]) -> Result<(), ShellError> {
         return Err(ShellError::Io(error.to_string()));
     }
     Ok(())
+}
+
+/// The lowest revision a session opens at. Every start has ten digits, so
+/// one is not mistaken for a small count.
+const OPENING_FLOOR: u64 = 1_000_000_000;
+
+/// How many starts there are from [`OPENING_FLOOR`] up.
+const OPENING_SPAN: u64 = 1_000_000_000;
+
+/// Where a newly opened session's revisions start: a different number each
+/// time, in this process and in another one that opens the same project.
+///
+/// A session that always started at 0 let a revision read from one open
+/// match another: a `cutlass mcp` client that had made one edit wrote
+/// unseen over a window that took the project and made one edit of its
+/// own, and so did a turn that outlived a project switch. The number comes
+/// from the process's random hash keys, as the project socket's token
+/// does, and stays far below what JSON holds exactly.
+pub(crate) fn opening_revision() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        hasher.write_u128(now);
+        hasher.write_u32(std::process::id());
+        let start = OPENING_FLOOR + hasher.finish() % OPENING_SPAN;
+        // Never the start of the session opened just before.
+        if LAST.swap(start, Ordering::Relaxed) != start {
+            return start;
+        }
+    }
 }
 
 fn opening_pixel_size(rate: FrameRate) -> f64 {
@@ -9105,7 +9231,33 @@ fn heard_words(
     source: &mut dyn PcmSource,
     clip: &HeardClip,
 ) -> Result<WordColumns, ShellError> {
-    let pcm = source.read(&clip.range).map_err(prepare_message)?;
+    heard_words_or_silence(recognizer, source, clip)?
+        .ok_or_else(|| prepare_message(PrepareError::NoAudio))
+}
+
+/// [`heard_words`], with `None` for a clip whose file has no sound in it:
+/// that clip was heard, and says nothing. Any other miss is a clip that
+/// may have words and could not be heard.
+fn heard_words_or_silence(
+    recognizer: &dyn Recognizer,
+    source: &mut dyn PcmSource,
+    clip: &HeardClip,
+) -> Result<Option<WordColumns>, ShellError> {
+    let pcm = match source.read(&clip.range) {
+        Ok(pcm) => pcm,
+        Err(PrepareError::NoAudio) => return Ok(None),
+        Err(error) => return Err(prepare_message(error)),
+    };
+    let words = words_of(recognizer, pcm, clip)?;
+    Ok(Some(words))
+}
+
+/// The words in `pcm`, the sound of `clip`, on the timeline clock.
+fn words_of(
+    recognizer: &dyn Recognizer,
+    pcm: Pcm,
+    clip: &HeardClip,
+) -> Result<WordColumns, ShellError> {
     let pcm = fit(pcm, recognizer.sample_rate()).map_err(prepare_message)?;
     let utterances = recognizer.recognize(&pcm).map_err(recognize_message)?;
     let words = columns(&utterances)
@@ -12467,6 +12619,104 @@ mod tests {
     }
 
     #[test]
+    fn each_open_of_a_project_counts_its_revisions_from_a_start_of_its_own() {
+        let root = Temp::new();
+        let path = Shell::create_project(&root.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&path).unwrap();
+        let first = desktop.revision().unwrap();
+        assert!(first >= super::OPENING_FLOOR, "{first}");
+        desktop.set_project_name("one edit").unwrap();
+        let edited = desktop.revision().unwrap();
+        assert_eq!(edited, first + 1);
+        // Open again: what was read before the close is not a revision of
+        // this open, at the start or after as many edits.
+        desktop.close_project().unwrap();
+        desktop.open_folder(&path).unwrap();
+        let second = desktop.revision().unwrap();
+        assert!(second >= super::OPENING_FLOOR, "{second}");
+        assert_ne!(second, first);
+        // A write that names the old revision is refused and changes nothing.
+        let stale = desktop.run_agent_tool(
+            &cutlass_agent::ToolCall {
+                id: "stale".to_owned(),
+                name: "draft.apply".to_owned(),
+                arguments: serde_json::json!({
+                    "expected_revision": first,
+                    "requests": [{ "op": "set_project_name", "name": "unseen" }],
+                })
+                .to_string(),
+            },
+            &[],
+        );
+        assert!(stale.outcome.is_error, "{}", stale.outcome.content);
+        assert!(
+            stale.outcome.content.contains("does not match"),
+            "{}",
+            stale.outcome.content
+        );
+        assert_eq!(desktop.draft().unwrap().name, "one edit");
+        assert_eq!(desktop.revision(), Some(second));
+        // Many opens, and no two starts in a row the same.
+        let mut last = super::opening_revision();
+        for _ in 0..1_000 {
+            let next = super::opening_revision();
+            assert_ne!(next, last);
+            assert!(
+                (super::OPENING_FLOOR..super::OPENING_FLOOR + super::OPENING_SPAN).contains(&next)
+            );
+            last = next;
+        }
+    }
+
+    #[test]
+    fn a_project_made_where_another_was_calls_itself_something_else() {
+        let root = Temp::new();
+        let mut desktop = shell();
+        assert_eq!(desktop.assistant_chat_project(), "");
+        let first = Shell::create_project(&root.path).unwrap();
+        desktop.open_folder(&first).unwrap();
+        let before = desktop.assistant_chat_project();
+        assert!(!before.is_empty());
+        // Open again: it is the same project.
+        desktop.close_project().unwrap();
+        desktop.open_folder(&first).unwrap();
+        assert_eq!(desktop.assistant_chat_project(), before);
+        // Delete it and make a new one: the same folder, the same id.
+        desktop.close_project().unwrap();
+        std::fs::remove_dir_all(&first).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let second = Shell::create_project(&root.path).unwrap();
+        assert_eq!(second, first);
+        desktop.open_folder(&second).unwrap();
+        assert_ne!(desktop.assistant_chat_project(), before);
+    }
+
+    #[test]
+    fn a_file_is_put_in_place_only_where_no_file_is() {
+        let temp = Temp::new();
+        std::fs::create_dir_all(&temp.path).unwrap();
+        let place = temp.path.join("cut.mp4");
+        let staged = super::staged_path(&place).unwrap();
+        // Beside its place, under a name that keeps the ending.
+        assert_eq!(staged.parent(), place.parent());
+        assert_eq!(staged.extension(), place.extension());
+        assert_ne!(staged, place);
+        // A free place takes the file, and the staged one is gone.
+        std::fs::write(&staged, b"new").unwrap();
+        super::place_new(&staged, &place).unwrap();
+        assert_eq!(std::fs::read(&place).unwrap(), b"new");
+        assert!(!staged.exists());
+        // A place that was taken meanwhile keeps what is there.
+        std::fs::write(&place, b"someone else's").unwrap();
+        std::fs::write(&staged, b"newer").unwrap();
+        let error = super::place_new(&staged, &place).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("was left as it is"), "{error}");
+        assert_eq!(std::fs::read(&place).unwrap(), b"someone else's");
+    }
+
+    #[test]
     fn a_new_project_starts_with_linkage_on_and_keeps_the_switch() {
         let root = Temp::new();
         let path = Shell::create_project(&root.path).unwrap();
@@ -12916,6 +13166,59 @@ mod tests {
         desktop.undo().unwrap();
         assert_eq!(effects(&desktop).len(), 1);
         assert!(desktop.add_effect("effect:recipe/none").is_err());
+    }
+
+    #[test]
+    fn an_effect_dropped_on_a_clip_is_drawn_on_that_clip_and_not_on_a_row() {
+        let temp = Temp::new();
+        touching_cut(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let card = cutlass_editor::effect_cards()[0].id.clone();
+        let rows_before = desktop.lanes().len();
+        let main_row = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop
+            .drop_effect(&card, lane_time(&desktop, 1_500_000.0), main_row)
+            .unwrap();
+        let effect = desktop.selected().cloned().unwrap();
+        let lanes = desktop.lanes();
+        assert_eq!(lanes.len(), rows_before, "no row opens for it");
+        assert!(lanes.iter().all(|lane| lane.kind != TrackType::Effect));
+        let on = |id: &str| -> Vec<SegmentId> {
+            lanes
+                .iter()
+                .flat_map(|lane| &lane.clips)
+                .find(|clip| clip.id.as_str() == id)
+                .map(|clip| clip.effects.iter().map(|e| e.segment_id.clone()).collect())
+                .unwrap()
+        };
+        assert_eq!(on("right"), vec![effect.clone()]);
+        assert!(on("left").is_empty());
+        // A second drop on the same clip rides on it too, on the same
+        // hidden row, and the clip lists both.
+        desktop
+            .drop_effect(&card, lane_time(&desktop, 1_200_000.0), main_row)
+            .unwrap();
+        let lanes = desktop.lanes();
+        assert_eq!(lanes.len(), rows_before);
+        let listed: usize = lanes
+            .iter()
+            .flat_map(|lane| &lane.clips)
+            .map(|clip| clip.effects.len())
+            .sum();
+        assert_eq!(listed, 2);
+        // One added at the playhead runs over every picture and has a row.
+        desktop.seek(Micros(0));
+        desktop.add_effect(&card).unwrap();
+        let lanes = desktop.lanes();
+        assert_eq!(lanes.len(), rows_before + 1);
+        let row = lanes
+            .iter()
+            .find(|lane| lane.kind == TrackType::Effect)
+            .unwrap();
+        assert_eq!(row.clips.len(), 1);
+        assert!(row.clips.iter().all(|clip| clip.id != effect));
     }
 
     #[test]
@@ -14394,6 +14697,15 @@ mod tests {
             .collect()
     }
 
+    /// The tone ends after four stereo frames; the rest of the asked window
+    /// is silence, so the device stays on time.
+    fn assert_tone_then_silence(bytes: &[u8]) {
+        let played = preview_samples(bytes);
+        assert_eq!(played.len(), cutlass_playback::PLAY_FRAMES as usize * 2);
+        assert_eq!(played[..8], [0.5; 8]);
+        assert!(played[8..].iter().all(|sample| *sample == 0.0));
+    }
+
     #[test]
     fn play_queues_the_mixed_tone_and_a_mute_or_a_host_with_no_device_stays_silent() {
         let temp = Temp::new();
@@ -14404,7 +14716,7 @@ mod tests {
         let revision = desktop.revision();
         desktop.play();
         assert!(desktop.audio_output_open());
-        assert_eq!(preview_samples(desktop.queued_preview()), vec![0.5; 8]);
+        assert_tone_then_silence(desktop.queued_preview());
         assert_eq!(desktop.revision(), revision);
         let picture = desktop.preview_bytes().unwrap();
         assert_eq!(picture.width, 2);
@@ -14415,7 +14727,7 @@ mod tests {
         assert!(desktop.queued_preview().is_empty());
         desktop.set_scrub_audio(true);
         desktop.seek(Micros(0));
-        assert_eq!(preview_samples(desktop.queued_preview()), vec![0.5; 8]);
+        assert_tone_then_silence(desktop.queued_preview());
         assert_eq!(desktop.revision(), revision);
 
         let audio = desktop
@@ -14587,15 +14899,16 @@ mod tests {
         readers.decoders_mut().register(CodecId::Jpeg, open_flat);
         desktop.set_readers(readers);
 
-        // The clip and its decode thread each open the movie.
+        // Opening the clip reads the movie twice, once to probe it and once
+        // to demux it, and its decode thread opens it a third time.
         let first = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 3);
         assert_ne!(first.rgba, [0x33, 0x66, 0x99, 0xFF].repeat(4));
         assert!(first.rgba.iter().any(|byte| *byte != 0));
 
         desktop.seek(Micros(10));
         let later = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 3);
         assert_eq!(later.rgba, first.rgba);
 
         let track = desktop.draft().unwrap().tracks[0].id.clone();
@@ -14603,15 +14916,17 @@ mod tests {
             .toggle_attribute(track.clone(), TrackAttribute::MUTE)
             .unwrap();
         desktop.seek(Micros(20));
+        // Muting changes the draft, not how the movie is read, so the open
+        // clip is kept.
         let muted = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 8);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 3);
         assert_eq!(muted.rgba, first.rgba);
 
         desktop
             .toggle_attribute(track, TrackAttribute::HIDE)
             .unwrap();
         let hidden = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 8);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 3);
         assert_eq!(hidden.rgba, vec![0; 16]);
     }
 

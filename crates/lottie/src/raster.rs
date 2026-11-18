@@ -64,6 +64,17 @@ fn draw_fill(canvas: &mut [u8], width: u32, fill: &Fill) {
 
 /// Sample counts, 0 to 16, for every pixel of `edges` over the whole
 /// output.
+/// How much of each pixel of a `width` by `height` picture `edges` fill by
+/// the non-zero rule, 0 to 255, row by row from the top.
+#[must_use]
+pub fn coverage(edges: &[Edge], width: u32, height: u32) -> Vec<u8> {
+    let mut map = coverage_map(edges, width, height);
+    for value in &mut map {
+        *value = to_byte(f32::from(*value) / SAMPLES);
+    }
+    map
+}
+
 fn coverage_map(edges: &[Edge], width: u32, height: u32) -> Vec<u8> {
     let mut map = vec![0_u8; width as usize * height as usize];
     if let Some(bounds) = Bounds::of(edges, width, height) {

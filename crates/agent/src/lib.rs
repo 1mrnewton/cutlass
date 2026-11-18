@@ -16,6 +16,7 @@ mod delegate;
 mod draft;
 mod forward;
 mod r#loop;
+pub mod markdown;
 mod mcp;
 mod mcp_connection;
 mod mcp_server;
@@ -39,7 +40,7 @@ pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize
 pub use chat::{
     ChatModel, ChatTransport, LoopbackHttp, SYSTEM_PROMPT, parse_reply, prompt_context,
 };
-pub use chat_file::{load_chat, save_chat};
+pub use chat_file::{ChatMiss, load_chat, load_chat_of, save_chat, save_chat_of};
 pub use delegate::{
     CHILD_TOOLS, DELEGATE, Delegating, definitions_with_delegate, delegate_definition,
 };
@@ -51,11 +52,11 @@ pub use draft::{
 pub use forward::{Forward, Forwarded, ProjectSocket, Wake, YIELD};
 pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run, run_after};
 pub use mcp::{McpClient, McpError, McpTransport};
-pub use mcp_connection::{LIST_TOOLS, McpConnection, McpWire};
+pub use mcp_connection::{ANSWER_WITHIN, LIST_TOOLS, McpConnection, McpWire};
 pub use mcp_server::{MCP_PROTOCOL_VERSION, McpServer};
 pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
-    ToolDefinition, shorten_results,
+    ToolDefinition, first_sent, shorten_results,
 };
 pub use ops::{Op, describe as describe_ops, ops};
 pub use picture::{PICTURE_LIMIT, Picture, forget_pictures};

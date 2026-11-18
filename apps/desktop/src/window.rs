@@ -4,18 +4,38 @@ use crate::shell::Shell;
 use crate::tokens;
 use crate::view::{ViewState, show};
 
+/// eframe's wgpu setup, with the backend this platform should draw on.
+///
+/// On Windows that is Direct3D 12 alone. Left to choose, wgpu takes Vulkan
+/// first, and some Intel drivers (igvk64.dll 31.0.101.2141) crash inside
+/// their own code while the window's device opens. Direct3D 12 is also what
+/// Media Foundation decodes on. `WGPU_BACKEND` still picks another.
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup};
+    let mut options = WgpuConfiguration::default();
+    if let WgpuSetup::CreateNew(create) = &mut options.wgpu_setup {
+        create.instance_descriptor.backends = backends(
+            eframe::wgpu::Backends::from_env(),
+            create.instance_descriptor.backends,
+        );
+    }
+    options
+}
+
+/// `chosen` when `WGPU_BACKEND` names backends, else this platform's own.
+fn backends(
+    chosen: Option<eframe::wgpu::Backends>,
+    default: eframe::wgpu::Backends,
+) -> eframe::wgpu::Backends {
+    match chosen {
+        Some(chosen) => chosen,
+        None if cfg!(target_os = "windows") => eframe::wgpu::Backends::DX12,
+        None => default,
+    }
+}
+
 /// Open the window on the projects, or on what the command line names.
 pub fn run() -> eframe::Result {
-    run_on(false)
-}
-
-/// Open the window on the effect studio, as `cutlass studio` does. A word
-/// after it is the id of an effect or a transition to open there.
-pub fn run_studio() -> eframe::Result {
-    run_on(true)
-}
-
-fn run_on(studio: bool) -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Cutlass")
         .with_inner_size([1280.0, 800.0])
@@ -48,6 +68,7 @@ fn run_on(studio: bool) -> eframe::Result {
         "Cutlass",
         eframe::NativeOptions {
             viewport,
+            wgpu_options: wgpu_options(),
             ..Default::default()
         },
         Box::new(move |creation| {
@@ -58,25 +79,11 @@ fn run_on(studio: bool) -> eframe::Result {
             shell.keep_settings_file(file, loaded.generation);
             shell.keep_presets_file(Shell::home().text_presets_file());
             shell.keep_notes_file(Shell::home().assistant_notes_file());
-            shell.keep_studio_folder(Shell::home().studio());
             // At most once a day, and never with the switch off.
             shell.check_updates_at_launch();
             // A project folder or files named on the command line, as a
             // file association passes them.
-            // After `cutlass studio` there are none: what follows is the
-            // command and the recipe to open, not files.
-            let named = if studio {
-                Vec::new()
-            } else {
-                crate::cli::named_files(std::env::args_os().skip(1))
-            };
-            if studio
-                && let Some(id) = std::env::args().nth(2)
-                && !shell.studio_mut().open_effect(&id)
-                && !shell.studio_mut().open_transition(&id)
-            {
-                cutlass_logger::warn!("cutlass studio: no effect or transition {id}");
-            }
+            let named = crate::cli::named_files(std::env::args_os().skip(1));
             if let Err(error) = shell.drop_files(&named) {
                 shell.notice_error(&error);
             }
@@ -96,11 +103,11 @@ fn run_on(studio: bool) -> eframe::Result {
                 let ctx = creation.egui_ctx.clone();
                 cutlass_platform_apple::wake_on_opened_files(move || ctx.request_repaint());
             }
-            let mut view = ViewState::new();
-            view.studio.open = studio;
+            // Before the first frame, so no frame is laid out without them.
+            crate::view::install_fonts(&creation.egui_ctx);
             Ok(Box::new(DesktopWindow {
                 shell,
-                view,
+                view: ViewState::new(),
                 last_time: None,
                 #[cfg(target_os = "macos")]
                 menu_bar: None,
@@ -261,5 +268,21 @@ mod tests {
     #[test]
     fn a_file_that_is_not_a_png_gives_no_icon() {
         assert!(icon(b"not a png").is_none());
+    }
+
+    #[test]
+    fn windows_draws_on_direct3d_12_unless_wgpu_backend_says_otherwise() {
+        use eframe::wgpu::Backends;
+        let default = Backends::PRIMARY | Backends::GL;
+        let own = if cfg!(target_os = "windows") {
+            Backends::DX12
+        } else {
+            default
+        };
+        assert_eq!(super::backends(None, default), own);
+        assert_eq!(
+            super::backends(Some(Backends::VULKAN), default),
+            Backends::VULKAN
+        );
     }
 }

@@ -438,6 +438,11 @@ pub enum DraftError {
     InvalidRange,
     /// A failed combo could not be named again from the open draft.
     UnnamedFailure,
+    /// The request id already answered a different combo.
+    RequestIdReused {
+        /// The id that was sent again.
+        id: String,
+    },
 }
 
 impl fmt::Display for DraftError {
@@ -460,6 +465,11 @@ impl fmt::Display for DraftError {
                 "missing material {id}; draft.query \"materials\" lists them"
             ),
             Self::InvalidRange => write!(formatter, "the range ends before it starts"),
+            Self::RequestIdReused { id } => write!(
+                formatter,
+                "request id {id} already committed a different combo, so nothing was written; \
+                 give each new combo a new request id"
+            ),
             Self::UnnamedFailure => write!(
                 formatter,
                 "the draft is unchanged, and the failed request could not be named"
@@ -470,11 +480,21 @@ impl fmt::Display for DraftError {
 
 impl std::error::Error for DraftError {}
 
-/// The first result of each combo that carried a request id, so the same id
-/// is answered the same way again. A host that builds its tools anew for
-/// each call hands this from one to the next.
+/// The combo each request id committed and what it answered, so the same
+/// combo sent again under that id, as a client does when an answer is lost,
+/// is answered the same way and not written twice. A dry run or a refused
+/// combo changed nothing and is not kept, so a retry runs it afresh. A host
+/// that builds its tools anew for each call hands this from one to the next.
 #[derive(Debug, Default)]
-pub struct Remembered(HashMap<String, Result<ApplyResult, DraftError>>);
+pub struct Remembered(HashMap<String, Committed>);
+
+/// A combo a request id committed, and its answer.
+#[derive(Clone, Debug)]
+struct Committed {
+    expected_revision: u64,
+    requests: Vec<Request>,
+    result: ApplyResult,
+}
 
 /// The most request ids kept; past it the oldest are forgotten together.
 const REMEMBERED_LIMIT: usize = 1024;
@@ -483,7 +503,7 @@ const REMEMBERED_LIMIT: usize = 1024;
 #[derive(Debug)]
 pub struct DraftTools {
     session: Session,
-    idempotent: HashMap<String, Result<ApplyResult, DraftError>>,
+    idempotent: HashMap<String, Committed>,
 }
 
 impl DraftTools {
@@ -528,7 +548,9 @@ impl DraftTools {
         }
     }
 
-    /// Apply one combo, or preview it, and remember a non-empty request id.
+    /// Apply one combo, or preview it. A non-empty request id that commits
+    /// is remembered with its combo: the same combo under it again is
+    /// answered as before, and another combo under it is refused.
     pub fn apply(&mut self, input: ApplyInput) -> Result<ApplyResult, DraftError> {
         let ApplyInput {
             request_id,
@@ -538,18 +560,30 @@ impl DraftTools {
         } = input;
         let key = idempotency_key(request_id);
         if let Some(key) = &key
-            && let Some(cached) = self.idempotent.get(key)
+            && let Some(kept) = self.idempotent.get(key)
         {
-            return cached.clone();
+            if kept.expected_revision == expected_revision && kept.requests == requests {
+                return Ok(kept.result);
+            }
+            return Err(DraftError::RequestIdReused { id: key.clone() });
         }
-        let result = self.apply_fresh(expected_revision, &requests, mode);
-        if let Some(key) = key {
+        let result = self.apply_fresh(expected_revision, &requests, mode)?;
+        if let Some(key) = key
+            && result.committed
+        {
             if self.idempotent.len() >= REMEMBERED_LIMIT {
                 self.idempotent.clear();
             }
-            self.idempotent.insert(key, result.clone());
+            self.idempotent.insert(
+                key,
+                Committed {
+                    expected_revision,
+                    requests,
+                    result,
+                },
+            );
         }
-        result
+        Ok(result)
     }
 
     /// Restore the draft from before the last committed combo.
@@ -678,7 +712,12 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetLut { .. } => "set_lut",
         Request::SetChroma { .. } => "set_chroma",
         Request::SetMask { .. } => "set_mask",
+        Request::AddMask { .. } => "add_mask",
+        Request::EditMask { .. } => "edit_mask",
+        Request::RemoveMask { .. } => "remove_mask",
+        Request::MoveMask { .. } => "move_mask",
         Request::SetSelection { .. } => "set_selection",
+        Request::SetMatting { .. } => "set_matting",
         Request::Track { .. } => "track",
         Request::Untrack { .. } => "untrack",
         Request::SetColorMask { .. } => "set_color_mask",
@@ -722,7 +761,7 @@ pub fn request_name(request: &Request) -> &'static str {
 }
 
 fn idempotency_key(request_id: Option<String>) -> Option<String> {
-    request_id.filter(|id| !id.is_empty())
+    request_id.filter(|id| !id.trim().is_empty())
 }
 
 fn project_view(revision: u64, draft: &Draft) -> QueryView {
@@ -942,10 +981,19 @@ fn difference(stored: &Value, plain: &Value) -> Option<Value> {
 /// with what they mean: text with no color is drawn white.
 const MEANT: &[(&str, &str, &str)] = &[("texts", "text_color", "#ffffff")];
 
-/// `record` as a view writes it: [`trimmed`], with the [`MEANT`] values
-/// written out, so a reader is not left to guess what a missing one is.
+/// `record` as a view writes it: what it holds that a new record of its
+/// pool would not, with the [`MEANT`] values written out, so a reader is
+/// not left to guess what a missing one is.
+///
+/// A value is left out when it is the one a new record has, not when it
+/// is zero: a title's alpha is 1 when new, so an alpha of 0, a title that
+/// is there and cannot be seen, is said.
 fn shown_record(pool: &str, record: &Value) -> Value {
-    let mut shown = trimmed(record);
+    let mut shown = match new_record(pool) {
+        Some(new) => unlike(record, &new).unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+        // A pool whose records do not read from an id alone.
+        None => trimmed(record),
+    };
     if let Some(map) = shown.as_object_mut() {
         for (in_pool, key, meaning) in MEANT {
             if *in_pool == pool && !map.contains_key(*key) {
@@ -954,6 +1002,38 @@ fn shown_record(pool: &str, record: &Value) -> Value {
         }
     }
     shown
+}
+
+/// A record of `pool` as it is when new: one read from an id alone, with
+/// every other field at what it starts as.
+fn new_record(pool: &str) -> Option<Value> {
+    let mut pools = serde_json::Map::new();
+    pools.insert(pool.to_owned(), serde_json::json!([{ "id": "" }]));
+    let materials: cutlass_model::Materials = serde_json::from_value(Value::Object(pools)).ok()?;
+    let written = serde_json::to_value(&materials).ok()?;
+    written.get(pool)?.as_array()?.first().cloned()
+}
+
+/// What `stored` holds that `new` does not. A field a new record has is
+/// kept when its value is another one, zero included; a field it lacks is
+/// kept unless it says nothing.
+fn unlike(stored: &Value, new: &Value) -> Option<Value> {
+    match (stored, new) {
+        (Value::Object(stored), Value::Object(new)) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in stored {
+                let kept = match new.get(key) {
+                    Some(start) => unlike(value, start),
+                    None => Some(trimmed(value)).filter(|value| !says_nothing(value)),
+                };
+                if let Some(kept) = kept {
+                    out.insert(key.clone(), kept);
+                }
+            }
+            (!out.is_empty()).then_some(Value::Object(out))
+        }
+        _ => (stored != new).then(|| trimmed(stored)),
+    }
 }
 
 /// `record` without its empty, zero and false values, which say nothing.
@@ -1305,6 +1385,33 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(colored.contains(r##""text_color":"#ffcc00""##), "{colored}");
+        // A new title's alphas are 1, and saying so says nothing.
+        assert!(!colored.contains("alpha"), "{colored}");
+        // One stored at 0 is a title that cannot be seen: the view says
+        // it, where a view that left out every zero showed a plain title.
+        let mut draft = tools.session().draft().clone();
+        draft.materials.texts[0].global_alpha = 0.0;
+        draft.materials.texts[0].text_alpha = 0.0;
+        let unseen = DraftTools::new(Session::open(draft))
+            .query(&DraftQuery::Material {
+                material_id: MaterialId::new("title-text"),
+            })
+            .unwrap()
+            .to_string();
+        let record: Value = serde_json::from_str(
+            unseen
+                .lines()
+                .next()
+                .and_then(|line| line.split_once("texts="))
+                .map(|(_, record)| record)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["global_alpha"], 0.0, "{unseen}");
+        assert_eq!(record["text_alpha"], 0.0, "{unseen}");
+        assert!(record.get("background_alpha").is_none(), "{unseen}");
+        assert_eq!(record["content"], "Summer trip");
+        assert_eq!(record["id"], "title-text");
         // A plain clip has nothing set, and a track view stays one line.
         let (mut tools, track) = open_tools();
         tools
@@ -1964,18 +2071,17 @@ mod tests {
                 cause: EditError::DuplicateSegment,
             }
         );
-        let again = tools
+        // The refused dry run is not kept: a fixed combo under its id runs.
+        let fixed = tools
             .apply(apply_input(
                 Some("dry-fail"),
                 0,
                 vec![place(&track, "b", 0, 1_000_000)],
                 ApplyMode::Commit,
             ))
-            .unwrap_err();
-        assert_eq!(again, error);
-        assert!(tools.session().draft().tracks[0].segments.is_empty());
-        assert_eq!(tools.session().revision(), 0);
-        assert_eq!(tools.undo().unwrap_err(), DraftError::EmptyUndo);
+            .unwrap();
+        assert!(fixed.committed);
+        assert_eq!(tools.session().draft().tracks[0].segments.len(), 1);
     }
 
     #[test]
@@ -2008,23 +2114,24 @@ mod tests {
                 ApplyMode::Commit,
             ))
             .unwrap();
-        assert_eq!(again, result);
-        assert!(!again.committed);
-        assert_eq!(tools.session().revision(), 0);
-        assert!(tools.session().draft().tracks[0].segments.is_empty());
+        // The commit after a dry run under the same id writes.
+        assert_eq!(
+            again,
+            ApplyResult {
+                revision: 1,
+                committed: true,
+            }
+        );
+        assert_eq!(tools.session().draft().tracks[0].segments.len(), 1);
     }
 
     #[test]
-    fn request_id_returns_the_first_result() {
+    fn request_id_answers_its_combo_again_and_refuses_another() {
         let (mut tools, track) = open_tools();
         let original = tools.session().draft().clone();
+        let combo = || vec![place(&track, "a", 0, 1_000_000)];
         let first = tools
-            .apply(apply_input(
-                Some("step"),
-                0,
-                vec![place(&track, "a", 0, 1_000_000)],
-                ApplyMode::Commit,
-            ))
+            .apply(apply_input(Some("step"), 0, combo(), ApplyMode::Commit))
             .unwrap();
         assert_eq!(
             first,
@@ -2033,54 +2140,77 @@ mod tests {
                 committed: true,
             }
         );
-        let second = tools
+        // The same combo again, as after a lost answer: not written twice.
+        let again = tools
+            .apply(apply_input(Some("step"), 0, combo(), ApplyMode::Commit))
+            .unwrap();
+        assert_eq!(again, first);
+        assert_eq!(tools.session().revision(), 1);
+        // Another combo under the same id is refused, not dropped unseen.
+        let other = tools
             .apply(apply_input(
                 Some("step"),
-                0,
+                1,
                 vec![place(&track, "b", 1_000_000, 1_000_000)],
-                ApplyMode::Commit,
-            ))
-            .unwrap();
-        assert_eq!(second, first);
-        assert_eq!(tools.session().revision(), 1);
-        assert_eq!(tools.session().draft().tracks[0].segments.len(), 1);
-        assert_eq!(
-            tools.session().draft().tracks[0].segments[0].id.as_str(),
-            "a"
-        );
-        assert_eq!(tools.undo().unwrap(), 2);
-        assert_eq!(tools.session().draft(), &original);
-        assert_eq!(tools.undo().unwrap_err(), DraftError::EmptyUndo);
-
-        let (mut tools, track) = open_tools();
-        let original = tools.session().draft().clone();
-        let error = tools
-            .apply(apply_input(
-                Some("stale"),
-                4,
-                vec![place(&track, "a", 0, 1_000_000)],
                 ApplyMode::Commit,
             ))
             .unwrap_err();
         assert_eq!(
-            error,
+            other,
+            DraftError::RequestIdReused {
+                id: "step".to_owned()
+            }
+        );
+        assert!(other.to_string().contains("new request id"), "{other}");
+        assert_eq!(tools.session().revision(), 1);
+        assert_eq!(tools.session().draft().tracks[0].segments.len(), 1);
+        assert_eq!(tools.undo().unwrap(), 2);
+        assert_eq!(tools.session().draft(), &original);
+    }
+
+    #[test]
+    fn request_id_keeps_no_dry_run_and_no_refusal() {
+        let (mut tools, track) = open_tools();
+        let combo = || vec![place(&track, "a", 0, 1_000_000)];
+        // A refused combo is not kept: the retry on the right revision runs.
+        let stale = tools
+            .apply(apply_input(Some("try"), 4, combo(), ApplyMode::Commit))
+            .unwrap_err();
+        assert_eq!(
+            stale,
             DraftError::RevisionMismatch {
                 expected: 4,
                 actual: 0,
             }
         );
-        let again = tools
+        // Nor is a dry run: the commit after it under the same id writes.
+        let dry = tools
+            .apply(apply_input(Some("try"), 0, combo(), ApplyMode::DryRun))
+            .unwrap();
+        assert!(!dry.committed);
+        assert_eq!(tools.session().revision(), 0);
+        let written = tools
+            .apply(apply_input(Some("try"), 0, combo(), ApplyMode::Commit))
+            .unwrap();
+        assert_eq!(
+            written,
+            ApplyResult {
+                revision: 1,
+                committed: true,
+            }
+        );
+        assert_eq!(tools.session().draft().tracks[0].segments.len(), 1);
+        // A blank id is no id.
+        let blank = tools
             .apply(apply_input(
-                Some("stale"),
-                0,
-                vec![place(&track, "a", 0, 1_000_000)],
+                Some("  "),
+                1,
+                vec![place(&track, "b", 1_000_000, 1_000_000)],
                 ApplyMode::Commit,
             ))
-            .unwrap_err();
-        assert_eq!(again, error);
-        assert_eq!(tools.session().draft(), &original);
-        assert_eq!(tools.session().revision(), 0);
-        assert_eq!(tools.undo().unwrap_err(), DraftError::EmptyUndo);
+            .unwrap();
+        assert_eq!(blank.revision, 2);
+        assert!(tools.take_remembered().0.len() == 1);
     }
 
     #[test]

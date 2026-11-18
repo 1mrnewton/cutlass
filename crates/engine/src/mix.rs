@@ -70,9 +70,17 @@ pub struct MixClip {
     pub offset_us: i64,
     /// The clip's length on the timeline.
     pub duration_us: i64,
+    /// Source time per timeline time across this part of the window: its
+    /// mean, so a speed curve's windows join where the curve puts them.
     pub speed: f64,
     pub pitch_follows_speed: bool,
+    /// The gain at the clip's first sample in the window.
     pub volume: f64,
+    /// The gain at the clip's last sample in the window. The gain moves in
+    /// a straight line from `volume` to this, sample by sample, so a volume
+    /// key does not step once a window.
+    pub volume_end: f64,
+    /// Microseconds; a negative one is no fade.
     pub fade_in_us: i64,
     pub fade_out_us: i64,
     pub fade_curve: i32,
@@ -111,13 +119,14 @@ pub fn mix_inputs(draft: &Draft, span: MixSpan) -> Vec<MixClip> {
     let mut clips = Vec::new();
     for track in &draft.tracks {
         for segment in &track.segments {
-            if !map::contributes_sound(draft, segment) {
-                continue;
-            }
+            // The window first: it is a few sums, and most clips miss it.
             let Some(part) = clip_part(&segment.target, span) else {
                 continue;
             };
-            clips.push(clip_for(draft, track, segment, part));
+            if !map::contributes_sound(draft, segment) {
+                continue;
+            }
+            clips.push(clip_for(draft, track, segment, part, span.rate));
         }
     }
     clips
@@ -263,14 +272,24 @@ pub fn render(mix: &Mix, clips: &[MixClip], clock: ClockKind) -> Result<MixResul
     })
 }
 
-fn clip_for(draft: &Draft, track: &Track, segment: &Segment, part: ClipPart) -> MixClip {
+fn clip_for(draft: &Draft, track: &Track, segment: &Segment, part: ClipPart, rate: u32) -> MixClip {
     let offset = Micros(part.offset_us);
-    // The clip's first sample in the window, on the timeline.
+    // The clip's first sample in the window, on the timeline, and the time
+    // just past its part of the window.
     let time = Micros(segment.target.start.0.saturating_add(part.offset_us));
+    let span = part_micros(part.frames, rate);
+    let last = Micros(
+        offset
+            .0
+            .saturating_add(part_micros(part.frames.saturating_sub(1), rate)),
+    );
     let volume = clip_volume(segment, &draft.keyframe_graph_list, offset);
+    let volume_end = clip_volume(segment, &draft.keyframe_graph_list, last);
     let (fade_in_us, fade_out_us, fade_curve) = fade_of(draft, segment);
     let speed = map::placement_of(draft, segment)
-        .and_then(|placement| map::speed_at(&placement, time))
+        .and_then(|placement| {
+            map::mean_speed(&placement, time, Micros(time.0.saturating_add(span)))
+        })
         .unwrap_or(1.0);
     MixClip {
         pcm: ClipPcm::Missing,
@@ -282,6 +301,7 @@ fn clip_for(draft: &Draft, track: &Track, segment: &Segment, part: ClipPart) -> 
         speed,
         pitch_follows_speed: segment.is_tone_modify,
         volume,
+        volume_end,
         fade_in_us,
         fade_out_us,
         fade_curve,
@@ -307,6 +327,14 @@ pub fn clip_volume(segment: &Segment, graphs: &[KeyframeGraph], offset: Micros) 
     }
 }
 
+/// `frames` samples at `rate`, in microseconds, rounded down.
+fn part_micros(frames: u32, rate: u32) -> i64 {
+    if rate == 0 {
+        return 0;
+    }
+    i64::try_from(i128::from(frames) * MICROS / i128::from(rate)).unwrap_or(i64::MAX)
+}
+
 fn fade_of(draft: &Draft, segment: &Segment) -> (i64, i64, i32) {
     for id in &segment.extra_material_refs {
         if let Some(MaterialRef::Fade(fade)) = draft.materials.get(id.as_str()) {
@@ -329,6 +357,15 @@ fn process(mix: &Mix, clip: &MixClip) -> Result<Pcm, EngineError> {
     let ClipPcm::Ready(pcm) = &clip.pcm else {
         return Err(EngineError::NotReady);
     };
+    // Integer samples become full-scale floats, as the reader returns them,
+    // so every later step has floats whatever the clip's rate.
+    let floats;
+    let pcm = if pcm.as_i16().is_some() {
+        floats = to_f32(pcm)?;
+        &floats
+    } else {
+        pcm
+    };
     // Before the resample, so it runs on two channels instead of eight.
     let folded;
     let pcm = if pcm.layout.len() == 1 || pcm.layout == ChannelLayout::stereo() {
@@ -339,30 +376,47 @@ fn process(mix: &Mix, clip: &MixClip) -> Result<Pcm, EngineError> {
     };
     let pcm = resample(pcm, mix.rate)?;
     let pcm = stretch(&pcm, clip.speed, !clip.pitch_follows_speed)?;
-    let pcm = apply_gain(&pcm, clip.volume)?;
-    let curve = FadeCurve::from_type(clip.fade_curve)?;
+    let pcm = apply_gain(&pcm, clip.volume, clip.volume_end)?;
+    // A curve this build does not know is a straight fade: the clip still
+    // fades, and one stored value does not silence the mix.
+    let curve = FadeCurve::from_type(clip.fade_curve).unwrap_or(FadeCurve::Linear);
     // After the stretch, so the buffer is on the timeline's clock, as the
     // fade durations and the clip's length are.
     let span = FadeSpan {
-        start_us: clip.offset_us,
-        clip_us: clip.duration_us,
+        start_us: clip.offset_us.max(0),
+        clip_us: clip.duration_us.max(0),
     };
     Ok(fade_window(
         &pcm,
         span,
-        clip.fade_in_us,
-        clip.fade_out_us,
+        clip.fade_in_us.max(0),
+        clip.fade_out_us.max(0),
         curve,
     )?)
 }
 
+/// 16-bit samples as floats, divided by the same full scale the reader uses.
+fn to_f32(pcm: &Pcm) -> Result<Pcm, EngineError> {
+    let Some(samples) = pcm.as_i16() else {
+        return Err(EngineError::Layout);
+    };
+    let floats = samples
+        .iter()
+        .map(|sample| f32::from(*sample) / 32_767.0)
+        .collect();
+    Pcm::from_f32(pcm.rate, pcm.layout.clone(), floats).map_err(|_| EngineError::Layout)
+}
+
 /// `pcm` where its clip sounds in the window: after the clip's lead of
-/// silence, cut at the frames the clip covers, and, when the clip ends
-/// inside the window, followed by silence to the window's end. A clip that
-/// covers the whole window and is no longer than it is passed on as it is.
+/// silence, cut at the frames the clip covers, and followed by silence to
+/// the window's end. The result is always the whole window: a buffer
+/// shorter than the frames the clip covers, as a stretch can round to or a
+/// file that ends early gives, is silent where it has no samples, so the
+/// window keeps its length and later windows keep their time. A buffer
+/// that is exactly the window is passed on as it is.
 fn place(pcm: Pcm, clip: &MixClip) -> Result<Pcm, EngineError> {
     let held = pcm.samples.min(clip.frames);
-    if clip.lead_frames == 0 && clip.tail_frames == 0 && held == pcm.samples {
+    if clip.lead_frames == 0 && clip.tail_frames == 0 && pcm.samples == clip.frames {
         return Ok(pcm);
     }
     let Some(samples) = pcm.as_f32() else {
@@ -377,31 +431,45 @@ fn place(pcm: Pcm, clip: &MixClip) -> Result<Pcm, EngineError> {
     };
     let lead = len(clip.lead_frames)?;
     let sound = samples.get(..len(held)?).ok_or(EngineError::Layout)?;
-    let mut placed = vec![0.0_f32; lead];
+    let window = clip
+        .lead_frames
+        .checked_add(clip.frames)
+        .and_then(|frames| frames.checked_add(clip.tail_frames))
+        .ok_or(EngineError::Overflow)?;
+    let mut placed = Vec::with_capacity(len(window)?);
+    placed.resize(lead, 0.0_f32);
     placed.extend_from_slice(sound);
-    if clip.tail_frames > 0 {
-        let window = clip
-            .lead_frames
-            .checked_add(clip.frames)
-            .and_then(|frames| frames.checked_add(clip.tail_frames))
-            .ok_or(EngineError::Overflow)?;
-        placed.resize(len(window)?, 0.0);
-    }
+    placed.resize(len(window)?, 0.0);
     Pcm::from_f32(pcm.rate, pcm.layout.clone(), placed).map_err(|_| EngineError::Layout)
 }
 
-fn apply_gain(pcm: &Pcm, volume: f64) -> Result<Pcm, EngineError> {
-    if !volume.is_finite() {
+/// Gain `from` at the first frame moving in a straight line to `to` at the
+/// last, the same on every channel.
+fn apply_gain(pcm: &Pcm, from: f64, to: f64) -> Result<Pcm, EngineError> {
+    if !from.is_finite() || !to.is_finite() {
         return Err(EngineError::Audio("non-finite volume".to_owned()));
     }
-    if volume == 1.0 {
+    if from == 1.0 && to == 1.0 {
         return Ok(pcm.clone());
     }
     let Some(samples) = pcm.as_f32() else {
         return Err(EngineError::Layout);
     };
-    let gain = volume as f32;
-    let scaled = samples.iter().map(|sample| sample * gain).collect();
+    let channels = pcm.layout.len().max(1);
+    let steps = pcm.samples.saturating_sub(1).max(1);
+    let scaled = samples
+        .chunks(channels)
+        .enumerate()
+        .flat_map(|(frame, chunk)| {
+            let gain = if from == to {
+                from
+            } else {
+                from + (to - from) * (frame as f64 / f64::from(steps))
+            };
+            let gain = gain as f32;
+            chunk.iter().map(move |sample| sample * gain)
+        })
+        .collect();
     Pcm::from_f32(pcm.rate, pcm.layout.clone(), scaled).map_err(|_| EngineError::Layout)
 }
 
@@ -543,7 +611,7 @@ mod tests {
     fn sound(pcm: Pcm) -> MixClip {
         MixClip {
             lead_frames: 0,
-            frames: u32::MAX,
+            frames: pcm.samples,
             tail_frames: 0,
             offset_us: 0,
             duration_us: i64::from(pcm.samples) * 1_000_000 / i64::from(pcm.rate),
@@ -551,6 +619,7 @@ mod tests {
             speed: 1.0,
             pitch_follows_speed: false,
             volume: 1.0,
+            volume_end: 1.0,
             fade_in_us: 0,
             fade_out_us: 0,
             fade_curve: 0,
@@ -573,6 +642,7 @@ mod tests {
 
         let mut quiet = sound(mono(8_000, vec![1.0; 4]));
         quiet.volume = 0.0;
+        quiet.volume_end = 0.0;
         let gained = render(&mix, &[quiet], ClockKind::Playback).expect("gain");
         assert_eq!(gained.contributed, 1);
         assert_eq!(gained.pcm.as_f32(), Some(&[0.0, 0.0, 0.0, 0.0][..]));
@@ -852,6 +922,107 @@ mod tests {
         late.pcm = ClipPcm::Missing;
         let skipped = render(&mix, &[late], ClockKind::Playback).expect("skip");
         assert_eq!(skipped.pcm.samples, 0);
+    }
+
+    #[test]
+    fn a_short_buffer_still_fills_its_window_and_a_bad_fade_still_sounds() {
+        let mix = Mix {
+            rate: 8_000,
+            limiter: 0,
+        };
+        // A buffer two samples short of a clip that covers the whole window,
+        // as a stretch or an early end gives: the window keeps its length.
+        let mut short = sound(mono(8_000, vec![0.5; 4]));
+        short.frames = 6;
+        let mixed = render(&mix, &[short.clone()], ClockKind::Export).expect("short");
+        assert_eq!(
+            mixed.pcm.as_f32().expect("f32"),
+            [0.5, 0.5, 0.5, 0.5, 0.0, 0.0]
+        );
+        // A curve this build does not know is a straight fade, and a
+        // negative length is no fade: neither silences the mix.
+        let mut unknown = sound(mono(8_000, vec![1.0; 4]));
+        unknown.fade_curve = 99;
+        unknown.fade_in_us = 1_000;
+        unknown.duration_us = 1_000_000;
+        let linear = MixClip {
+            fade_curve: 2,
+            ..unknown.clone()
+        };
+        let mixed = render(&mix, &[unknown], ClockKind::Export).expect("unknown curve");
+        let expected = render(&mix, &[linear], ClockKind::Export).expect("linear");
+        assert_eq!(mixed.pcm.as_f32(), expected.pcm.as_f32());
+        let mut negative = sound(mono(8_000, vec![1.0; 4]));
+        negative.fade_curve = 2;
+        negative.fade_in_us = -5;
+        negative.fade_out_us = -5;
+        negative.offset_us = -5;
+        let mixed = render(&mix, &[negative], ClockKind::Export).expect("negative");
+        assert_eq!(mixed.pcm.as_f32().expect("f32"), [1.0; 4]);
+    }
+
+    #[test]
+    fn volume_ramps_sample_by_sample_and_16_bit_sound_is_mixed() {
+        let mix = Mix {
+            rate: 8_000,
+            limiter: 0,
+        };
+        let mut ramp = sound(mono(8_000, vec![1.0; 5]));
+        ramp.volume = 0.0;
+        ramp.volume_end = 1.0;
+        let mixed = render(&mix, &[ramp], ClockKind::Export).expect("ramp");
+        assert_eq!(
+            mixed.pcm.as_f32().expect("f32"),
+            [0.0, 0.25, 0.5, 0.75, 1.0]
+        );
+        // Stereo: both sides of a frame take the same gain.
+        let stereo = Pcm::from_f32(8_000, ChannelLayout::stereo(), vec![1.0; 4]).expect("stereo");
+        let mut stereo = sound(stereo);
+        stereo.volume = 0.5;
+        stereo.volume_end = 1.0;
+        let mixed = render(&mix, &[stereo], ClockKind::Export).expect("stereo ramp");
+        assert_eq!(mixed.pcm.as_f32().expect("f32"), [0.5, 0.5, 1.0, 1.0]);
+        // 16-bit samples are floats at the reader's full scale.
+        let wide = Pcm::from_i16(
+            8_000,
+            ChannelLayout::mono(),
+            vec![0, 32_767, -32_767, 16_384],
+        )
+        .expect("i16");
+        let mixed = render(&mix, &[sound(wide)], ClockKind::Export).expect("i16");
+        let samples = mixed.pcm.as_f32().expect("f32");
+        assert_eq!(&samples[..3], [0.0, 1.0, -1.0]);
+        assert!((samples[3] - 16_384.0 / 32_767.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_window_carries_the_volume_at_its_last_sample() {
+        let mut draft = Draft::empty("D");
+        let mut segment = Segment::new("a", "audio", TimeRange::new(0, 1_000_000));
+        cutlass_model::put_key(&mut segment, cutlass_model::VOLUME_KEY, Micros(0), 0.0);
+        cutlass_model::put_key(
+            &mut segment,
+            cutlass_model::VOLUME_KEY,
+            Micros(1_000_000),
+            1.0,
+        );
+        draft.tracks[0].segments.push(segment);
+        // 4,800 samples at 48 kHz from 100 ms: the last is at 199,979 us.
+        let clips = mix_inputs(
+            &draft,
+            MixSpan {
+                time: Micros(100_000),
+                frames: 4_800,
+                rate: 48_000,
+            },
+        );
+        assert!((clips[0].volume - 0.1).abs() < 1e-9);
+        let last = 0.1 + 4_799.0 / 48_000.0;
+        assert!(
+            (clips[0].volume_end - last).abs() < 1e-6,
+            "{}",
+            clips[0].volume_end
+        );
     }
 
     #[test]

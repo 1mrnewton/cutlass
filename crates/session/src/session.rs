@@ -36,6 +36,17 @@ impl Session {
         Self::open(draft)
     }
 
+    /// Count this session's revisions from `revision`, not from 0. A host
+    /// that opens one draft after another gives each a different start, so
+    /// a revision read from an earlier one, or from another process that
+    /// held the same project, matches nothing here and its write is
+    /// refused. Meant for a session nothing has been applied to yet.
+    #[must_use]
+    pub fn starting_at(mut self, revision: u64) -> Self {
+        self.revision = revision;
+        self
+    }
+
     /// Follow and cut switches. A new draft starts with all of them on.
     #[must_use]
     pub fn linkage(&self) -> LinkageSettings {
@@ -449,6 +460,31 @@ mod tests {
             }
         );
         assert_eq!(session.draft().tracks[0].segments.len(), 1);
+    }
+
+    #[test]
+    fn a_session_counts_from_where_it_is_started() {
+        let (session, track) = session();
+        let mut session = session.starting_at(7_000);
+        assert_eq!(session.revision(), 7_000);
+        // A revision read from a session that started at 0 is stale here.
+        let error = session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap_err();
+        assert_eq!(
+            error,
+            EditError::RevisionMismatch {
+                expected: 0,
+                actual: 7_000
+            }
+        );
+        assert!(session.draft().tracks[0].segments.is_empty());
+        let placed = session
+            .apply(7_000, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
+        assert_eq!(placed, 7_001);
+        assert_eq!(session.undo().unwrap(), 7_002);
+        assert_eq!(session.redo().unwrap(), 7_003);
     }
 
     #[test]

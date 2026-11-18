@@ -89,6 +89,52 @@ pub fn shorten_results(messages: &mut [Message], limit: usize) {
     }
 }
 
+/// Where what a model is sent of `messages` begins, for the earlier turns
+/// of a conversation to take no more than `budget` characters: the start
+/// of the oldest turn from which the rest fits. A turn is a user's ask and
+/// everything that answered it, and is sent whole or not at all, so no
+/// tool call is sent without its result. 0 sends every message, and
+/// `messages.len()` none, when the newest turn alone is past the budget.
+///
+/// A host does this to the turns before the one it is about to run. A
+/// conversation that is only ever added to outgrows the model's context,
+/// and from then on every ask in it fails.
+#[must_use]
+pub fn first_sent(messages: &[Message], budget: usize) -> usize {
+    let mut from = messages.len();
+    let mut used = 0usize;
+    let mut turn = 0usize;
+    for (index, message) in messages.iter().enumerate().rev() {
+        turn = turn.saturating_add(size_of(message));
+        // A turn starts at a user's words, and the first message starts
+        // one whoever said it.
+        if index > 0 && !matches!(message, Message::User { .. }) {
+            continue;
+        }
+        used = used.saturating_add(turn);
+        if used > budget {
+            break;
+        }
+        from = index;
+        turn = 0;
+    }
+    from
+}
+
+/// The characters `message` adds to a request.
+fn size_of(message: &Message) -> usize {
+    match message {
+        Message::User { text } => text.len(),
+        Message::Assistant { text, calls } => calls
+            .iter()
+            .map(|call| call.name.len() + call.arguments.len())
+            .fold(text.len(), usize::saturating_add),
+        Message::Tool {
+            content, picture, ..
+        } => content.len() + picture.as_ref().map_or(0, |picture| picture.data.len()),
+    }
+}
+
 /// Messages and tool definitions sent to a model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionRequest {
@@ -221,6 +267,81 @@ impl<M: Model> Model for CloudModel<M> {
             return Err(ModelError::CloudDisabled);
         }
         self.inner.complete(request)
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::{Message, ToolCall, first_sent};
+
+    fn user(text: &str) -> Message {
+        Message::User {
+            text: text.to_owned(),
+        }
+    }
+
+    fn said(text: &str, calls: &[&str]) -> Message {
+        Message::Assistant {
+            text: text.to_owned(),
+            calls: calls
+                .iter()
+                .map(|id| ToolCall {
+                    id: (*id).to_owned(),
+                    name: "t".to_owned(),
+                    arguments: "ab".to_owned(),
+                })
+                .collect(),
+        }
+    }
+
+    fn result(id: &str, content: &str) -> Message {
+        Message::Tool {
+            call_id: id.to_owned(),
+            name: "t".to_owned(),
+            content: content.to_owned(),
+            is_error: false,
+            picture: None,
+        }
+    }
+
+    #[test]
+    fn the_oldest_turns_are_left_out_whole_once_a_conversation_is_past_its_budget() {
+        // Three turns of 10, 16 and 8 characters.
+        let messages = vec![
+            user("12345"),
+            said("12345", &[]),
+            user("1234"),
+            said("123", &["c1"]),
+            result("c1", "1234"),
+            said("12", &[]),
+            user("1234"),
+            said("1234", &[]),
+        ];
+        assert!(first_sent(&[], 0) == 0 && first_sent(&[], 100) == 0);
+        // All of it fits.
+        assert_eq!(first_sent(&messages, 34), 0);
+        assert_eq!(first_sent(&messages, usize::MAX), 0);
+        // One character short: the first turn goes, whole.
+        assert_eq!(first_sent(&messages, 33), 2);
+        assert_eq!(first_sent(&messages, 24), 2);
+        // The middle turn is never cut between a call and its result.
+        assert_eq!(first_sent(&messages, 23), 6);
+        assert_eq!(first_sent(&messages, 8), 6);
+        // Not even the newest fits: none of it is sent.
+        assert_eq!(first_sent(&messages, 7), messages.len());
+        assert_eq!(first_sent(&messages, 0), messages.len());
+        // What is sent always begins at a user's words.
+        for budget in 0..40 {
+            let from = first_sent(&messages, budget);
+            assert!(
+                from == messages.len() || matches!(messages[from], Message::User { .. }),
+                "{budget}"
+            );
+        }
+        // A conversation that begins with a reply is one turn from there.
+        let headless = vec![said("12345", &[]), user("12"), said("12", &[])];
+        assert_eq!(first_sent(&headless, 9), 0);
+        assert_eq!(first_sent(&headless, 8), 1);
     }
 }
 

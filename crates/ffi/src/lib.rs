@@ -21,6 +21,7 @@ mod host;
 mod keys;
 mod layer;
 mod look;
+mod mask;
 mod media;
 mod player;
 mod preview;
@@ -68,6 +69,7 @@ pub use layer::{PhoneShape, PhoneSticker, phone_shapes, phone_stickers, sticker_
 pub use look::{
     PhoneAdjust, PhoneClipFilter, PhoneFilter, adjust_sliders, clip_filter, phone_filters,
 };
+pub use mask::{PhoneBrush, PhoneMask, PhoneMaskHandles, PhoneMaskShape, mask_shapes};
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
@@ -136,6 +138,8 @@ pub struct PhoneHost {
     faces: FaceTable,
     /// The preview gesture in flight.
     live: Option<stage::Live>,
+    /// The mask drag in flight.
+    mask_live: Option<mask::LiveMask>,
     /// The title being typed into, and the revision of its last change.
     typing: Option<(SegmentId, u64)>,
     /// The title a slider is restyling, and the revision of its last change.
@@ -180,6 +184,7 @@ impl PhoneHost {
             strip: Strip::default(),
             faces: shipped_faces(FaceTable::default()),
             live: None,
+            mask_live: None,
             typing: None,
             styling: None,
         })
@@ -1828,12 +1833,12 @@ mod tests {
     use super::PhoneHost;
     use crate::{FfiError, PhoneAnimation, animation_presets, start_log};
 
-    struct Temp {
-        path: PathBuf,
+    pub(crate) struct Temp {
+        pub(crate) path: PathBuf,
     }
 
     impl Temp {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             let path =
@@ -1859,7 +1864,7 @@ mod tests {
         assert_eq!(log, temp.path.join("cutlass.log"));
     }
 
-    struct Roots<'a> {
+    pub(crate) struct Roots<'a> {
         temp: &'a Temp,
         project: PathBuf,
         bundle: PathBuf,
@@ -1867,7 +1872,7 @@ mod tests {
     }
 
     impl Roots<'_> {
-        fn new(temp: &Temp) -> Roots<'_> {
+        pub(crate) fn new(temp: &Temp) -> Roots<'_> {
             let project = temp.path.join("project");
             let bundle = temp.path.join("bundle");
             let cache = temp.path.join("cache");
@@ -1880,7 +1885,7 @@ mod tests {
             }
         }
 
-        fn create(&self) -> PhoneHost {
+        pub(crate) fn create(&self) -> PhoneHost {
             PhoneHost::create(&self.project, "D", &self.bundle, &self.cache, 0).unwrap()
         }
 
@@ -2040,11 +2045,11 @@ mod tests {
         assert_eq!(Micros(5).0, 5);
     }
 
-    fn fixture(name: &str) -> PathBuf {
+    pub(crate) fn fixture(name: &str) -> PathBuf {
         crate::crate_dir().join("../engine/fixtures").join(name)
     }
 
-    fn still(duration: i64) -> crate::Probed {
+    pub(crate) fn still(duration: i64) -> crate::Probed {
         crate::Probed::Video {
             meta: cutlass_model::MetaType::Photo,
             width: 16,

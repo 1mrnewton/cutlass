@@ -77,6 +77,7 @@ extension ToolKind {
         case .duplicate: "duplicate"
         case .replace: "replace"
         case .crop: "crop"
+        case .mask: "mask"
         case .mirror: "mirror"
         case .rotate: "rotate"
         case .reverse: "reverse"

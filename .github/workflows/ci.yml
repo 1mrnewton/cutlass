@@ -310,13 +310,56 @@ jobs:
           working-directory: apps/android
           script: ./gradlew --no-daemon connectedDebugAndroidTest
 
+  packaging-changes:
+    # Release packaging is the slowest part of a run: each package is a PGO
+    # build, three builds in one, and the macOS one alone takes about 27
+    # minutes against 20 for the next job. It runs on main, by hand, and on
+    # pull requests into main that change what packaging reads: its scripts
+    # and installer files, the app's icons and manifest, the workspace
+    # manifest, lockfile and toolchain, the H.264 crates and streams the PGO
+    # build trains, and the workflows. Other pull requests skip it, and main
+    # builds every package again once they merge. release.yml builds the
+    # published packages.
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      # A pull request checks out its merge into the base; with its first
+      # parent, the base, the diff is what the pull request changes.
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        with:
+          fetch-depth: 2
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo run=true >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$BASE" != main ]; then
+            echo run=false >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pattern='^(\.github/workflows/|installer/|apps/desktop/icons/|apps/desktop/Cargo\.toml$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|scripts/(pgo|pgo_profile|macos_bundle|windows_installer|appimage|smoke)\.py$|tools/h264-pgo/|crates/codecs/h264(-kernels)?/)'
+          matched=$(git diff --name-only HEAD^1 HEAD | grep -E "$pattern" || true)
+          if [ -n "$matched" ]; then
+            echo run=true >> "$GITHUB_OUTPUT"
+            { echo '### Release packaging runs for these changes'; echo '```'; echo "$matched"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo run=false >> "$GITHUB_OUTPUT"
+            echo 'Release packaging is skipped: this pull request changes nothing it reads. Main builds it after the merge.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   appimage:
     # The Linux release build as an AppImage, on the oldest supported
     # Ubuntu so its glibc runs on newer systems. The built AppImage runs the
     # same smoke test as the plain binary, then is kept as an artifact.
-    # Release packaging runs on main and on pull requests into main; other
-    # pull requests skip it. release.yml builds the published packages.
-    if: github.event_name != 'pull_request' || github.base_ref == 'main'
+    # It runs when packaging-changes says so.
+    needs: packaging-changes
+    if: needs.packaging-changes.outputs.run == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -351,10 +394,9 @@ jobs:
     # The macOS release build as Cutlass.app and a DMG, signed ad hoc until a
     # Developer ID is set up (CODESIGN_IDENTITY and NOTARY_PROFILE). The
     # binary inside the bundle runs the same smoke test, and the DMG is kept
-    # as an artifact.
-    # Release packaging runs on main and on pull requests into main; other
-    # pull requests skip it. release.yml builds the published packages.
-    if: github.event_name != 'pull_request' || github.base_ref == 'main'
+    # as an artifact. It runs when packaging-changes says so.
+    needs: packaging-changes
+    if: needs.packaging-changes.outputs.run == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -381,9 +423,9 @@ jobs:
     # a code signing certificate is set up (SIGNTOOL_CERT). The installer is
     # run silently, the installed binary runs the smoke test, and the
     # uninstaller removes it and its registry keys; the installer is kept.
-    # Release packaging runs on main and on pull requests into main; other
-    # pull requests skip it. release.yml builds the published packages.
-    if: github.event_name != 'pull_request' || github.base_ref == 'main'
+    # It runs when packaging-changes says so.
+    needs: packaging-changes
+    if: needs.packaging-changes.outputs.run == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

@@ -10,7 +10,7 @@ use cutlass_eval::{RelightAsk, relight_ask};
 use cutlass_model::{MaterialRef, Relight, SegmentId};
 use cutlass_session::Request;
 use cutlass_store::find_relight;
-use cutlass_vision::{Compute, DEPTH_WEIGHTS, DepthModel, EnhanceJobError, relight_clip};
+use cutlass_vision::{DEPTH_WEIGHTS, DepthModel, EnhanceJobError, relight_clip};
 
 use super::enhance::model_dir;
 use super::{KeyedSetting, Landing, Shell, ShellError};
@@ -118,9 +118,9 @@ impl Shell {
         let readers = self.readers.clone();
         let encoders = self.encoders.clone();
         let kernels = Shell::home().cache().join("kernels");
-        let compute = Compute::best();
         self.start_job(RELIGHT_JOB, move |progress| {
             progress.stage("Loading the model");
+            let compute = crate::gpu_trust::compute();
             if let Err(error) = cutlass_vision::keep_kernels_in(&kernels) {
                 cutlass_logger::warn!("kernel cache: {error}");
             }

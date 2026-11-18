@@ -1,17 +1,19 @@
-//! The keep pass: an effect's result shows inside its mask and the picture
-//! from before the effect shows outside it, softly across a feathered edge.
-//! The shape is `cutlass_effects`'s WGSL `mask_coverage`, the arithmetic the
-//! CPU path uses for an adjustment layer's mask.
+//! The keep pass: an effect's result shows inside its masks and the
+//! picture from before the effect shows outside them, softly across a
+//! feathered edge. The masks are `cutlass_effects`'s WGSL `mask_stack`, the
+//! arithmetic the CPU path uses for an adjustment layer's masks.
 
 use crate::pool::Bind;
-use cutlass_effects::{CanvasMask, MASK_WGSL};
+use crate::stack::{STACK_BYTES, atlas_view, stack_bytes};
+use cutlass_effects::{CanvasMasks, MASK_WGSL, STACK_WGSL};
 
 use crate::CANVAS_FORMAT;
 
 const SHADER: &str = r"
 @group(0) @binding(0) var before: texture_2d<f32>;
 @group(0) @binding(1) var after: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> mask: CanvasMask;
+@group(0) @binding(2) var<uniform> stack: MaskStack;
+@group(0) @binding(3) var atlas: texture_2d<f32>;
 
 struct Out {
     @builtin(position) position: vec4<f32>,
@@ -31,12 +33,9 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
     let at = vec2<i32>(in.position.xy);
     let was = textureLoad(before, at, 0);
     let now = textureLoad(after, at, 0);
-    return mix(was, now, mask_coverage(mask, in.position.xy));
+    return mix(was, now, mask_stack(stack, atlas, in.position.xy));
 }
 ";
-
-/// Bytes in the mask's uniform block.
-const PARAMS: u64 = 64;
 
 pub(crate) struct Keep {
     pipeline: wgpu::RenderPipeline,
@@ -46,7 +45,7 @@ pub(crate) struct Keep {
 
 impl Keep {
     pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
-        let source = format!("{SHADER}\n{MASK_WGSL}");
+        let source = format!("{SHADER}\n{MASK_WGSL}\n{STACK_WGSL}");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render keep"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -72,10 +71,11 @@ impl Keep {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(PARAMS),
+                        min_binding_size: wgpu::BufferSize::new(STACK_BYTES),
                     },
                     count: None,
                 },
+                texture(3),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -115,7 +115,9 @@ impl Keep {
         }
     }
 
-    /// Write `after` where `mask` keeps it and `before` elsewhere into `to`.
+    /// Write `after` where `masks` keep it and `before` elsewhere into `to`.
+    /// Drawn masks whose pictures are larger than the device's textures
+    /// are refused.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run(
         &self,
@@ -125,16 +127,17 @@ impl Keep {
         before: &wgpu::TextureView,
         after: &wgpu::TextureView,
         to: &wgpu::TextureView,
-        mask: &CanvasMask,
-    ) {
-        let bytes: Vec<u8> = mask
-            .uniform()
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect();
-        let buffer = self
-            .pool
-            .uniform(device, queue, "cutlass-render keep params", PARAMS, &bytes);
+        masks: &CanvasMasks,
+    ) -> Result<(), crate::RenderError> {
+        let atlas = atlas_view(&self.pool, device, queue, masks)?;
+        let bytes = stack_bytes(masks);
+        let buffer = self.pool.uniform(
+            device,
+            queue,
+            "cutlass-render keep params",
+            STACK_BYTES,
+            &bytes,
+        );
         let group = self.pool.group(
             device,
             "cutlass-render keep",
@@ -143,6 +146,7 @@ impl Keep {
                 (0, Bind::View(before)),
                 (1, Bind::View(after)),
                 (2, Bind::Buffer(&buffer)),
+                (3, Bind::View(&atlas)),
             ],
         );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -164,5 +168,7 @@ impl Keep {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &group, &[]);
         pass.draw(0..3, 0..1);
+        drop(pass);
+        Ok(())
     }
 }

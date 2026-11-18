@@ -468,14 +468,15 @@ mod tests {
         assert_eq!(pixels(&hostile, None, 95), [255, 0, 0, 255]);
 
         let store = publish("transition-fade");
-        assert_eq!(pixels(&draft, Some(&store), 95), [127, 0, 127, 255]);
+        assert_eq!(pixels(&draft, Some(&store), 95), [128, 0, 128, 255]);
         assert_eq!(pixels(&draft, Some(&store), 100), [0, 0, 255, 255]);
         assert_eq!(draft, before);
 
         let overlap = palette(100, 100, 10, true);
         assert_eq!(pixels(&overlap, None, 100), [0, 0, 255, 255]);
-        assert_eq!(pixels(&overlap, Some(&store), 100), [127, 0, 127, 255]);
-        assert_eq!(pixels(&overlap, Some(&store), 104), [25, 0, 229, 255]);
+        assert_eq!(pixels(&overlap, Some(&store), 100), [128, 0, 128, 255]);
+        // 25.5 and 229.5, each within half a step.
+        assert_eq!(pixels(&overlap, Some(&store), 104), [26, 0, 229, 255]);
         assert_eq!(pixels(&overlap, Some(&store), 105), [0, 0, 255, 255]);
 
         let gap = palette(110, 100, 10, false);
@@ -520,7 +521,7 @@ mod tests {
         draft.tracks[0].segments[1] = incoming;
         let store = publish("transition-fade");
         assert_eq!(pixels(&draft, None, 95), [255, 0, 0, 255]);
-        assert_eq!(pixels(&draft, Some(&store), 95), [127, 0, 127, 255]);
+        assert_eq!(pixels(&draft, Some(&store), 95), [128, 0, 128, 255]);
     }
 
     #[test]
@@ -638,8 +639,9 @@ mod tests {
             .chunks(4)
             .flat_map(|pixel| {
                 (0..4).map(|channel| {
+                    // Halfway, rounded to the nearest, as the dissolve rounds.
                     let value = u16::from(pixel[channel]) * 5 + u16::from(blue[channel]) * 5;
-                    u8::try_from(value / 10).expect("byte")
+                    u8::try_from((value + 5) / 10).expect("byte")
                 })
             })
             .collect()

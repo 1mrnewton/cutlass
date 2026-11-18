@@ -11,6 +11,14 @@
 //! them back unchanged. A reply from an earlier runner (an earlier turn,
 //! or another model) is sent as its text and tool calls only, which drops
 //! the oldest thinking blocks: a leading run, which the API allows.
+//!
+//! Every round of a turn sends the prompt, the tool list and the whole
+//! conversation again, and only its end is new. The request asks the API
+//! to cache it: a marker on the prompt, which with the tools before it is
+//! the same in every request, and the top-level field that caches the
+//! conversation as it grows. What was sent before is then read back at a
+//! fraction of its price. A service that does not take the top-level field
+//! is sent the same request without it.
 
 use std::collections::BTreeMap;
 
@@ -61,6 +69,9 @@ pub struct ClaudeModel<T> {
     /// Each reply's content blocks as the API sent them, by the reply's
     /// text and tool call ids.
     replies: BTreeMap<String, Value>,
+    /// The service refused the top-level caching field and took the same
+    /// request without it: it is left out from then on.
+    plain: bool,
 }
 
 impl<T: ChatTransport> ClaudeModel<T> {
@@ -73,6 +84,7 @@ impl<T: ChatTransport> ClaudeModel<T> {
             model: model.to_owned(),
             system: crate::chat::SYSTEM_PROMPT.to_owned(),
             replies: BTreeMap::new(),
+            plain: false,
         }
     }
 
@@ -145,9 +157,19 @@ impl<T: ChatTransport> ClaudeModel<T> {
         let mut body = json!({
             "model": self.model,
             "max_tokens": MAX_TOKENS,
-            "system": self.system,
+            // The tools and the prompt come first and do not change: the
+            // marker lets them be read back whatever follows.
+            "system": [{
+                "type": "text",
+                "text": self.system,
+                "cache_control": { "type": "ephemeral" },
+            }],
             "messages": messages,
         });
+        if !self.plain {
+            // The conversation so far, cached as it grows round by round.
+            body["cache_control"] = json!({ "type": "ephemeral" });
+        }
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
         }
@@ -162,11 +184,37 @@ impl<T: ChatTransport> Model for ClaudeModel<T> {
     fn complete(&mut self, request: &CompletionRequest) -> Result<Completion, ModelError> {
         let body = self.body(request).to_string();
         let reply = self.transport.post(&body)?;
-        let (completion, content) = parse_claude_reply(&reply)?;
+        let (completion, content) = match parse_claude_reply(&reply) {
+            Err(refused) if !self.plain && names_caching(&refused) => {
+                // The request is otherwise fine: send it without the
+                // field, and if that is answered, leave the field out.
+                self.plain = true;
+                let body = self.body(request).to_string();
+                let again = self
+                    .transport
+                    .post(&body)
+                    .and_then(|reply| parse_claude_reply(&reply));
+                match again {
+                    Ok(answered) => answered,
+                    Err(_) => {
+                        // Not the field: the first error is the one to show.
+                        self.plain = false;
+                        return Err(refused);
+                    }
+                }
+            }
+            other => other?,
+        };
         self.replies
             .insert(reply_key(&completion.text, &completion.calls), content);
         Ok(completion)
     }
+}
+
+/// Whether `error` is the API refusing a request for its caching field.
+fn names_caching(error: &ModelError) -> bool {
+    matches!(error, ModelError::Inner(message)
+        if message.contains("invalid_request_error") && message.contains("cache_control"))
 }
 
 /// A tool result's content: its text, or its text and then its picture as
@@ -420,7 +468,12 @@ mod tests {
         let body = &sent[1];
         assert_eq!(body["model"], "claude-opus-5-5");
         assert_eq!(body["fallbacks"], "default");
-        assert!(body["system"].as_str().unwrap().ends_with("\n\nNotes."));
+        assert!(
+            body["system"][0]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("\n\nNotes.")
+        );
         assert!(body.get("thinking").is_none());
         assert!(
             body["tools"]
@@ -530,5 +583,86 @@ mod tests {
         assert_eq!(results[1]["content"], json!([image]));
         // No picture: the text as it always went.
         assert_eq!(results[2]["content"], "no picture");
+    }
+
+    #[test]
+    fn the_prompt_and_the_growing_conversation_are_cached() {
+        let reply = json!({
+            "content": [{ "type": "text", "text": "Done." }],
+            "stop_reason": "end_turn",
+        })
+        .to_string();
+        let request = CompletionRequest {
+            messages: vec![Message::User {
+                text: "hello".to_owned(),
+            }],
+            tools: tools(),
+        };
+        let mut model = ClaudeModel::new(
+            Replies {
+                sent: Vec::new(),
+                replies: vec![reply.clone()],
+            },
+            "claude-opus-5-5",
+        );
+        model.complete(&request).unwrap();
+        let sent = &model.transport().sent[0];
+        // The prompt is one block with a marker, after the tools, and the
+        // request asks for the conversation to be cached as it grows.
+        let marker = json!({ "type": "ephemeral" });
+        assert_eq!(sent["system"].as_array().unwrap().len(), 1);
+        assert_eq!(sent["system"][0]["type"], "text");
+        assert_eq!(sent["system"][0]["cache_control"], marker);
+        assert_eq!(sent["cache_control"], marker);
+        // Nothing in what is sent changes from one round to the next but
+        // its end, or nothing would be read back.
+        let again = model.body(&request);
+        assert_eq!(&again, sent);
+
+        // A service that refuses the top-level field is sent the request
+        // without it, once, and not sent the field again.
+        let refusal = json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "cache_control: Extra inputs are not permitted",
+            },
+        })
+        .to_string();
+        let mut model = ClaudeModel::new(
+            Replies {
+                sent: Vec::new(),
+                replies: vec![refusal.clone(), reply.clone(), reply.clone()],
+            },
+            "claude-opus-5-5",
+        );
+        assert_eq!(model.complete(&request).unwrap().text, "Done.");
+        model.complete(&request).unwrap();
+        let sent = &model.transport().sent;
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0]["cache_control"], marker);
+        assert!(sent[1].get("cache_control").is_none());
+        assert!(sent[2].get("cache_control").is_none());
+        assert_eq!(sent[1]["system"][0]["cache_control"], marker);
+
+        // An error that is not about the field is shown as it is, and the
+        // field is still sent the next time.
+        let other = json!({
+            "type": "error",
+            "error": { "type": "rate_limit_error", "message": "slow down" },
+        })
+        .to_string();
+        let mut model = ClaudeModel::new(
+            Replies {
+                sent: Vec::new(),
+                replies: vec![other, reply],
+            },
+            "claude-opus-5-5",
+        );
+        let error = model.complete(&request).unwrap_err();
+        assert!(error.to_string().contains("rate_limit_error"), "{error}");
+        model.complete(&request).unwrap();
+        assert_eq!(model.transport().sent.len(), 2);
+        assert_eq!(model.transport().sent[1]["cache_control"], marker);
     }
 }

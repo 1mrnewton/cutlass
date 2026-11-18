@@ -657,13 +657,19 @@ pub enum Request {
         strength: f64,
     },
     /// Key `color` (`#rrggbb`) out of the clip with `strength` and
-    /// `shadow`, each 0 to 1. An empty colour takes the key off.
+    /// `shadow`, its edge softened by `feather` and pulled in by
+    /// `clean_up`, each 0 to 1 (the edge 0 when left out). An empty colour
+    /// takes the key off.
     SetChroma {
         segment_id: SegmentId,
         material_id: MaterialId,
         color: String,
         strength: f64,
         shadow: f64,
+        #[serde(default)]
+        feather: f64,
+        #[serde(default)]
+        clean_up: f64,
     },
     /// Mask the clip with `mask`, in the clip's own frame, or take its mask
     /// off with `None`.
@@ -672,12 +678,64 @@ pub enum Request {
         material_id: MaterialId,
         mask: Option<cutlass_effects::Mask>,
     },
+    /// Put `mask` at the end of the clip's masks, as record `material_id`;
+    /// with `color`, at the end of the masks on its colour work. A clip
+    /// lists eight of each at most.
+    AddMask {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        mask: cutlass_effects::Mask,
+        /// What a text, brush or pen mask is drawn from.
+        #[serde(default)]
+        art: Option<cutlass_effects::MaskArt>,
+        #[serde(default)]
+        color: bool,
+    },
+    /// Make the clip's mask at `index` (0 the first) into `mask`. A record
+    /// another clip shares stays theirs and this clip gets its own, named
+    /// `material_id`, with its keys.
+    EditMask {
+        segment_id: SegmentId,
+        index: usize,
+        material_id: MaterialId,
+        mask: cutlass_effects::Mask,
+        /// A new drawing for a text, brush or pen mask; without one it
+        /// keeps its own.
+        #[serde(default)]
+        art: Option<cutlass_effects::MaskArt>,
+        #[serde(default)]
+        color: bool,
+    },
+    /// Take the clip's mask at `index` off, with its keys.
+    RemoveMask {
+        segment_id: SegmentId,
+        index: usize,
+        #[serde(default)]
+        color: bool,
+    },
+    /// Move the clip's mask at `from` to place `to`; masks join in their
+    /// order, so this changes what each one adds to or takes from.
+    MoveMask {
+        segment_id: SegmentId,
+        from: usize,
+        to: usize,
+        #[serde(default)]
+        color: bool,
+    },
     /// Cut the video clip down to `selection`, the object click-to-select
     /// found, or take its selection off with `None`.
     SetSelection {
         segment_id: SegmentId,
         material_id: MaterialId,
         selection: Option<cutlass_effects::Selection>,
+    },
+    /// Remove BG: set the video clip's matting (how its subject is found,
+    /// its edge, its outline and Custom removal's picks), or take it off
+    /// with `None`. The matte itself is made by a job after.
+    SetMatting {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        matting: Option<cutlass_effects::Matting>,
     },
     /// Make `followers` (video, sticker or text clips) follow the video clip
     /// `target` along `path`, the target's corners on the canvas frame by
@@ -691,10 +749,10 @@ pub enum Request {
         tracking_id: MaterialId,
         anchor: Micros,
         path: cutlass_model::TrackPath,
-        /// Clips whose mask follows instead, each with the path in its own
+        /// Masks that follow instead, each with the path in its clip's own
         /// frame (-1 to 1, y up).
         #[serde(default)]
-        masks: Vec<(SegmentId, cutlass_model::TrackPath)>,
+        masks: Vec<TrackedMask>,
     },
     /// Stop `segment_id` following the track it lists, and take off the
     /// keys the track wrote: its pose keys, or its mask's when its mask
@@ -992,5 +1050,62 @@ mod tests {
         let text = serde_json::to_string(&request).unwrap();
         assert!(text.starts_with(r#"{"op":"place""#), "{text}");
         assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
+    }
+}
+
+/// A mask that follows a track: the clip's mask at `index` (0 the first) of
+/// its clip masks, or with `color` of its colour masks, along `path`, the
+/// target's box in the clip's own frame. It reads from `[clip, path]`, the
+/// clip's first clip mask, as well.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "TrackedMaskForm")]
+pub struct TrackedMask {
+    pub segment_id: SegmentId,
+    pub path: cutlass_model::TrackPath,
+    pub index: usize,
+    pub color: bool,
+}
+
+impl From<(SegmentId, cutlass_model::TrackPath)> for TrackedMask {
+    fn from((segment_id, path): (SegmentId, cutlass_model::TrackPath)) -> Self {
+        Self {
+            segment_id,
+            path,
+            index: 0,
+            color: false,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TrackedMaskForm {
+    Pair(SegmentId, cutlass_model::TrackPath),
+    Full {
+        segment_id: SegmentId,
+        path: cutlass_model::TrackPath,
+        #[serde(default)]
+        index: usize,
+        #[serde(default)]
+        color: bool,
+    },
+}
+
+impl From<TrackedMaskForm> for TrackedMask {
+    fn from(form: TrackedMaskForm) -> Self {
+        match form {
+            TrackedMaskForm::Pair(segment_id, path) => (segment_id, path).into(),
+            TrackedMaskForm::Full {
+                segment_id,
+                path,
+                index,
+                color,
+            } => Self {
+                segment_id,
+                path,
+                index,
+                color,
+            },
+        }
     }
 }

@@ -333,7 +333,7 @@ fn a_clip_with_no_mask_gets_a_box_that_follows_the_target() {
         &mut draft,
         &"v".into(),
         &[],
-        &[("v".into(), own)],
+        &[("v".into(), own).into()],
         &"t1".into(),
         Micros(0),
         &canvas,
@@ -381,7 +381,7 @@ fn a_mask_keeps_its_place_size_and_turn_against_the_box() {
         &mut draft,
         &"v".into(),
         &[],
-        &[("v".into(), own)],
+        &[("v".into(), own).into()],
         &"t1".into(),
         Micros(0),
         &canvas,
@@ -410,7 +410,7 @@ fn a_clip_follows_by_pose_or_by_mask_not_both() {
         &mut draft,
         &"v".into(),
         &["s".into()],
-        &[("s".into(), own.clone())],
+        &[("s".into(), own.clone()).into()],
         &"t1".into(),
         Micros(0),
         &canvas,
@@ -430,7 +430,7 @@ fn a_clip_follows_by_pose_or_by_mask_not_both() {
         &mut draft,
         &"v".into(),
         &[],
-        &[("v".into(), own.clone()), ("v".into(), own)],
+        &[("v".into(), own.clone()).into(), ("v".into(), own).into()],
         &"t1".into(),
         Micros(0),
         &canvas,
@@ -483,7 +483,7 @@ fn a_mask_stops_following_while_a_sticker_keeps_the_track() {
         &mut draft,
         &"v".into(),
         &["s".into()],
-        &[("v".into(), own)],
+        &[("v".into(), own).into()],
         &"t1".into(),
         Micros(0),
         &canvas,
@@ -518,4 +518,113 @@ fn a_locked_clip_cannot_stop_following() {
         untrack(&mut draft, &"s".into()),
         Err(EditError::LockedTrack)
     );
+}
+
+#[test]
+fn a_later_mask_and_a_colour_mask_follow_by_their_own_keys_and_stop() {
+    use cutlass_effects::{segment_color_masks, segment_masks};
+    let mut draft = draft();
+    let circle = Mask::new(MaskShape::Circle);
+    let lists = crate::edit::masks::add_mask;
+    lists(&mut draft, &"v".into(), &"m1".into(), &circle, None, false).unwrap();
+    lists(&mut draft, &"v".into(), &"m2".into(), &circle, None, false).unwrap();
+    lists(&mut draft, &"v".into(), &"c1".into(), &circle, None, true).unwrap();
+    let canvas = path(30, |t| ((-0.5 + 0.02 * t, 0.0), 0.1, 0.0));
+    let own = clip_path(30, |t| ((-0.5 + 0.02 * t, 0.0), (0.1, 0.2), 0.0));
+    let second = TrackedMask {
+        segment_id: "v".into(),
+        path: own.clone(),
+        index: 1,
+        color: false,
+    };
+    let colour = TrackedMask {
+        color: true,
+        index: 0,
+        ..second.clone()
+    };
+    track(
+        &mut draft,
+        &"v".into(),
+        &[],
+        &[second, colour],
+        &"t1".into(),
+        Micros(0),
+        &canvas,
+    )
+    .unwrap();
+    let x = MASK_KEYS[0];
+    let names: Vec<&str> = draft.tracks[0].segments[0]
+        .common_keyframes
+        .iter()
+        .map(|group| group.property_type.as_str())
+        .collect();
+    assert!(
+        names.contains(&mask_key(x, Some("m2")).as_str()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&mask_key(x, Some("c1")).as_str()),
+        "{names:?}"
+    );
+    assert!(!names.contains(&x), "the first mask stays still: {names:?}");
+    let at = |draft: &Draft, time: i64| {
+        let segment = &draft.tracks[0].segments[0];
+        let graphs = &draft.keyframe_graph_list;
+        (
+            segment_masks(draft, segment)[1].at(segment, graphs, Micros(time)),
+            segment_color_masks(draft, segment)[0].at(segment, graphs, Micros(time)),
+        )
+    };
+    // Each keeps its place half a clip right of the box as the box slides.
+    let (moved, lit) = at(&draft, 20 * 1_000_000 / 30);
+    assert!(
+        close(moved.x, 0.4) && close(lit.x, 0.4),
+        "{} {}",
+        moved.x,
+        lit.x
+    );
+    let record = &draft.materials.video_trackings[0];
+    assert_eq!(
+        record.fields["mask_records"],
+        serde_json::json!([["v", "m2"], ["v", "c1"]])
+    );
+    // A mask past the end of the list is refused.
+    let beyond = TrackedMask {
+        segment_id: "v".into(),
+        path: own,
+        index: 5,
+        color: false,
+    };
+    let before = draft.clone();
+    assert_eq!(
+        track(
+            &mut draft,
+            &"v".into(),
+            &[],
+            &[beyond],
+            &"t2".into(),
+            Micros(0),
+            &canvas
+        ),
+        Err(EditError::MaskList)
+    );
+    assert_eq!(draft, before);
+    untrack(&mut draft, &"v".into()).unwrap();
+    assert!(draft.tracks[0].segments[0].common_keyframes.is_empty());
+    let (still, unlit) = at(&draft, 20 * 1_000_000 / 30);
+    assert!(close(still.x, 0.0) && close(unlit.x, 0.0));
+}
+
+#[test]
+fn a_mask_entry_reads_as_a_pair_or_by_name() {
+    let own = clip_path(2, |_| ((0.0, 0.0), (0.1, 0.1), 0.0));
+    let pair: TrackedMask = serde_json::from_value(serde_json::json!(["v", own])).unwrap();
+    assert_eq!(pair, ("v".into(), own.clone()).into());
+    let named: TrackedMask = serde_json::from_value(
+        serde_json::json!({"segment_id": "v", "path": own, "index": 2, "color": true}),
+    )
+    .unwrap();
+    assert_eq!((named.index, named.color), (2, true));
+    let back: TrackedMask = serde_json::from_value(serde_json::to_value(&named).unwrap()).unwrap();
+    assert_eq!(back, named);
 }

@@ -48,7 +48,9 @@ fn main() -> ExitCode {
     }
     let opened = match command {
         Command::Mcp(path) => {
-            return match cutlass::mcp::run(path.as_deref()) {
+            let served = cutlass::mcp::run(path.as_deref());
+            cutlass::gpu_trust::stop_check();
+            return match served {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => fail("cutlass mcp", &error),
             };
@@ -69,6 +71,7 @@ fn main() -> ExitCode {
         }
         _ => cutlass::window::run(),
     };
+    cutlass::gpu_trust::stop_check();
     if let Err(error) = opened {
         cutlass::report_error(&error.to_string());
     }

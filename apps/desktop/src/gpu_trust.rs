@@ -9,7 +9,7 @@
 
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,31 @@ enum State {
 
 static STATE: Mutex<State> = Mutex::new(State::Idle);
 static SETTLED: Condvar = Condvar::new();
+
+/// The running check, so the editor can stop it when it quits: a check
+/// left running keeps the program file open, and on Windows an open
+/// program file cannot be replaced or uninstalled.
+static CHILD: Mutex<Running> = Mutex::new(Running::Waiting);
+
+enum Running {
+    /// Not started yet.
+    Waiting,
+    Started(Child),
+    /// [`stop_check`] ran: start nothing more.
+    Stopped,
+}
+
+/// Stop a check that is still running, before the editor quits. Call it
+/// once, at the end; a check started later is stopped as it starts.
+pub fn stop_check() {
+    let Ok(mut running) = CHILD.lock() else {
+        return;
+    };
+    if let Running::Started(mut child) = std::mem::replace(&mut *running, Running::Stopped) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
 
 /// Start checking this machine's GPU in a process of its own, when the
 /// build has a GPU path that is not trusted from the start. Call it once,
@@ -95,25 +120,54 @@ pub fn compute() -> Compute {
 /// Run `cutlass gpu-check` and read its answer.
 fn run_check() -> Result<GpuCheck, String> {
     let program = std::env::current_exe().map_err(|error| format!("no program path: {error}"))?;
-    let mut child = Command::new(program)
+    let child = Command::new(program)
         .arg(CHECK_ARGUMENT)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("the check did not start: {error}"))?;
+    {
+        let mut running = CHILD.lock().map_err(|_| "the check was lost".to_owned())?;
+        if matches!(*running, Running::Stopped) {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("the editor quit first".to_owned());
+        }
+        *running = Running::Started(child);
+    }
     let started = Instant::now();
     let status = loop {
+        let mut running = CHILD.lock().map_err(|_| "the check was lost".to_owned())?;
+        let Running::Started(child) = &mut *running else {
+            return Err("the editor quit first".to_owned());
+        };
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() > LONGEST => {
                 let _ = child.kill();
                 let _ = child.wait();
+                *running = Running::Waiting;
                 return Err(format!("the check took over {} s", LONGEST.as_secs()));
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Ok(None) => {
+                drop(running);
+                std::thread::sleep(Duration::from_millis(100));
+            }
             Err(error) => return Err(format!("the check was lost: {error}")),
         }
+    };
+    // Take the finished check back, unless the editor took it first.
+    let mut child = match CHILD.lock() {
+        Ok(mut running) => match std::mem::replace(&mut *running, Running::Waiting) {
+            Running::Started(child) => child,
+            other => {
+                *running = other;
+                return Err("the editor quit first".to_owned());
+            }
+        },
+        Err(_) => return Err("the check was lost".to_owned()),
     };
     let mut said = String::new();
     if let Some(mut out) = child.stdout.take() {

@@ -3791,3 +3791,128 @@ fn a_forced_key_frame_lands_on_the_picture_pushed_after_it() {
         assert_decodes(&packets, (w, h), 40);
     }
 }
+
+#[test]
+fn complexity_aq_segments_at_a_bitrate_by_the_golden_frames_budget() {
+    // At a bitrate whose frames are each under 256 bits a superblock but
+    // whose golden frames and alt-refs (their boost) are over, complexity
+    // AQ segments in one pass and in two: libvpx decides on those frames,
+    // and the frames between keep it.
+    let (w, h) = (256u32, 128u32);
+    let frame = |i: u32| {
+        let mut f = moving(w, h, i / 4);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            if k as u32 % w >= 192 {
+                let n =
+                    ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 26;
+                *v = 60 + n as u8;
+            }
+        }
+        f
+    };
+    // 1000 bits a frame (2048 a frame is 256 a superblock here).
+    let opts = super::Vp9Options {
+        aq_mode: super::AqMode::Complexity,
+        bitrate: 30_000,
+        speed: 6,
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let one = encode_with(opts, (w, h), 30, frame);
+    let two = two_pass(opts, (w, h), 30, &frame);
+    for (name, packets) in [("one pass", one), ("two passes", two)] {
+        assert_decodes(&packets, (w, h), 30);
+        let segmented = all_headers(&packets)
+            .iter()
+            .filter(|hd| !hd.show_existing && !hd.key_frame && hd.seg.enabled)
+            .count();
+        assert!(segmented >= 10, "{name}: {segmented} frames segmented");
+    }
+}
+
+#[test]
+fn the_temporal_dependency_model_codes_an_alt_ref_its_group_leans_on_finer() {
+    // A still textured picture (after a key frame of another): the group
+    // predicts from its alt-ref wholly, so with `enable_tpl` the alt-ref
+    // is coded finer than without, and the stream decodes.
+    let (w, h) = (128u32, 128u32);
+    let pic = |i: u32| {
+        if i == 0 {
+            return noisy(w, h, 7, 99);
+        }
+        noisy(w, h, 0, 1)
+    };
+    let arf_q = |tpl: bool| {
+        let opts = super::Vp9Options {
+            qindex: 120,
+            speed: 6,
+            threads: 2,
+            enable_tpl: tpl,
+            ..super::Vp9Options::default()
+        };
+        let packets = encode_with(opts, (w, h), 20, pic);
+        assert_decodes(&packets, (w, h), 20);
+        all_headers(&packets)
+            .iter()
+            .find(|hd| !hd.show_frame && !hd.show_existing)
+            .map(|hd| hd.base_qindex)
+            .expect("an alt-ref")
+    };
+    let (with, without) = (arf_q(true), arf_q(false));
+    assert!(with < without, "{with} against {without}");
+}
+
+#[test]
+fn a_corpus_four_times_the_clips_complexity_halves_its_rate() {
+    // libvpx's unit and mapping: a clip spends the bitrate times the
+    // square root of its complexity over the corpus's (its VBR bias of
+    // 50%), so a corpus four times as complex as the clip halves its rate
+    // and one a quarter of it doubles it.
+    let (w, h) = (160u32, 96u32);
+    let clip = |i: u32| noisy(w, h, i * 2, i);
+    let base = super::Vp9Options {
+        bitrate: 120_000,
+        threads: 2,
+        speed: 8,
+        ..super::Vp9Options::default()
+    };
+    let probe = Vp9Encoder::with_options(w, h, base).expect("encoder");
+    let q = probe.first_pass_qindex(1.0 / 30.0);
+    let first: Vec<u64> = encode_with(
+        super::Vp9Options {
+            bitrate: 0,
+            qindex: q,
+            speed: 10,
+            ..base
+        },
+        (w, h),
+        30,
+        clip,
+    )
+    .iter()
+    .map(|p| p.data.len() as u64 * 8)
+    .collect();
+    let own = probe.first_pass_complexity(&first, q);
+    assert!(own > 0);
+    let bits = |corpus: u32| {
+        let mut encoder = Vp9Encoder::with_options(
+            w,
+            h,
+            super::Vp9Options {
+                corpus_complexity: corpus,
+                ..base
+            },
+        )
+        .expect("encoder");
+        encoder.set_second_pass(&first, q);
+        let mut packets = Vec::new();
+        for i in 0..30u32 {
+            packets.extend(encoder.push(&input(clip(i))).expect("push"));
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        packet_bytes(&packets) as f64
+    };
+    let (at, rich, poor) = (bits(own), bits(own / 4), bits(own * 4));
+    assert!(poor / at > 0.35 && poor / at < 0.7, "{poor} against {at}");
+    assert!(rich / at > 1.4 && rich / at < 2.8, "{rich} against {at}");
+}

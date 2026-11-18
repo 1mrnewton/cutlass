@@ -3009,13 +3009,13 @@ brackets). "Added" is new in this round; each has a test in
 | `-minrate` = `-maxrate` = `-b:v`, `-bufsize` | `end-usage=cbr`, `rc_buf_sz` | `cbr_buffer_ms` (`cbr=`): the buffer sizes the first key frame and the start, as libvpx's; see "Options measured" |
 | `-rc_init_occupancy` | `rc_buf_initial_sz` | `rc_init_occupancy_ms` (`occupancy=`, in ms, added): the buffer's starting level; unset, three quarters of `-bufsize` (FFmpeg's default) |
 | `-qmin`, `-qmax` | `min-q`, `max-q` | `min_q`, `max_q` as indices (`min_q=`, `max_q=`: added to `vp9enc`): every frame's quantizer within them in every rate mode; see "Options measured" |
-| `-undershoot-pct`, `-overshoot-pct` | `undershoot-pct`, `overshoot-pct` | `undershoot_pct`, `overshoot_pct`: dead bands on what is paid back (added) |
+| `-undershoot-pct`, `-overshoot-pct` | `undershoot-pct`, `overshoot-pct` | `undershoot_pct`, `overshoot_pct`: dead bands on what is paid back (added); they act at a variable bitrate too, where libvpx 1.14 shows none (an intentional difference, see "Options measured") |
 | `-max-intra-rate` | `max-intra-rate` | `max_intra_pct` (added) |
-| `-drop-threshold` | `drop-frame` | `drop_frame_pct` (`drop=`, added): one pass at a bitrate; see "Options measured" |
+| `-drop-threshold` | `drop-frame` | `drop_frame_pct` (`drop=`, added): one pass at a bitrate, at a variable bitrate too (libvpx drops in CBR only: an intentional difference); see "Options measured" |
 | `-g` | `kf-max-dist` | `keyint` |
-| `-keyint_min` | `kf-min-dist` | `keyint_min`: a cut that far from the last key frame is one (added); intervals are fixed as with `-keyint_min` = `-g` |
+| `-keyint_min` | `kf-min-dist` | `keyint_min`: a cut that far from the last key frame is one (added; in two passes every cut that far, by default every cut); intervals are fixed as with `-keyint_min` = `-g` |
 | `-force_key_frames` | `VPX_EFLAG_FORCE_KF` | `Vp9Encoder::force_keyframe` (the engine's `force_keyframe`; `force_keyframes=N,N,...` in pictures, added): the picture pushed next is the key frame, with the lookahead too, and no alt-ref spans it |
-| `-pass 1` / `-pass 2` | `g_pass`, stats | `Vp9Encoder::first_pass_qindex`, `set_second_pass` (`twopass=1`) |
+| `-pass 1` / `-pass 2` | `g_pass`, stats | `Vp9Encoder::first_pass_qindex`, `set_second_pass` (`twopass=1`): a key frame on each scene cut, as libvpx's two passes put one (added); see "Options measured" |
 | `-deadline` best / good / realtime, `-cpu-used` (`-speed`, `-quality`) | | `speed` 0–10 (`speed=`); see the speeds below |
 | `-lag-in-frames` (`-rc_lookahead`) | `g_lag_in_frames` | `lag` (`lag=`) |
 | `-auto-alt-ref` 0 / 1 | `enable-auto-alt-ref` | `alt_ref` (`alt_ref=0`, added) |
@@ -3030,25 +3030,25 @@ brackets). "Added" is new in this round; each has a test in
 | `-tune-content film` | `tune-content` | `tune_content: TuneContent::Film` (`film=1`, added): libvpx's RD penalties on grain lost; see "Options measured" |
 | `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ), or `aq_mode: AqMode::Variance` |
 | `-aq-mode 3` / `4` | cyclic refresh, equator360 | `aq_mode`: `AqMode::CyclicRefresh` (`aq=3`), `AqMode::Equator360` (`aq=4`), added |
-| `-aq-mode 2` | complexity AQ | `aq_mode: AqMode::Complexity` (`aq=2`, added): each superblock's segment by the rate its source's variance projects, before it is coded (libvpx's is the rate its search spent); see "Options measured" |
+| `-aq-mode 2` | complexity AQ | `aq_mode: AqMode::Complexity` (`aq=2`, added): each superblock's segment by the rate its source's variance projects, before it is coded (libvpx's is the rate its search spent); at a bitrate, in one pass and two, segmented while golden frames' and alt-refs' budgets allow, as libvpx decides; see "Options measured" |
 | `-noise-sensitivity` | `noise-sensitivity` | `noise_sensitivity` (`noise=`, added): a temporal denoiser of luma; see "Options measured" |
 | `-static-thresh` | `static-thresh` | `static_thresh` (`static_thresh=`, added) |
-| `-sharpness` | `sharpness` | `sharpness` (`sharpness=`, added) |
+| `-sharpness` | `sharpness` | `sharpness` (`sharpness=`, added): written to the header for the loop filter (libvpx 1.14 writes 0 and uses it in its RD search: an intentional difference) |
 | `-error-resilient default` | `error-resilient` | `error_resilient` (`error_resilient=1`, added); `partitions` is VP8's |
-| `-frame-parallel` | `frame-parallel` | `frame_parallel` (`frame_parallel=1`, added) |
+| `-frame-parallel` | `frame-parallel` | `frame_parallel` (`frame_parallel=1`, added); off by default (libvpx's is on: an intentional difference, it costs 5 to 9% here; see "Options measured") |
 | `-lossless 1` | `lossless` | `qindex` 0 (`lossless=1`) |
 | `-tile-columns` | `tile-columns` | `tile_columns` (`tile_columns=`, added; by default one per thread) |
-| `-tile-rows` | `tile-rows` | `tile_rows` (`tile_rows=`) |
+| `-tile-rows` | `tile-rows` | `tile_rows` (`tile_rows=`): honoured (libvpx 1.14 here writes one tile row whatever it is asked: an intentional difference) |
 | `-row-mt 1` | `row-mt` | always below speed 9: rows on threads (`enc::tile::Lanes`, added); from speed 9 one thread a tile column, as many as the threads allow beyond one |
 | `-threads` | `g_threads` | `threads` (`threads=`) |
-| `-level` | `target-level` | `level`: named in `vpcC` (added), not enforced |
+| `-level` | `target-level` | `level`: named in `vpcC` (added), not enforced (libvpx refuses a level the picture size is over: an intentional difference) |
 | `-ts-parameters` | temporal layers | `temporal_layers` 2 or 3 (`layers=`, added): libvpx's L1T2 and L1T3 patterns; spatial layers are not |
-| `-corpus-complexity` | corpus VBR | `corpus_complexity` with `Vp9Encoder::first_pass_complexity` (`corpus=` with `twopass=1`, added), in this encoder's own unit; see "Options measured" |
-| `-enable-tpl` | TPL model | n/a: two passes have their own allocation |
+| `-corpus-complexity` | corpus VBR | `corpus_complexity` with `Vp9Encoder::first_pass_complexity` (`corpus=` with `twopass=1`, added), in libvpx's unit (its first pass's error a macroblock, projected here from first-pass bits); see "Options measured" |
+| `-enable-tpl` | TPL model | `enable_tpl` (`tpl=1`, added): libvpx's temporal dependency model of an alt-ref's group, its lambda by superblock and a step for the alt-ref from r0; off by default (libvpx's is on); see "Options measured" |
 | `-pix_fmt yuv420p` … `yuv444p12le` | profiles 0–3 | `chroma`, `bit_depth` (`chroma=`, `bits=`) |
 | `-pix_fmt gbrp`, `gbrp10le`, `gbrp12le` | `VPX_CS_SRGB` | `ColorSpace::Srgb` with 4:4:4: planes G, B, R (added) |
 | `-pix_fmt yuva420p` | alpha as a second stream in WebM `BlockAdditional` | `alpha` (`alpha=FILE`, added): a second encoder codes the alpha plane as the luma of a 4:2:0 picture with chroma at 128, one alpha packet a packet (`Vp9Encoder::push_planes_alpha`, `flush_alpha`; on the codec contract a frame's alpha plane in, `SideData::BlockAdditional` id 1 out); `cutlass-matroska` writes it as each block's BlockAdditional (BlockAddID 1) with AlphaMode 1 and reads it back; `Vp9Decoder` decodes it into the frame's alpha (`Vp9AlphaDecoder` on its own), as FFmpeg's `libvpx-vp9` decoder does; see "Options measured" |
-| `-colorspace`, `-color_range` | `color-space`, `color-range` | `color_space`, `full_range` (`colorspace=`, `range=`), and from `CodecParams` (added) |
+| `-colorspace`, `-color_range` | `color-space`, `color-range` | `color_space`, `full_range` (`colorspace=`, `range=`), and from `CodecParams` (added); BT.601 by default (FFmpeg writes 0, unknown, when no colour space is given: kept, as the decoded frames' colour on the codec contract depends on it) |
 | `-aspect` / sample aspect ratio | `VP9E_SET_RENDER_SIZE` | `render_size` (`render=WxH`, added) |
 | regions of interest (side data) | ROI map | `Vp9Encoder::set_roi_map` with a `RoiMap` (`roi_q=`, `roi_ref=`, `roi_skip=` in `vp9enc`, added): a segment a block, each with a quantizer and loop filter delta, a reference and skip |
 
@@ -3211,10 +3211,22 @@ a Gaussian of that variance at the step: half the log of 1 + 12 var over
 the pixel step squared, a sample), on every frame, hidden alt-refs too.
 Each segment's blocks weigh rate against error at their own quantizer
 (at the frame's lambda it lost 27.9 points summed over the clips, 6.1
-with it). With a bitrate, as in libvpx, there is no segmentation while a
-superblock's share of a frame is under 256 bits (at 720p and 30 pictures
-a second, under about 1.7 Mb/s). One pass at speed 5, four threads,
-BD-rate at the same PSNR-Y / FFmpeg's average:
+with it). With a bitrate, as in libvpx (`vp9_setup_in_frame_q_adj`), the
+segments are set up on key, golden and alt-ref frames, by their own
+budget, and the frames between keep what they chose: there is no
+segmentation while that budget's share a superblock is under 256 bits.
+A golden frame or alt-ref takes 3.5 frames' budget (a key frame here
+one), so at 720p and 30 pictures a second it segments from about 500
+kb/s. It decided on every frame by the average frame's budget before
+(under about 1.7 Mb/s, none): the three scenes (60 frames) at 1.5 Mb/s,
+FFmpeg `-aq-mode 2` against `aq=2`, frames segmented, kB / PSNR-Y: one
+pass, libvpx 60 of 60, 393 / 39.65; before 0 of 63 (the stream of
+`aq=0`), 332 / 40.37; now 62 of 63, 333 / 40.21. Two passes: libvpx 70
+of 70, 370 / 40.38; before 0, 375 / 41.59; now 66 of 67, 373 / 41.49.
+At 400 kb/s libvpx segments 54 of 60, ours none (its alt-refs' budgets
+are under the floor; libvpx boosts them more). One pass at speed 5,
+four threads, BD-rate at the same PSNR-Y / FFmpeg's average (measured
+before this change, at 1 to 4 Mb/s):
 
 | | Three scenes | Still and jumps | Grainy pan |
 | --- | --- | --- | --- |
@@ -3409,22 +3421,113 @@ realtime deadline: at the good deadline FFmpeg's `addroi` changes no
 byte.
 
 **Corpus VBR** (`corpus_complexity`, `-corpus-complexity`). In two
-passes, a clip spends the bitrate times its complexity over the
-corpus's (a quarter to four times), so that a corpus of clips comes to
-the bitrate as a whole and its easy clips leave bits to its hard ones.
-A clip's complexity is `Vp9Encoder::first_pass_complexity`: ten times the
-mean bits a 16×16 block of luma takes in its first pass, brought to
-quantizer index 100 (bits as the step to the power −1.25); the corpus's
-is the mean over its clips, each weighed by its length. libvpx's number
-is its first pass's mean modified error, which this encoder has no
-equivalent of, so the values do not carry over. The three clips as a
-corpus at 2 Mb/s (complexities 588, 293 and 311; the corpus 408):
+passes, as libvpx's `vp9_init_second_pass`, a clip spends the bitrate
+times the mean of its pictures' normalized scores, each the square root
+of the picture's first-pass error over a tenth of the corpus complexity
+(libvpx's VBR bias of 50%): the square root of the clip's complexity
+over the corpus's (from a quarter to four times), so that easy clips
+leave bits to hard ones. The unit is libvpx's: a picture's error is its
+first pass's `coded_error` a macroblock (the prediction's squared error
+over 256, with libvpx's floor of 200 over the square root of the
+macroblocks), and a clip's complexity (`Vp9Encoder::first_pass_complexity`)
+the corpus value at which it would spend the bitrate. libvpx measures the
+error; here it is projected from the bits each first-pass picture took
+at its step (as a Gaussian residual takes them) and brought to libvpx's
+values on the three clips: libvpx's rates at `-corpus-complexity` 300
+and 3000 put them at about 305, 240 and 275; this encoder at 305, 196
+and 205. Before, the unit was this encoder's own (the three scenes at
+588) and the share linear in it, so that `-corpus-complexity 500` gave
+the three scenes more bits where libvpx gives fewer. The three scenes
+(60 frames) at 1.5 Mb/s, FFmpeg's two passes against `twopass=1`, kb/s
+/ PSNR-Y:
+
+| | libvpx 1.14 | Before | Now |
+| --- | --- | --- | --- |
+| none | 1483, 41.32 dB | 1479, 41.56 | 1477, 41.56 |
+| `-corpus-complexity 500` / `corpus=500` | 1135, 40.07 | 1648, 42.12 | 1158, 40.29 |
+| `-corpus-complexity 5000` / `corpus=5000` | 411, 35.02 | 418, 34.63 | 418, 34.63 |
+
+The three clips as a corpus at 2 Mb/s (complexities 305, 196 and 205;
+the corpus, weighed by length, 239), kb/s and PSNR-Y:
 
 | | Three scenes | Still and jumps | Grainy pan | All |
 | --- | --- | --- | --- | --- |
-| Each at the bitrate | 2052 kb/s, 42.78 dB | 2028, 43.96 | 1967, 44.20 | 2022 kB |
-| `corpus=408` | 2975, 45.15 | 1486, 43.77 | 1501, 43.89 | 2048 kB |
-| libvpx `-cpu-used 4`, then `-corpus-complexity 400` | 2365 → 2312 | 2012 → 1686 | 1844 → 1717 | |
+| Each at the bitrate | 2054 kb/s, 43.07 dB | 2024, 44.01 | 1980, 44.29 | 2025 kB |
+| `corpus=239` | 2329, 43.83 | 1842, 44.00 | 1832, 44.22 | 2022 kB |
+| `corpus=300` | 2072, 43.11 | 1654, 43.93 | 1636, 44.11 | |
+| libvpx, none → `-corpus-complexity 300` | 2013 → 2008 | 1993 → 1666 | 1919 → 1875 | |
+
+**Key frames on cuts in two passes** (`-pass 1/2`). libvpx's two passes
+put a key frame on the scene cuts their first pass finds (within
+`kf-min-dist`); this encoder's put one on each cut its lookahead finds,
+at least `keyint_min` from the last key frame (by default every cut;
+`keyint_min` at `keyint` keeps cuts as golden frames, as FFmpeg's
+`-keyint_min 60 -g 60` does), and the rate control scales the new
+scene's step against the first key frame's as it did a cut's. One pass
+keeps cuts as golden frames unless `keyint_min` is set. The three scenes
+(60 frames, a cut at 30) at 1.5 Mb/s: libvpx key frames 0 and 30, 371
+kB / 41.32 dB; before 0 only, 370 / 41.56; now 0 and 30, 369 / 41.56.
+BD-rate against before (two passes at 1 to 4 Mb/s, four threads, PSNR-Y
+/ U / V / FFmpeg's average): the three scenes (90 frames, cuts at 30
+and 60) −0.9 / −0.0 / +0.0 / −0.6%; the still scene and the pan (no
+cuts) the same streams. Against libvpx's two passes (`-pass 1/2`,
+cpu-used 1, four threads): −11.6 / −5.6 / −10.3 / −10.3%, −39.4 /
+−35.6 / −35.4 / −37.3%, −20.1 / −33.2 / −32.8 / −26.7%. A key frame
+forced (`force_keyframe`) mid-scene in two passes is not in the first
+pass's plan as such: with the cut at 30 and keys forced at 15 and 45,
+the stream came 5% over the rate and the five frames after 45 at the
+coarsest quantizer (left as it is).
+
+**Temporal dependency model** (`enable_tpl`, `-enable-tpl`). libvpx's
+`vp9_tpl_model.c` over the source pictures of an alt-ref's golden group
+(the golden frame, the alt-ref, the pictures up to its target), on 16×16
+blocks: each block's intra cost (SATD of the best of DC, vertical and
+horizontal prediction from the source) and inter cost (SATD at the best
+whole-sample vector into the golden frame, the picture before or the
+alt-ref, a diamond search within 32 samples), and from the last picture
+back the dependency each block passes to the blocks of its reference its
+vector covers, by area, times the share of its cost prediction saves.
+libvpx 1.14's VP9 encoder uses it for the alt-ref's lambda by superblock
+(`get_rdmult_delta`: r0 over the superblock's own intra over dependency
+cost, half to 1.5 times); this encoder does that, and also codes the
+alt-ref at the square root of r0 over 0.3 of its step (0.7 to 1.3), the
+frame-level part libaom takes from it. Not done: libvpx's sub-sample
+vectors, its 8×8 blocks at small sizes, the model on the pictures past
+the alt-ref, and the lambdas of the group's other frames (libvpx has
+none either). Two passes at 1 to 4 Mb/s, four threads, BD-rate at the
+same PSNR-Y / U / V / FFmpeg's average:
+
+| | Three scenes | Still and jumps | Grainy pan |
+| --- | --- | --- | --- |
+| `tpl=1` against `tpl=0` | −0.8 / −1.2 / −1.1 / −0.9% | +1.8 / +2.5 / +2.2 / +1.9% | −5.2 / +0.3 / +0.3 / −2.2% |
+| lambda alone (summed over the clips) | +0.1, +2.0, −0.8 Y | | |
+| alt-ref step alone (summed) | −0.7, +5.5, −5.3 Y | | |
+| libvpx `-enable-tpl 1` against `0` | −0.4 / +0.5 / −0.1 / −0.2% | +0.3 / +2.5 / +2.4 / +1.2% | +0.8 / +2.0 / +1.8 / +1.4% |
+
+Both lose on the still scene; summed over the clips ours wins 4.2 points
+of PSNR-Y (1.2 averaged), libvpx's loses 0.7 (2.4). On the three scenes
+(60 frames, 1.5 Mb/s): libvpx 372.3 kB / 41.31 dB → 370.8 / 41.32 with
+it, ours 369.4 / 41.56 → 370.7 / 41.73. It takes 1.1 times the time of
+two passes without it (the model's searches; libvpx's 1.2). Off by
+default (libvpx's is on), as it loses on one clip of three.
+
+**Defaults that differ from FFmpeg's, on purpose.** FFmpeg's
+`libvpx-vp9` writes `frame_parallel_decoding_mode` 1 and colour space 0
+(unknown) when not told otherwise; this encoder writes 0 and BT.601.
+Frame-parallel mode (no backward adaptation of the probabilities) costs,
+BD-rate of `frame_parallel=1` against the default at the same PSNR-Y /
+FFmpeg's average: speed 5 +7.4 / +8.8% on the three scenes, +4.2 / +8.1%
+on the still scene, +5.0 / +7.6% on the pan; two passes +7.3 / +8.0%,
++7.7 / +9.3%, +9.2 / +12.1%. The colour space costs nothing, but the
+decoder hands the frames out with the colour space the stream signals,
+and the codec contract's default (and its tests) is BT.601. Also kept on
+purpose, where libvpx 1.14 differs: `drop_frame_pct` drops at a variable
+bitrate too (libvpx only in CBR); `undershoot_pct` and `overshoot_pct`
+act at a variable bitrate (libvpx 1.14 writes the same bytes with 0 or
+100, and refuses `overshoot` past 100); `tile_rows` is honoured (libvpx
+writes one tile row); `sharpness` is written to the header and filters
+edges less (libvpx writes 0 and uses it in its RD search); `level` is
+only named in `vpcC` (libvpx refuses a level the picture size is over).
 
 **Alpha** (`alpha`, `-pix_fmt yuva420p`). As in FFmpeg's `libvpxenc.c`,
 a second encoder takes the stream's options (quantizer, bitrate, speed,

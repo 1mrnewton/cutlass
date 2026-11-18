@@ -311,12 +311,14 @@ pub struct Vp9Options {
     /// Two passes over a corpus (libvpx's `vbr-corpus-complexity`,
     /// FFmpeg's `-corpus-complexity`): the corpus's complexity, the mean
     /// of [`Vp9Encoder::first_pass_complexity`] over its clips, each
-    /// weighed by its length (this encoder's own measure, not libvpx's
-    /// numbers). Each clip then
-    /// spends the bitrate times its complexity over the corpus's (from a
-    /// quarter to four times), so that the corpus as a whole comes to the
-    /// bitrate and its easy clips leave bits to its hard ones. 0: each
-    /// clip at the bitrate.
+    /// weighed by its length, in libvpx's unit (ten times its mean
+    /// modified first-pass error a macroblock). Each clip then spends the
+    /// bitrate times the mean over its pictures of the square root of each
+    /// one's error over a tenth of the corpus's complexity (libvpx's
+    /// normalized scores at its VBR bias of 50%; from a quarter to four
+    /// times), so that the corpus as a whole comes to about the bitrate
+    /// and its easy clips leave bits to its hard ones. 0: each clip at the
+    /// bitrate.
     pub corpus_complexity: u32,
     /// With a bitrate: the rate buffer's level when the stream starts, in
     /// milliseconds of the bitrate (libvpx's `rc_buffer_initial_size`,
@@ -697,6 +699,9 @@ struct Core<P: EncPixel> {
     cancel: Arc<AtomicBool>,
     /// Pictures waiting for the lookahead, oldest first.
     queue: std::collections::VecDeque<Queued<P>>,
+    /// [`AqMode::Complexity`] with a bitrate: whether the last key,
+    /// golden or alt-ref frame's budget was enough for segments.
+    complexity_on: bool,
     /// Where the overlay of the alt-ref coded last goes (`since_key`).
     overlay_at: Option<u32>,
     /// With [`Vp9Options::alt_ref_layers`]: the hidden alt-refs inside the
@@ -970,10 +975,20 @@ impl Vp9Encoder {
     }
 
     /// A clip's complexity for [`Vp9Options::corpus_complexity`], from
-    /// its first pass (as [`Vp9Encoder::set_second_pass`] takes it): ten
-    /// times the mean bits a 16×16 block of luma its pictures take at
-    /// quantizer index 100 (the first pass's bits, scaled from its
-    /// quantizer as bits fall with the step to the power 1.25). The mean
+    /// its first pass (as [`Vp9Encoder::set_second_pass`] takes it), in
+    /// libvpx's unit (`vbr-corpus-complexity`, FFmpeg's
+    /// `-corpus-complexity`): the corpus complexity at which libvpx would
+    /// give the clip the bitrate, ten times the square of the mean square
+    /// root of its pictures' first-pass errors (libvpx's normalized scores
+    /// at its VBR bias of 50% are each picture's error over a tenth of the
+    /// corpus complexity, square-rooted). A picture's error is libvpx's
+    /// first-pass `coded_error` a macroblock (the prediction's squared
+    /// error over 256, with libvpx's floor of 200 over the square root of
+    /// the macroblocks), here projected from the bits the picture took at
+    /// the first pass's step as a Gaussian residual takes them (half the
+    /// log₂ of 1 + 12 var / step² a sample, as complexity AQ projects
+    /// rates), and brought to libvpx's values on the README's three clips
+    /// (about 305, 196 and 205 here, 305, 240 and 275 in libvpx). The mean
     /// over a corpus's clips, each weighed by its length, is its
     /// complexity.
     pub fn first_pass_complexity(&self, first_bits: &[u64], first_q: u8) -> u32 {
@@ -1232,6 +1247,7 @@ impl<P: EncPixel> Core<P> {
             since_key: 0,
             force_key: true,
             force_next: false,
+            complexity_on: false,
             rc: Rate::new(opts, u64::from(width) * u64::from(height)),
             cancel: Arc::new(AtomicBool::new(false)),
             queue: std::collections::VecDeque::new(),
@@ -1264,22 +1280,44 @@ impl<P: EncPixel> Core<P> {
             self.opts.gf_range().1,
         ));
         if self.opts.corpus_complexity > 0 {
+            // libvpx's `vp9_init_second_pass`: the bitrate times the mean of
+            // the pictures' normalized scores, each the square root of its
+            // error over a tenth of the corpus complexity (its VBR bias of
+            // 50%): the square root of the clip's complexity over the
+            // corpus's.
             let c = self.complexity(first_bits, first_q);
             self.rc.budget = (c / f64::from(self.opts.corpus_complexity))
+                .sqrt()
                 .clamp(1.0 / CORPUS_RANGE, CORPUS_RANGE);
         }
     }
 
     /// See [`Vp9Encoder::first_pass_complexity`].
     fn complexity(&self, first_bits: &[u64], first_q: u8) -> f64 {
-        if first_bits.is_empty() {
+        let e = self.first_pass_errors(first_bits, first_q);
+        if e.is_empty() {
             return 0.0;
         }
-        let blocks = (self.width.div_ceil(16) * self.height.div_ceil(16)) as f64;
-        let bd = self.opts.bit_depth;
-        let at = (step_of(first_q, bd) / step_of(CORPUS_Q, bd)).powf(EXP);
-        let mean = first_bits.iter().sum::<u64>() as f64 / first_bits.len() as f64;
-        10.0 * mean * at / blocks
+        // The corpus complexity at which libvpx's normalized scores of the
+        // clip average 1 (it spends the bitrate), brought to libvpx's
+        // values ([`CORPUS_SCALE`]).
+        let root = e.iter().map(|&x| x.sqrt()).sum::<f64>() / e.len() as f64;
+        CORPUS_SCALE.0 * (10.0 * root * root).powf(CORPUS_SCALE.1)
+    }
+
+    /// Each first-pass picture's error, libvpx's first-pass `coded_error`
+    /// a macroblock (see [`Vp9Encoder::first_pass_complexity`]).
+    fn first_pass_errors(&self, first_bits: &[u64], first_q: u8) -> Vec<f64> {
+        let mbs = f64::from(self.width.div_ceil(16) * self.height.div_ceil(16));
+        let samples = f64::from(self.width) * f64::from(self.height);
+        let step = step_of(first_q, self.opts.bit_depth);
+        first_bits
+            .iter()
+            .map(|&b| {
+                let per = (b as f64 / samples).min(CORPUS_MOST_BITS);
+                step * step / 12.0 * ((2.0 * per).exp2() - 1.0) + 200.0 / mbs.sqrt()
+            })
+            .collect()
     }
 
     /// Codes one picture: `planes` are Y, U, V with their strides.
@@ -1517,8 +1555,24 @@ impl<P: EncPixel> Core<P> {
             self.enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
             self.rc.alt_ref(k);
             let qindex = self.rc.qindex(1, f.seconds, false);
+            let qindex = if self.opts.enable_tpl && self.last_luma.len() == w * h {
+                // The temporal dependency model of the group: the golden
+                // frame (coded last), the alt-ref, the pictures to its target.
+                let mut pics: Vec<&[P]> = vec![&self.last_luma, &src[0], &f.planes[0]];
+                pics.extend(self.queue.iter().take(k - 1).map(|q| &q.planes[0][..]));
+                let model =
+                    super::tpl::Model::new(&pics, w, h, self.opts.bit_depth, self.opts.threads());
+                self.enc
+                    .set_lambda_scales(model.lambda_scales(w.div_ceil(64), h.div_ceil(64)));
+                match model.r0() {
+                    Some(r0) => self.rc.tpl_qindex(qindex, r0),
+                    None => qindex,
+                }
+            } else {
+                qindex
+            };
             if self.opts.aq_mode == AqMode::Complexity
-                && let Some(plan) = self.complexity_plan((&src[0], w), qindex, 0.0)
+                && let Some(plan) = self.complexity_plan((&src[0], w), qindex, 0.0, 1)
             {
                 self.enc.set_segmentation(plan);
             }
@@ -1797,9 +1851,12 @@ impl<P: EncPixel> Core<P> {
             self.enc.set_global(g);
         }
         // (With `keyint_min`, a cut far enough from the last key frame is
-        // one.)
+        // one; in two passes every cut that far is, as libvpx's two passes
+        // put a key frame on the cuts its first pass finds.)
         let min = self.opts.keyint_min;
-        let key = forced || (cut && min > 0 && self.since_key >= min);
+        let auto = min > 0 || (self.rc.pass2.is_some() && !layered);
+        let key = forced || (cut && auto && self.since_key >= min);
+        self.rc.scene_key = key && !forced;
         let cut = cut && !key;
         // A golden frame every `GF_INTERVAL` frames, coded finer: the
         // frames after it predict from it. After an alt-ref, the golden
@@ -1940,7 +1997,7 @@ impl<P: EncPixel> Core<P> {
         }
         self.rc.layer = (layered && !key).then_some(usize::from(self.layer));
         let qindex = self.rc.qindex(kind, seconds, cut);
-        self.segment(key, qindex, planes[0], seconds);
+        self.segment(key, kind, qindex, planes[0], seconds);
         if layered && !key {
             let (_, refresh, refs) = layer_of(self.opts.temporal_layers, self.since_key);
             self.enc.set_layer(refresh, refs);
@@ -2037,7 +2094,7 @@ impl<P: EncPixel> Core<P> {
 
     /// The segmentation of a shown frame at `qindex` with
     /// [`Vp9Options::aq_mode`]'s other modes than variance AQ.
-    fn segment(&mut self, key: bool, qindex: u8, luma: (&[P], usize), seconds: f64) {
+    fn segment(&mut self, key: bool, kind: usize, qindex: u8, luma: (&[P], usize), seconds: f64) {
         let (w, h) = (self.width as usize, self.height as usize);
         let mi = (w.div_ceil(8), h.div_ceil(8));
         let bd = self.opts.bit_depth;
@@ -2062,7 +2119,7 @@ impl<P: EncPixel> Core<P> {
             }
             AqMode::Complexity => {
                 let (y, stride) = luma;
-                if let Some(plan) = self.complexity_plan((y, stride), qindex, seconds) {
+                if let Some(plan) = self.complexity_plan((y, stride), qindex, seconds, kind) {
                     self.enc.set_segmentation(plan);
                 }
             }
@@ -2079,13 +2136,16 @@ impl<P: EncPixel> Core<P> {
 
     /// [`AqMode::Complexity`]'s plan for a frame of luma `y` (rows
     /// `stride` apart) at `qindex`, shown for `seconds` (0: a hidden
-    /// frame); `None` without segmentation: lossless, or with a bitrate
-    /// under [`COMPLEXITY_SB_BITS`] a superblock.
+    /// frame), of type `kind` (key, golden or alt-ref, inter); `None`
+    /// without segmentation: lossless, or with a bitrate where the last
+    /// key, golden or alt-ref frame's budget was under
+    /// [`COMPLEXITY_SB_BITS`] a superblock.
     fn complexity_plan(
-        &self,
+        &mut self,
         (y, stride): (&[P], usize),
         qindex: u8,
         seconds: f64,
+        kind: usize,
     ) -> Option<super::aq::Plan> {
         let (w, h) = (self.width as usize, self.height as usize);
         let bd = self.opts.bit_depth;
@@ -2093,9 +2153,23 @@ impl<P: EncPixel> Core<P> {
             return None;
         }
         if self.opts.bitrate > 0 {
-            let frame =
-                f64::from(self.opts.bitrate) * if seconds > 0.0 { seconds } else { 1.0 / 30.0 };
-            if frame * 4096.0 < COMPLEXITY_SB_BITS * (w * h) as f64 {
+            // libvpx sets the segments up on key, golden and alt-ref frames
+            // (`vp9_setup_in_frame_q_adj`), by their own budget
+            // (`sb64_target_rate`), which for golden frames and alt-refs
+            // their boost makes several frames'; the frames between keep
+            // what they chose. (A key frame here by a frame's budget.)
+            if kind < 2 {
+                let share = match (kind, self.opts.cbr_buffer_ms) {
+                    (0, _) => 1.0,
+                    (_, 0) => SHARE[1],
+                    _ => SHARE_CBR[1],
+                };
+                let frame = f64::from(self.opts.bitrate)
+                    * if seconds > 0.0 { seconds } else { 1.0 / 30.0 }
+                    * share;
+                self.complexity_on = frame * 4096.0 >= COMPLEXITY_SB_BITS * (w * h) as f64;
+            }
+            if !self.complexity_on {
                 return None;
             }
         }
@@ -2316,6 +2390,7 @@ impl<P: EncPixel> Core<P> {
         self.enc = self.opts.frame_encoder(self.width, self.height);
         self.force_key = true;
         self.force_next = false;
+        self.complexity_on = false;
         self.since_key = 0;
         self.rc = Rate::new(self.opts, u64::from(self.width) * u64::from(self.height));
         self.queue.clear();
@@ -2804,6 +2879,18 @@ const KEY_K: f64 = 4.0;
 /// `under_shoot_pct` and `over_shoot_pct` at their default, 50, over two).
 const CBR_PACE: f64 = 0.25;
 
+/// [`Vp9Options::enable_tpl`]: the model's r0 at which an alt-ref keeps
+/// its step, and the least and most its step is scaled by. (r0 runs from
+/// 0.1 on the still scene to 0.7 on the three scenes' last.) Two passes
+/// at speed 5 on the README's three clips (1 to 4 Mb/s, four threads),
+/// BD-rate at the same PSNR-Y / FFmpeg's average against the model off:
+/// the three scenes −0.8 / −0.9%, the still scene +1.8 / +1.9%, the
+/// grainy pan −5.2 / −2.2% (summed −4.2 / −1.2); the lambda alone +1.3 /
+/// +1.9 summed, the step alone −0.5 / +1.2; r0 at 0.2, +12.2 / +6.6;
+/// finer by at most 0.85, −3.5 / −0.8.
+const TPL_R0: f64 = 0.3;
+const TPL_SCALE: (f64, f64) = (0.7, 1.3);
+
 /// At a constant bitrate, how many quantizer indices a golden or key frame
 /// is at most finer than the inter frames. On a 720p pan at 2 Mb/s, half-
 /// second windows stay within -15% and +15% of the rate at speed 6 (they
@@ -3126,6 +3213,10 @@ struct Rate {
     layer: Option<usize>,
     /// The frame coded next is of a drawn picture ([`DRAWN_SHARE`]).
     drawn: bool,
+    /// The frame coded next is a key frame on a cut (two passes put one
+    /// there): its scene is scaled against the first key frame's as a
+    /// cut's is ([`SCENE_BETA`]).
+    scene_key: bool,
     layer_model: [Option<f64>; 3],
     layer_q: [Option<u8>; 3],
     /// Two passes with [`Vp9Options::corpus_complexity`]: the clip's
@@ -3227,6 +3318,7 @@ impl Rate {
             decimation: (0, 0),
             layer: None,
             drawn: false,
+            scene_key: false,
             layer_model: [None; 3],
             layer_q: [None; 3],
             budget: 1.0,
@@ -3390,7 +3482,8 @@ impl Rate {
             // as a fixed quantizer does, and a cut a key frame's.
             let frames = p.first.len().max(1);
             if (kind == 0 || cut) && (self.frames as usize) < p.first.len() {
-                p.scene_at(self.frames as usize, kind == 0);
+                // (A key frame on a cut starts a scene as a cut does.)
+                p.scene_at(self.frames as usize, kind == 0 && !self.scene_key);
             }
             let s1 = step_of(p.q, self.opts.bit_depth);
             let total =
@@ -3690,6 +3783,20 @@ impl Rate {
         q_of_step(step * scale, bd).clamp(self.opts.min_q, self.opts.max_q)
     }
 
+    /// [`Vp9Options::enable_tpl`]'s frame-level part: the alt-ref's
+    /// quantizer `q` with its step scaled by the square root of the
+    /// model's `r0` over [`TPL_R0`] (within [`TPL_SCALE`]): an alt-ref the
+    /// group leans on more than usual finer, less coarser (as libaom scales
+    /// an alt-ref's step from the leaf frames' by the square root of r0).
+    fn tpl_qindex(&self, q: u8, r0: f64) -> u8 {
+        if q == 0 {
+            return 0;
+        }
+        let scale = (r0 / TPL_R0).sqrt().clamp(TPL_SCALE.0, TPL_SCALE.1);
+        let bd = self.opts.bit_depth;
+        self.held(q_of_step(step_of(q, bd) * scale, bd))
+    }
+
     /// The inter frames' quantizer now.
     fn peek_q(&self) -> u8 {
         self.last_q
@@ -3795,10 +3902,23 @@ fn layer_of(layers: u8, at: u32) -> (u8, u8, u8) {
     }
 }
 
-/// [`Vp9Options::corpus_complexity`]: the quantizer index its measure is
-/// at, and how far a clip's share of the bitrate may be from 1.
-const CORPUS_Q: u8 = 100;
+/// [`Vp9Options::corpus_complexity`]: how far a clip's share of the
+/// bitrate may be from 1, and the most bits a sample of a first-pass
+/// picture counts as.
 const CORPUS_RANGE: f64 = 4.0;
+const CORPUS_MOST_BITS: f64 = 8.0;
+
+/// [`Vp9Encoder::first_pass_complexity`]: the scale and power that bring
+/// the complexity of the errors projected from first-pass bits to
+/// libvpx's, which measures them. libvpx 1.14's two passes at 2 Mb/s
+/// with `-corpus-complexity` 300 and 3000 (its rate at a corpus of c is
+/// its own at the square root of the clip's complexity over c) put the
+/// README's three clips at about 305 (the three scenes), 240 (the still
+/// scene) and 275 (the grainy pan); the projected errors give 4787, 1973
+/// and 2170, which these bring to 305, 196 and 205 (a power of 0.25
+/// fits them closer, 305, 244 and 250, but leaves a still picture and a
+/// noisy pan only 1.4 times apart).
+const CORPUS_SCALE: (f64, f64) = (4.41, 0.5);
 
 /// [`AqMode::Complexity`]: with a bitrate, the least share of a frame's
 /// bits a superblock's area takes for the frame to be segmented

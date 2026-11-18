@@ -16,6 +16,7 @@ pub mod arf;
 pub mod denoise;
 pub mod probs;
 pub mod tile;
+pub mod tpl;
 pub mod tx;
 
 use std::sync::Arc;
@@ -337,8 +338,11 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// quantized ([`FrameEncoder::set_segmentation`]).
     next_plan: Option<aq::Plan>,
     /// With `tune=ssim`, the frame's scales of the RD lambda by
-    /// superblock ([`ssim_scales`]).
+    /// superblock ([`ssim_scales`]), times those of [`Self::set_lambda_scales`].
     ssim: Vec<f32>,
+    /// For the frame coded next, scales of the RD lambda by superblock
+    /// ([`Self::set_lambda_scales`]).
+    next_lambda: Option<Vec<f32>>,
     /// The next frame's slots to refresh and references its blocks may
     /// use ([`FrameEncoder::set_layer`]), and the frame's being coded.
     next_layer: Option<(u8, u8)>,
@@ -453,6 +457,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             aq: None,
             next_plan: None,
             ssim: Vec::new(),
+            next_lambda: None,
             next_layer: None,
             layer: None,
             drawn: false,
@@ -528,6 +533,14 @@ impl<P: EncPixel> FrameEncoder<P> {
             row: (y * 8).clamp(-8 * 1023, 8 * 1023) as i16,
             col: (x * 8).clamp(-8 * 1023, 8 * 1023) as i16,
         });
+    }
+
+    /// For the frame coded next only: each superblock's scale of the RD
+    /// lambda, in raster order (`width.div_ceil(64)` a row), as `tune=ssim`
+    /// scales it (the two multiply): the temporal dependency model's
+    /// ([`tpl`]).
+    pub fn set_lambda_scales(&mut self, scales: Vec<f32>) {
+        self.next_lambda = Some(scales);
     }
 
     /// Whether the pictures coded from now on are drawn (graphics,
@@ -623,6 +636,15 @@ impl<P: EncPixel> FrameEncoder<P> {
             );
         } else {
             self.ssim.clear();
+        }
+        if let Some(scales) = self.next_lambda.take().filter(|_| !lossless) {
+            if self.ssim.is_empty() {
+                self.ssim = scales;
+            } else {
+                for (a, b) in self.ssim.iter_mut().zip(scales) {
+                    *a *= b;
+                }
+            }
         }
         // The tiles are coded against the probabilities as they stand; their
         // symbols are kept, the coefficient probabilities that pay for

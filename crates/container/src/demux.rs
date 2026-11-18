@@ -6,7 +6,7 @@
 
 use crate::error::ReadError;
 use crate::seek::{SeekLanding, SeekTo};
-use crate::stream::{Gap, Stream};
+use crate::stream::{Gap, Stream, TrackId};
 use cutlass_codec::{ContainerId, Packet};
 
 /// One open file: streams out, then packets out.
@@ -38,4 +38,17 @@ pub trait Demux: Send {
 
     /// Bytes read from the owned input. A seek does not increase this.
     fn consumed(&self) -> u64;
+
+    /// The latest presentation time plus duration of any packet of
+    /// `track`, in the file timescale, when the file's index holds it
+    /// without reading a packet. It is what reading every packet of the
+    /// track would find.
+    ///
+    /// [`None`] when the container has no such index, the track has no
+    /// samples, or the index is not complete at open, as in a fragmented
+    /// file: a caller that needs the end then reads the packets.
+    fn indexed_end(&self, track: TrackId) -> Option<i64> {
+        let _ = track;
+        None
+    }
 }

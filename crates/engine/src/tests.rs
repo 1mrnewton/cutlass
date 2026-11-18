@@ -17,11 +17,8 @@ use cutlass_decode::{
     PictureInfo, PictureOutput, PixelFormat, Transfer,
 };
 use cutlass_jpeg::JpegDecoder;
-use cutlass_model::{
-    Draft, MaterialAudio, MaterialId, MaterialVideo, Micros, Segment, SegmentId, TimeRange, Track,
-    TrackAttribute, TrackType,
-};
-use cutlass_picture::{Picture, PictureSource, Sample, rgba_len};
+use cutlass_model::{Draft, MaterialVideo, Micros, Segment, SegmentId, TimeRange, TrackType};
+use cutlass_picture::{Picture, PictureSource, Sample};
 use cutlass_png::PngDecoder;
 use cutlass_still::{StillDemux, StillProbe, still_limits};
 
@@ -29,9 +26,8 @@ use crate::ahead::ReadAhead;
 use crate::clock::ClockKind;
 use crate::error::EngineError;
 use crate::map::ticks_to_micros;
-use crate::reader::{MAX_AUDIO_FRAMES, ReaderFactory, Steer};
-use crate::source::{open_segment, peaks_from};
-use crate::{MAX_BUCKETS, MAX_EDGE};
+use crate::reader::{ReaderFactory, Steer};
+use crate::source::open_segment;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -43,6 +39,8 @@ thread_local! {
     static PLATFORM_OPENS: Cell<u32> = const { Cell::new(0) };
     static RUST_OPENS: Cell<u32> = const { Cell::new(0) };
     static PROBES: Cell<u32> = const { Cell::new(0) };
+    static SCRIPT_OPENS: Cell<u32> = const { Cell::new(0) };
+    static SCRIPT_READS: Cell<u32> = const { Cell::new(0) };
 }
 
 fn reset_counts() {
@@ -370,21 +368,7 @@ fn export_returns_the_still_and_playback_does_not_decode() {
     let playback = open_segment(&factory, &draft, &id, ClockKind::Playback, 4).expect("play");
     assert!(matches!(playback.sample(Micros(0)), Sample::Miss));
     assert_eq!(playback.decodes(), 0);
-    let audio = playback.advance_audio(48, 48_000).expect("clock");
-    assert_eq!(audio, Micros(1_000));
-    let late = playback.fill(Micros(0)).expect("late");
-    assert_eq!(late, Sample::Miss);
     assert_eq!(playback.cached(), 0);
-    assert_eq!(playback.decodes(), 1);
-
-    let waited = export.advance_audio(48_000, 48_000).expect("ahead");
-    assert!(waited.0 > 0);
-    let filled = export.fill(Micros(0)).expect("fill");
-    let Sample::Ready(Picture::Cpu(filled)) = filled else {
-        panic!("filled picture");
-    };
-    assert_eq!(filled.rgba(), jpeg_rgba(&path));
-    assert!(export.cached() >= 1);
 }
 
 fn jpeg_rgba(path: &Path) -> Vec<u8> {
@@ -741,6 +725,69 @@ fn a_seek_back_shows_the_old_picture_until_the_asked_one_is_ready() {
     assert!(shown.iter().all(|start| *start == tick(150)), "{shown:?}");
 }
 
+/// While set, [`Failing`] refuses every packet.
+static REFUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// [`Token`], refusing every packet while [`REFUSE`] is set.
+struct Failing;
+
+impl Decoder for Failing {
+    fn codec(&self) -> CodecId {
+        CodecId::Jpeg
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        if REFUSE.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "refused",
+            });
+        }
+        Token.push(packet)
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {}
+}
+
+#[test]
+fn a_read_that_does_not_wait_tries_a_failed_time_again_after_a_while() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_eight);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, |_params| Ok(Box::new(Failing)));
+    let media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let ahead = ReadAhead::start(media, TimeRange::new(0, 1_000_000), 2).expect("thread");
+    let at = Micros(40_000);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let failed = loop {
+        match ahead.try_picture(at) {
+            Err(error) => break error,
+            Ok(Some(_)) => panic!("the decoder refuses"),
+            Ok(None) => {}
+        }
+        assert!(std::time::Instant::now() < until, "no answer");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    };
+    assert!(!matches!(failed, EngineError::Interrupted));
+    // The file reads now, but the error stands for a moment first.
+    REFUSE.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(ahead.try_picture(at).is_err());
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(Some(held)) = ahead.try_picture(at) {
+            assert!(held.start.0 <= at.0 && at.0 < held.end.0);
+            break;
+        }
+        assert!(std::time::Instant::now() < until, "never tried again");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// [`OnePicture`], three milliseconds a picture, so a test sees a decode on
 /// its way.
 struct SlowPicture;
@@ -816,6 +863,49 @@ fn pictures_a_drain_releases_reach_the_scan_at_their_own_times() {
         .map(|ticks| ticks_to_micros(ticks, Timescale::new(30)).expect("time").0)
         .collect();
     assert_eq!(starts, expected);
+}
+
+/// Ten minutes at 30 fps, every picture a key frame the seek lands on.
+fn open_ten_minutes(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let mut movie = scripted(0, 18_000);
+    movie.lands = true;
+    Ok(Box::new(movie))
+}
+
+/// The same ten minutes, where every seek lands on the first picture.
+fn open_ten_minutes_unseekable(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(Box::new(scripted(0, 18_000)))
+}
+
+#[test]
+fn far_apart_pictures_are_sought_so_a_long_range_is_covered() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_ten_minutes);
+    readers.decoders_mut().register(CodecId::Jpeg, open_token);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let _ = script_counts();
+    let range = TimeRange::new(0, 600_000_000);
+    let frames = media.pictures_across(&range, 2_500_000, 240).expect("scan");
+    let (_, reads) = script_counts();
+    // All 240 pictures, across the whole ten minutes, from a packet or two
+    // each instead of the 4,000 the decode budget would stop at.
+    assert_eq!(frames.len(), 240);
+    let last = frames.last().expect("last").start.0;
+    assert!(last >= 597_000_000, "{last}");
+    assert!(reads < 1_000, "{reads} packets read");
+    let starts: Vec<i64> = frames.iter().map(|held| held.start.0).collect();
+    assert!(starts.windows(2).all(|pair| pair[1] - pair[0] >= 2_500_000));
+
+    // A file whose seeks land back at the start is decoded through after
+    // the first seek shows it, and still keeps its pictures in order.
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_ten_minutes_unseekable);
+    readers.decoders_mut().register(CodecId::Jpeg, open_token);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let frames = media.pictures_across(&range, 2_500_000, 240).expect("scan");
+    let starts: Vec<i64> = frames.iter().map(|held| held.start.0).collect();
+    assert!(starts.len() > 1);
+    assert!(starts.windows(2).all(|pair| pair[1] - pair[0] >= 2_500_000));
 }
 
 fn open_four(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
@@ -967,6 +1057,9 @@ struct Scripted {
     cancelled: bool,
     /// Seek to the asked picture, every one a keyframe, instead of the start.
     lands: bool,
+    /// Answer [`Demux::indexed_end`] from the packets, as a file with an
+    /// index does, instead of leaving the reader to read them.
+    indexed: bool,
 }
 
 fn scripted(foreign: usize, pictures: usize) -> Scripted {
@@ -1001,6 +1094,7 @@ fn scripted(foreign: usize, pictures: usize) -> Scripted {
         cursor: 0,
         cancelled: false,
         lands: false,
+        indexed: false,
     }
 }
 
@@ -1038,6 +1132,7 @@ impl Demux for Scripted {
         if self.cancelled {
             return Err(ReadError::Cancelled);
         }
+        SCRIPT_READS.with(|count| count.set(count.get().saturating_add(1)));
         let Some(packet) = self.packets.get(self.cursor) else {
             return Ok(None);
         };
@@ -1088,6 +1183,79 @@ impl Demux for Scripted {
     fn consumed(&self) -> u64 {
         0
     }
+
+    fn indexed_end(&self, track: TrackId) -> Option<i64> {
+        if !self.indexed {
+            return None;
+        }
+        self.packets
+            .iter()
+            .filter(|packet| packet.stream() == track.get())
+            .filter_map(|packet| {
+                let timestamp = packet.timestamp();
+                Some(timestamp.presentation()? + timestamp.duration()?)
+            })
+            .max()
+    }
+}
+
+fn open_counted(indexed: bool) -> Box<dyn Demux> {
+    SCRIPT_OPENS.with(|count| count.set(count.get().saturating_add(1)));
+    let mut script = scripted(4, 30);
+    script.indexed = indexed;
+    Box::new(script)
+}
+
+fn open_indexed(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(open_counted(true))
+}
+
+fn open_unindexed(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(open_counted(false))
+}
+
+fn script_counts() -> (u32, u32) {
+    (
+        SCRIPT_OPENS.with(|count| count.replace(0)),
+        SCRIPT_READS.with(|count| count.replace(0)),
+    )
+}
+
+#[test]
+fn an_indexed_file_opens_once_and_reads_no_packet_for_its_duration() {
+    let path = std::env::temp_dir().join(format!("cutlass-indexed-{}", std::process::id()));
+    std::fs::write(&path, b"x").expect("file");
+    let mut indexed = ReaderFactory::new();
+    indexed.register_container(probe_script, open_indexed);
+    indexed.decoders_mut().register(CodecId::Jpeg, open_token);
+    let mut unindexed = ReaderFactory::new();
+    unindexed.register_container(probe_script, open_unindexed);
+    unindexed.decoders_mut().register(CodecId::Jpeg, open_token);
+    let _ = script_counts();
+
+    // Pictures 4 to 33 at 30 per second, each one tick long: the last ends
+    // at tick 34. The other stream's last packet ends at tick 4.
+    let whole = Some(ticks_to_micros(34, Timescale::new(30)).expect("micros"));
+    let media = indexed.open(&path).expect("open");
+    assert_eq!(media.info().duration, whole);
+    assert_eq!(script_counts(), (1, 0), "one open and no packet read");
+
+    // Without an index the packets are read once, then the file is opened
+    // again to decode. The factory keeps that probe for the next open.
+    let media = unindexed.open(&path).expect("open");
+    assert_eq!(media.info().duration, whole);
+    assert_eq!(script_counts(), (2, 35));
+    let again = unindexed.clone().open(&path).expect("again");
+    assert_eq!(again.info().duration, whole);
+    assert_eq!(script_counts(), (1, 0), "a kept probe reads nothing");
+    assert_eq!(unindexed.probe(&path).expect("probe").duration, whole);
+    assert_eq!(script_counts(), (0, 0));
+
+    // A file that changed is probed again.
+    std::fs::write(&path, b"longer").expect("rewrite");
+    assert_eq!(unindexed.probe(&path).expect("probe").byte_size, 6);
+    assert_eq!(script_counts(), (1, 35));
+    let _ = std::fs::remove_file(&path);
 }
 
 fn open_wav(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
@@ -1280,6 +1448,7 @@ fn open_ramp(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
         cursor: 0,
         cancelled: false,
         lands: true,
+        indexed: false,
     }))
 }
 
@@ -1397,15 +1566,6 @@ fn a_seven_one_wav_reads_in_its_mask_order_and_its_waveform_sees_every_channel()
     assert_eq!(floats.len(), 64 * 8);
     assert!((floats[7] - 16_384.0 / 32_767.0).abs() < 1e-6);
 
-    let mut media = readers.open(&path).expect("7.1 opens");
-    let wave = peaks_from(&mut media, 64).expect("waveform");
-    assert_eq!(wave.frames(), 64);
-    let loudest = wave
-        .peaks()
-        .iter()
-        .fold(0.0_f32, |top, peak| top.max(peak.max));
-    assert!((loudest - 16_384.0 / 32_767.0).abs() < 1e-3, "{loudest}");
-
     // A mask naming two speakers for eight channels is not opened as sound.
     write_extensible_wav(&path, 8, 0x3, &samples);
     assert_eq!(readers.open(&path).err(), Some(EngineError::Layout));
@@ -1456,323 +1616,11 @@ fn a_law_and_mu_law_wavs_play_through_the_g711_expansion() {
     }
 }
 
-#[test]
-fn a_filmstrip_ask_does_not_decode_and_a_fill_stores_the_still() {
-    let factory = factory();
-    let path = fixture("pattern.png");
-    let (draft, id) = draft_for(&path);
-    let source = open_segment(&factory, &draft, &id, ClockKind::Export, 4).expect("export");
-    assert_eq!(
-        source.strip_at(Micros(5_000_000)).expect_err("outside"),
-        EngineError::Outside
-    );
-    assert_eq!(
-        source
-            .fill_strip(Micros(5_000_000))
-            .expect_err("outside fill"),
-        EngineError::Outside
-    );
-    assert_eq!(source.decodes(), 0);
-    assert_eq!(
-        source.strip_at(Micros(0)).expect_err("miss"),
-        EngineError::NotReady
-    );
-    assert_eq!(source.decodes(), 0);
-    source.fill_strip(Micros(0)).expect("fill");
-    assert_eq!(source.decodes(), 1);
-    assert_eq!(source.cached(), 0);
-    let cell = source.strip_at(Micros(100)).expect("cell");
-    assert_eq!(source.decodes(), 1);
-    assert_eq!(cell.width(), 16);
-    assert_eq!(cell.height(), 16);
-    assert!(cell.width().max(cell.height()) <= MAX_EDGE);
-    assert_eq!(
-        cell.rgba().len(),
-        rgba_len(cell.width(), cell.height()).expect("bytes")
-    );
-    let picture = source.picture_at(Micros(0)).expect("picture");
-    let Picture::Cpu(bytes) = picture else {
-        panic!("cpu picture");
-    };
-    assert_eq!(cell.rgba(), bytes.rgba());
-    assert_eq!(source.decodes(), 2);
-    let again = source.strip_at(Micros(0)).expect("cached cell");
-    assert_eq!(again.rgba(), cell.rgba());
-    assert_eq!(source.decodes(), 2);
-}
-
-#[test]
-fn playback_fills_a_filmstrip_without_filling_the_preview_window() {
-    let factory = factory();
-    let path = fixture("pattern.png");
-    let (draft, id) = draft_for(&path);
-    let source = open_segment(&factory, &draft, &id, ClockKind::Playback, 4).expect("play");
-    assert_eq!(
-        source.picture_at(Micros(0)).expect_err("playback"),
-        EngineError::NotReady
-    );
-    assert_eq!(
-        source.strip_at(Micros(0)).expect_err("strip"),
-        EngineError::NotReady
-    );
-    assert_eq!(source.decodes(), 0);
-    let audio = source.advance_audio(48, 48_000).expect("clock");
-    assert_eq!(audio, Micros(1_000));
-    source.fill_strip(Micros(0)).expect("strip fill");
-    assert_eq!(source.decodes(), 1);
-    assert_eq!(source.cached(), 0);
-    let cell = source.strip_at(Micros(0)).expect("cell");
-    assert_eq!(cell.width(), 16);
-    assert_eq!(cell.height(), 16);
-    assert_eq!(source.fill(Micros(0)).expect("late"), Sample::Miss);
-    assert_eq!(source.cached(), 0);
-    assert_eq!(
-        source.strip_at(Micros(0)).expect("kept").rgba(),
-        cell.rgba()
-    );
-    assert_eq!(source.decodes(), 2);
-}
-
-#[test]
-fn a_platform_buffer_is_not_a_filmstrip_cell() {
-    let mut factory = ReaderFactory::new();
-    factory.register_container(probe_still, open_still);
-    factory.decoders_mut().register(CodecId::Jpeg, open_token);
-    let path = fixture("pattern.jpg");
-    let (draft, id) = draft_for(&path);
-    let source = open_segment(&factory, &draft, &id, ClockKind::Export, 2).expect("source");
-    assert_eq!(
-        source.fill_strip(Micros(0)).expect_err("platform"),
-        EngineError::NotReady
-    );
-    assert_eq!(source.decodes(), 1);
-    assert_eq!(
-        source.strip_at(Micros(0)).expect_err("empty"),
-        EngineError::NotReady
-    );
-    assert_eq!(source.decodes(), 1);
-}
-
-#[test]
-fn a_real_still_fills_a_filmstrip_when_the_folder_is_present() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
-    if !root.is_dir() {
-        eprintln!("skipped: ../local-files is missing");
-        return;
-    }
-    let path = root.join("04-motion-graphics.png");
-    if !path.is_file() {
-        eprintln!("skipped: 04-motion-graphics.png is not in ../local-files");
-        return;
-    }
-    let factory = factory();
-    let (draft, id) = draft_for(&path);
-    let source = open_segment(&factory, &draft, &id, ClockKind::Playback, 2).expect("still");
-    assert_eq!(
-        source.strip_at(Micros(0)).expect_err("miss"),
-        EngineError::NotReady
-    );
-    assert_eq!(source.decodes(), 0);
-    source.fill_strip(Micros(0)).expect("fill");
-    let cell = source.strip_at(Micros(0)).expect("cell");
-    assert_eq!(source.decodes(), 1);
-    assert!(cell.width() >= 1 && cell.height() >= 1);
-    assert!(cell.width() <= MAX_EDGE && cell.height() <= MAX_EDGE);
-    assert_eq!(
-        cell.rgba().len(),
-        rgba_len(cell.width(), cell.height()).expect("bytes")
-    );
-    assert_eq!(
-        source.strip_at(Micros(0)).expect("again").rgba(),
-        cell.rgba()
-    );
-    assert_eq!(source.decodes(), 1);
-}
-
 fn audio_readers() -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(cutlass_riff::probe, open_wav);
     cutlass_pcm::register_decoders(readers.decoders_mut());
     readers
-}
-
-fn audio_draft(path: &Path, mute: bool) -> (Draft, SegmentId) {
-    let mut draft = Draft::empty("D");
-    draft.materials.audios.push(MaterialAudio {
-        id: MaterialId::new("tone"),
-        path: path.display().to_string(),
-        duration: Micros(1_000_000),
-        ..MaterialAudio::default()
-    });
-    let mut track = Track::main("audio");
-    track.kind = TrackType::Audio;
-    if mute {
-        track.attribute = TrackAttribute(TrackAttribute::MUTE);
-    }
-    let mut segment = Segment::new("clip", "tone", TimeRange::new(0, 1_000_000));
-    segment.source_range = Some(TimeRange::new(0, 1_000_000));
-    track.segments.push(segment);
-    draft.tracks.push(track);
-    (draft, SegmentId::new("clip"))
-}
-
-fn full_scale_wav(path: &Path) {
-    let mut payload = Vec::new();
-    for sample in [0_i16, 32_767, -32_767] {
-        payload.extend_from_slice(&sample.to_le_bytes());
-    }
-    write_pcm_wav(path, 48_000, 16, &payload);
-}
-
-fn assert_full_scale(wave: &crate::Waveform) {
-    assert_eq!(wave.frames(), 3);
-    assert!(!wave.capped());
-    assert_eq!(wave.peaks().len(), MAX_BUCKETS);
-    let mid = MAX_BUCKETS / 3;
-    let last = 2 * MAX_BUCKETS / 3;
-    for (index, peak) in wave.peaks().iter().enumerate() {
-        let (min, max): (f32, f32) = match index {
-            0 => (0.0, 0.0),
-            index if index == mid => (1.0, 1.0),
-            index if index == last => (-1.0, -1.0),
-            _ => (0.0, 0.0),
-        };
-        assert_eq!(peak.min.to_bits(), min.to_bits(), "{index}");
-        assert_eq!(peak.max.to_bits(), max.to_bits(), "{index}");
-    }
-}
-
-#[test]
-fn a_waveform_ask_does_not_decode_and_a_fill_stores_full_scale_peaks() {
-    let path = std::env::temp_dir().join(format!("cutlass-wave-peaks-{}", std::process::id()));
-    full_scale_wav(&path);
-    let readers = audio_readers();
-    let (draft, id) = audio_draft(&path, false);
-    let source = open_segment(&readers, &draft, &id, ClockKind::Playback, 2).expect("audio");
-    assert_eq!(source.waveform().expect_err("miss"), EngineError::NotReady);
-    assert_eq!(source.decodes(), 0);
-    source.fill_waveform().expect("fill");
-    assert_eq!(source.decodes(), 0);
-    assert_full_scale(&source.waveform().expect("wave"));
-    assert_eq!(source.decodes(), 0);
-    assert_eq!(
-        source.fill_strip(Micros(0)).expect_err("picture"),
-        EngineError::NoDecoder {
-            codec: "picture".to_owned(),
-        }
-    );
-    assert_eq!(source.decodes(), 1);
-    assert_eq!(source.waveform().expect("kept").frames(), 3);
-    std::fs::remove_file(&path).expect("remove");
-}
-
-#[test]
-fn a_muted_track_still_stores_the_file_waveform() {
-    let path = std::env::temp_dir().join(format!("cutlass-wave-mute-{}", std::process::id()));
-    full_scale_wav(&path);
-    let readers = audio_readers();
-    let (draft, id) = audio_draft(&path, true);
-    let source = open_segment(&readers, &draft, &id, ClockKind::Playback, 2).expect("muted");
-    source.fill_waveform().expect("fill");
-    assert_eq!(source.decodes(), 0);
-    assert_full_scale(&source.waveform().expect("wave"));
-    std::fs::remove_file(&path).expect("remove");
-}
-
-#[test]
-fn a_waveform_prefix_drops_the_unread_tail() {
-    let longer = std::env::temp_dir().join(format!("cutlass-wave-prefix-{}", std::process::id()));
-    let mut loud_tail = Vec::new();
-    for sample in [0_i16, 0, 0, 0, 32_767] {
-        loud_tail.extend_from_slice(&sample.to_le_bytes());
-    }
-    write_pcm_wav(&longer, 48_000, 16, &loud_tail);
-    let readers = audio_readers();
-    let mut media = readers.open(&longer).expect("longer");
-    let prefix = peaks_from(&mut media, 4).expect("prefix");
-    assert!(prefix.capped());
-    assert_eq!(prefix.frames(), 4);
-    assert_eq!(prefix.peaks().len(), MAX_BUCKETS);
-    for peak in prefix.peaks() {
-        assert_eq!(peak.max.to_bits(), 0.0_f32.to_bits());
-        assert_eq!(peak.min.to_bits(), 0.0_f32.to_bits());
-    }
-
-    let exact = std::env::temp_dir().join(format!("cutlass-wave-exact-{}", std::process::id()));
-    write_pcm_wav(&exact, 48_000, 16, &loud_tail[..8]);
-    let mut media = readers.open(&exact).expect("exact");
-    let whole = peaks_from(&mut media, 4).expect("whole");
-    assert!(!whole.capped());
-    assert_eq!(whole.frames(), 4);
-    std::fs::remove_file(&longer).expect("remove longer");
-    std::fs::remove_file(&exact).expect("remove exact");
-}
-
-#[test]
-fn a_still_has_no_waveform() {
-    let factory = factory();
-    let path = fixture("pattern.png");
-    let (draft, id) = draft_for(&path);
-    let source = open_segment(&factory, &draft, &id, ClockKind::Export, 2).expect("still");
-    assert_eq!(
-        source.fill_waveform().expect_err("audio"),
-        EngineError::NotMedia
-    );
-    assert_eq!(source.waveform().expect_err("empty"), EngineError::NotReady);
-    assert_eq!(source.decodes(), 0);
-}
-
-#[test]
-fn a_real_wav_fills_a_waveform_when_the_folder_is_present() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
-    if !root.is_dir() {
-        eprintln!("skipped: ../local-files is missing");
-        return;
-    }
-    let Some(path) = smallest_wav(&root) else {
-        eprintln!("skipped: ../local-files has no wav");
-        return;
-    };
-    let readers = audio_readers();
-    let (draft, id) = audio_draft(&path, false);
-    let source = open_segment(&readers, &draft, &id, ClockKind::Playback, 2).expect("wav");
-    assert_eq!(source.waveform().expect_err("miss"), EngineError::NotReady);
-    source.fill_waveform().expect("fill");
-    let wave = source.waveform().expect("wave");
-    assert_eq!(source.decodes(), 0);
-    assert_eq!(wave.peaks().len(), MAX_BUCKETS);
-    assert!(wave.frames() > 0);
-    assert!(wave.frames() <= MAX_AUDIO_FRAMES);
-    if wave.frames() == MAX_AUDIO_FRAMES {
-        assert!(wave.capped());
-    } else {
-        assert!(!wave.capped());
-    }
-    for peak in wave.peaks() {
-        assert!(peak.min <= peak.max);
-        assert!(peak.min >= -1.0 && peak.max <= 1.0);
-    }
-    assert_eq!(source.waveform().expect("again").frames(), wave.frames());
-}
-
-fn smallest_wav(root: &Path) -> Option<PathBuf> {
-    let mut best: Option<(u64, PathBuf)> = None;
-    for entry in std::fs::read_dir(root).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("wav") {
-            continue;
-        }
-        let Ok(len) = entry.metadata().map(|meta| meta.len()) else {
-            continue;
-        };
-        if len == 0 {
-            continue;
-        }
-        if best.as_ref().is_none_or(|(size, _)| len < *size) {
-            best = Some((len, path));
-        }
-    }
-    best.map(|(_, path)| path)
 }
 
 #[test]

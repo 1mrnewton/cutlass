@@ -8379,7 +8379,8 @@ fn film_texture(
 ) -> egui::TextureId {
     let frame = textures.frame;
     let entry = textures.shown.entry(key).or_insert_with(|| {
-        let image = egui::ColorImage::from_rgba_unmultiplied(
+        // A thumbnail is premultiplied, as egui's own images are.
+        let image = egui::ColorImage::from_rgba_premultiplied(
             [thumb.width as usize, thumb.height as usize],
             &thumb.rgba,
         );

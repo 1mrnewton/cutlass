@@ -9,14 +9,17 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use cutlass_codec::access::{
     ChannelLayout, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, PixelFormat, SampleFormat,
     StandardLayout, Transfer,
 };
 use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
-use cutlass_container::{Demux, DisplayQuarter, OpenError, ProbeResult, ReadError, SeekTo};
+use cutlass_container::{
+    Demux, DisplayQuarter, Landing, OpenError, ProbeResult, ReadError, SeekTo,
+};
 use cutlass_decode::{
     AudioOutput, CodecError, DecodeFactory, Decoder, Output, Packet as AccessPacket, PictureOutput,
     PictureSamples, SideData, StillImage, Surface,
@@ -27,10 +30,18 @@ use crate::error::EngineError;
 use crate::map::{micros_to_ticks, micros_to_ticks_floor, ticks_to_micros};
 
 const HEADER_LIMIT: usize = 4096;
+/// Files whose probe a factory keeps. Past this the kept probes are dropped
+/// and filled again as files are opened.
+const MAX_PROBED: usize = 4_096;
 /// Picture or audio packets one seek may decode before giving up.
 const DECODE_PACKETS: u32 = 64;
 /// Pictures one forward scene scan will decode. A longer file is read from its start.
 const MAX_SCAN_PICTURES: u32 = 4_000;
+
+/// The spacing from which [`Media::pictures_across`] seeks to each picture
+/// instead of decoding through: a key frame is usually closer than this, so
+/// a seek decodes less than the pictures between.
+const SEEK_SPACING: i64 = 2_000_000;
 /// How far past the last picture [`Media::decode_at`] keeps decoding forward
 /// instead of seeking. A longer jump seeks to the keyframe before the time.
 const FORWARD_REACH: i64 = 2_000_000;
@@ -109,6 +120,10 @@ pub enum DecodedFrame {
         height: u32,
         primaries: ColorPrimaries,
         transfer: Transfer,
+        /// The Y′CbCr matrix the platform names. Unspecified is BT.709.
+        matrix: ColorMatrix,
+        /// The sample range the platform names. Unspecified is studio swing.
+        range: ColorRange,
         surface: Surface,
     },
 }
@@ -124,6 +139,8 @@ impl DecodedFrame {
                 height,
                 primaries,
                 transfer,
+                matrix,
+                range,
                 surface,
             } => Ok(std::borrow::Cow::Owned(Self::Coded {
                 width: *width,
@@ -131,8 +148,8 @@ impl DecodedFrame {
                 pixel: PixelFormat::Yuv420p,
                 primaries: *primaries,
                 transfer: *transfer,
-                matrix: ColorMatrix::Unspecified,
-                range: ColorRange::Unspecified,
+                matrix: *matrix,
+                range: *range,
                 bytes: surface.yuv420p()?,
             })),
             Self::Platform { .. } | Self::Still(_) | Self::Coded { .. } => {
@@ -307,6 +324,23 @@ pub struct ReaderFactory {
     decoders: DecodeFactory,
     /// Files [`Self::open`] reads in place of others: a source's proxy.
     stand_ins: Arc<HashMap<PathBuf, PathBuf>>,
+    /// What a probe found, by file, shared by every copy of the factory. A
+    /// file whose length or modified time changed is probed again.
+    probed: Arc<Mutex<HashMap<PathBuf, Probed>>>,
+}
+
+/// One file's probe and the length and modified time it was made at.
+#[derive(Clone)]
+struct Probed {
+    stamp: Stamp,
+    info: MediaInfo,
+}
+
+/// A file's length and modified time: the same pair means the same probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stamp {
+    len: u64,
+    modified: Option<SystemTime>,
 }
 
 impl ReaderFactory {
@@ -316,6 +350,7 @@ impl ReaderFactory {
             families: Vec::new(),
             decoders: DecodeFactory::new(),
             stand_ins: Arc::default(),
+            probed: Arc::default(),
         }
     }
 
@@ -330,8 +365,9 @@ impl ReaderFactory {
         }
     }
 
-    /// The file [`Self::open`] reads for `path`.
-    fn stand_in<'a>(&'a self, path: &'a Path) -> &'a Path {
+    /// The file [`Self::open`] reads for `path`: a proxy standing in for
+    /// it, or `path` itself.
+    pub fn stand_in<'a>(&'a self, path: &'a Path) -> &'a Path {
         if self.stand_ins.is_empty() {
             return path;
         }
@@ -362,12 +398,47 @@ impl ReaderFactory {
     }
 
     /// Duration, size, and streams. No decoder runs.
+    ///
+    /// The duration comes from the container's index when it has one.
+    /// Otherwise every packet is read once; the factory keeps the answer, so
+    /// the same file, unchanged, is not read again.
     pub fn probe(&self, path: &Path) -> Result<MediaInfo, EngineError> {
-        let byte_size = file_len(path)?;
-        let mut demux = self.open_demux(path)?;
-        let mut info = stream_info(demux.as_ref(), byte_size);
-        info.duration = duration_of(demux.as_mut())?;
+        let stamp = file_stamp(path)?;
+        if let Some(info) = self.kept_probe(path, stamp) {
+            return Ok(info);
+        }
+        let mut demux = self.open_demux(path, stamp.len)?;
+        let (info, _) = described(demux.as_mut(), stamp.len)?;
+        self.keep_probe(path, stamp, &info);
         Ok(info)
+    }
+
+    fn kept_probe(&self, path: &Path, stamp: Stamp) -> Option<MediaInfo> {
+        let probed = self
+            .probed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        probed
+            .get(path)
+            .filter(|kept| kept.stamp == stamp)
+            .map(|kept| kept.info.clone())
+    }
+
+    fn keep_probe(&self, path: &Path, stamp: Stamp, info: &MediaInfo) {
+        let mut probed = self
+            .probed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if probed.len() >= MAX_PROBED && !probed.contains_key(path) {
+            probed.clear();
+        }
+        probed.insert(
+            path.to_path_buf(),
+            Probed {
+                stamp,
+                info: info.clone(),
+            },
+        );
     }
 
     /// Whether `path` has an audio stream. This reads the header and does not decode.
@@ -380,10 +451,25 @@ impl ReaderFactory {
     }
 
     /// Opens the container and a decoder for each picture or audio stream.
+    ///
+    /// The file is opened once. Only a file whose duration is not in its
+    /// container's index, and that this factory has not probed before, is
+    /// read to its end for the duration and then opened again.
     pub fn open(&self, path: &Path) -> Result<Media, EngineError> {
         let path = self.stand_in(path);
-        let info = self.probe(path)?;
-        let demux = self.open_demux(path)?;
+        let stamp = file_stamp(path)?;
+        let mut demux = self.open_demux(path, stamp.len)?;
+        let info = match self.kept_probe(path, stamp) {
+            Some(info) => info,
+            None => {
+                let (info, read) = described(demux.as_mut(), stamp.len)?;
+                self.keep_probe(path, stamp, &info);
+                if read {
+                    demux = self.open_demux(path, stamp.len)?;
+                }
+                info
+            }
+        };
         let (picture, audio) = open_pipes(&self.decoders, demux.as_ref())?;
         Ok(Media {
             demux,
@@ -392,12 +478,14 @@ impl ReaderFactory {
             info,
             cursor: None,
             run: None,
+            opened: path.to_path_buf(),
+            stamp,
         })
     }
 
-    fn open_demux(&self, path: &Path) -> Result<Box<dyn Demux>, EngineError> {
-        let header = header_of(path)?;
-        let family = choose(&self.families, &header, file_len(path)?)?;
+    fn open_demux(&self, path: &Path, len: u64) -> Result<Box<dyn Demux>, EngineError> {
+        let header = header_of(path, len)?;
+        let family = choose(&self.families, &header, len)?;
         (family.open)(path).map_err(from_open)
     }
 }
@@ -418,6 +506,10 @@ pub struct Media {
     cursor: Option<Cursor>,
     /// Decoded audio past the last [`Media::audio_from`], for the next one.
     run: Option<AudioRun>,
+    /// The file read, after any stand-in, and its length and modified time
+    /// when it was opened.
+    opened: PathBuf,
+    stamp: Stamp,
 }
 
 /// Decoded audio the next [`Media::audio_from`] continues from.
@@ -475,6 +567,19 @@ impl Media {
     #[must_use]
     pub fn info(&self) -> &MediaInfo {
         &self.info
+    }
+
+    /// The file this reads: the path asked for, or the proxy that stood in.
+    #[must_use]
+    pub fn opened(&self) -> &Path {
+        &self.opened
+    }
+
+    /// Whether the file still has the length and modified time it had when
+    /// it was opened. A file replaced since, or gone, is not.
+    #[must_use]
+    pub fn unchanged(&self) -> bool {
+        file_stamp(&self.opened).is_ok_and(|stamp| stamp == self.stamp)
     }
 
     /// The picture that covers `source`, seeking in the file timescale when the stream has a clock.
@@ -575,8 +680,9 @@ impl Media {
     }
 
     /// Drop what the picture decoder holds and seek to the keyframe before
-    /// `source`.
-    fn restart_picture(&mut self, source: Micros) -> Result<(), EngineError> {
+    /// `source`. The source time of the packet the seek landed on, when the
+    /// demuxer names one.
+    fn restart_picture(&mut self, source: Micros) -> Result<Option<Micros>, EngineError> {
         let (track, timescale) = {
             let Some(pipe) = self.picture.as_mut() else {
                 return Err(EngineError::NoDecoder {
@@ -598,8 +704,12 @@ impl Media {
 
     /// Pictures from `range`, at least `gap` microseconds apart, at most `limit`.
     ///
-    /// One seek starts the read. Later pictures stay in file order. The stream
-    /// ending is an empty or short list, not an error.
+    /// One seek starts the read. Pictures [`SEEK_SPACING`] or more apart are
+    /// each sought, so a long range is covered before the decode budget runs
+    /// out; when a seek lands no later than the last picture, the key frames
+    /// are too far apart for that to save work, and the rest is decoded
+    /// through. Pictures stay in file order. The stream ending is an empty
+    /// or short list, not an error.
     pub fn pictures_across(
         &mut self,
         range: &TimeRange,
@@ -624,6 +734,7 @@ impl Media {
         let mut kept = Vec::new();
         let mut last = None;
         let mut decoded = 0_u32;
+        let mut seeking = gap >= SEEK_SPACING;
         while kept.len() < limit {
             if decoded == MAX_SCAN_PICTURES {
                 break;
@@ -645,37 +756,55 @@ impl Media {
             {
                 continue;
             }
-            last = Some(held.start.0);
+            let start = held.start.0;
+            last = Some(start);
             kept.push(held);
+            if seeking && kept.len() < limit {
+                let next = start.saturating_add(gap);
+                if next >= end {
+                    break;
+                }
+                let landed = self.restart_picture(Micros(next))?;
+                seeking = landed.is_some_and(|landed| landed.0 > start);
+            }
         }
         Ok(kept)
     }
 
+    /// Seek the picture track to `source`. The source time of the packet the
+    /// seek landed on, when the stream has a clock and the demuxer names one.
     fn seek_picture(
         &mut self,
         source: Micros,
         track: u32,
         timescale: Timescale,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Option<Micros>, EngineError> {
         self.run = None;
         if timescale.is_clock() {
             let lead = self.picture.as_ref().map_or(0, |pipe| pipe.lead);
             let ticks = micros_to_ticks_floor(source, timescale)?.saturating_add(lead);
-            self.demux
+            let landing = self
+                .demux
                 .seek(SeekTo {
                     track,
                     time: ticks,
                     end: None,
                 })
                 .map_err(from_read)?;
+            Ok(match landing.landing {
+                Landing::Packet { time, .. } => {
+                    ticks_to_micros(time.saturating_sub(lead), timescale).ok()
+                }
+                Landing::End => None,
+            })
         } else {
             let _ = self.demux.seek(SeekTo {
                 track,
                 time: 0,
                 end: None,
             });
+            Ok(None)
         }
-        Ok(())
     }
 
     /// The next picture in display order.
@@ -1202,6 +1331,8 @@ fn frame_from_picture(picture: PictureOutput) -> DecodedFrame {
                 height: info.height,
                 primaries: info.primaries,
                 transfer: info.transfer,
+                matrix: info.matrix,
+                range: info.range,
                 surface: surface.clone(),
             };
         }
@@ -1577,6 +1708,39 @@ fn stream_info(demux: &dyn Demux, byte_size: u64) -> MediaInfo {
     }
 }
 
+/// The streams and the duration of an open file, and whether its packets
+/// were read to find the duration: a file read to its end must be opened
+/// again before it is decoded.
+fn described(demux: &mut dyn Demux, byte_size: u64) -> Result<(MediaInfo, bool), EngineError> {
+    let mut info = stream_info(demux, byte_size);
+    if let Some(duration) = indexed_duration(demux)? {
+        info.duration = duration;
+        return Ok((info, false));
+    }
+    info.duration = duration_of(demux)?;
+    Ok((info, true))
+}
+
+/// [`duration_of`] from the container's index, without reading a packet:
+/// the latest end of any stream with a clock, less its lead. `None` when a
+/// stream with a clock has no indexed end, so the packets must be read.
+fn indexed_duration(demux: &dyn Demux) -> Result<Option<Option<Micros>>, EngineError> {
+    let mut end: Option<i64> = None;
+    for stream in demux.streams() {
+        let timescale = stream.timescale();
+        if !timescale.is_clock() {
+            continue;
+        }
+        let Some(ticks) = demux.indexed_end(stream.id()) else {
+            return Ok(None);
+        };
+        let ticks = ticks.saturating_sub(edit_lead(stream.edits()));
+        let micros = ticks_to_micros(ticks, timescale)?;
+        end = Some(end.map_or(micros.0, |current| current.max(micros.0)));
+    }
+    Ok(Some(end.map(Micros)))
+}
+
 fn duration_of(demux: &mut dyn Demux) -> Result<Option<Micros>, EngineError> {
     // Each stream's time zero, as playback places it: a transport stream's
     // first picture shows at its edit's media time, not at tick zero.
@@ -1646,9 +1810,8 @@ fn choose<'a>(families: &'a [Family], header: &[u8], len: u64) -> Result<&'a Fam
     Err(EngineError::UnknownContainer)
 }
 
-fn header_of(path: &Path) -> Result<Vec<u8>, EngineError> {
+fn header_of(path: &Path, len: u64) -> Result<Vec<u8>, EngineError> {
     let mut file = open_file(path)?;
-    let len = file_len(path)?;
     let cap = usize::try_from(len.min(u64::try_from(HEADER_LIMIT).unwrap_or(u64::MAX)))
         .unwrap_or(HEADER_LIMIT);
     let mut buf = vec![0_u8; cap];
@@ -1668,7 +1831,7 @@ fn header_of(path: &Path) -> Result<Vec<u8>, EngineError> {
     Ok(buf)
 }
 
-fn file_len(path: &Path) -> Result<u64, EngineError> {
+pub(crate) fn file_stamp(path: &Path) -> Result<Stamp, EngineError> {
     let file = open_file(path)?;
     let meta = file.metadata().map_err(|error| EngineError::Io {
         message: error.to_string(),
@@ -1678,7 +1841,10 @@ fn file_len(path: &Path) -> Result<u64, EngineError> {
             message: "not a file".to_owned(),
         });
     }
-    Ok(meta.len())
+    Ok(Stamp {
+        len: meta.len(),
+        modified: meta.modified().ok(),
+    })
 }
 
 fn open_file(path: &Path) -> Result<File, EngineError> {

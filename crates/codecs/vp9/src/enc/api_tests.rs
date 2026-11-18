@@ -3916,3 +3916,39 @@ fn a_corpus_four_times_the_clips_complexity_halves_its_rate() {
     assert!(poor / at > 0.35 && poor / at < 0.7, "{poor} against {at}");
     assert!(rich / at > 1.4 && rich / at < 2.8, "{rich} against {at}");
 }
+
+#[test]
+fn two_passes_put_a_key_frame_on_a_cut() {
+    // As libvpx's two passes: a cut is a key frame by default (it was a
+    // golden frame), and with `keyint_min` past it, not.
+    let (w, h) = (128u32, 128u32);
+    let clip = |i: u32| {
+        if i < 12 {
+            return moving(w, h, i);
+        }
+        let mut f = moving(w, h, 0);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let (r, c) = (k / 128, k % 128);
+            *v = (40 + (r + c + i as usize) / 4).min(255) as u8;
+        }
+        f
+    };
+    for (min, key) in [(0u32, true), (20, false)] {
+        let opts = super::Vp9Options {
+            bitrate: 400_000,
+            keyint_min: min,
+            speed: 6,
+            threads: 2,
+            ..super::Vp9Options::default()
+        };
+        let packets = two_pass(opts, (w, h), 24, &clip);
+        assert_decodes(&packets, (w, h), 24);
+        let keys: Vec<i64> = packets
+            .iter()
+            .filter(|p| p.keyframe)
+            .map(|p| p.pts)
+            .collect();
+        let want = if key { vec![0, 12] } else { vec![0] };
+        assert_eq!(keys, want, "keyint_min {min}");
+    }
+}

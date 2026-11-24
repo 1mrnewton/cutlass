@@ -1,7 +1,10 @@
 //! The `desc` chunk: `CAFAudioDescription`, 32 big-endian bytes.
 //!
-//! `mSampleRate` is a `Float64`. The stream timescale is that rate, so it
-//! must be a whole number of ticks per second that fits a `u32`.
+//! `mSampleRate` is a `Float64`. The stream timescale is that rate as a
+//! whole number of ticks per second: a fraction, such as the 22254.5454 Hz
+//! of early Macintosh sound, is rounded to the nearest hertz, a half going
+//! up, the rule the AIFF demuxer uses. libavformat's CAF demuxer drops the
+//! fraction instead, so it reports 22254 where this reports 22255.
 
 use cutlass_container::{Limits, OpenError};
 
@@ -20,7 +23,7 @@ pub const FLAG_LITTLE_ENDIAN: u32 = 2;
 /// The audio description, with the rate checked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Description {
-    /// `mSampleRate`, a whole number of frames per second.
+    /// `mSampleRate`, to the nearest whole number of frames per second.
     pub sample_rate: u32,
     /// `mFormatID`, such as `lpcm`, `aac ` or `alac`.
     pub format: [u8; 4],
@@ -46,7 +49,7 @@ impl Description {
         let field = |at| be_u32(body, at).ok_or_else(|| truncated(DESC_BYTES, 0));
         let format = fourcc(body, 8).ok_or_else(|| truncated(DESC_BYTES, 0))?;
         let description = Self {
-            sample_rate: whole_rate(f64::from_bits(rate_bits))?,
+            sample_rate: nearest_rate(f64::from_bits(rate_bits))?,
             format,
             flags: field(12)?,
             bytes_per_packet: field(16)?,
@@ -107,20 +110,23 @@ impl Description {
     }
 }
 
-/// The timescale of a `Float64` rate: finite, positive, whole, at most `u32::MAX`.
-fn whole_rate(rate: f64) -> Result<u32, OpenError> {
-    if !rate.is_finite() || rate < 1.0 || rate > f64::from(u32::MAX) || rate.fract() != 0.0 {
+/// The timescale of a `Float64` rate: the nearest whole number, a half
+/// going up. The rate must be finite and round to `1..=u32::MAX`.
+fn nearest_rate(rate: f64) -> Result<u32, OpenError> {
+    let whole = (rate + 0.5).floor();
+    if !rate.is_finite() || whole < 1.0 || whole > f64::from(u32::MAX) {
         return Err(malformed(format!(
-            "desc sample rate {rate} is not a whole number of frames per second"
+            "desc sample rate {rate} is not a number of frames per second"
         )));
     }
     // Checked above: whole, at least 1 and at most u32::MAX, so the cast is exact.
-    Ok(rate as u32)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(whole as u32)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Description, whole_rate};
+    use super::{Description, nearest_rate};
     use cutlass_container::{Limits, OpenError};
 
     fn body(rate: f64, channels: u32, fpp: u32, bpp: u32) -> Vec<u8> {
@@ -146,13 +152,33 @@ mod tests {
     }
 
     #[test]
-    fn rates_that_are_not_a_whole_timescale_are_refused() {
-        for rate in [0.0, -1.0, 0.5, 44_100.5, f64::NAN, f64::INFINITY, 5e9] {
-            assert!(whole_rate(rate).is_err(), "{rate}");
+    fn rates_that_are_not_a_timescale_are_refused() {
+        for rate in [
+            0.0,
+            -1.0,
+            0.25,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            5e9,
+            f64::from(u32::MAX) + 0.5,
+        ] {
+            assert!(nearest_rate(rate).is_err(), "{rate}");
         }
-        assert_eq!(whole_rate(1.0), Ok(1));
-        assert_eq!(whole_rate(f64::from(u32::MAX)), Ok(u32::MAX));
-        assert_eq!(whole_rate(8_000.0), Ok(8_000));
+        assert_eq!(nearest_rate(1.0), Ok(1));
+        assert_eq!(nearest_rate(f64::from(u32::MAX)), Ok(u32::MAX));
+        assert_eq!(nearest_rate(8_000.0), Ok(8_000));
+    }
+
+    #[test]
+    fn a_fractional_rate_is_the_nearest_hertz() {
+        // 244800 / 11 Hz, the first Macintosh sound hardware.
+        assert_eq!(nearest_rate(244_800.0 / 11.0), Ok(22_255));
+        assert_eq!(nearest_rate(122_400.0 / 11.0), Ok(11_127));
+        assert_eq!(nearest_rate(44_100.5), Ok(44_101));
+        assert_eq!(nearest_rate(44_100.499), Ok(44_100));
+        assert_eq!(nearest_rate(0.5), Ok(1));
+        assert_eq!(nearest_rate(f64::from(u32::MAX) + 0.25), Ok(u32::MAX));
     }
 
     #[test]

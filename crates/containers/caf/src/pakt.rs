@@ -221,6 +221,37 @@ impl Table {
         located
     }
 
+    /// Drops the rows whose packets do not lie wholly inside the first
+    /// `len` bytes of sound: what a file that stops early still holds.
+    /// Returns true when a row was dropped.
+    pub(crate) fn keep_within(&mut self, len: u64) -> bool {
+        if self.total_bytes <= len {
+            return false;
+        }
+        let mut kept = 0_u64;
+        let mut bytes = 0_u64;
+        let mut frames = 0_u64;
+        while kept < self.count {
+            let (size, duration) = self.entry(kept);
+            let end = bytes.saturating_add(u64::from(size));
+            if end > len {
+                break;
+            }
+            bytes = end;
+            frames = frames.saturating_add(u64::from(duration));
+            kept += 1;
+        }
+        let rows = usize::try_from(kept).unwrap_or(usize::MAX);
+        self.sizes.truncate(rows);
+        self.frames.truncate(rows);
+        let checkpoints = usize::try_from(kept.div_ceil(CHECKPOINT_EVERY)).unwrap_or(usize::MAX);
+        self.checkpoints.truncate(checkpoints);
+        self.count = kept;
+        self.total_bytes = bytes;
+        self.total_frames = frames;
+        true
+    }
+
     /// Reads the entries that follow a packet table header.
     ///
     /// `entry_bytes` is the chunk size less the header. `constant_bytes`

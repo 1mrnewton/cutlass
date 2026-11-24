@@ -68,7 +68,7 @@ fn a_broken_description_is_refused() {
         (f64::INFINITY, 4, 1, 2, 16),
         (0.0, 4, 1, 2, 16),
         (-48_000.0, 4, 1, 2, 16),
-        (44_100.5, 4, 1, 2, 16),
+        (0.25, 4, 1, 2, 16),
         (1e12, 4, 1, 2, 16),
         (48_000.0, 4, 1, 0, 16),
         (48_000.0, 4, 1, 65, 16),
@@ -128,11 +128,19 @@ fn chunk_sizes_that_overrun_or_go_negative_are_refused_before_data() {
         assert!(open(&bytes).is_err(), "free {size}");
         drain(&bytes);
     }
+    // The sound chunk is the exception: a size past the file is a file
+    // that stopped, and the frames that are there play.
     let huge = file(&[
         chunk(b"desc", &desc_body(48_000.0, b"lpcm", 2, 4, 1, 2, 16)),
-        sized_chunk(b"data", 1 << 50, &data_body(&[0; 16])),
+        sized_chunk(b"data", 1 << 50, &data_body(&[7; 18])),
     ]);
-    assert!(matches!(refused(&huge), OpenError::HostileSize { .. }));
+    let mut demux = open(&huge).expect("cut data");
+    assert!(demux.is_cut());
+    assert_eq!(demux.total_frames(), Some(4));
+    let packet = demux.read_packet().expect("read").expect("packet");
+    assert_eq!(packet.bytes(), &[7; 16]);
+    assert!(demux.read_packet().expect("end").is_none());
+    drain(&huge);
 }
 
 #[test]
@@ -224,9 +232,33 @@ fn varints_that_are_too_long_or_too_large_are_refused() {
 }
 
 #[test]
-fn packet_sizes_beyond_the_data_or_the_packet_limit_are_refused() {
-    let bytes = aac_with_pakt(pakt_body(2, 2048, 0, 0, &[10, 10]), &[0; 15]);
-    assert!(matches!(refused(&bytes), OpenError::HostileSize { .. }));
+fn packet_sizes_beyond_the_data_drop_rows_and_beyond_the_packet_limit_are_refused() {
+    // Two packets of 10 bytes in 15 bytes of sound: the first is whole.
+    let bytes = aac_with_pakt(pakt_body(2, 2048, 0, 0, &[10, 10]), &[3; 15]);
+    let mut demux = open(&bytes).expect("cut table");
+    assert!(demux.is_cut());
+    assert_eq!(demux.packet_count(), Some(1));
+    assert_eq!(demux.total_frames(), Some(1024));
+    let packet = demux.read_packet().expect("read").expect("packet");
+    assert_eq!(packet.bytes(), &[3; 10]);
+    assert_eq!(packet.timestamp().duration(), Some(1024));
+    assert!(demux.read_packet().expect("end").is_none());
+    let end = demux
+        .seek(SeekTo {
+            track: 0,
+            time: 1024,
+            end: None,
+        })
+        .expect("seek");
+    assert!(matches!(end.landing, cutlass_container::Landing::End));
+    // No packet is whole: the file opens and is empty.
+    let none = aac_with_pakt(pakt_body(2, 2048, 0, 0, &[10, 10]), &[3; 9]);
+    let mut demux = open(&none).expect("no whole packet");
+    assert!(demux.is_cut());
+    assert_eq!(demux.packet_count(), Some(0));
+    assert!(demux.read_packet().expect("end").is_none());
+    drain(&bytes);
+    drain(&none);
     let mut big = Vec::new();
     varint(20 * 1024 * 1024, &mut big);
     let mut table = pakt_body(1, 1024, 0, 0, &[]);

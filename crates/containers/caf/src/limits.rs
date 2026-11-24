@@ -33,10 +33,11 @@ pub const MAX_KEPT_BYTES: u64 = 1024 * 1024;
 /// channel, for [`MAX_CHANNELS`] channels.
 pub const MAX_CHAN_BYTES: u64 = 12 + 20 * MAX_CHANNELS as u64;
 
-/// Linear PCM is returned in packets of whole frames up to this many bytes,
-/// the grouping libavformat's CAF demuxer uses. A frame larger than this is
-/// returned alone.
-pub const PCM_PACKET_BYTES: u64 = 4_096;
+/// Linear PCM is returned in packets of whole frames up to this many
+/// bytes: 16,384 frames of 16-bit stereo, the size the WAV and AIFF
+/// demuxers use. libavformat's CAF demuxer uses 4,096. A frame larger than
+/// this is returned alone.
+pub const PCM_PACKET_BYTES: u64 = 64 * 1024;
 
 /// One seek checkpoint is kept for this many packets of a packet table.
 pub const CHECKPOINT_EVERY: u64 = 64;

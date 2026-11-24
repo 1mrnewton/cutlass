@@ -3,12 +3,17 @@
 //! Open walks the chunks and decodes the packet table; it does not read
 //! the sound. Each read returns one packet; linear PCM and other formats
 //! of one frame per packet are grouped into whole frames up to
-//! [`PCM_PACKET_BYTES`], the grouping libavformat uses. Timestamps are
+//! [`PCM_PACKET_BYTES`]. Timestamps are
 //! frames at the `desc` sample rate, counted from the first frame in the
 //! file: priming frames are not subtracted. They are exposed as the
 //! stream's [`Trim`] and as one edit. A seek is arithmetic for constant
 //! packets and uses the table's checkpoints for variable ones; it reads no
 //! sound bytes.
+//!
+//! A file that stops inside `data` plays the whole packets it holds: the
+//! frames that are there for constant packets, and the rows of the packet
+//! table whose bytes are there for variable ones. [`CafDemux::is_cut`]
+//! says so.
 
 use std::io::{BufReader, Read, Seek};
 
@@ -21,7 +26,7 @@ use cutlass_container::{
 use crate::chan::ChannelLayout;
 use crate::codec;
 use crate::desc::Description;
-use crate::error::{hostile, malformed};
+use crate::error::malformed;
 use crate::info::InfoEntry;
 use crate::kept::KeptChunk;
 use crate::limits::PCM_PACKET_BYTES;
@@ -52,6 +57,7 @@ pub struct CafDemux<R> {
     group: u64,
     /// A forward input whose `data` runs to an unknown end.
     unbounded: bool,
+    cut: bool,
     next: u64,
     offset: u64,
     time: u64,
@@ -92,10 +98,11 @@ impl<R: Read + Seek> CafDemux<R> {
     fn from_input(mut input: Input<BufReader<R>>) -> Result<Self, OpenError> {
         let mut scanned = walk::scan(&mut input)?;
         let unbounded = scanned.data.len.is_none() && scanned.desc.is_constant();
-        let packets = plan(&mut scanned, &input)?;
+        let (packets, cut) = plan(&mut scanned, &input)?;
         let stream = stream_of(&scanned, &packets, unbounded)?;
         let group = if scanned.desc.is_constant() && scanned.desc.frames_per_packet == 1 {
-            (PCM_PACKET_BYTES / u64::from(scanned.desc.bytes_per_packet)).max(1)
+            let limit = PCM_PACKET_BYTES.min(input.limits().max_packet_bytes);
+            (limit / u64::from(scanned.desc.bytes_per_packet)).max(1)
         } else {
             1
         };
@@ -114,6 +121,7 @@ impl<R: Read + Seek> CafDemux<R> {
             packets,
             group,
             unbounded,
+            cut,
             next: 0,
             offset: 0,
             time: 0,
@@ -197,6 +205,15 @@ impl<R: Read + Seek> CafDemux<R> {
         self.data.open_ended
     }
 
+    /// True when the file holds less sound than its header states: `data`
+    /// runs past the end of the file, or the packet table counts packets
+    /// whose bytes are not there. What is there plays. A forward reader
+    /// learns this only when the input ends.
+    #[must_use]
+    pub const fn is_cut(&self) -> bool {
+        self.cut
+    }
+
     /// CAF packets in the file, or `None` for a forward input whose `data`
     /// runs to an unknown end.
     #[must_use]
@@ -248,6 +265,10 @@ impl<R: Read + Seek> CafDemux<R> {
             .checked_add(self.offset)
             .ok_or_else(|| source("packet offset does not fit"))?;
         self.place(at)?;
+        if self.input.access() == Access::Forward && self.group > 1 {
+            // A forward input may end before the size it stated.
+            return self.read_run(bytes, taken);
+        }
         let payload = self
             .input
             .read_limited(bytes, self.input.limits().max_packet_bytes)
@@ -259,15 +280,42 @@ impl<R: Read + Seek> CafDemux<R> {
         Ok(Some(packet))
     }
 
-    /// A forward read of constant packets up to the end of the stream.
-    fn read_unbounded(&mut self) -> Result<Option<Packet>, ReadError> {
-        if self.ended {
+    /// `asked` one-frame packets of a forward input, or the whole ones
+    /// that arrive before it ends.
+    fn read_run(&mut self, bytes: u64, asked: u64) -> Result<Option<Packet>, ReadError> {
+        let limit = self.input.limits().max_packet_bytes;
+        if bytes > limit {
+            return Err(ReadError::HostileSize {
+                declared: bytes,
+                limit,
+            });
+        }
+        let want = usize::try_from(bytes).map_err(|_| source("packet size does not fit"))?;
+        let payload = self.fill(want)?;
+        let (each, frames) = self.packets.entry(0);
+        let each = u64::from(each).max(1);
+        let taken = crate::bytes::len_u64(payload.len()) / each;
+        if taken < asked {
+            self.cut = true;
+            self.next = self.packets.count();
+        }
+        if taken == 0 {
             return Ok(None);
         }
-        let (bytes, frames) = self.packets.entry(0);
-        let packet_bytes =
-            usize::try_from(bytes).map_err(|_| source("packet size does not fit"))?;
-        let want = packet_bytes.saturating_mul(usize::try_from(self.group).unwrap_or(1));
+        let mut payload = payload;
+        payload.truncate(usize::try_from(taken * each).unwrap_or(0));
+        let frames = u64::from(frames) * taken;
+        let packet = self.packet(payload, frames)?;
+        if taken == asked {
+            self.next += taken;
+        }
+        self.offset += taken * each;
+        self.time += frames;
+        Ok(Some(packet))
+    }
+
+    /// Up to `want` bytes: fewer when the input ends first.
+    fn fill(&mut self, want: usize) -> Result<Vec<u8>, ReadError> {
         let mut payload = Vec::new();
         payload
             .try_reserve_exact(want)
@@ -280,10 +328,29 @@ impl<R: Read + Seek> CafDemux<R> {
                 .read(&mut payload[filled..])
                 .map_err(ReadError::from_packet)?;
             if got == 0 {
-                self.ended = true;
                 break;
             }
             filled += got;
+        }
+        payload.truncate(filled);
+        Ok(payload)
+    }
+
+    /// A forward read of constant packets up to the end of the stream.
+    fn read_unbounded(&mut self) -> Result<Option<Packet>, ReadError> {
+        if self.ended {
+            return Ok(None);
+        }
+        let (bytes, frames) = self.packets.entry(0);
+        let packet_bytes =
+            usize::try_from(bytes).map_err(|_| source("packet size does not fit"))?;
+        let want = packet_bytes.saturating_mul(usize::try_from(self.group).unwrap_or(1));
+        let mut payload = self.fill(want)?;
+        let filled = payload.len();
+        if filled < want {
+            self.ended = true;
+            // The input may end anywhere, but not inside a frame.
+            self.cut |= !filled.is_multiple_of(packet_bytes.max(1));
         }
         let whole = filled / packet_bytes.max(1);
         if whole == 0 {
@@ -375,22 +442,23 @@ fn source(message: impl Into<String>) -> ReadError {
     }
 }
 
-/// The packet layout, checked against the bytes in `data`. The table moves
-/// out of `scanned` rather than being copied: it is the one large thing an
-/// open holds.
-fn plan<R: Read>(scanned: &mut Scanned, input: &Input<R>) -> Result<Packets, OpenError> {
+/// The packet layout, fitted to the bytes in `data`, and whether the file
+/// holds less than its header states. The table moves out of `scanned`
+/// rather than being copied: it is the one large thing an open holds.
+fn plan<R: Read>(scanned: &mut Scanned, input: &Input<R>) -> Result<(Packets, bool), OpenError> {
     let desc = &scanned.desc;
     let data_len = scanned.data.len;
+    let mut cut = scanned.data.cut;
     if desc.is_constant() {
         let bytes = u64::from(desc.bytes_per_packet);
         let declared = scanned.pakt.map_or(0, |pakt| pakt.packets);
         let count = match data_len {
             Some(len) if declared > 0 => {
-                let need = declared.saturating_mul(bytes);
-                if need > len {
-                    return Err(hostile(need, len));
-                }
-                declared
+                // A table that counts more packets than the bytes hold is
+                // a file that stopped: the packets that are there play.
+                let held = len / bytes;
+                cut |= declared > held;
+                declared.min(held)
             }
             Some(len) => len / bytes,
             None => 0,
@@ -407,9 +475,9 @@ fn plan<R: Read>(scanned: &mut Scanned, input: &Input<R>) -> Result<Packets, Ope
         {
             return Err(malformed("the frame count does not fit"));
         }
-        return Ok(packets);
+        return Ok((packets, cut));
     }
-    let Some(table) = scanned.table.take() else {
+    let Some(mut table) = scanned.table.take() else {
         if input.access() == Access::Forward {
             return Err(malformed(
                 "variable packets need a pakt chunk before data on a forward input",
@@ -417,13 +485,11 @@ fn plan<R: Read>(scanned: &mut Scanned, input: &Input<R>) -> Result<Packets, Ope
         }
         return Err(malformed("variable packets need a pakt chunk"));
     };
-    let packets = Packets::Table(table);
-    if let Some(len) = data_len
-        && packets.total_bytes() > len
-    {
-        return Err(hostile(packets.total_bytes(), len));
+    // Rows whose bytes the file does not hold are dropped, not refused.
+    if let Some(len) = data_len {
+        cut |= table.keep_within(len);
     }
-    Ok(packets)
+    Ok((Packets::Table(table), cut))
 }
 
 fn stream_of(scanned: &Scanned, packets: &Packets, unbounded: bool) -> Result<Stream, OpenError> {
@@ -497,5 +563,13 @@ impl<R: Read + Seek + Send> Demux for CafDemux<R> {
 
     fn consumed(&self) -> u64 {
         self.input.consumed()
+    }
+
+    fn indexed_end(&self, track: TrackId) -> Option<i64> {
+        if track.get() != 0 || self.unbounded {
+            return None;
+        }
+        let frames = self.packets.total_frames();
+        (frames != 0).then(|| i64::try_from(frames).ok()).flatten()
     }
 }

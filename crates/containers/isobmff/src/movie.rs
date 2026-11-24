@@ -232,6 +232,12 @@ fn parse_trak(
         partial_sync: draft.partial_sync,
     };
     let no_sync = index::no_sync_samples(&tables.sync, &tables.partial_sync);
+    let kind = match (kind, &tables.sizes) {
+        (MediaKind::Audio(audio), Sizes::Constant { size, .. }) if sample_entry == *b"ipcm" => {
+            MediaKind::Audio(fit_integer_pcm(audio, *size))
+        }
+        (kind, _) => kind,
+    };
     let mut grouped = None;
     let samples = if tables.sizes.count() == 0 {
         Vec::new()
@@ -302,6 +308,36 @@ fn fit_kind(kind: MediaKind, tkhd_width: u32, tkhd_height: u32, timescale: u32) 
             })
         }
         other => other,
+    }
+}
+
+/// An `ipcm` track whose `stsz` frame size disagrees with its `pcmC`
+/// sample size takes the width from `stsz`. FFmpeg 6.1 wrote 24-bit PCM
+/// with a `pcmC` that says 32 bits; the bytes in the file are 24-bit.
+fn fit_integer_pcm(audio: AudioParams, frame_bytes: u32) -> AudioParams {
+    use crate::legacy::SampleFormat as F;
+    let channels = u32::from(audio.channels);
+    if channels == 0 || !frame_bytes.is_multiple_of(channels) {
+        return audio;
+    }
+    let little = matches!(audio.format, F::S16Le | F::S24Le | F::S32Le);
+    let big = matches!(audio.format, F::S16Be | F::S24Be | F::S32Be);
+    if !little && !big {
+        return audio;
+    }
+    let (format, bits) = match (frame_bytes / channels, little) {
+        (2, true) => (F::S16Le, 16),
+        (2, false) => (F::S16Be, 16),
+        (3, true) => (F::S24Le, 24),
+        (3, false) => (F::S24Be, 24),
+        (4, true) => (F::S32Le, 32),
+        (4, false) => (F::S32Be, 32),
+        _ => return audio,
+    };
+    AudioParams {
+        format,
+        bits_per_sample: bits,
+        ..audio
     }
 }
 

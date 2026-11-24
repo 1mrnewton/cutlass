@@ -17,7 +17,10 @@
 //!   movie. The fragments' payload becomes the movie's `mdat`, and the
 //!   `moov` and `moof` boxes written on the way are left inside it as
 //!   unreferenced bytes. A process that dies before `finish` leaves a
-//!   fragmented file that plays up to its last whole fragment.
+//!   fragmented file that plays up to its last whole fragment. When a track
+//!   cannot be described as the first fragment is due, because its codec
+//!   configuration has not come yet, the file is written progressive
+//!   instead, as it would be without the option.
 //!
 //! A fragment ends before a video keyframe once it holds
 //! `fragment_millis` of video, or once any track holds that much when there
@@ -521,7 +524,13 @@ impl<W: Write + Seek> IsoBmffMux<W> {
             }
             Layout::Recoverable => {
                 // The cover goes in the movie written at finish.
-                let moov = init_moov(&self.tracks, self.movie_scale()?, None, times)?;
+                let Ok(moov) = init_moov(&self.tracks, self.movie_scale()?, None, times) else {
+                    // A track cannot be described yet: its configuration
+                    // has not come. The file is written progressive, as it
+                    // would be without this option, and described at finish.
+                    self.options.recoverable = false;
+                    return self.start();
+                };
                 self.write_bytes(&ftyp)?;
                 self.mdat_at = Some(self.cursor);
                 // Sixteen free bytes that finish turns into the `mdat`
@@ -638,32 +647,45 @@ impl<W: Write + Seek> IsoBmffMux<W> {
                 if self.cut_before(track, &entry) {
                     self.flush_fragment()?;
                 }
-                let held = &mut self.tracks[track];
-                if held.pending.is_empty() {
-                    held.pending_dts = sample.dts;
+                if self.layout()? == Layout::Progressive {
+                    // The flush found a track it could not describe yet
+                    // and made the file progressive.
+                    entry.offset = self.cursor;
+                    self.write_bytes(payload)?;
+                    self.tracks[track].samples.push(entry);
+                } else {
+                    self.hold(track, sample.dts, &entry, payload);
                 }
-                held.pending.push(FragSample {
-                    duration: entry.duration,
-                    size,
-                    cts,
-                    keyframe: entry.keyframe,
-                });
-                let at = self.fragment.len();
-                match held.runs.last_mut() {
-                    Some(run) if run.at + run.len == at => run.len += payload.len(),
-                    _ => held.runs.push(Run {
-                        first: held.pending.len() - 1,
-                        at,
-                        len: payload.len(),
-                    }),
-                }
-                held.pending_ticks = held.pending_ticks.saturating_add(u64::from(entry.duration));
-                self.fragment.extend_from_slice(payload);
-                self.pending_samples += 1;
             }
         }
         self.tracks[track].next_dts = next_dts;
         Ok(())
+    }
+
+    /// Adds a sample to the current fragment.
+    fn hold(&mut self, track: usize, dts: i64, entry: &Sample, payload: &[u8]) {
+        let held = &mut self.tracks[track];
+        if held.pending.is_empty() {
+            held.pending_dts = dts;
+        }
+        held.pending.push(FragSample {
+            duration: entry.duration,
+            size: entry.size,
+            cts: entry.cts,
+            keyframe: entry.keyframe,
+        });
+        let at = self.fragment.len();
+        match held.runs.last_mut() {
+            Some(run) if run.at + run.len == at => run.len += payload.len(),
+            _ => held.runs.push(Run {
+                first: held.pending.len() - 1,
+                at,
+                len: payload.len(),
+            }),
+        }
+        held.pending_ticks = held.pending_ticks.saturating_add(u64::from(entry.duration));
+        self.fragment.extend_from_slice(payload);
+        self.pending_samples += 1;
     }
 
     /// Whether the current fragment ends before this sample of `track`.
@@ -715,6 +737,9 @@ impl<W: Write + Seek> IsoBmffMux<W> {
             return Ok(());
         }
         self.start()?;
+        if self.layout()? == Layout::Progressive {
+            return self.write_pending_plain();
+        }
         let fragmented = self.options.fragmented;
         let grouped = !fragmented;
         let draft = moof_bytes(&self.tracks, self.sequence, 0, grouped)?;
@@ -756,6 +781,38 @@ impl<W: Write + Seek> IsoBmffMux<W> {
         written?;
         self.sequence = self.sequence.saturating_add(1);
         self.flush_output()
+    }
+
+    /// Writes the pending samples as plain payload, in the order they
+    /// arrived, for a recoverable file that had to start progressive.
+    fn write_pending_plain(&mut self) -> Result<(), Error> {
+        let base = self.cursor;
+        let payload = std::mem::take(&mut self.fragment);
+        let written = self.write_bytes(&payload);
+        self.fragment = payload;
+        self.fragment.clear();
+        for track in &mut self.tracks {
+            let mut runs = track.runs.iter().peekable();
+            let mut at = base;
+            for (index, sample) in track.pending.iter().enumerate() {
+                if let Some(run) = runs.next_if(|run| run.first == index) {
+                    at = base.saturating_add(u64::try_from(run.at).unwrap_or(u64::MAX));
+                }
+                track.samples.push(Sample {
+                    offset: at,
+                    duration: sample.duration,
+                    size: sample.size,
+                    cts: sample.cts,
+                    keyframe: sample.keyframe,
+                });
+                at += u64::from(sample.size);
+            }
+            track.pending.clear();
+            track.runs.clear();
+            track.pending_ticks = 0;
+        }
+        self.pending_samples = 0;
+        written
     }
 
     /// Writes a fragment's payload after its `mdat` header, and records
@@ -933,13 +990,11 @@ impl<W: Write + Seek> Mux for IsoBmffMux<W> {
                 let mfra = mfra_bytes(&self.tracks);
                 self.write_bytes(&mfra)?;
             }
-            Layout::Recoverable => {
+            Layout::Recoverable | Layout::Progressive => {
+                // A recoverable file that could not describe its tracks
+                // when it started is progressive from here on.
                 self.start()?;
                 self.flush_fragment()?;
-                self.finish_movie()?;
-            }
-            Layout::Progressive => {
-                self.start()?;
                 self.finish_movie()?;
             }
             Layout::Buffered => {

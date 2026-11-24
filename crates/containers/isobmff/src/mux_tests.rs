@@ -776,6 +776,63 @@ fn a_fragment_does_not_wait_forever_for_a_keyframe() {
     assert_eq!(read_all(&unfinished), packets[..fragments.len() * 12]);
 }
 
+#[test]
+fn a_recoverable_file_without_a_configuration_yet_is_written_progressive() {
+    // An Opus track cannot be described before its head arrives. The
+    // first fragment comes due without it, so the file goes on as a
+    // progressive one, and the head set later is in the index.
+    for moov_at_end in [true, false] {
+        let mut cursor = Cursor::new(Vec::new());
+        let mut wrote = Vec::new();
+        {
+            let mut mux = IsoBmffMux::with_reader(
+                &mut cursor,
+                MuxOptions {
+                    recoverable: true,
+                    moov_at_end,
+                    fragment_millis: 100,
+                    ..MuxOptions::default()
+                },
+            );
+            let opus = StreamParams::audio(
+                CodecId::Opus,
+                Timescale(48_000),
+                48_000,
+                2,
+                16,
+                Default::default(),
+            );
+            let id = mux.add_stream(&opus).unwrap();
+            for number in 0..40u64 {
+                let packet = Packet {
+                    track_id: id,
+                    payload: payload(3, number),
+                    dts: i64::try_from(number).unwrap() * 960,
+                    pts: i64::try_from(number).unwrap() * 960,
+                    duration: 960,
+                    timescale: Timescale(48_000),
+                    keyframe: true,
+                };
+                mux.write_packet(&packet).unwrap();
+                wrote.push(packet);
+            }
+            let mut head = b"OpusHead".to_vec();
+            head.extend_from_slice(&[1, 2, 0, 0, 0x80, 0xBB, 0, 0, 0, 0, 0]);
+            mux.set_extradata(id, head).unwrap();
+            mux.finish().unwrap();
+        }
+        let bytes = cursor.into_inner();
+        let expected: &[&str] = if moov_at_end {
+            &["ftyp", "mdat", "moov"]
+        } else {
+            &["ftyp", "moov", "mdat"]
+        };
+        assert_eq!(kinds(&bytes), expected);
+        assert!(!bytes.windows(4).any(|word| word == b"moof"));
+        assert_eq!(read_all(&bytes), wrote);
+    }
+}
+
 fn chunk_count(trak: &[u8]) -> u32 {
     be32(find(trak, &[b"mdia", b"minf", b"stbl", b"stco"]), 4)
 }

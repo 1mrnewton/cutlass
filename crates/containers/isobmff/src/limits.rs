@@ -42,6 +42,3 @@ pub const MAX_COVER_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Payloads buffered when `moov` is written before `mdat`.
 pub const MAX_BUFFERED_MUX_BYTES: u64 = 256 * 1024 * 1024;
-
-/// Samples gathered into one movie fragment before it is flushed.
-pub const DEFAULT_SAMPLES_PER_FRAGMENT: u32 = 16;

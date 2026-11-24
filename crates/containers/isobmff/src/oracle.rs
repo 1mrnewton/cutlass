@@ -803,6 +803,7 @@ fn mux_once(rng: &mut u64) -> Result<(), String> {
         fragmented: rng_next(rng).is_multiple_of(2),
         samples_per_fragment: u32::try_from(1 + (rng_next(rng) % 8)).unwrap_or(1),
         movie_timescale: None,
+        ..crate::MuxOptions::default()
     };
     let mut mux = crate::IsoBmffMux::new(std::io::Cursor::new(Vec::new()), options);
     let track_count = 1 + (rng_next(rng) % 3);

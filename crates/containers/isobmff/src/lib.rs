@@ -26,7 +26,10 @@ pub use brand::probe;
 pub use demux::{IsoBmff, IsoBmffFile};
 pub use file_mux::Mp4Mux;
 pub use limits::{MAX_METADATA_BYTES, MAX_PACKET_BYTES, MAX_SAMPLES, PROBE_BYTES};
-pub use mux::{FileBrand, IsoBmffMux, MuxOptions};
+pub use mux::{
+    DEFAULT_FRAGMENT_BYTES, DEFAULT_FRAGMENT_MILLIS, FileBrand, IsoBmffMux, MAX_MOVIE_TIMESCALE,
+    MuxOptions,
+};
 
 pub use legacy::{
     AudioParams, CodecId, ColorTags, Demux, Edit, Error, FileSource, MediaKind, Mux, Packet,

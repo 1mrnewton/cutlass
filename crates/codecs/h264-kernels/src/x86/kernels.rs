@@ -8,6 +8,10 @@
 // [`crate::mc`], [`crate::deblock`], [`crate::residual`] and
 // [`crate::intra`] compare each tier with them.
 //
+// `rustfmt` leaves the body of a macro call as it finds it, `feat!`
+// included. To format this file, turn each `feat! {` line into
+// `mod name {`, run `rustfmt` on the file, and turn the lines back.
+//
 // # Memory
 //
 // As the NEON whole-block kernels do, these load and store through
@@ -438,7 +442,11 @@ feat! {
     unsafe fn put8<const AVG: bool>(dst: *mut u8, row: __m128i) {
         // SAFETY: the caller's promise.
         unsafe {
-            let row = if AVG { _mm_avg_epu8(row, ld8(dst)) } else { row };
+            let row = if AVG {
+                _mm_avg_epu8(row, ld8(dst))
+            } else {
+                row
+            };
             st8(dst, row);
         }
     }
@@ -452,7 +460,11 @@ feat! {
     unsafe fn put4<const AVG: bool>(dst: *mut u8, row: __m128i) {
         // SAFETY: the caller's promise.
         unsafe {
-            let row = if AVG { _mm_avg_epu8(row, ld4(dst)) } else { row };
+            let row = if AVG {
+                _mm_avg_epu8(row, ld4(dst))
+            } else {
+                row
+            };
             st4(dst, row);
         }
     }
@@ -502,7 +514,14 @@ feat! {
         // writes, from `at` in the source.
         unsafe {
             let src = block.src.as_ptr().add(at);
-            luma_run(w, false, (dst.as_mut_ptr(), dst_stride), (src, block.stride), h, frac);
+            luma_run(
+                w,
+                false,
+                (dst.as_mut_ptr(), dst_stride),
+                (src, block.stride),
+                h,
+                frac,
+            );
         }
         true
     }
@@ -672,7 +691,14 @@ feat! {
         // writes, from `at` in the source.
         unsafe {
             let src = block.src.as_ptr().add(at);
-            chroma_run(w, false, (dst.as_mut_ptr(), dst_stride), (src, block.stride), h, frac);
+            chroma_run(
+                w,
+                false,
+                (dst.as_mut_ptr(), dst_stride),
+                (src, block.stride),
+                h,
+                frac,
+            );
         }
         true
     }
@@ -727,7 +753,11 @@ feat! {
         }
         let reach = |source: &ChromaSource<'_>| {
             let cb = chroma_reach(&source.plane(true, size), source.frac, (dst_cb, dst_stride))?;
-            let cr = chroma_reach(&source.plane(false, size), source.frac, (dst_cr, dst_stride))?;
+            let cr = chroma_reach(
+                &source.plane(false, size),
+                source.frac,
+                (dst_cr, dst_stride),
+            )?;
             Some((cb, cr))
         };
         let Some(one) = reach(&first) else {
@@ -746,8 +776,22 @@ feat! {
         // reads from either source and writes.
         unsafe {
             let (s, frac) = (first.stride, first.frac);
-            chroma_run(w, false, (out_cb, dst_stride), (first.cb.as_ptr().add(one.0), s), h, frac);
-            chroma_run(w, false, (out_cr, dst_stride), (first.cr.as_ptr().add(one.1), s), h, frac);
+            chroma_run(
+                w,
+                false,
+                (out_cb, dst_stride),
+                (first.cb.as_ptr().add(one.0), s),
+                h,
+                frac,
+            );
+            chroma_run(
+                w,
+                false,
+                (out_cr, dst_stride),
+                (first.cr.as_ptr().add(one.1), s),
+                h,
+                frac,
+            );
             if let Some((source, at)) = two {
                 let (s, frac) = (source.stride, source.frac);
                 let (cb, cr) = (source.cb.as_ptr().add(at.0), source.cr.as_ptr().add(at.1));
@@ -800,7 +844,9 @@ feat! {
             let (cx, cy) = (x / 2, y / 2);
             let one = chroma_source(first, (cx, cy), (cw, ch));
             let two = match second {
-                Some(source) => chroma_source(source, (cx, cy), (cw, ch)).map(Some).ok_or(()),
+                Some(source) => chroma_source(source, (cx, cy), (cw, ch))
+                    .map(Some)
+                    .ok_or(()),
                 None => Ok(None),
             };
             match (one, two) {
@@ -852,15 +898,24 @@ feat! {
         unsafe {
             let mut done = 0;
             while done + 16 <= n {
-                st16(dst.add(done), _mm_avg_epu8(ld16(a.add(done)), ld16(b.add(done))));
+                st16(
+                    dst.add(done),
+                    _mm_avg_epu8(ld16(a.add(done)), ld16(b.add(done))),
+                );
                 done += 16;
             }
             if done + 8 <= n {
-                st8(dst.add(done), _mm_avg_epu8(ld8(a.add(done)), ld8(b.add(done))));
+                st8(
+                    dst.add(done),
+                    _mm_avg_epu8(ld8(a.add(done)), ld8(b.add(done))),
+                );
                 done += 8;
             }
             if done + 4 <= n {
-                st4(dst.add(done), _mm_avg_epu8(ld4(a.add(done)), ld4(b.add(done))));
+                st4(
+                    dst.add(done),
+                    _mm_avg_epu8(ld4(a.add(done)), ld4(b.add(done))),
+                );
                 done += 4;
             }
             while done < n {
@@ -1032,7 +1087,11 @@ feat! {
         }
         let (w, h) = size;
         let by = _mm_set1_epi16(weight.weight as i16);
-        let round = _mm_set1_epi16(if weight.shift > 0 { 1 << (weight.shift - 1) } else { 0 });
+        let round = _mm_set1_epi16(if weight.shift > 0 {
+            1 << (weight.shift - 1)
+        } else {
+            0
+        });
         let shift = _mm_cvtsi32_si128(weight.shift);
         let offset = _mm_set1_epi16(weight.offset as i16);
         let scaled = |samples: __m128i| {
@@ -1063,7 +1122,12 @@ feat! {
         let (lo, hi) = six16(taps);
         let mut out = [0u8; 16];
         // SAFETY: `out` is sixteen writable bytes.
-        unsafe { st16(out.as_mut_ptr(), _mm_packus_epi16(round_lanes(lo), round_lanes(hi))) };
+        unsafe {
+            st16(
+                out.as_mut_ptr(),
+                _mm_packus_epi16(round_lanes(lo), round_lanes(hi)),
+            )
+        };
         out
     }
 
@@ -1150,7 +1214,10 @@ feat! {
         let mut out = [0u8; 16];
         // SAFETY: each array is sixteen bytes.
         unsafe {
-            st16(out.as_mut_ptr(), _mm_avg_epu8(ld16(a.as_ptr()), ld16(b.as_ptr())));
+            st16(
+                out.as_mut_ptr(),
+                _mm_avg_epu8(ld16(a.as_ptr()), ld16(b.as_ptr())),
+            );
         }
         out
     }
@@ -1160,7 +1227,10 @@ feat! {
         let mut out = [0u8; 8];
         // SAFETY: each array is eight bytes.
         unsafe {
-            st8(out.as_mut_ptr(), _mm_avg_epu8(ld8(a.as_ptr()), ld8(b.as_ptr())));
+            st8(
+                out.as_mut_ptr(),
+                _mm_avg_epu8(ld8(a.as_ptr()), ld8(b.as_ptr())),
+            );
         }
         out
     }
@@ -1172,7 +1242,11 @@ feat! {
         // SAFETY: each line is nine readable bytes and `out` eight
         // writable ones.
         unsafe {
-            let row = chroma_row(chroma_pairs(top.as_ptr()), chroma_pairs(bottom.as_ptr()), taps);
+            let row = chroma_row(
+                chroma_pairs(top.as_ptr()),
+                chroma_pairs(bottom.as_ptr()),
+                taps,
+            );
             st8(out.as_mut_ptr(), row);
         }
         out
@@ -1303,7 +1377,10 @@ feat! {
         let beta = splat(beta);
         // 0xff where the side's outer sample is near enough to be moved.
         let near = |outer: __m128i, edge: __m128i| {
-            _mm_cmpeq_epi8(_mm_or_si128(at_least(absdiff(outer, edge), beta), skip), zero)
+            _mm_cmpeq_epi8(
+                _mm_or_si128(at_least(absdiff(outer, edge), beta), skip),
+                zero,
+            )
         };
         let (ap, aq) = (near(p2, p0), near(q2, q0));
         // Zero on a line that is not filtered, so nothing moves there.
@@ -1470,8 +1547,14 @@ feat! {
             let row = |index: usize| q0.sub(4 * down).add(index * down);
             match tc0 {
                 Some(tc0) => {
-                    let v = [ld16(row(1)), ld16(row(2)), ld16(row(3)), ld16(row(4)), ld16(row(5)),
-                        ld16(row(6))];
+                    let v = [
+                        ld16(row(1)),
+                        ld16(row(2)),
+                        ld16(row(3)),
+                        ld16(row(4)),
+                        ld16(row(5)),
+                        ld16(row(6)),
+                    ];
                     if let Some(new) = normal(v, alpha, beta, spread4(tc0)) {
                         st16(row(2), new[0]);
                         st16(row(3), new[1]);
@@ -1480,8 +1563,16 @@ feat! {
                     }
                 }
                 None => {
-                    let v = [ld16(row(0)), ld16(row(1)), ld16(row(2)), ld16(row(3)), ld16(row(4)),
-                        ld16(row(5)), ld16(row(6)), ld16(row(7))];
+                    let v = [
+                        ld16(row(0)),
+                        ld16(row(1)),
+                        ld16(row(2)),
+                        ld16(row(3)),
+                        ld16(row(4)),
+                        ld16(row(5)),
+                        ld16(row(6)),
+                        ld16(row(7)),
+                    ];
                     if let Some(new) = strong(v, alpha, beta) {
                         for (index, samples) in new.into_iter().enumerate() {
                             st16(row(index + 1), samples);
@@ -1556,10 +1647,21 @@ feat! {
     unsafe fn store_four_lines(first: *mut u8, down: usize, lines: __m128i) {
         // SAFETY: the four lines the caller promises.
         unsafe {
-            first.cast::<i32>().write_unaligned(_mm_cvtsi128_si32(lines));
-            first.add(down).cast::<i32>().write_unaligned(_mm_extract_epi32::<1>(lines));
-            first.add(2 * down).cast::<i32>().write_unaligned(_mm_extract_epi32::<2>(lines));
-            first.add(3 * down).cast::<i32>().write_unaligned(_mm_extract_epi32::<3>(lines));
+            first
+                .cast::<i32>()
+                .write_unaligned(_mm_cvtsi128_si32(lines));
+            first
+                .add(down)
+                .cast::<i32>()
+                .write_unaligned(_mm_extract_epi32::<1>(lines));
+            first
+                .add(2 * down)
+                .cast::<i32>()
+                .write_unaligned(_mm_extract_epi32::<2>(lines));
+            first
+                .add(3 * down)
+                .cast::<i32>()
+                .write_unaligned(_mm_extract_epi32::<3>(lines));
         }
     }
 
@@ -1616,11 +1718,17 @@ feat! {
     unsafe fn load_chroma_lines(first: *const u8, down: usize) -> (__m128i, __m128i) {
         // SAFETY: the eight lines the caller promises.
         let pair = |index: usize| unsafe {
-            _mm_unpacklo_epi8(ld4(first.add(index * down)), ld4(first.add((index + 1) * down)))
+            _mm_unpacklo_epi8(
+                ld4(first.add(index * down)),
+                ld4(first.add((index + 1) * down)),
+            )
         };
         let top = _mm_unpacklo_epi16(pair(0), pair(2));
         let bottom = _mm_unpacklo_epi16(pair(4), pair(6));
-        (_mm_unpacklo_epi32(top, bottom), _mm_unpackhi_epi32(top, bottom))
+        (
+            _mm_unpacklo_epi32(top, bottom),
+            _mm_unpackhi_epi32(top, bottom),
+        )
     }
 
     /// Eight lines' new p0 and q0, a pair of bytes a line in `pairs`, to
@@ -1634,7 +1742,10 @@ feat! {
         // SAFETY: the eight lines the caller promises.
         unsafe {
             let put = |index: usize, pair: i32| {
-                first.add(index * down).cast::<u16>().write_unaligned(pair as u16);
+                first
+                    .add(index * down)
+                    .cast::<u16>()
+                    .write_unaligned(pair as u16);
             };
             put(0, _mm_extract_epi16::<0>(pairs));
             put(1, _mm_extract_epi16::<1>(pairs));
@@ -1658,7 +1769,12 @@ feat! {
     unsafe fn chroma_rows_at(q0: *mut u8, down: usize, alpha: u8, beta: u8, tc0: Option<[i8; 4]>) {
         // SAFETY: the four rows the caller promises.
         unsafe {
-            let v = [ld8(q0.sub(2 * down)), ld8(q0.sub(down)), ld8(q0), ld8(q0.add(down))];
+            let v = [
+                ld8(q0.sub(2 * down)),
+                ld8(q0.sub(down)),
+                ld8(q0),
+                ld8(q0.add(down)),
+            ];
             if let Some((p0, new_q0)) = chroma_filtered(v, alpha, beta, spread2(tc0), 0xff) {
                 st8(q0.sub(down), p0);
                 st8(q0, new_q0);
@@ -1697,7 +1813,10 @@ feat! {
         // SAFETY: the four rows of each plane the caller promises.
         unsafe {
             let both = |back: usize, on: usize| {
-                let (cb, cr) = (cb.sub(back * down).add(on * down), cr.sub(back * down).add(on * down));
+                let (cb, cr) = (
+                    cb.sub(back * down).add(on * down),
+                    cr.sub(back * down).add(on * down),
+                );
                 _mm_unpacklo_epi64(ld8(cb), ld8(cr))
             };
             let v = [both(2, 0), both(1, 0), both(0, 0), both(0, 1)];
@@ -1745,7 +1864,15 @@ feat! {
         };
         // SAFETY: `rows` is eight rows of sixteen bytes, sixteen apart,
         // and q0 the fifth.
-        unsafe { luma_rows_at(rows.as_mut_ptr().cast::<u8>().add(64), 16, alpha, beta, Some(tc0)) };
+        unsafe {
+            luma_rows_at(
+                rows.as_mut_ptr().cast::<u8>().add(64),
+                16,
+                alpha,
+                beta,
+                Some(tc0),
+            )
+        };
     }
 
     /// See [`crate::deblock::luma_strong_rows`].
@@ -1754,7 +1881,15 @@ feat! {
             return crate::scalar::luma_strong_rows(rows, alpha, beta);
         };
         // SAFETY: as in `luma_normal_rows`.
-        unsafe { luma_rows_at(rows.as_mut_ptr().cast::<u8>().add(64), 16, alpha, beta, None) };
+        unsafe {
+            luma_rows_at(
+                rows.as_mut_ptr().cast::<u8>().add(64),
+                16,
+                alpha,
+                beta,
+                None,
+            )
+        };
     }
 
     /// See [`crate::deblock::luma_normal_lines`].
@@ -1764,7 +1899,15 @@ feat! {
         };
         // SAFETY: `lines` is sixteen lines of eight bytes, eight apart,
         // and q0 the fifth byte of each.
-        unsafe { luma_lines_at(lines.as_mut_ptr().cast::<u8>().add(4), 8, alpha, beta, Some(tc0)) };
+        unsafe {
+            luma_lines_at(
+                lines.as_mut_ptr().cast::<u8>().add(4),
+                8,
+                alpha,
+                beta,
+                Some(tc0),
+            )
+        };
     }
 
     /// See [`crate::deblock::luma_strong_lines`].
@@ -1783,7 +1926,15 @@ feat! {
         };
         // SAFETY: `rows` is four rows of eight bytes, eight apart, and q0
         // the third.
-        unsafe { chroma_rows_at(rows.as_mut_ptr().cast::<u8>().add(16), 8, alpha, beta, Some(tc0)) };
+        unsafe {
+            chroma_rows_at(
+                rows.as_mut_ptr().cast::<u8>().add(16),
+                8,
+                alpha,
+                beta,
+                Some(tc0),
+            )
+        };
     }
 
     /// See [`crate::deblock::chroma_strong`].
@@ -1801,7 +1952,13 @@ feat! {
         let Some((alpha, beta)) = small(edge.alpha, edge.beta, edge.tc0) else {
             return crate::scalar::luma_edge(plane, edge);
         };
-        let Edge { at, down, vertical, tc0, .. } = edge;
+        let Edge {
+            at,
+            down,
+            vertical,
+            tc0,
+            ..
+        } = edge;
         if vertical {
             let Some(first) = at.checked_sub(4) else {
                 return false;
@@ -1831,7 +1988,13 @@ feat! {
         let Some((alpha, beta)) = small(edge.alpha, edge.beta, edge.tc0) else {
             return crate::scalar::chroma_edge(plane, edge);
         };
-        let Edge { at, down, vertical, tc0, .. } = edge;
+        let Edge {
+            at,
+            down,
+            vertical,
+            tc0,
+            ..
+        } = edge;
         if vertical {
             let Some(first) = at.checked_sub(2) else {
                 return false;
@@ -1867,7 +2030,12 @@ feat! {
         filter: &Filter,
         step: usize,
     ) {
-        let at = edges.at + if vertical { step * index } else { step * index * edges.down };
+        let at = edges.at
+            + if vertical {
+                step * index
+            } else {
+                step * index * edges.down
+            };
         if !filter.tame() {
             let edge = Edge {
                 at,
@@ -2065,8 +2233,12 @@ feat! {
         // four samples from `at` are in the plane, as checked above.
         unsafe {
             let levels = block.as_ptr().cast::<u8>();
-            let rows = [ld16(levels), ld16(levels.add(16)), ld16(levels.add(32)),
-                ld16(levels.add(48))];
+            let rows = [
+                ld16(levels),
+                ld16(levels.add(16)),
+                ld16(levels.add(32)),
+                ld16(levels.add(48)),
+            ];
             // Along each row, then down each column.
             let out = pass4(turn4(pass4(turn4(rows))));
             let first = plane.as_mut_ptr().add(at);
@@ -2180,9 +2352,15 @@ feat! {
             for row in 0..size {
                 let samples = first.add(row * down);
                 if size == 8 {
-                    st8(samples, _mm_subs_epu8(_mm_adds_epu8(ld8(samples), rise), fall));
+                    st8(
+                        samples,
+                        _mm_subs_epu8(_mm_adds_epu8(ld8(samples), rise), fall),
+                    );
                 } else {
-                    st4(samples, _mm_subs_epu8(_mm_adds_epu8(ld4(samples), rise), fall));
+                    st4(
+                        samples,
+                        _mm_subs_epu8(_mm_adds_epu8(ld4(samples), rise), fall),
+                    );
                 }
             }
         }
@@ -2199,7 +2377,11 @@ feat! {
         // How far the samples rise and how far they fall: the left
         // quarter's value in the low four bytes and the right one's in the
         // next four.
-        let four = |value: i32| (value.max(0) as u32).wrapping_mul(0x0101_0101).cast_signed();
+        let four = |value: i32| {
+            (value.max(0) as u32)
+                .wrapping_mul(0x0101_0101)
+                .cast_signed()
+        };
         let pair = |left: i32, right: i32| _mm_set_epi32(0, 0, four(right), four(left));
         let moves = |left: i32, right: i32| (pair(left, right), pair(-left, -right));
         let halves = [moves(dcs[0], dcs[1]), moves(dcs[2], dcs[3])];
@@ -2210,7 +2392,10 @@ feat! {
             for row in 0..8 {
                 let (rise, fall) = halves[row / 4];
                 let samples = first.add(row * down);
-                st8(samples, _mm_subs_epu8(_mm_adds_epu8(ld8(samples), rise), fall));
+                st8(
+                    samples,
+                    _mm_subs_epu8(_mm_adds_epu8(ld8(samples), rise), fall),
+                );
             }
         }
         true
@@ -2272,7 +2457,10 @@ feat! {
             unsafe {
                 let row = block.add(y * down);
                 if W == 16 {
-                    st16(row, _mm_packus_epi16(_mm_srai_epi16::<5>(lo), _mm_srai_epi16::<5>(hi)));
+                    st16(
+                        row,
+                        _mm_packus_epi16(_mm_srai_epi16::<5>(lo), _mm_srai_epi16::<5>(hi)),
+                    );
                 } else {
                     let lanes = _mm_srai_epi16::<5>(lo);
                     st8(row, _mm_packus_epi16(lanes, lanes));
@@ -2396,7 +2584,10 @@ feat! {
                     for half in 0..2 {
                         let row = quarter(0, half) | (quarter(1, half) << 32);
                         for y in 0..4 {
-                            block.add((half * 4 + y) * down).cast::<u64>().write_unaligned(row);
+                            block
+                                .add((half * 4 + y) * down)
+                                .cast::<u64>()
+                                .write_unaligned(row);
                         }
                     }
                 }
@@ -2549,9 +2740,9 @@ feat! {
                 picked(line.as_ptr(), &PICKS4[usize::from(mode - 3)])
             } else {
                 match mode {
-                    0 if near.above => _mm_set1_epi32(i32::from_le_bytes([
-                        above[0], above[1], above[2], above[3],
-                    ])),
+                    0 if near.above => {
+                        _mm_set1_epi32(i32::from_le_bytes([above[0], above[1], above[2], above[3]]))
+                    }
                     1 if near.left => _mm_set_epi32(
                         i32::from_le_bytes([left[3]; 4]),
                         i32::from_le_bytes([left[2]; 4]),

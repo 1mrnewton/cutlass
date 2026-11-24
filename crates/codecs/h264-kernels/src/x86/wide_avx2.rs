@@ -31,13 +31,19 @@ feat! {
         let near = _mm256_add_epi16(t[1], t[4]);
         let mid = _mm256_add_epi16(t[2], t[3]);
         let inner = _mm256_sub_epi16(_mm256_slli_epi16::<2>(mid), near);
-        _mm256_add_epi16(_mm256_add_epi16(_mm256_slli_epi16::<2>(inner), inner), outer)
+        _mm256_add_epi16(
+            _mm256_add_epi16(_mm256_slli_epi16::<2>(inner), inner),
+            outer,
+        )
     }
 
     /// Sixteen 16-bit lanes as bytes, with saturation.
     #[inline]
     fn narrow(lanes: __m256i) -> __m128i {
-        _mm_packus_epi16(_mm256_castsi256_si128(lanes), _mm256_extracti128_si256::<1>(lanes))
+        _mm_packus_epi16(
+            _mm256_castsi256_si128(lanes),
+            _mm256_extracti128_si256::<1>(lanes),
+        )
     }
 
     /// A row of sixteen full samples.
@@ -97,7 +103,10 @@ feat! {
     /// Sixteen half samples from their sums: (sum + 16) >> 5, clipped.
     #[inline]
     fn round16(sums: __m256i) -> __m128i {
-        narrow(_mm256_srai_epi16::<5>(_mm256_add_epi16(sums, _mm256_set1_epi16(16))))
+        narrow(_mm256_srai_epi16::<5>(_mm256_add_epi16(
+            sums,
+            _mm256_set1_epi16(16),
+        )))
     }
 
     /// Sixteen centre samples from six rows of sums: see the 128-bit
@@ -123,7 +132,11 @@ feat! {
     unsafe fn put16<const AVG: bool>(dst: *mut u8, row: __m128i) {
         // SAFETY: the caller's promise.
         unsafe {
-            let row = if AVG { _mm_avg_epu8(row, ld16(dst)) } else { row };
+            let row = if AVG {
+                _mm_avg_epu8(row, ld16(dst))
+            } else {
+                row
+            };
             st16(dst, row);
         }
     }

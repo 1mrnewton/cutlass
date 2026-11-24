@@ -84,14 +84,13 @@ impl Coding {
         }
     }
 
-    /// Only s16, f32 and f64 hold the mix sample exactly. Every other
-    /// coding would quantize or companding would round, so the encoder
-    /// refuses it instead of returning different samples.
+    /// s16, f32 and f64 hold the mix sample exactly. s24 and s32 round the
+    /// float mix sample to the nearest integer code and stop at full scale;
+    /// every s24 code decodes and encodes back to itself. The 8-bit, G.711
+    /// and s64 codings are not written.
     pub(crate) const fn encode(self) -> Result<(), CodecError> {
         match self {
-            Self::S16 | Self::F32 | Self::F64 => Ok(()),
-            Self::S24 => Err(CodecError::Unsupported { what: "s24 encode" }),
-            Self::S32 => Err(CodecError::Unsupported { what: "s32 encode" }),
+            Self::S16 | Self::F32 | Self::F64 | Self::S24 | Self::S32 => Ok(()),
             Self::S8 => Err(CodecError::Unsupported { what: "s8 encode" }),
             Self::U8 => Err(CodecError::Unsupported { what: "u8 encode" }),
             Self::ALaw => Err(CodecError::Unsupported {

@@ -69,6 +69,32 @@ pub fn vector() -> bool {
     cfg!(all(target_arch = "aarch64", target_feature = "neon")) || avx2()
 }
 
+/// Runs `f` compiled for AVX2 (with BMI1, BMI2, LZCNT and POPCNT) when
+/// [`avx2`] says the kernels run, else as built: [`crate::wide::wide`]
+/// with [`force_scalar`] honoured. The closure and what it calls must be
+/// `#[inline(always)]` to be compiled for AVX2; anything left out of line
+/// still runs correctly, at the build's width.
+#[inline(always)]
+pub fn wide<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if avx2() {
+            // SAFETY: `avx2` checked at run time that the CPU has every
+            // feature `avx2_body` enables. The body is the caller's safe
+            // closure.
+            #[allow(unsafe_code)]
+            return unsafe { avx2_body(f) };
+        }
+    }
+    f()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,lzcnt,popcnt")]
+fn avx2_body<R>(f: impl FnOnce() -> R) -> R {
+    f()
+}
+
 /// Loads and stores for the AVX2 kernels, without a pointer: a vector is
 /// read from and written to a fixed-size array, which compiles to one
 /// unaligned move.

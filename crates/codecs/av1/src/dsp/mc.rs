@@ -25,6 +25,7 @@
 //! Block widths and heights are at most 128 (the largest AV1 block).
 
 use cutlass_simd::av1::blend;
+use cutlass_simd::av1::cpu::wide;
 use cutlass_simd::av1::mc as kernel;
 use cutlass_simd::av1::warp;
 use std::sync::OnceLock;
@@ -946,15 +947,18 @@ pub fn prep<P: Pixel>(
     let fh = half(&SUBPEL_FILTERS[fx][mx]);
     let fv = half(&SUBPEL_FILTERS[fy][my]);
     match (mx != 0, my != 0) {
-        (false, false) => match w {
-            4 => prep_copy::<P, 4>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
-            8 => prep_copy::<P, 8>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
-            16 => prep_copy::<P, 16>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
-            32 => prep_copy::<P, 32>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
-            64 => prep_copy::<P, 64>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
-            128 => prep_copy::<P, 128>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
-            _ => prep_copy::<P, 0>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
-        },
+        (false, false) => wide(
+            #[inline(always)]
+            || match w {
+                4 => prep_copy::<P, 4>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+                8 => prep_copy::<P, 8>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+                16 => prep_copy::<P, 16>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+                32 => prep_copy::<P, 32>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+                64 => prep_copy::<P, 64>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+                128 => prep_copy::<P, 128>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+                _ => prep_copy::<P, 0>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+            },
+        ),
         (true, false)
             if kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
                 .is_some_and(|b| b.with(|b| kernel::prep_h_u8(tmp, w, b))) => {}
@@ -1264,15 +1268,18 @@ pub fn avg<P: Pixel>(
     h: usize,
     bd: u32,
 ) {
-    match w {
-        4 => avg_w::<P, 4>(dst, dst_stride, t0, t1, w, h, bd),
-        8 => avg_w::<P, 8>(dst, dst_stride, t0, t1, w, h, bd),
-        16 => avg_w::<P, 16>(dst, dst_stride, t0, t1, w, h, bd),
-        32 => avg_w::<P, 32>(dst, dst_stride, t0, t1, w, h, bd),
-        64 => avg_w::<P, 64>(dst, dst_stride, t0, t1, w, h, bd),
-        128 => avg_w::<P, 128>(dst, dst_stride, t0, t1, w, h, bd),
-        _ => avg_w::<P, 0>(dst, dst_stride, t0, t1, w, h, bd),
-    }
+    wide(
+        #[inline(always)]
+        || match w {
+            4 => avg_w::<P, 4>(dst, dst_stride, t0, t1, w, h, bd),
+            8 => avg_w::<P, 8>(dst, dst_stride, t0, t1, w, h, bd),
+            16 => avg_w::<P, 16>(dst, dst_stride, t0, t1, w, h, bd),
+            32 => avg_w::<P, 32>(dst, dst_stride, t0, t1, w, h, bd),
+            64 => avg_w::<P, 64>(dst, dst_stride, t0, t1, w, h, bd),
+            128 => avg_w::<P, 128>(dst, dst_stride, t0, t1, w, h, bd),
+            _ => avg_w::<P, 0>(dst, dst_stride, t0, t1, w, h, bd),
+        },
+    );
 }
 
 /// `COMPOUND_AVERAGE` of two whole-sample predictions, read straight from
@@ -1285,15 +1292,18 @@ pub fn avg_copy<P: Pixel>(
     w: usize,
     h: usize,
 ) {
-    match w {
-        4 => avg_copy_w::<P, 4>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
-        8 => avg_copy_w::<P, 8>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
-        16 => avg_copy_w::<P, 16>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
-        32 => avg_copy_w::<P, 32>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
-        64 => avg_copy_w::<P, 64>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
-        128 => avg_copy_w::<P, 128>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
-        _ => avg_copy_w::<P, 0>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
-    }
+    wide(
+        #[inline(always)]
+        || match w {
+            4 => avg_copy_w::<P, 4>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+            8 => avg_copy_w::<P, 8>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+            16 => avg_copy_w::<P, 16>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+            32 => avg_copy_w::<P, 32>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+            64 => avg_copy_w::<P, 64>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+            128 => avg_copy_w::<P, 128>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+            _ => avg_copy_w::<P, 0>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+        },
+    );
 }
 
 #[inline(always)]
@@ -1377,17 +1387,22 @@ pub fn w_avg<P: Pixel>(
 ) {
     let sh = 4 + inter_post_round(bd, true);
     let off = (1 << (sh - 1)) + (fwd + bck) * prep_bias(bd);
-    for r in 0..h {
-        let d = &mut dst[r * dst_stride..][..w];
-        let a = &t0[r * w..][..w];
-        let b = &t1[r * w..][..w];
-        for c in 0..w {
-            d[c] = clip_px::<P>(
-                (fwd * i32::from(a[c]) + bck * i32::from(b[c]) + off) >> sh,
-                bd,
-            );
-        }
-    }
+    wide(
+        #[inline(always)]
+        || {
+            for r in 0..h {
+                let d = &mut dst[r * dst_stride..][..w];
+                let a = &t0[r * w..][..w];
+                let b = &t1[r * w..][..w];
+                for c in 0..w {
+                    d[c] = clip_px::<P>(
+                        (fwd * i32::from(a[c]) + bck * i32::from(b[c]) + off) >> sh,
+                        bd,
+                    );
+                }
+            }
+        },
+    );
 }
 
 /// Reads the blend weight of the mask blend process (7.11.3.14) for sample

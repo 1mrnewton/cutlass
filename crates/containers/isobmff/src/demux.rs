@@ -1102,6 +1102,9 @@ fn scale_ticks(ticks: i64, from: u32, to: u32) -> i64 {
 }
 
 #[cfg(test)]
+mod grouped_audio;
+
+#[cfg(test)]
 mod tests {
     use super::covering_offset;
 

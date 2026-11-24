@@ -531,3 +531,201 @@ fn is_sync(sync: &Sync, partial: &[u32], index: u64) -> bool {
 pub fn no_sync_samples(sync: &Sync, partial: &[u32]) -> bool {
     matches!(sync, Sync::Only(list) if list.is_empty() && partial.is_empty())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tables(stsc: &[(u32, u32)], chunks: Vec<u64>, size: u32, count: u64) -> Tables {
+        Tables {
+            stts: vec![Run {
+                count: u32::try_from(count).unwrap_or(u32::MAX),
+                delta: 1,
+            }],
+            ctts: Vec::new(),
+            stsc: stsc
+                .iter()
+                .map(|(first_chunk, samples_per_chunk)| ChunkMap {
+                    first_chunk: *first_chunk,
+                    samples_per_chunk: *samples_per_chunk,
+                })
+                .collect(),
+            sizes: Sizes::Constant { size, count },
+            chunks,
+            sync: Sync::All,
+            partial_sync: Vec::new(),
+        }
+    }
+
+    /// The packets FFmpeg's grouping makes, from the row-per-frame table:
+    /// consecutive frames of one chunk, up to `packet_frames` at a time.
+    fn by_frame(tables: &Tables, frame_bytes: u32, packet_frames: u32) -> Vec<Sample> {
+        let mut rows = Tables {
+            stts: tables.stts.clone(),
+            ctts: Vec::new(),
+            stsc: tables.stsc.clone(),
+            sizes: Sizes::Constant {
+                size: frame_bytes,
+                count: tables.sizes.count(),
+            },
+            chunks: tables.chunks.clone(),
+            sync: Sync::All,
+            partial_sync: Vec::new(),
+        };
+        rows.stts[0].count = u32::MAX;
+        let frames = build(&rows).unwrap();
+        let mut out: Vec<Sample> = Vec::new();
+        for frame in frames {
+            match out.last_mut() {
+                Some(last)
+                    if last.duration < packet_frames
+                        && last.offset + u64::from(last.size) == frame.offset
+                        && !tables.chunks.contains(&frame.offset) =>
+                {
+                    last.size += frame.size;
+                    last.duration += 1;
+                }
+                _ => out.push(frame),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn grouped_packets_equal_the_row_per_frame_table_joined_per_chunk() {
+        let mut state = 0x2545_F491u32;
+        let mut next = |below: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % below
+        };
+        for round in 0..200 {
+            let frame_bytes = 1 + next(8);
+            // Runs of chunks, each run with its own frames per chunk.
+            let mut stsc = Vec::new();
+            let mut chunks = Vec::new();
+            let mut offset = 100u64;
+            let mut total = 0u64;
+            for _ in 0..1 + next(4) {
+                let per_chunk = 1 + next(3000);
+                stsc.push((u32::try_from(chunks.len()).unwrap() + 1, per_chunk));
+                for _ in 0..1 + next(4) {
+                    chunks.push(offset);
+                    // A gap after each chunk, where another track sits.
+                    offset +=
+                        u64::from(per_chunk) * u64::from(frame_bytes) + 1 + u64::from(next(9));
+                    total += u64::from(per_chunk);
+                }
+            }
+            // Some size tables end inside the last chunk.
+            let count = if round % 3 == 0 {
+                total - u64::from(next(u32::try_from(total.min(500)).unwrap()))
+            } else {
+                total
+            };
+            let tables = tables(&stsc, chunks, 1, count);
+            assert!(groupable(&tables));
+            let grouped = group(
+                &tables,
+                Framing {
+                    frames: 1,
+                    bytes: frame_bytes,
+                },
+            )
+            .unwrap();
+            let expected = by_frame(&tables, frame_bytes, GROUP_FRAMES);
+            assert_eq!(grouped.frames(), count, "round {round}");
+            assert_eq!(grouped.len(), expected.len(), "round {round}");
+            for (index, want) in expected.iter().enumerate() {
+                let got = grouped.get(index).unwrap();
+                assert_eq!(
+                    (got.offset, got.size, got.dts, got.pts, got.duration),
+                    (want.offset, want.size, want.dts, want.dts, want.duration),
+                    "round {round} packet {index}"
+                );
+                assert!(got.keyframe);
+            }
+            assert!(grouped.get(expected.len()).is_none());
+            // Written out as rows, it is the same table.
+            let mut samples = Samples::Grouped(grouped);
+            assert_eq!(
+                samples.presentation_end(),
+                Some(i64::try_from(count).unwrap())
+            );
+            let rows = samples.table_mut().unwrap();
+            assert_eq!(rows.len(), expected.len());
+            assert_eq!(
+                rows.last().map(|row| row.offset),
+                expected.last().map(|row| row.offset)
+            );
+        }
+    }
+
+    #[test]
+    fn only_one_tick_constant_size_tables_are_grouped() {
+        let plain = || tables(&[(1, 10)], vec![0], 4, 10);
+        assert!(groupable(&plain()));
+        let mut longer = plain();
+        longer.stts[0].delta = 1024;
+        assert!(!groupable(&longer));
+        let mut offsets = plain();
+        offsets.ctts.push(CtsRun {
+            count: 10,
+            offset: 1,
+        });
+        assert!(!groupable(&offsets));
+        let mut each = plain();
+        each.sizes = Sizes::Table(vec![4; 10]);
+        assert!(!groupable(&each));
+        let mut none = plain();
+        none.stts.clear();
+        assert!(!groupable(&none));
+        // Two rows that both say one tick are one timeline.
+        let mut split = plain();
+        split.stts = vec![Run { count: 4, delta: 1 }, Run { count: 6, delta: 1 }];
+        assert!(groupable(&split));
+    }
+
+    #[test]
+    fn hostile_group_tables_are_errors_and_allocate_nothing_by_count() {
+        let framing = Framing {
+            frames: 1,
+            bytes: 4,
+        };
+        // No chunk, no chunk map, a frame of no bytes.
+        assert!(group(&tables(&[(1, 10)], Vec::new(), 4, 10), framing).is_err());
+        assert!(group(&tables(&[], vec![0], 4, 10), framing).is_err());
+        let empty = Framing {
+            frames: 1,
+            bytes: 0,
+        };
+        assert!(group(&tables(&[(1, 10)], vec![0], 4, 10), empty).is_err());
+        // One packet of a block larger than a packet may be.
+        let huge = Framing {
+            frames: 1,
+            bytes: u32::MAX,
+        };
+        assert!(matches!(
+            group(&tables(&[(1, 10)], vec![0], 4, 10), huge),
+            Err(Error::Limit { what: "packet", .. })
+        ));
+        // Chunk maps out of order, a first chunk of 0, and offsets at the
+        // top of the range: every packet is still answered or refused.
+        let wild = tables(
+            &[(0, 3), (5, u32::MAX), (2, 7)],
+            vec![u64::MAX - 2, 0, u64::MAX, 9, 1],
+            4,
+            u64::from(u32::MAX),
+        );
+        if let Ok(grouped) = group(&wild, framing) {
+            for index in [0, 1, grouped.len() / 2, grouped.len().saturating_sub(1)] {
+                let _ = grouped.get(index);
+            }
+            assert!(grouped.get(grouped.len()).is_none());
+        }
+        // More packets than a table may hold are not written out as rows.
+        let long = tables(&[(1, 1)], vec![0; 5], 1, 5);
+        let mut samples = Samples::Grouped(group(&long, framing).unwrap());
+        assert_eq!(samples.len(), 5);
+        assert_eq!(samples.table_mut().unwrap().len(), 5);
+    }
+}

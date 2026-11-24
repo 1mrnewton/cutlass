@@ -973,4 +973,171 @@ mod tests {
         assert_eq!(codec(Some(0x6C)).codec, CodecId::Mjpeg);
         assert_eq!(codec(Some(0x21)).codec, CodecId::Mpeg4);
     }
+
+    /// One sound entry: `head` is the 28-byte version-0 body with the
+    /// version, channels, bits and rate set, then `rest`.
+    fn sound(
+        code: &[u8; 4],
+        version: u16,
+        channels: u16,
+        bits: u16,
+        rate: u16,
+        rest: &[u8],
+    ) -> SampleDesc {
+        let mut entry = vec![0u8; 28];
+        entry[7] = 1;
+        entry[8..10].copy_from_slice(&version.to_be_bytes());
+        entry[16..18].copy_from_slice(&channels.to_be_bytes());
+        entry[18..20].copy_from_slice(&bits.to_be_bytes());
+        entry[24..26].copy_from_slice(&rate.to_be_bytes());
+        entry.extend_from_slice(rest);
+        let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        stsd.extend(boxed(code, &entry));
+        let mut budget = 64;
+        parse_stsd(&stsd, *b"soun", &mut budget, 0)
+            .expect("parse")
+            .remove(0)
+    }
+
+    fn audio(desc: &SampleDesc) -> AudioParams {
+        match desc.kind {
+            MediaKind::Audio(audio) => audio,
+            _ => panic!("not audio"),
+        }
+    }
+
+    #[test]
+    fn a_pcm_entry_states_the_bytes_of_one_frame() {
+        let one = |bytes| Some(Framing { frames: 1, bytes });
+        assert_eq!(sound(b"sowt", 0, 2, 16, 48_000, &[]).framing, one(4));
+        assert_eq!(sound(b"twos", 0, 1, 16, 48_000, &[]).framing, one(2));
+        assert_eq!(sound(b"twos", 0, 2, 8, 8_000, &[]).framing, one(2));
+        assert_eq!(sound(b"raw ", 0, 1, 8, 8_000, &[]).framing, one(1));
+        assert_eq!(sound(b"in24", 0, 2, 24, 48_000, &[]).framing, one(6));
+        assert_eq!(sound(b"in32", 0, 2, 32, 48_000, &[]).framing, one(8));
+        assert_eq!(sound(b"fl32", 0, 6, 32, 48_000, &[]).framing, one(24));
+        assert_eq!(sound(b"fl64", 0, 1, 64, 48_000, &[]).framing, one(8));
+        // G.711 is a byte a channel whatever the bits field says.
+        assert_eq!(sound(b"ulaw", 0, 2, 16, 8_000, &[]).framing, one(2));
+        assert_eq!(sound(b"alaw", 0, 1, 16, 8_000, &[]).framing, one(1));
+        // Version 1 of uncompressed sound: one sample per packet, and the
+        // frame is still channels times the sample width.
+        let mut v1 = Vec::new();
+        for field in [1u32, 2, 4, 2] {
+            v1.extend(field.to_be_bytes());
+        }
+        assert_eq!(sound(b"sowt", 1, 2, 16, 48_000, &v1).framing, one(4));
+        // A compressed codec's version-1 block.
+        let mut block = Vec::new();
+        for field in [64u32, 34, 68, 2] {
+            block.extend(field.to_be_bytes());
+        }
+        assert_eq!(
+            sound(b"ima4", 1, 2, 16, 44_100, &block).framing,
+            Some(Framing {
+                frames: 64,
+                bytes: 68
+            })
+        );
+        // Compressed sound with no block, and a PCM entry with no channels,
+        // leave the size to `stsz`.
+        assert_eq!(sound(b"mp4a", 0, 2, 16, 48_000, &[]).framing, None);
+        assert_eq!(sound(b"sowt", 0, 0, 16, 48_000, &[]).framing, None);
+    }
+
+    #[test]
+    fn iso_pcm_entries_read_pcmc_and_keep_the_stsz_frame_size() {
+        let pcmc = |flags: u8, size: u8| boxed(b"pcmC", &[0, 0, 0, 0, flags, size]);
+        let cases = [
+            (b"ipcm", 1, 16, SampleFormat::S16Le),
+            (b"ipcm", 0, 16, SampleFormat::S16Be),
+            (b"ipcm", 1, 24, SampleFormat::S24Le),
+            (b"ipcm", 0, 32, SampleFormat::S32Be),
+            (b"fpcm", 1, 32, SampleFormat::F32Le),
+            (b"fpcm", 0, 64, SampleFormat::F64Be),
+        ];
+        for (code, flags, size, format) in cases {
+            let desc = sound(code, 0, 2, 16, 48_000, &pcmc(flags, size));
+            assert_eq!(desc.codec, CodecId::Pcm);
+            assert_eq!(audio(&desc).format, format);
+            assert_eq!(audio(&desc).bits_per_sample, u16::from(size));
+            assert_eq!(desc.framing, None);
+        }
+        // No `pcmC`, a short one, and a size no PCM has: the layout is
+        // unknown and nothing is guessed.
+        assert_eq!(
+            audio(&sound(b"fpcm", 0, 2, 16, 48_000, &[])).format,
+            SampleFormat::Unknown
+        );
+        let short = boxed(b"pcmC", &[0, 0, 0, 0, 1]);
+        assert_eq!(
+            audio(&sound(b"ipcm", 0, 2, 20, 48_000, &short)).format,
+            SampleFormat::Unknown
+        );
+        assert_eq!(
+            audio(&sound(b"ipcm", 0, 2, 16, 48_000, &pcmc(1, 20))).format,
+            SampleFormat::Unknown
+        );
+    }
+
+    #[test]
+    fn a_zero_rate_is_read_from_the_codec_configuration() {
+        // AAC-LC, frequency index 0 (96 kHz), stereo.
+        assert_eq!(aac_rate(&[0x10, 0x10]), Some(96_000));
+        // Index 1 (88.2 kHz) and index 4 (44.1 kHz).
+        assert_eq!(aac_rate(&[0x10, 0x90]), Some(88_200));
+        assert_eq!(aac_rate(&[0x12, 0x10]), Some(44_100));
+        // Index 15: the rate is written out in 24 bits (here 96000).
+        assert_eq!(aac_rate(&[0x17, 0x80, 0xBB, 0x80, 0x10]), Some(96_000));
+        // AOT 5 over a 48 kHz core with a 96 kHz extension.
+        assert_eq!(aac_rate(&[0x29, 0x90, 0x08]), Some(96_000));
+        // An escaped object type (32 + 10) still reads its frequency.
+        assert_eq!(aac_rate(&[0xF9, 0x46, 0x20]), Some(48_000));
+        // Empty, cut short, a reserved index, and a written rate of 0.
+        assert_eq!(aac_rate(&[]), None);
+        assert_eq!(aac_rate(&[0x10]), None);
+        assert_eq!(aac_rate(&[0x16, 0x90]), None);
+        assert_eq!(aac_rate(&[0x17, 0x80, 0x00, 0x00, 0x10]), None);
+
+        let mut dfla = vec![0, 0, 0, 0, 0x80, 0, 0, 34];
+        let mut info = [0u8; 34];
+        info[10..13].copy_from_slice(&[0x17, 0x70, 0x00]);
+        dfla.extend(info);
+        assert_eq!(flac_rate(&dfla), Some(96_000));
+        assert_eq!(flac_rate(&dfla[..20]), None);
+        let mut other = dfla.clone();
+        other[4] = 0x84;
+        assert_eq!(flac_rate(&other), None);
+
+        // The entry's own rate wins when it has one.
+        let esds = |config: &[u8]| {
+            let mut decoder = vec![0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            decoder.extend(descriptor(0x05, config));
+            let mut es = vec![0, 1, 0];
+            es.extend(descriptor(0x04, &decoder));
+            let mut body = vec![0; 4];
+            body.extend(descriptor(0x03, &es));
+            boxed(b"esds", &body)
+        };
+        let config = esds(&[0x10, 0x10]);
+        assert_eq!(
+            audio(&sound(b"mp4a", 0, 2, 16, 0, &config)).sample_rate,
+            96_000
+        );
+        assert_eq!(
+            audio(&sound(b"mp4a", 0, 2, 16, 44_100, &config)).sample_rate,
+            44_100
+        );
+        assert_eq!(
+            audio(&sound(b"fLaC", 0, 2, 16, 0, &boxed(b"dfLa", &dfla))).sample_rate,
+            96_000
+        );
+        assert_eq!(audio(&sound(b"Opus", 0, 2, 16, 0, &[])).sample_rate, 48_000);
+        // Nothing states a rate: it stays 0 for the media timescale.
+        assert_eq!(audio(&sound(b"mp4a", 0, 2, 16, 0, &[])).sample_rate, 0);
+        assert_eq!(
+            audio(&sound(b"mp4a", 0, 2, 16, 0, &esds(&[0x10]))).sample_rate,
+            0
+        );
+    }
 }

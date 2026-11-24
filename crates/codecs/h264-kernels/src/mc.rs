@@ -1045,27 +1045,33 @@ mod tests {
             (13, 2),
             (15, 4),
             (16, 5),
+            (4, 3),
+            (8, 5),
+            (12, 2),
         ] {
             let stride = 18;
-            let (mut fast, mut plain) = (vec![3u8; stride * 5], vec![3u8; stride * 5]);
-            assert!(super::avg_block(&mut fast, stride, &a, &b, (w, h)));
+            // A vector version may leave a width that is not a multiple of
+            // four to its caller; the block is then as it was. One it takes
+            // is the plain one's.
+            let fresh = vec![3u8; stride * 5];
+            let (mut fast, mut plain) = (fresh.clone(), fresh.clone());
+            let taken = super::avg_block(&mut fast, stride, &a, &b, (w, h));
+            assert!(taken || w % 4 != 0, "average {w}x{h}");
             assert!(scalar::avg_block(&mut plain, stride, &a, &b, (w, h)));
-            assert_eq!(fast, plain, "average {w}x{h}");
+            assert_eq!(
+                fast,
+                if taken { plain } else { fresh.clone() },
+                "average {w}x{h}"
+            );
             let weight = super::BiWeight {
                 w0: -37,
                 w1: 101,
                 shift: 6,
                 offset: -3,
             };
-            let (mut fast, mut plain) = (vec![3u8; stride * 5], vec![3u8; stride * 5]);
-            assert!(super::weight_block(
-                &mut fast,
-                stride,
-                &a,
-                &b,
-                (w, h),
-                weight
-            ));
+            let (mut fast, mut plain) = (fresh.clone(), fresh.clone());
+            let taken = super::weight_block(&mut fast, stride, &a, &b, (w, h), weight);
+            assert!(taken || w % 4 != 0, "weights {w}x{h}");
             assert!(scalar::weight_block(
                 &mut plain,
                 stride,
@@ -1074,7 +1080,7 @@ mod tests {
                 (w, h),
                 weight
             ));
-            assert_eq!(fast, plain, "weights {w}x{h}");
+            assert_eq!(fast, if taken { plain } else { fresh }, "weights {w}x{h}");
         }
     }
 }

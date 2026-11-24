@@ -12,6 +12,16 @@ use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams, Timescale, Times
 use cutlass_container::{Demux, Mux, NewStream, TrackDuration, TrackId};
 use cutlass_riff::{WavDemux, WavMux};
 
+/// Sample frames in `packets`: a PCM packet is a run of them.
+fn frames_in(packets: &[Packet]) -> u64 {
+    packets
+        .iter()
+        .map(|packet| {
+            u64::try_from(packet.timestamp().duration().expect("duration")).expect("frames")
+        })
+        .sum()
+}
+
 #[test]
 fn ffmpeg_pcm_matches_ffprobe_and_python_wave() {
     if !tool_on_path("ffmpeg") || !tool_on_path("ffprobe") {
@@ -41,10 +51,7 @@ fn ffmpeg_pcm_matches_ffprobe_and_python_wave() {
     assert_eq!(probed.sample_rate, 44_100);
     assert_eq!(probed.channels, 2);
     assert_eq!(probed.codec_name, "pcm_s16le");
-    assert_eq!(
-        probed.duration_ts,
-        Some(u64::try_from(ours.len()).expect("frames"))
-    );
+    assert_eq!(probed.duration_ts, Some(frames_in(&ours)));
     assert!(
         ours.iter()
             .all(|packet| packet.timescale().ticks_per_second() == 44_100)
@@ -52,7 +59,7 @@ fn ffmpeg_pcm_matches_ffprobe_and_python_wave() {
 
     let side = dir.join("tone.raw");
     let wave = python_wave(&pcm, &side).expect("python wave");
-    assert_eq!(wave, (2, 44_100, 2, u64::try_from(ours.len()).expect("n")));
+    assert_eq!(wave, (2, 44_100, 2, frames_in(&ours)));
     let raw = std::fs::read(&side).expect("raw");
     let mut gathered = Vec::new();
     for packet in &ours {
@@ -86,10 +93,7 @@ fn ffmpeg_pcm_matches_ffprobe_and_python_wave() {
     let float_probe = ffprobe_stream(&floats);
     assert_eq!(float_probe.sample_rate, 48_000);
     assert_eq!(float_probe.codec_name, "pcm_f32le");
-    assert_eq!(
-        float_probe.duration_ts,
-        Some(u64::try_from(float_packets.len()).expect("float frames"))
-    );
+    assert_eq!(float_probe.duration_ts, Some(frames_in(&float_packets)));
     let float_demux = open_file(&floats);
     assert!(float_demux.format().is_float());
 
@@ -112,10 +116,7 @@ fn ffmpeg_pcm_matches_ffprobe_and_python_wave() {
     let rf64_probe = ffprobe_stream(&rf64);
     assert_eq!(rf64_probe.sample_rate, 44_100);
     assert_eq!(rf64_probe.channels, 2);
-    assert_eq!(
-        rf64_probe.duration_ts,
-        Some(u64::try_from(ours.len()).expect("rf64"))
-    );
+    assert_eq!(rf64_probe.duration_ts, Some(frames_in(&ours)));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

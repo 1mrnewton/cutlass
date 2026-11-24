@@ -1,24 +1,32 @@
 //! WAV demuxer.
 //!
-//! One access unit is one sample frame for PCM, A-law, and μ-law, one
-//! MPEG frame for tags `0x0050` and `0x0055`, and one `nBlockAlign` block
-//! otherwise. Timestamps are sample-rate ticks. Sample bytes are not decoded.
+//! One packet is a run of whole sample frames, up to [`PCM_PACKET_BYTES`],
+//! for PCM, A-law, and μ-law; one MPEG frame for tags `0x0050` and
+//! `0x0055`; and one `nBlockAlign` block otherwise. Timestamps are
+//! sample-rate ticks. Sample bytes are not decoded.
+//!
+//! A seek on PCM lands on the asked frame itself: the next packet starts
+//! there, whichever run the frame was in before the seek.
+//!
+//! The `data` size is a claim. Sound the file does not hold is not
+//! invented: a `data` chunk that runs past the end of the file, states no
+//! size, or ends inside a frame plays up to the last whole frame that is
+//! there, and [`WavDemux::is_cut`] and [`WavDemux::is_open_ended`] say so.
 
 use std::io::{Read, Seek};
 
 use cutlass_codec::{ContainerId, Packet, PacketError, Timescale, Timestamp};
 use cutlass_container::{
     Access, Demux, Gap, Input, Landing, Limits, OpenError, ReadError, SeekError, SeekLanding,
-    SeekTo, Stream, TrackId, Trim,
+    SeekTo, SourceError, Stream, TrackId, Trim,
 };
 
 use crate::format::{Framing, WavFormat};
-use crate::limits::MAX_MPEG_RESYNC;
+use crate::limits::{MAX_MPEG_RESYNC, PCM_PACKET_BYTES};
 use crate::mpeg::{FrameHead, find_frame, parse_header};
 use crate::walk::{Brand, DroppedChunk, KeptChunk, Scanned, scan};
 
 const DISAGREE_DATA: &str = "ds64 data size disagrees with the data chunk";
-const DISAGREE_SAMPLES: &str = "ds64 sample count disagrees with the data chunk";
 const DISAGREE_FACT: &str = "fact sample count disagrees with ds64";
 
 enum Layout {
@@ -42,6 +50,14 @@ pub struct WavDemux<R: Read + Seek> {
     data_start: u64,
     data_len: u64,
     layout: Layout,
+    /// Frames in one packet. One, except for sample framing.
+    group: u64,
+    /// A forward input whose `data` runs to an end nothing states.
+    unbounded: bool,
+    cut: bool,
+    open_ended: bool,
+    /// The input ended before the layout said it would.
+    ended: bool,
     next: u64,
     cursor: u64,
     samples_at: u64,
@@ -85,9 +101,32 @@ impl<R: Read + Seek> WavDemux<R> {
         &self.dropped
     }
 
-    /// Sample count when every packet has a duration. MPEG stays unknown until read.
+    /// True when the file holds less sound than its `data` chunk states:
+    /// the chunk runs past the end of the file, as a recording or a
+    /// download that stopped leaves it, or it ends inside a sample frame.
+    /// What is there plays; the partial frame is dropped. A forward reader
+    /// learns this only when the input ends.
+    #[must_use]
+    pub const fn is_cut(&self) -> bool {
+        self.cut
+    }
+
+    /// True when the `data` chunk states no size, as a writer that could
+    /// not seek back leaves it: `0xFFFFFFFF` with no `ds64`, or zero under
+    /// a form size that was never filled in. The sound is the rest of the
+    /// input.
+    #[must_use]
+    pub const fn is_open_ended(&self) -> bool {
+        self.open_ended
+    }
+
+    /// Sample count when every packet has a duration. MPEG stays unknown
+    /// until read, and so does a forward input that states no size.
     #[must_use]
     pub const fn duration_samples(&self) -> Option<u64> {
+        if self.unbounded {
+            return None;
+        }
         match self.layout {
             Layout::Constant {
                 frames,
@@ -137,6 +176,11 @@ impl<R: Read + Seek> WavDemux<R> {
             data_start: planned.data_start,
             data_len: planned.data_len,
             layout: planned.layout,
+            group: planned.group,
+            unbounded: planned.unbounded,
+            cut: planned.cut,
+            open_ended: planned.open_ended,
+            ended: false,
             next: 0,
             cursor: planned.data_start,
             samples_at: 0,
@@ -175,22 +219,67 @@ impl<R: Read + Seek> WavDemux<R> {
             } => (frame_bytes, frames, per_frame, extra),
             Layout::Mpeg => return Ok(None),
         };
-        if self.next >= frames {
+        if self.ended || self.next >= frames {
             return Ok(None);
         }
+        let asked = self.group.min(frames - self.next);
         let offset = self
             .data_start
             .saturating_add(self.next.saturating_mul(frame_bytes));
         self.place(offset)?;
-        let bytes = self
-            .input
-            .read_limited(frame_bytes, self.input.limits().max_packet_bytes)
-            .map_err(ReadError::from_packet)?;
-        let stamp = stamp_frame(self.next, frames, per_frame, extra)?;
+        let mut bytes = self.take(asked.saturating_mul(frame_bytes))?;
+        let held = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let taken = held / frame_bytes;
+        if taken < asked {
+            // The input ended first. Whole frames that arrived are sound;
+            // a part of one is not. Only an input of unstated length may
+            // end here without having lost anything.
+            self.ended = true;
+            self.cut |= !self.unbounded || !held.is_multiple_of(frame_bytes);
+            bytes.truncate(usize_from(taken.saturating_mul(frame_bytes))?);
+        }
+        if taken == 0 {
+            return Ok(None);
+        }
+        let last = !self.unbounded && self.next.saturating_add(taken) == frames;
+        let stamp = stamp_run(self.next, taken, per_frame, if last { extra } else { 0 })?;
         let packet = audio_packet(self.format.sample_rate(), bytes, stamp)?;
-        self.next = self.next.saturating_add(1);
-        self.cursor = offset.saturating_add(frame_bytes);
+        self.next = self.next.saturating_add(taken);
+        self.cursor = offset.saturating_add(taken.saturating_mul(frame_bytes));
         Ok(Some(packet))
+    }
+
+    /// Up to `want` bytes from the read position: fewer when the input
+    /// ends first. The size is refused before it is allocated.
+    fn take(&mut self, want: u64) -> Result<Vec<u8>, ReadError> {
+        let limit = self.input.limits().max_packet_bytes;
+        if want > limit {
+            return Err(ReadError::HostileSize {
+                declared: want,
+                limit,
+            });
+        }
+        let len = usize_from(want)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(len)
+            .map_err(|_| ReadError::Source {
+                message: "out of memory".to_owned(),
+            })?;
+        bytes.resize(len, 0);
+        let mut filled = 0;
+        while filled < len {
+            let got = self
+                .input
+                .read(&mut bytes[filled..])
+                .map_err(ReadError::from_packet)?;
+            if got == 0 {
+                break;
+            }
+            filled += got;
+        }
+        bytes.truncate(filled);
+        Ok(bytes)
     }
 
     fn read_mpeg(&mut self) -> Result<Option<Packet>, ReadError> {
@@ -215,6 +304,11 @@ impl<R: Read + Seek> WavDemux<R> {
             return Ok(None);
         }
         let remaining = end - self.cursor;
+        if remaining < 4 && self.cut {
+            // The file stopped inside a frame header. The frames before
+            // it were returned.
+            return Ok(None);
+        }
         if remaining < 4 {
             return Err(ReadError::Truncated {
                 expected: 4,
@@ -223,9 +317,16 @@ impl<R: Read + Seek> WavDemux<R> {
         }
         self.place(self.cursor)?;
         let mut header = [0; 4];
-        self.input
-            .read_exact(&mut header)
-            .map_err(ReadError::from_packet)?;
+        match self.input.read_exact(&mut header) {
+            Ok(()) => {}
+            // An input of unstated length ends where its bytes do.
+            Err(SourceError::ShortRead { got, .. }) if self.unbounded => {
+                self.cut |= got != 0;
+                self.cursor = end;
+                return Ok(None);
+            }
+            Err(error) => return Err(ReadError::from_packet(error)),
+        }
         if let Some(head) = parse_header(&header) {
             return self.take_mpeg_rest(header, head, remaining);
         }
@@ -244,6 +345,11 @@ impl<R: Read + Seek> WavDemux<R> {
         head: FrameHead,
         remaining: u64,
     ) -> Result<Option<(Vec<u8>, FrameHead)>, ReadError> {
+        if head.len > remaining && self.cut {
+            // The last frame is not all there. It is not handed on.
+            self.cursor = self.data_end();
+            return Ok(None);
+        }
         if head.len > remaining {
             return Err(ReadError::Truncated {
                 expected: head.len,
@@ -259,10 +365,20 @@ impl<R: Read + Seek> WavDemux<R> {
             })?;
         bytes.extend_from_slice(&header);
         if rest_len > 0 {
-            let rest = self
-                .input
-                .read_limited(rest_len, self.input.limits().max_packet_bytes)
-                .map_err(ReadError::from_packet)?;
+            let rest = self.take(rest_len)?;
+            if u64::try_from(rest.len()).unwrap_or(u64::MAX) < rest_len {
+                if self.unbounded {
+                    self.cut = true;
+                    self.cursor = self.data_end();
+                    return Ok(None);
+                }
+                return Err(ReadError::Truncated {
+                    expected: head.len,
+                    got: u64::try_from(rest.len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(4),
+                });
+            }
             bytes.extend(rest);
         }
         self.cursor = self.cursor.saturating_add(head.len);
@@ -344,11 +460,13 @@ impl<R: Read + Seek> WavDemux<R> {
         let offset = self
             .data_start
             .saturating_add(index.saturating_mul(frame_bytes));
-        let ordinal = u32::try_from(index).map_err(|_| ReadError::Source {
-            message: "packet ordinal does not fit".to_owned(),
-        })?;
+        // The landing is a frame, not a packet that was read before: the
+        // next packet starts on it. Past 2^32 frames the ordinal stops at
+        // the largest value; the time and the byte position stay exact.
+        let ordinal = u32::try_from(index).unwrap_or(u32::MAX);
         let pts = ticks(index.saturating_mul(per_frame))?;
         self.place(offset)?;
+        self.ended = false;
         self.next = index;
         self.cursor = offset;
         self.samples_at = index.saturating_mul(per_frame);
@@ -356,7 +474,16 @@ impl<R: Read + Seek> WavDemux<R> {
     }
 
     fn land_end(&mut self) -> Result<SeekLanding, ReadError> {
-        let end = self.data_end();
+        let end = match self.layout {
+            Layout::Constant {
+                frames,
+                frame_bytes,
+                ..
+            } => self
+                .data_start
+                .saturating_add(frames.saturating_mul(frame_bytes)),
+            Layout::Mpeg => self.data_end(),
+        };
         self.place(end)?;
         self.next = match self.layout {
             Layout::Constant { frames, .. } => frames,
@@ -488,6 +615,10 @@ struct Planned {
     data_start: u64,
     data_len: u64,
     layout: Layout,
+    group: u64,
+    unbounded: bool,
+    cut: bool,
+    open_ended: bool,
 }
 
 fn plan(scanned: Scanned, max_packet: u64) -> Result<Planned, OpenError> {
@@ -509,81 +640,118 @@ fn plan(scanned: Scanned, max_packet: u64) -> Result<Planned, OpenError> {
             message: DISAGREE_DATA.to_owned(),
         });
     }
-    let layout = layout_for(
+    let unbounded = data.len.is_none();
+    let data_len = data.len.unwrap_or(u64::MAX - data.start);
+    let sized = Sized {
+        data_len,
+        // The sound is not the length the header states, so a sample count
+        // from the header does not describe it either.
+        damaged: data.cut || data.open_ended,
+        unbounded,
+    };
+    let (layout, partial) = layout_for(
         &format,
-        data.len,
+        sized,
         scanned.fact,
         scanned.ds64_samples,
         max_packet,
     )?;
+    let group = match (&layout, format.framing()) {
+        (Layout::Constant { frame_bytes, .. }, Framing::Samples) => {
+            (PCM_PACKET_BYTES.min(max_packet) / frame_bytes).max(1)
+        }
+        _ => 1,
+    };
     Ok(Planned {
         format,
         brand: scanned.brand,
         kept: scanned.kept,
         dropped: scanned.dropped,
         data_start: data.start,
-        data_len: data.len,
+        data_len,
         layout,
+        group,
+        unbounded,
+        cut: data.cut || (partial && !unbounded),
+        open_ended: data.open_ended,
     })
 }
 
+#[derive(Clone, Copy)]
+struct Sized {
+    data_len: u64,
+    damaged: bool,
+    unbounded: bool,
+}
+
+/// The layout, and whether `data` ends inside a frame or a block.
 fn layout_for(
     format: &WavFormat,
-    data_len: u64,
+    sized: Sized,
     fact: Option<u64>,
     ds64_samples: Option<u64>,
     max_packet: u64,
-) -> Result<Layout, OpenError> {
+) -> Result<(Layout, bool), OpenError> {
     match format.framing() {
-        Framing::Samples => layout_samples(format, data_len, ds64_samples),
-        Framing::Blocks => layout_blocks(format, data_len, fact, ds64_samples),
-        Framing::Mpeg => Ok(Layout::Mpeg),
-        Framing::Whole => layout_whole(data_len, fact, ds64_samples, max_packet),
+        Framing::Samples => layout_samples(format, sized.data_len),
+        Framing::Blocks => layout_blocks(format, sized, fact, ds64_samples),
+        Framing::Mpeg => Ok((Layout::Mpeg, false)),
+        Framing::Whole => {
+            if sized.unbounded {
+                return Err(OpenError::Source {
+                    message: "data size is not stated".to_owned(),
+                });
+            }
+            let layout = layout_whole(sized.data_len, fact, ds64_samples, max_packet)?;
+            Ok((layout, false))
+        }
     }
 }
 
-fn layout_samples(
-    format: &WavFormat,
-    data_len: u64,
-    ds64_samples: Option<u64>,
-) -> Result<Layout, OpenError> {
+/// The frames are counted from the bytes. A `fact` or `ds64` sample count
+/// is not read for PCM: a zero or a wrong one is common, and the bytes
+/// are what plays.
+fn layout_samples(format: &WavFormat, data_len: u64) -> Result<(Layout, bool), OpenError> {
     let frame_bytes = u64::from(format.block_align());
-    let frames = frames_of(data_len, frame_bytes)?;
-    if let Some(samples) = ds64_samples
-        && samples != frames
-    {
-        return Err(OpenError::Source {
-            message: DISAGREE_SAMPLES.to_owned(),
-        });
-    }
-    Ok(Layout::Constant {
-        frame_bytes,
-        frames,
-        per_frame: 1,
-        extra: 0,
-    })
+    let (frames, partial) = frames_of(data_len, frame_bytes)?;
+    Ok((
+        Layout::Constant {
+            frame_bytes,
+            frames,
+            per_frame: 1,
+            extra: 0,
+        },
+        partial,
+    ))
 }
 
 fn layout_blocks(
     format: &WavFormat,
-    data_len: u64,
+    sized: Sized,
     fact: Option<u64>,
     ds64_samples: Option<u64>,
-) -> Result<Layout, OpenError> {
+) -> Result<(Layout, bool), OpenError> {
     let frame_bytes = u64::from(format.block_align());
-    let frames = frames_of(data_len, frame_bytes)?;
+    let (frames, partial) = frames_of(sized.data_len, frame_bytes)?;
     let declared = named_samples(fact, ds64_samples)?;
     let formula = format
         .samples_per_block()
         .map(|samples| samples.saturating_mul(frames));
-    let total = declared.or(formula);
+    let total = if sized.damaged || partial {
+        formula
+    } else {
+        declared.or(formula)
+    };
     let (per_frame, extra) = split_samples(total, frames);
-    Ok(Layout::Constant {
-        frame_bytes,
-        frames,
-        per_frame,
-        extra,
-    })
+    Ok((
+        Layout::Constant {
+            frame_bytes,
+            frames,
+            per_frame,
+            extra,
+        },
+        partial,
+    ))
 }
 
 fn layout_whole(
@@ -609,13 +777,17 @@ fn layout_whole(
     })
 }
 
-fn frames_of(data_len: u64, frame_bytes: u64) -> Result<u64, OpenError> {
-    if frame_bytes == 0 || !data_len.is_multiple_of(frame_bytes) {
+/// Whole frames in `data_len`, and whether a part of one is left over.
+fn frames_of(data_len: u64, frame_bytes: u64) -> Result<(u64, bool), OpenError> {
+    if frame_bytes == 0 {
         return Err(OpenError::Source {
-            message: "data size is not a multiple of the block align".to_owned(),
+            message: "block align is zero".to_owned(),
         });
     }
-    Ok(data_len / frame_bytes)
+    Ok((
+        data_len / frame_bytes,
+        !data_len.is_multiple_of(frame_bytes),
+    ))
 }
 
 fn named_samples(fact: Option<u64>, ds64_samples: Option<u64>) -> Result<Option<u64>, OpenError> {
@@ -640,9 +812,11 @@ fn split_samples(total: Option<u64>, frames: u64) -> (u64, u64) {
     (per_frame, total.checked_rem(frames).unwrap_or(0))
 }
 
-fn stamp_frame(
+/// The time of `taken` frames from `index`, with `extra` samples added
+/// when the run ends the file.
+fn stamp_run(
     index: u64,
-    frames: u64,
+    taken: u64,
     per_frame: u64,
     extra: u64,
 ) -> Result<(Option<i64>, Option<i64>), ReadError> {
@@ -650,10 +824,7 @@ fn stamp_frame(
         return Ok((None, None));
     }
     let start = index.saturating_mul(per_frame);
-    let mut duration = per_frame;
-    if index.saturating_add(1) == frames {
-        duration = duration.saturating_add(extra);
-    }
+    let duration = taken.saturating_mul(per_frame).saturating_add(extra);
     Ok((Some(ticks(start)?), Some(ticks(duration)?)))
 }
 
@@ -746,5 +917,14 @@ impl<R: Read + Seek + Send> Demux for WavDemux<R> {
 
     fn consumed(&self) -> u64 {
         self.input.consumed()
+    }
+
+    fn indexed_end(&self, track: TrackId) -> Option<i64> {
+        if track.get() != 0 {
+            return None;
+        }
+        self.duration_samples()
+            .filter(|samples| *samples != 0)
+            .and_then(|samples| i64::try_from(samples).ok())
     }
 }

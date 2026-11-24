@@ -1193,6 +1193,15 @@ pub(crate) struct Census {
 
 #[cfg(test)]
 impl Census {
+    pub(crate) fn add(&mut self, other: Census) {
+        self.tns_filters += other.tns_filters;
+        self.long_tns_filters += other.long_tns_filters;
+        self.noise_bands += other.noise_bands;
+        self.intensity_bands += other.intensity_bands;
+        self.ms_bands += other.ms_bands;
+        self.short_channels += other.short_channels;
+    }
+
     fn channel(&mut self, channel: &Channel) {
         let filters = channel
             .tns

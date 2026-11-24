@@ -18,6 +18,8 @@ Channel order is the AAC element order, center first, not WAV order. Configurati
 
 The decoder reads single, pair and LFE elements with Huffman coding and escapes, pulse data, temporal noise shaping, perceptual noise substitution, mid/side and intensity stereo, sine and KBD windows, and long, start, short and stop blocks. Data stream and fill elements are skipped, so dynamic range data in a fill element is not applied.
 
+Noise substitution draws from one generator that the decoder keeps for its whole life: it runs on through every noise band of every channel, element and frame, so two channels or two frames never get the same noise. A band that is noise in both channels of a pair with its mid/side flag set is the exception the standard asks for: the right channel repeats the left channel's noise at its own energy. A packet that fails leaves the generator where it was, and `reset` puts it back to its start. The generator and the order it is used in are FFmpeg's, so a stream's noise bands come out the same as FFmpeg's.
+
 The encoder uses KBD windows, one frame of lookahead for block switching (one decision shared by the non-LFE channels), mid/side in bands where the two channels of a pair are strongly correlated, and a lowpass on the LFE channel. It never writes temporal noise shaping, noise substitution, intensity stereo, pulse data, prediction or coupling. The same samples and settings give the same bytes.
 
 Rate control is `RateControl::Average { bitrate }` or `RateControl::Variable { quality, cap }`, with quality 1 to 10. Average mode aims at a mean rate and does not pad access units to one size. A bitrate must be at least 8000 bps and at most 6144 bits per channel per frame; anything else is `CodecError::InvalidApi { what: "bitrate" }`.
@@ -83,12 +85,14 @@ The codec calls return `CodecError`. `Pcm::from_f32` returns `PcmError`, so map 
 
 ## How it is tested
 
-All tests are unit tests inside `src/`; run them with `cargo test -p cutlass-aac`.
+All tests are unit tests inside `src/`; run them with `cargo test -p cutlass-aac`. None of them needs FFmpeg or outside media.
 
 - Round trips through the crate's own encoder and decoder, with a floor on the signal-to-noise ratio after the delay is trimmed: mono 1 kHz sine at 96 kbps with 1024 and 960 sample frames (40 dB), stereo at 128 kbps (35 dB per channel), a tone near Nyquist (20 dB), 5.1 at 384 kbps (30 dB, LFE 25 dB), 7.1 at 512 kbps (25 dB per channel), and 16-bit input (40 dB). Silence stays below `1e-4` and a DC level keeps its mean within 0.02.
 - Against FFmpeg: `ffmpeg_decodes_our_access_units` and `we_decode_an_ffmpeg_stream` need 40 dB and a lag of at most 1024 samples. They are skipped with a line on stderr when `ffmpeg` is not installed; set `AAC_REQUIRE_ORACLES` to make a missing `ffmpeg` fail.
 - Rate: `noise_over_two_seconds_stays_inside_the_rate_window` keeps average mode between 0.70 and 1.10 times the target.
-- Decoder tools the encoder never writes (intensity, pulse, noise substitution) are tested on hand-built access units.
+- Against FFmpeg's decoder, from committed files: `src/oracle.rs` decodes three FFmpeg-written stereo streams in `tests/fixtures` (TNS on long and short windows, intensity stereo and mid/side in all three, noise substitution in one) and compares each with FFmpeg's own decode, committed beside it as 32-bit float. Each must reach 120 dB PSNR with no sample more than `1e-5` apart; the result is in the table below. The tests also assert that each tool is present in its stream. `tests/fixtures/README.md` says how the files were made.
+- Decoder tools the encoder never writes (intensity, pulse, noise substitution) are tested on hand-built access units. For noise substitution these check the band energy, that the two channels of a pair differ unless the mid/side flag correlates them, that the generator carries on across elements and packets, and that a failed packet does not move it.
+- TNS: every coefficient index against the formula of ISO/IEC 14496-3 4.6.9.3, the filter's output values in both directions, the step from two reflections to the filter, and that the filter undoes the matching analysis filter.
 - Bad input: `random_access_units_fail_closed` pushes 256 random packets and checks that an error leaves the frame count unchanged. A wrong ADTS CRC and a truncated frame are checked the same way. A decoded frame with a sample that is not finite or is past 4.0 comes out as silence marked `concealed`.
 - The filterbank, Huffman tables, quantizer, bit reader and config parser have their own tests.
 
@@ -97,7 +101,24 @@ Not run or missing:
 - `thirty_minute_decoder_campaign` is `#[ignore]`; no result is recorded here.
 - No published conformance streams (ISO/IEC 14496-26) are used.
 - The program config path of the `AudioSpecificConfig` parser has no test.
-- No test decodes a real-world file; the FFmpeg tests use a generated sine.
+- No test decodes a recording; the FFmpeg streams are a synthetic mix of plucked notes, drums and hiss. `an_outside_stream_matches_ffmpeg` compares any mono or stereo ADTS file with FFmpeg's decode of it when `AAC_ORACLE_ADTS` and `AAC_ORACLE_PCM` are set, and is skipped otherwise.
+- The fixtures do not contain correlated noise substitution (FFmpeg's encoder does not write it and its decoder does not implement it); it is tested on hand-built access units only.
+- The fixtures have no 960-sample frames, no mono or multichannel streams, and no pulse data.
+
+### Match with FFmpeg's decoder
+
+Measured on 24 November 2026 at commit `fac770fd`, on a cloud virtual machine with an Intel Xeon at 2.10 GHz (4 cores, x86-64, Ubuntu 24.04, Linux 6.18) with rustc 1.97.0, against the float `aac` decoder of FFmpeg 6.1.1. PSNR is against a full scale of 1.0, over every sample of both channels, with no alignment or trimming.
+
+| Stream (stereo, written by FFmpeg `-c:a aac`) | Before, at `bc3b5ee0` | Largest difference before | Now | Largest difference now |
+| --- | ---: | ---: | ---: | ---: |
+| `tools_44100_128k_nopns`, 0.5 s | 43.92 dB | 0.285 | 149.56 dB | 2.4e-7 |
+| `tools_48000_64k_nopns`, 0.5 s | 37.84 dB | 0.629 | 151.31 dB | 1.8e-7 |
+| `tools_44100_96k_pns`, 0.5 s | 34.77 dB | 0.199 | 149.27 dB | 2.4e-7 |
+| The same kind of mix, 73.5 s, `-b:a 128k` (not committed) | not measured | | 150.83 dB | 3.0e-7 |
+| 73.5 s, `-b:a 128k -aac_pns 0` (not committed) | not measured | | 150.86 dB | 3.0e-7 |
+| 73.5 s, `-b:a 64k` (not committed) | not measured | | 153.59 dB | 2.1e-7 |
+
+Two faults accounted for the earlier figures. TNS reflection coefficients had the wrong sign, so every frame with TNS was filtered wrongly. Noise substitution restarted its generator in every channel and frame, so every noise band held the same values. What is left is the rounding of two different float filterbanks.
 
 ## Speed against FFmpeg
 
@@ -113,7 +134,7 @@ Measured on 10 November 2026 at commit `ed0743d2`, on an Apple M5 Pro (18 cores,
 | Peak memory | 12 MB | 21 MB |
 | Threads allowed | 1 | 1 |
 
-Cutlass is **10.1× slower** than FFmpeg here. The two outputs are not bit-identical: 51.62 dB PSNR between them, largest single difference 0.957 (lengths 79,744,000 and 79,742,976 sample frames, compared after sliding one by 1024).
+Cutlass is **10.1× slower** than FFmpeg here. On that day the two outputs were 51.62 dB PSNR apart with a largest single difference of 0.957 (lengths 79,744,000 and 79,742,976 sample frames, compared after sliding one by 1024). The TNS and noise substitution faults behind those two figures were fixed on 24 November 2026; see "Match with FFmpeg's decoder" above for the figures since. This 30-minute recording and the timings have not been measured again since the fix.
 
 How it was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
 

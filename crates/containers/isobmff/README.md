@@ -169,7 +169,7 @@ Fast start costs one more read and write of the file at the end, about 2 s for 4
 | Cutlass, recoverable | 3.1 s | 1.2 s | 3.46 billion | 11.0 MB |
 | Cutlass, recoverable and fast start | 4.3 s | 2.0 s | 3.47 billion | 15.1 MB |
 
-Wall time is the disk's and is the same for both within the noise. Cutlass uses about 0.4 of FFmpeg's CPU time for the same copy. The recoverable layout doubles the user-space instructions, because each payload is copied into the fragment before it is written; FFmpeg 6.1.1 has no such mode to compare with.
+Wall time is the disk's and is the same for both within the noise. Cutlass uses 0.4 of FFmpeg's CPU time for the plain copy and 0.6 for the fast-start one. The recoverable layout doubles the user-space instructions, because each payload is copied into the fragment before it is written; FFmpeg 6.1.1 has no such mode to compare with.
 
 To run it again: `cargo build --release -p cutlass-isobmff --example mux_cost`, then `mux_cost write <layout> <out.mp4> <seconds>`, `mux_cost remux <layout> <in.mp4> <out.mp4>` (set `MUX_COST_NO_SYNC=1` to leave out the sync, as FFmpeg does), and `mux_cost hash <file>`.
 

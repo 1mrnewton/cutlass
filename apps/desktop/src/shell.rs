@@ -18025,9 +18025,12 @@ mod tests {
                 let rgba = ffmpeg_rgba(&ffmpeg, &destination, 45);
                 assert_eq!(rgba.len(), 960 * 480 * 4, "{name}");
                 assert!(
-                    rgba.chunks_exact(4).all(|p| p[0].abs_diff(0x33) <= 6
-                        && p[1].abs_diff(0x66) <= 6
-                        && p[2].abs_diff(0x99) <= 6),
+                    rgba.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|p| p[0].abs_diff(0x33) <= 6
+                            && p[1].abs_diff(0x66) <= 6
+                            && p[2].abs_diff(0x99) <= 6),
                     "{name}: ffmpeg's colour"
                 );
             }

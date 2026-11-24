@@ -213,11 +213,14 @@ pub(crate) struct SampleIn<'a> {
     pub keyframe: bool,
 }
 
+/// Reads from the output at its current position.
+type ReadBack<W> = fn(&mut W, &mut [u8]) -> std::io::Result<usize>;
+
 /// Muxes packets into an ISOBMFF file.
 pub struct IsoBmffMux<W: Write + Seek> {
     writer: Option<W>,
     /// Reads the output back, for moving the payload behind `moov`.
-    read: Option<fn(&mut W, &mut [u8]) -> std::io::Result<usize>>,
+    read: Option<ReadBack<W>>,
     options: MuxOptions,
     tracks: Vec<TrackOut>,
     buffered: Vec<u8>,

@@ -1,15 +1,23 @@
 //! An MP4 written through the workspace mux trait, for export.
 //!
-//! Packets go straight to the file after `mdat` and the index follows at
-//! finish, so a long export does not hold its packets in memory. Each
+//! [`Mp4Mux::new`] and [`Mp4Mux::with_brand`] write packets straight to the
+//! file after `mdat` and the index at finish, so a long export does not
+//! hold its packets in memory. [`Mp4Mux::with_options`] can also put the
+//! index first (fast start) and keep the file readable while it grows
+//! (recoverable), on an output that can be read back such as
+//! [`MovieFile`]. Each
 //! track's codec configuration may arrive with its first packet, as encoders
 //! hand it over; it is written in the index at the end. An AAC
 //! configuration wrapped in an MPEG-4 ES descriptor, as Apple's encoder
 //! gives it, is unwrapped to the bare AudioSpecificConfig MP4 stores. An
 //! Opus configuration may be an `OpusHead` or a `dOps` body; the file
-//! stores `dOps`, and an edit that starts play after the pre-skip.
+//! stores `dOps`, and an edit that starts play after the pre-skip. An AAC,
+//! AC-3 or E-AC-3 track whose encoder reports its delay gets an edit that
+//! starts play after it.
 
-use std::io::{Seek, Write};
+use std::fs::File;
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 use cutlass_codec::{CodecId as Id, ContainerId, Packet, StreamCodec, Timescale};
 use cutlass_container::{
@@ -20,7 +28,7 @@ use cutlass_container::{
 use crate::legacy::{
     self, CodecId, ColorTags, Error, SampleFormat, StreamParams, Timescale as BoxScale,
 };
-use crate::mux::{FileBrand, IsoBmffMux, MuxOptions};
+use crate::mux::{FileBrand, IsoBmffMux, MuxOptions, SampleIn};
 
 /// One track: the id handed out, the box writer's id, and the next decode
 /// time in the track's timescale.
@@ -33,18 +41,126 @@ struct Track {
     next: i64,
     /// A ProRes track whose `colr` box still waits for its first frame.
     color_from_frame: bool,
-    /// The last gapless trim an AC-3 or E-AC-3 encoder handed over.
+    /// The last gapless trim an AAC, AC-3 or E-AC-3 encoder handed over.
     trim: Option<Trim>,
 }
 
-/// An MP4 file written as packets arrive, with its index at the end.
+/// How [`Mp4Mux::with_options`] lays the file out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mp4Options {
+    pub brand: FileBrand,
+    /// Put the index before the media, so a player can start on the first
+    /// bytes of a download. The media is written first and moved up at
+    /// finish, a block at a time.
+    pub fast_start: bool,
+    /// Write the file as fragments while packets arrive and make it a
+    /// normal movie at finish. A process that dies first leaves a file
+    /// that plays up to its last whole fragment.
+    pub recoverable: bool,
+    /// Creation time in seconds since 1970-01-01 UTC. `None` writes none.
+    pub creation_time: Option<u64>,
+}
+
+impl Default for Mp4Options {
+    /// Index first, recoverable, no creation time.
+    fn default() -> Self {
+        Self {
+            brand: FileBrand::Mp4,
+            fast_start: true,
+            recoverable: true,
+            creation_time: None,
+        }
+    }
+}
+
+/// A file a movie is written to: buffered for writing, and readable, so a
+/// muxer can move what it wrote. [`Mp4Mux::with_options`] takes one.
+#[derive(Debug)]
+pub struct MovieFile {
+    inner: BufWriter<File>,
+}
+
+impl MovieFile {
+    /// Creates `path`, or empties it, open for reading and writing.
+    pub fn create(path: &Path) -> std::io::Result<Self> {
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        Ok(Self::new(BufWriter::new(file)))
+    }
+
+    /// Wraps a file that was opened for reading and writing.
+    #[must_use]
+    pub fn new(inner: BufWriter<File>) -> Self {
+        Self { inner }
+    }
+
+    #[must_use]
+    pub fn into_inner(self) -> BufWriter<File> {
+        self.inner
+    }
+}
+
+impl Write for MovieFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Seek for MovieFile {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(to)
+    }
+}
+
+impl Read for MovieFile {
+    /// Reads at the file position, after what is buffered is written.
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.flush()?;
+        self.inner.get_mut().read(bytes)
+    }
+}
+
+/// An MP4 file written as packets arrive.
 pub struct Mp4Mux<W: Write + Seek> {
     inner: IsoBmffMux<W>,
     brand: FileBrand,
+    index: IndexPlace,
     tracks: Vec<Track>,
     status: MuxStatus,
     payload: u64,
     failure: Option<MuxError>,
+}
+
+impl<W: Read + Write + Seek> Mp4Mux<W> {
+    /// A file laid out as `options` say, on an output that can be read
+    /// back, which fast start needs to move the media behind the index.
+    #[must_use]
+    pub fn with_options(writer: W, options: Mp4Options) -> Self {
+        let inner = IsoBmffMux::with_reader(
+            writer,
+            MuxOptions {
+                brand: options.brand,
+                moov_at_end: !options.fast_start,
+                recoverable: options.recoverable,
+                creation_time: options.creation_time,
+                ..MuxOptions::default()
+            },
+        );
+        let index = if options.fast_start {
+            IndexPlace::Start
+        } else {
+            IndexPlace::End
+        };
+        Self::over(inner, options.brand, index)
+    }
 }
 
 impl<W: Write + Seek> Mp4Mux<W> {
@@ -53,17 +169,22 @@ impl<W: Write + Seek> Mp4Mux<W> {
         Self::with_brand(writer, FileBrand::Mp4)
     }
 
-    /// A file of brand `brand`: `Mov` writes a QuickTime movie, `M4a` a
-    /// sound-only MPEG-4 file.
+    /// A file of brand `brand`, with its index at the end: `Mov` writes a
+    /// QuickTime movie, `M4a` a sound-only MPEG-4 file.
     #[must_use]
     pub fn with_brand(writer: W, brand: FileBrand) -> Self {
         let options = MuxOptions {
             brand,
             ..MuxOptions::default()
         };
+        Self::over(IsoBmffMux::new(writer, options), brand, IndexPlace::End)
+    }
+
+    fn over(inner: IsoBmffMux<W>, brand: FileBrand, index: IndexPlace) -> Self {
         Self {
-            inner: IsoBmffMux::new(writer, options),
+            inner,
             brand,
+            index,
             tracks: Vec::new(),
             status: MuxStatus::Building,
             payload: 0,
@@ -410,19 +531,17 @@ impl<W: Write + Seek> Mux for Mp4Mux<W> {
                     .map_err(|error| self.fail(boxed(error)))?;
             }
         }
-        legacy::Mux::write_packet(
-            &mut self.inner,
-            &legacy::Packet {
+        self.inner
+            .write_sample(&SampleIn {
                 track_id: track.boxed,
-                payload: packet.bytes().to_vec(),
+                payload: packet.bytes(),
                 dts: track.next,
                 pts,
                 duration: span,
-                timescale: BoxScale(track.timescale.ticks_per_second()),
+                timescale: track.timescale.ticks_per_second(),
                 keyframe: packet.keyframe(),
-            },
-        )
-        .map_err(|error| self.fail(boxed(error)))?;
+            })
+            .map_err(|error| self.fail(boxed(error)))?;
         self.tracks[index].next = track.next.saturating_add(duration);
         self.payload = self
             .payload
@@ -477,7 +596,7 @@ impl<W: Write + Seek> Mux for Mp4Mux<W> {
         self.status = MuxStatus::Finished;
         Ok(FinishedMux::complete(
             durations.to_vec(),
-            IndexPlace::End,
+            self.index,
             MuxMode::Progressive,
             false,
             Vec::new(),
@@ -503,7 +622,7 @@ impl<W: Write + Seek> Mux for Mp4Mux<W> {
             .map_err(|error| self.fail(boxed(error)))
     }
 
-    /// AC-3 and E-AC-3 keep the encoder delay and the trailing padding
+    /// AAC, AC-3 and E-AC-3 keep the encoder delay and the trailing padding
     /// inside the frame durations. The edit written at finish skips the
     /// delay and ends before the padding. Opus already shortens its last
     /// packet and writes its pre-skip from the head, so this trim is not
@@ -511,7 +630,10 @@ impl<W: Write + Seek> Mux for Mp4Mux<W> {
     fn set_trim(&mut self, track: TrackId, trim: Trim) -> Result<(), MuxError> {
         self.building()?;
         let index = self.track(track.get()).map_err(|error| self.fail(error))?;
-        if matches!(self.tracks[index].codec, CodecId::Ac3 | CodecId::Eac3) {
+        if matches!(
+            self.tracks[index].codec,
+            CodecId::Aac | CodecId::Ac3 | CodecId::Eac3
+        ) {
             self.tracks[index].trim = Some(trim);
         }
         Ok(())

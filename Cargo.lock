@@ -2873,6 +2873,7 @@ dependencies = [
  "cutlass-store",
  "cutlass-vorbis",
  "cutlass-vp8",
+ "cutlass-vp9",
  "cutlass-webp",
 ]
 

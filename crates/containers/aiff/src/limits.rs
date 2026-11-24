@@ -9,5 +9,9 @@ pub(crate) const MAX_CHUNKS: u32 = 4096;
 /// Channels stored in one frame.
 pub(crate) const MAX_CHANNELS: u16 = 64;
 
+/// Linear, A-law and mu-law sound is returned in packets of whole sample
+/// frames up to this many bytes: 16,384 frames of 16-bit stereo.
+pub(crate) const PCM_PACKET_BYTES: u64 = 64 * 1024;
+
 /// Largest `COMM` payload this crate will read.
 pub(crate) const MAX_COMM: u32 = 4096;

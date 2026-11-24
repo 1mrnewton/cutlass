@@ -1,8 +1,13 @@
 //! `COMM` fields and the PCM layout bytes handed to the decoder.
 //!
-//! Linear, A-law and mu-law packets are one sample frame. The compressed
+//! Linear, A-law and mu-law sound is whole sample frames. The compressed
 //! rows below are one codec block, still compressed. Anything else is
 //! refused by name.
+//!
+//! A sample of 1 to 32 bits is stored in the fewest whole bytes that hold
+//! it, left-justified with the unused low bits zero (AIFF 1.3, "Sample
+//! Points and Sample Frames"). So a 12-bit sample is read as 16-bit and a
+//! 20-bit one as 24-bit: the value is already at full scale.
 
 use cutlass_codec::{CodecId, StreamCodec, UnknownCodec};
 use cutlass_container::{MuxError, NewStream, OpenError};
@@ -40,10 +45,6 @@ impl Sound {
         self.rate
     }
 
-    pub(crate) const fn sample_frames(self) -> u32 {
-        self.sample_frames
-    }
-
     pub(crate) const fn frame_bytes(self) -> u16 {
         match self.layout {
             Layout::Pcm {
@@ -64,20 +65,20 @@ impl Sound {
         }
     }
 
-    pub(crate) fn packet_count(self) -> Result<u32, OpenError> {
+    /// True for linear, A-law and mu-law sound, whose frames may be
+    /// returned many to a packet.
+    pub(crate) const fn is_pcm(self) -> bool {
+        matches!(self.layout, Layout::Pcm { .. })
+    }
+
+    /// Sample frames or codec blocks `COMM` states. Zero is "not stated":
+    /// a writer that could not seek back leaves it so.
+    pub(crate) fn stated_units(self) -> Result<u64, OpenError> {
         let step = self.samples_per_packet();
         if step == 0 || !self.sample_frames.is_multiple_of(step) {
             return Err(open_source("sample count is not a whole number of packets"));
         }
-        Ok(self.sample_frames / step)
-    }
-
-    pub(crate) fn data_bytes(self) -> Result<u64, OpenError> {
-        let packets = u64::from(self.packet_count()?);
-        let frame = u64::from(self.frame_bytes());
-        packets
-            .checked_mul(frame)
-            .ok_or_else(|| open_source("sound data does not fit"))
+        Ok(u64::from(self.sample_frames / step))
     }
 
     pub(crate) fn stream_codec(self) -> Result<StreamCodec, OpenError> {
@@ -174,9 +175,12 @@ fn classify(tag: [u8; 4], bits: u16, channels: u16) -> Result<Layout, OpenError>
         b"sowt" => linear(bits, false, channels),
         b"in24" => sized(bits, 24, true, channels),
         b"in32" => sized(bits, 32, true, channels),
-        b"raw " => sized(bits, 8, true, channels),
-        b"fl32" => float_layout(bits, 32, channels),
-        b"fl64" => float_layout(bits, 64, channels),
+        // Offset binary: 128 is silence. QuickTime File Format, "Sound
+        // Sample Descriptions", `raw `; libavformat maps it the same way.
+        b"raw " => unsigned_bytes(bits, channels),
+        // Both cases are in files: QuickTime wrote the upper-case tags.
+        b"fl32" | b"FL32" => float_layout(bits, 32, channels),
+        b"fl64" | b"FL64" => float_layout(bits, 64, channels),
         b"ima4" => blocks(tag, channels, 34, 64),
         b"MAC3" => blocks(tag, channels, 2, 6),
         b"MAC6" => blocks(tag, channels, 1, 6),
@@ -197,15 +201,24 @@ fn sized(bits: u16, expect: u16, big: bool, channels: u16) -> Result<Layout, Ope
     linear(bits, big, channels)
 }
 
+fn unsigned_bytes(bits: u16, channels: u16) -> Result<Layout, OpenError> {
+    if bits == 0 || bits > 8 {
+        return Err(open_source(format!(
+            "sample size {bits} does not match the compression type"
+        )));
+    }
+    pcm_layout(11, 1, true, channels)
+}
+
 fn linear(bits: u16, big: bool, channels: u16) -> Result<Layout, OpenError> {
-    let coding = match bits {
-        8 => 6,
-        16 => 1,
-        24 => 2,
-        32 => 3,
+    let (coding, width) = match bits {
+        1..=8 => (6, 1),
+        9..=16 => (1, 2),
+        17..=24 => (2, 3),
+        25..=32 => (3, 4),
         _ => return Err(open_source(format!("sample size {bits} is not linear pcm"))),
     };
-    pcm_layout(coding, bits / 8, big, channels)
+    pcm_layout(coding, width, big, channels)
 }
 
 fn float_layout(bits: u16, expect: u16, channels: u16) -> Result<Layout, OpenError> {

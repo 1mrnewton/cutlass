@@ -368,3 +368,136 @@ fn the_filter_on_a_window_of_bytes_matches_the_one_on_16_bits() {
     let mut dst = vec![0; 10];
     assert!(!filter_inner_bytes(&mut dst, 11, &[0; WINDOW], &f, true, 4));
 }
+
+#[test]
+fn the_filter_matches_for_every_shift_and_every_number_of_rows() {
+    let mut rng = Rng(0x5117_F7ED);
+    for bd in [8u32, 10, 12] {
+        for shift in 0..=15u32 {
+            for rows in 1..=8usize {
+                // Every sample available: any shift is then exact.
+                let win = window(&mut rng, bd, 0);
+                let pri = ((rng.next() % 16) << (bd - 8)) as u16;
+                let sec = ((rng.next() % 5) << (bd - 8)) as u16;
+                if pri == 0 && sec == 0 {
+                    continue;
+                }
+                let mut f = filter_for(pri, sec, (rng.next() % 8) as usize, 6, bd);
+                f.pri_shift = shift;
+                f.sec_shift = 15 - shift;
+                let want = scalar::filter(&win, &f, rows);
+                assert_eq!(
+                    filter_u16(&win, &f, rows),
+                    want,
+                    "{bd} bits, {rows} rows, {f:?}"
+                );
+                // At the picture's edges, with the shifts a stream gives.
+                let edges = 1 + rng.next() % 15;
+                let win = window(&mut rng, bd, edges);
+                let f = filter_for(pri, sec, (shift % 8) as usize, 3 + shift % 4 + (bd - 8), bd);
+                assert_eq!(
+                    filter_u16(&win, &f, rows),
+                    scalar::filter(&win, &f, rows),
+                    "{bd} bits at an edge, {rows} rows, {f:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn one_sample_outside_the_picture_is_left_out_wherever_a_tap_reads_it() {
+    let mut rng = Rng(0x0DD_5A3F);
+    let base = window(&mut rng, 8, 0);
+    for row in 0..12 {
+        for col in 0..12 {
+            if (2..10).contains(&row) && (2..10).contains(&col) {
+                continue;
+            }
+            let mut win = base;
+            win[row * STRIDE + col] = UNAVAILABLE;
+            for dir in 0..8 {
+                for (pri, sec) in [(15, 4), (9, 0), (0, 2), (1, 1)] {
+                    let f = filter_for(pri, sec, dir, 3 + (row + col) as u32 % 4, 8);
+                    assert_eq!(
+                        filter_u16(&win, &f, 8),
+                        scalar::filter(&win, &f, 8),
+                        "row {row} col {col} {f:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_byte_filter_matches_for_every_shift_and_every_number_of_rows() {
+    let mut rng = Rng(0x0B17_E5F7);
+    for shift in 0..=15u32 {
+        for rows in 1..=8usize {
+            for (pri, sec) in [(15, 4), (15, 0), (0, 4), (1, 1), (8, 2), (3, 0)] {
+                let win = window(&mut rng, 8, 0);
+                let bytes: [u8; WINDOW] = win.map(|v| v as u8);
+                let mut f = filter_for(pri, sec, (rng.next() % 8) as usize, 6, 8);
+                f.pri_shift = shift;
+                f.sec_shift = 15 - shift;
+                let want = scalar::filter(&win, &f, rows);
+                for (wide, w) in [(true, 8usize), (false, 4)] {
+                    // A destination that ends with the block's last
+                    // sample.
+                    let stride = w + rows % 3;
+                    let len = (rows - 1) * stride + w;
+                    let mut got = vec![0xEEu8; len];
+                    assert!(filter_inner_u8(&mut got, stride, &win, &f, wide, rows));
+                    let mut from_bytes = vec![0xEEu8; len];
+                    assert!(filter_inner_bytes(
+                        &mut from_bytes,
+                        stride,
+                        &bytes,
+                        &f,
+                        wide,
+                        rows
+                    ));
+                    assert_eq!(got, from_bytes, "{w} wide, {rows} rows, {f:?}");
+                    for (r, row) in got.chunks(stride).enumerate() {
+                        for (c, &v) in row.iter().enumerate() {
+                            let want = if c < w { want[r][c] as u8 } else { 0xEE };
+                            assert_eq!(v, want, "{w} wide, row {r} of {rows}, {f:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_direction_of_every_extreme_block_matches() {
+    // Blocks of the two extreme samples in every pattern of rows, columns
+    // and diagonals: the sums at their largest.
+    for bd in [8u32, 10, 12] {
+        let max = ((1u32 << bd) - 1) as u16;
+        for pattern in 0..64usize {
+            let px: [[u16; 8]; 8] = core::array::from_fn(|i| {
+                core::array::from_fn(|j| {
+                    let on = match pattern % 8 {
+                        0 => true,
+                        1 => false,
+                        2 => i % 2 == 0,
+                        3 => j % 2 == 0,
+                        4 => (i + j) % 2 == 0,
+                        5 => i + j < 8,
+                        6 => i < j,
+                        _ => (i * 3 + j * 5 + pattern) % 7 < 3,
+                    };
+                    if on ^ (pattern & 8 != 0) { max } else { 0 }
+                })
+            });
+            let want = scalar::direction(&px, bd);
+            assert_eq!(direction_u16(&px, bd), want, "{bd} bits pattern {pattern}");
+            if bd == 8 {
+                assert_eq!(direction_u8(&px.map(|r| r.map(|v| v as u8))), want);
+            }
+        }
+    }
+}

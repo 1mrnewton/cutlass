@@ -1,6 +1,6 @@
 # cutlass-h264
 
-An H.264 (AVC) decoder and encoder in safe Rust. The crate has `#![forbid(unsafe_code)]` and depends only on `cutlass-decode`, `cutlass-encode` and `cutlass-h264-kernels`, which holds its sample loops and the `unsafe` their NEON versions need. It runs on the caller's thread unless the decoder is given threads with `with_threads`. The desktop app registers both: on macOS and Windows the platform codec is asked first when hardware decode or encode is on in Settings, and this crate is used when that opener declines, when hardware is off, and always on Linux.
+An H.264 (AVC) decoder and encoder in safe Rust. The crate has `#![forbid(unsafe_code)]` and depends only on `cutlass-decode`, `cutlass-encode` and `cutlass-h264-kernels`, which holds its sample loops and the `unsafe` their NEON, SSE4.1 and AVX2 versions need. It runs on the caller's thread unless the decoder is given threads with `with_threads`. The desktop app registers both: on macOS and Windows the platform codec is asked first when hardware decode or encode is on in Settings, and this crate is used when that opener declines, when hardware is off, and always on Linux.
 
 ## What it supports
 
@@ -127,6 +127,56 @@ Read the threaded table with care. `/usr/bin/time` reports hundredths of a secon
 How the decode was measured: each side is a whole process timed with `/usr/bin/time -l`, start-up and file reading included, the two run one after the other. The Cutlass side is a small program that reads the file, splits it into access units, pushes each to `H264Decoder` and drops the pictures; it is not in the repository. The FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which reads the same file with libavformat and decodes it with libavcodec, with no filter graph and no output stage. Before the timing, every sample of every picture of all five films was the same from both decoders, with Cutlass on 1 thread and on 18.
 
 On 10 November 2026, at commit `ed0743d2`, the decoder took 9.47 s on one thread for 600 pictures of 1920×1080 written by libx264, where FFmpeg took 2.48 s.
+
+**Decode, h264, on x86-64.** Measured on 24 November 2026 at commit `eb666531`, on an Intel Xeon (`Intel(R) Xeon(R) Processor @ 2.10GHz`, family 6 model 207, with AVX2 and AVX-512; 4 virtual CPUs of a KVM guest, 15 GB) running Ubuntu 24.04, against FFmpeg 6.1.1 built from its source (tag `n6.1.1`, gcc 13.3, static, with only the H.264 decoder, parser and raw demuxer in it). Ubuntu's own FFmpeg 6.1.1 took 1 to 6% longer than that build. Built with rustc 1.97.0 and `cargo build --release`, not through `scripts/pgo.py`. The input is eight Annex B streams made for this with `ffmpeg -c:v libx264 -bf 3 -crf 23` at the preset named, from FFmpeg's `mandelbrot` source with noise added, all High profile, 8-bit 4:2:0, CABAC; "pan" is its `testsrc2` source turned and scrolled, and "all intra" has a key picture every picture. They are not in the repository.
+
+Until this commit an x86-64 build ran every sample loop as plain Rust. "Before" is that build, at `bcab8681`. The kernels are now chosen when the first one is called: AVX2 where the CPU has it, else SSE4.1; "SSE4.1" is the same commit made to choose that on this CPU.
+
+One thread on both sides (FFmpeg's `thread_count` 1), processor time of the whole process, user and system (median of 7 runs taken in turn, 3 for "Before"; the whole table run three times and each cell the middle of the three):
+
+| Stream | Pictures | Before | Cutlass, AVX2 | Cutlass, SSE4.1 | FFmpeg (`h264`) | AVX2 ÷ FFmpeg |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1920×1080 superfast | 120 | 4.09 s | 2.31 s | 2.38 s | 1.96 s | 1.18 |
+| 1920×1080 veryfast | 120 | 2.47 s | 1.17 s | 1.26 s | 0.93 s | 1.26 |
+| 1920×1080 medium | 120 | 2.86 s | 1.40 s | 1.41 s | 1.08 s | 1.30 |
+| 1920×1080 slow | 120 | 2.84 s | 1.37 s | 1.42 s | 1.08 s | 1.27 |
+| 1920×1080 medium, pan | 120 | 2.63 s | 1.13 s | 1.19 s | 0.83 s | 1.36 |
+| 1920×1080 medium, all intra | 30 | 0.95 s | 0.51 s | 0.51 s | 0.54 s | 0.94 |
+| 3840×2160 veryfast | 48 | 3.82 s | 1.64 s | 1.68 s | 1.38 s | 1.19 |
+| 3840×2160 medium | 48 | 4.50 s | 2.10 s | 2.08 s | 1.55 s | 1.35 |
+
+Retired instructions of the whole process:
+
+| Stream | Before | Cutlass, AVX2 | Cutlass, SSE4.1 | FFmpeg (`h264`) | AVX2 ÷ FFmpeg |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1920×1080 superfast | 34.94G | 16.34G | 17.04G | 11.26G | 1.45 |
+| 1920×1080 veryfast | 24.81G | 9.07G | 9.68G | 6.30G | 1.44 |
+| 1920×1080 medium | 25.94G | 10.25G | 10.89G | 7.10G | 1.44 |
+| 1920×1080 slow | 25.16G | 10.12G | 10.76G | 6.95G | 1.46 |
+| 1920×1080 medium, pan | 24.83G | 8.78G | 9.38G | 5.90G | 1.49 |
+| 1920×1080 medium, all intra | 10.67G | 3.98G | 4.10G | 3.16G | 1.26 |
+| 3840×2160 veryfast | 35.73G | 11.78G | 12.62G | 8.41G | 1.40 |
+| 3840×2160 medium | 36.67G | 13.19G | 14.12G | 9.51G | 1.39 |
+
+The vector kernels halve the time of every stream (1.8 to 2.3 times as fast as before) and bring the instructions to 0.33 to 0.47 of what they were. Cutlass is still behind this FFmpeg on seven of the eight: it takes 1.18 to 1.36 times FFmpeg's time, and 0.94 of it on the all-intra stream. It retires 1.26 to 1.49 times FFmpeg's instructions on all eight, the all-intra one included, which it gets through in less time. Times on this shared machine moved by up to 5% from one run of the table to the next; the instruction counts do not move.
+
+Where the instructions go on the 1920×1080 medium stream, by the function they are counted in:
+
+| Area | Cutlass, AVX2 | FFmpeg | Difference |
+| --- | ---: | ---: | ---: |
+| Reading the stream: CABAC, macroblock syntax, motion vectors, levels and their scaling | 5.18G | 3.60G | 1.58G |
+| Inter prediction | 2.14G | 1.55G | 0.59G |
+| Deblocking, with finding each edge's strength | 2.08G | 1.65G | 0.43G |
+| Inverse transforms and adding the residual | 0.25G | 0.19G | 0.06G |
+| Intra prediction | 0.01G | 0.01G | 0.00G |
+| Everything else (clearing and copying memory, start-up, the harness) | 0.59G | 0.10G | 0.49G |
+| Whole process | 10.25G | 7.10G | 3.15G |
+
+Of Cutlass's 10.25G, 2.44G are in `cutlass-h264-kernels` and 7.81G outside it, in this crate and the memory clearing and copying it asks for: more than FFmpeg's whole decode. What is left to win is mostly here: reading residual levels under CABAC (`inter_luma_scaled` and `chroma_scaled`, 2.77G against about 1.84G for FFmpeg's `decode_cabac_residual_nondc_internal`, `decode_significance_x86` and `get_cabac`), finding the deblocking strengths (`deblock_rows_after`, 1.30G against 1.01G for FFmpeg's `loop_filter`, `ff_h264_filter_mb_fast` and its strength routine), and the calls around each prediction (`mc_plain`, `predict_parts` and `prefetch_motion`, 0.60G against 0.34G for `mc_part_420_simple_8`). Sampled processor time splits the same way: 56% reading the stream, 19% inter prediction, 15% deblocking in Cutlass, against 60%, 20% and 16% in FFmpeg.
+
+One thing was tried and left as it was. Asking the cache for a reference block's rows ahead of its prediction (`prefetch`) made the 3840×2160 medium stream 6 to 10% faster and two of the 1920×1080 ones 1 to 4% slower, in 7 runs of each with and without it; it is kept, as FFmpeg keeps its own. The AVX2 kernels, which are the 128-bit ones built a second time for AVX2 with sixteen-wide luma prediction in 256-bit registers, retire 3 to 7% fewer instructions than the SSE4.1 ones and take from 1% more to 7% less time, which on half the streams is within what the times move by.
+
+How this was measured: as the table above it, each side is a whole process, here timed with `/usr/bin/time`, and the Cutlass side is `examples/profile_decode.rs` with `NOHASH=1`, which reads the file, splits it into access units, pushes each to `H264Decoder` and drops the pictures. This machine gives `perf stat` no hardware counters, so the instructions are counted by Valgrind 3.22 (`--tool=callgrind`), which runs the same binaries on a CPU it presents as having AVX2 and no AVX-512, and there are no cycle counts. Before the timing, every sample of every picture of all eight streams was the same from FFmpeg, from the build before, and from Cutlass on its AVX2 and its SSE4.1 kernels.
 
 **Encode, h264.** Measured on 10 November 2026 at commit `ed0743d2`, same machine, FFmpeg 8.1.1, `cargo build --release` with rustc 1.99.1, and not measured again since. Input: 300 raw frames of 1920×1080 at 30 frames a second, asked for 8 Mbit/s.
 

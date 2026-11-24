@@ -882,6 +882,17 @@ fn samples_that_lie_together_share_a_chunk() {
     );
     assert_eq!(chunk_count(traks(&grouped)[0]), 4);
     assert_eq!(chunk_count(traks(&grouped)[1]), 4);
+    // In each fragment the sound lies before the pictures, so the first
+    // sample of every track is near the start of the file.
+    let first_chunk = |trak: &[u8]| be32(find(trak, &[b"mdia", b"minf", b"stbl", b"stco"]), 8);
+    let sound_at = first_chunk(traks(&grouped)[1]);
+    let sound_bytes: u32 = packets
+        .iter()
+        .filter(|p| p.track_id == 2)
+        .take(44)
+        .map(|p| p.payload.len() as u32)
+        .sum();
+    assert_eq!(first_chunk(traks(&grouped)[0]), sound_at + sound_bytes);
     let moov = |bytes: &[u8]| find(bytes, &[b"moov"]).len();
     assert!(moov(&grouped) < moov(&plain) - 4 * (runs as usize - 4));
     assert_eq!(by_track(read_all(&grouped)), by_track(packets));

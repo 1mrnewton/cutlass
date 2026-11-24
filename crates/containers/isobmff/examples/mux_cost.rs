@@ -15,6 +15,7 @@
 //! packets, to show two layouts hold the same ones. Each prints the time to
 //! write the packets, the time `finish` took, the time to sync the file to
 //! disk, and the process's peak resident memory where the system tells.
+//! With `MUX_COST_NO_SYNC` set the file is not synced, as FFmpeg's is not.
 
 #![allow(clippy::print_stdout)]
 
@@ -148,6 +149,12 @@ fn remux(options: MuxOptions, input: &Path, out: &Path) -> Result<(), String> {
     let started = Instant::now();
     let mut source = FileSource::open(input).map_err(text)?;
     let mut movie = IsoBmff::open(&mut source).map_err(text)?;
+    // The edits are copied as they are, so the movie timescale they are
+    // counted in is kept too.
+    let options = MuxOptions {
+        movie_timescale: Some(movie.movie_timescale().get()),
+        ..options
+    };
     let mut mux = IsoBmffMux::with_reader(MovieFile::create(out).map_err(text)?, options);
     for stream in movie.streams() {
         let id = mux.add_stream(&stream.params).map_err(text)?;
@@ -169,7 +176,9 @@ fn finish(mux: IsoBmffMux<MovieFile>, started: Instant, out: &Path) -> Result<()
     let file = file
         .into_inner()
         .map_err(|error| text(error.into_error()))?;
-    file.sync_all().map_err(text)?;
+    if std::env::var_os("MUX_COST_NO_SYNC").is_none() {
+        file.sync_all().map_err(text)?;
+    }
     let synced = syncing.elapsed();
     let bytes = std::fs::metadata(out).map_err(text)?.len();
     println!("bytes {bytes}");

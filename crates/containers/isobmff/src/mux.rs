@@ -31,7 +31,7 @@
 //! is lost when the keyframes are far apart. Each track has one `traf` in a
 //! fragment. Fragmented output keeps the caller's interleave, with a `trun`
 //! for each run of a track's samples; a recoverable file lays each track's
-//! samples together under one `trun`.
+//! samples together under one `trun`, sound before pictures.
 //!
 //! Packet decode times on a track start at 0 and advance by each sample's
 //! duration. Presentation time may differ; that difference is the composition
@@ -823,7 +823,7 @@ impl<W: Write + Seek> IsoBmffMux<W> {
             self.write_bytes(payload)?;
         }
         let mut traf_number = 0u8;
-        for index in 0..self.tracks.len() {
+        for index in payload_order(&self.tracks, grouped) {
             if self.tracks[index].pending.is_empty() {
                 continue;
             }
@@ -1985,8 +1985,21 @@ fn trex(track: &TrackOut) -> Vec<u8> {
     box_bytes(b"trex", &payload)
 }
 
+/// The order tracks come in within a fragment. When their payload is
+/// grouped, the tracks that are not video come first: their part of a
+/// fragment is small, so every track's first sample is near the start of
+/// the file. A reader that looks at the first few megabytes for each track,
+/// as FFmpeg does, then finds them all, however large the pictures are.
+fn payload_order(tracks: &[TrackOut], grouped: bool) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..tracks.len()).collect();
+    if grouped {
+        order.sort_by_key(|index| tracks[*index].is_video());
+    }
+    order
+}
+
 /// One `moof` for the pending samples: a `traf` for each track that has
-/// some, in track order. `data_start` is the distance from the start of the
+/// some, in the order of `payload_order`. `data_start` is the distance from the start of the
 /// `moof` to the first payload byte. When `grouped`, each track's payload
 /// lies together, in track order, and its `traf` has one `trun`. Otherwise
 /// the payload is in arrival order and each run of a track's samples has
@@ -2002,7 +2015,8 @@ fn moof_bytes(
     mfhd.extend_from_slice(&sequence.to_be_bytes());
     body.extend(box_bytes(b"mfhd", &mfhd));
     let mut track_at = data_start;
-    for track in tracks {
+    for index in payload_order(tracks, grouped) {
+        let track = &tracks[index];
         if track.pending.is_empty() {
             continue;
         }

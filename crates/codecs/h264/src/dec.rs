@@ -732,7 +732,7 @@ macro_rules! decode_depth {
             &$nals,
             $packet,
             &mut $grain,
-            ($self.pool.as_ref(), &$self.spares),
+            ($self.threads_now(), &$self.spares),
         )?;
         if let Some(frame) = dpb.last() {
             $self.picture_samples = frame.w.saturating_mul(frame.h);
@@ -755,6 +755,11 @@ pub struct H264Decoder {
     grain: crate::sei::GrainHold,
     /// Threads that decode pictures, when asked for.
     pool: Option<Pool>,
+    /// The first picture after opening or a reset is decoded on the
+    /// calling thread, whatever `pool` holds.
+    first_here: bool,
+    /// A picture has been decoded since opening or the last reset.
+    warm: bool,
     /// Pictures chosen for output, in order, that may still be decoding.
     outbox: std::collections::VecDeque<Queued>,
     /// Pictures that were ready when a call ended in an error. The next
@@ -772,11 +777,26 @@ pub fn register_decoders(factory: &mut DecodeFactory) {
     factory.register_video(CodecId::H264, open_decoder);
 }
 
+/// Processor cores a decoder the app opens uses at most. Several clips
+/// are open at once on a timeline, each with its own decoder, and past
+/// eight cores a picture gains little.
+const APP_CORES: usize = 8;
+
+/// The cores a decoder the app opens decodes on: those the machine has,
+/// up to [`APP_CORES`].
+fn app_cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |cores| cores.get().min(APP_CORES))
+}
+
 fn open_registered(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
-    Ok(Box::new(AccessDecoder {
-        inner: H264Decoder::open(params)?,
+    Ok(Box::new(open_access(params, app_cores())?))
+}
+
+fn open_access(params: &CodecParams, cores: usize) -> Result<AccessDecoder, CodecError> {
+    Ok(AccessDecoder {
+        inner: H264Decoder::open(params)?.with_threads_from_the_second_picture(cores),
         packed: Vec::new(),
-    }))
+    })
 }
 
 /// The engine's decoder. It returns one packed picture per displayed frame.
@@ -792,7 +812,9 @@ struct AccessDecoder {
 const PACKED_KEPT: usize = 4;
 
 fn open_decoder(params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError> {
-    Ok(Box::new(H264Decoder::open(params)?))
+    Ok(Box::new(
+        H264Decoder::open(params)?.with_threads_from_the_second_picture(app_cores()),
+    ))
 }
 
 impl H264Decoder {
@@ -813,6 +835,8 @@ impl H264Decoder {
             extra: params.extra.clone(),
             grain: crate::sei::GrainHold::default(),
             pool: None,
+            first_here: false,
+            warm: false,
             outbox: std::collections::VecDeque::new(),
             stash: Vec::new(),
             picture_samples: 0,
@@ -845,10 +869,38 @@ impl H264Decoder {
     /// Interlaced, 4:2:2, 4:4:4, multi-view and scalable pictures are
     /// decoded on the calling thread as before. One thread or none keeps
     /// everything on the calling thread.
+    ///
+    /// No thread is started until a picture needs one, and a thread that
+    /// has had no picture for half a second ends, so a decoder that is
+    /// not being fed holds none.
     #[must_use]
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.pool = (threads > 1).then(|| Pool::new(threads));
         self
+    }
+
+    /// As [`Self::with_threads`], for a decoder that may be asked for one
+    /// picture and no more, as when a still is taken or a seek lands on
+    /// the picture wanted. The first picture after opening, and after each
+    /// [`VideoDecoder::reset`], is decoded on the calling thread: it comes
+    /// out of the same call as it would on one thread, an error in it is
+    /// returned by the call that pushed it, and a decoder that goes no
+    /// further starts no thread. The pictures after it go to other
+    /// threads. This is how [`register_decoders`] opens the decoder, for
+    /// up to eight cores.
+    #[must_use]
+    pub fn with_threads_from_the_second_picture(mut self, threads: usize) -> Self {
+        self = self.with_threads(threads);
+        self.first_here = true;
+        self
+    }
+
+    /// The threads the next picture may be decoded on.
+    fn threads_now(&self) -> Option<&Pool> {
+        if self.first_here && !self.warm {
+            return None;
+        }
+        self.pool.as_ref()
     }
 
     /// As [`Self::with_threads`], with each picture decoded to its end on
@@ -1063,6 +1115,9 @@ impl VideoDecoder for H264Decoder {
         let mut grain = self.grain.clone();
         // The unit is split into NAL units once, for both passes over it.
         let nals = nal::access_unit(&packet.data, self.length_size)?;
+        let slices = nals
+            .iter()
+            .any(|nal| matches!(nal.kind, 1 | 2 | 5 | 20 | 21));
         let depth = au_depth(&self.sets, &nals, self.dpb.depth())?;
         let mut out = std::mem::take(&mut self.stash);
         let prior = if depth == self.dpb.depth() {
@@ -1125,6 +1180,7 @@ impl VideoDecoder for H264Decoder {
         self.poc = poc;
         self.grain = grain;
         self.drained = false;
+        self.warm |= slices;
         self.take_ready(&mut out, false)?;
         Ok(out)
     }
@@ -1147,6 +1203,7 @@ impl VideoDecoder for H264Decoder {
         self.dpb = Store::Eight(Vec::new());
         self.poc = Poc::new();
         self.drained = false;
+        self.warm = false;
         self.sets = Sets::new();
         self.grain = crate::sei::GrainHold::default();
         if !self.extra.is_empty() {
@@ -1575,7 +1632,7 @@ fn decode_au<S: Sample>(
             pic.w,
             pic.h,
             pic.mb_w,
-            pool.permits.clone(),
+            pool.permits(),
             Some(spares.clone()),
         ));
         let mut meta = pic.clone();
@@ -5250,8 +5307,8 @@ impl Queued {
     }
 }
 
-/// Threads kept for each core asked for. Most pictures in a chain wait on
-/// the one in front and use no core while they do.
+/// Threads there may be for each core asked for. Most pictures in a chain
+/// wait on the one in front and use no core while they do.
 const IN_FLIGHT_PER_CORE: usize = 4;
 /// Pictures in flight for every two cores asked for. More decode no faster
 /// on 8 or 18 cores, at 1080p or 4K, and each holds its planes.
@@ -5265,20 +5322,86 @@ const IN_FLIGHT_BYTES_PER_CORE: usize = 1 << 27;
 
 type Task = Box<dyn FnOnce() + Send>;
 
-/// The threads that decode pictures.
-struct Pool {
-    /// `None` runs each task where it is handed over.
-    sender: Option<std::sync::mpsc::Sender<Task>>,
+/// How long a thread waits for a picture before it ends. A decoder that
+/// has stopped being fed, as a clip on a timeline that is not playing,
+/// then holds no thread.
+const IDLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Pictures waiting for a thread, and the threads.
+#[derive(Default)]
+struct Line {
+    tasks: std::collections::VecDeque<Task>,
+    /// Threads waiting for a task.
+    idle: usize,
+    /// Threads running, waiting or about to start.
+    alive: usize,
+    /// Every thread started, most at one time, for tests and measurement.
+    peak: usize,
+    /// No more tasks will come.
+    closed: bool,
     workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+/// What the decoder and its threads share.
+struct Crew {
+    line: std::sync::Mutex<Line>,
+    called: std::sync::Condvar,
+    /// One permit per core asked for.
+    permits: std::sync::Arc<progress::Permits>,
+}
+
+impl Crew {
+    /// One thread's life: tasks in the order they were handed over, until
+    /// none comes for [`IDLE`] or the line is closed.
+    fn work(&self) {
+        loop {
+            let task = {
+                let Ok(mut line) = self.line.lock() else {
+                    return;
+                };
+                loop {
+                    if let Some(task) = line.tasks.pop_front() {
+                        break task;
+                    }
+                    if line.closed {
+                        line.alive = line.alive.saturating_sub(1);
+                        return;
+                    }
+                    line.idle += 1;
+                    let Ok((woken, wait)) = self.called.wait_timeout(line, IDLE) else {
+                        return;
+                    };
+                    line = woken;
+                    line.idle = line.idle.saturating_sub(1);
+                    if wait.timed_out() && line.tasks.is_empty() {
+                        line.alive = line.alive.saturating_sub(1);
+                        return;
+                    }
+                }
+            };
+            // A task that unwinds has already marked its picture failed;
+            // the thread goes on to the next.
+            self.permits.take();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
+            self.permits.give();
+        }
+    }
+}
+
+/// The threads that decode pictures. None is started until a picture
+/// needs one, and one that has had nothing to do for [`IDLE`] ends.
+struct Pool {
+    /// `None` runs each task where it is handed over, with nothing to
+    /// share.
+    crew: Option<std::sync::Arc<Crew>>,
+    /// Threads there may be at one time.
+    limit: usize,
     /// How many pictures the threads can decode at once.
     depth: usize,
     /// Memory the pictures in flight may take together.
     budget: usize,
     /// Tasks handed over and not yet finished.
     flying: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// One permit per core asked for. `None` runs tasks where they are
-    /// handed over, with nothing to share.
-    permits: Option<std::sync::Arc<progress::Permits>>,
 }
 
 /// Counts a task as finished when it ends, however it ends.
@@ -5291,67 +5414,57 @@ impl Drop for Lands {
 }
 
 impl Pool {
-    /// For `cores` processor cores: that many permits to decode, and a
-    /// thread for each picture that may be in flight.
+    /// For `cores` processor cores: that many permits to decode, and up
+    /// to a thread for each picture that may be in flight.
     fn new(cores: usize) -> Self {
-        let (sender, receiver) = std::sync::mpsc::channel::<Task>();
-        let receiver = std::sync::Arc::new(std::sync::Mutex::new(receiver));
-        let permits = std::sync::Arc::new(progress::Permits::new(cores));
-        let mut workers = Vec::new();
-        for index in 0..cores.saturating_mul(IN_FLIGHT_PER_CORE) {
-            let receiver = receiver.clone();
-            let permits = permits.clone();
-            let spawned = std::thread::Builder::new()
-                .name(format!("h264-{index}"))
-                .spawn(move || {
-                    loop {
-                        let task = match receiver.lock() {
-                            Ok(receiver) => receiver.recv(),
-                            Err(_) => return,
-                        };
-                        let Ok(task) = task else {
-                            return;
-                        };
-                        // A task that unwinds has already marked its
-                        // picture failed; the thread goes on to the next.
-                        permits.take();
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
-                        permits.give();
-                    }
-                });
-            if let Ok(worker) = spawned {
-                workers.push(worker);
-            }
-        }
-        if workers.is_empty() {
-            return Self::inline();
-        }
-        let depth = workers
-            .len()
-            .min(cores.saturating_mul(DEPTH_PER_TWO_CORES).div_ceil(2));
+        let limit = cores.saturating_mul(IN_FLIGHT_PER_CORE).max(1);
         Self {
-            sender: Some(sender),
-            workers,
-            depth,
+            crew: Some(std::sync::Arc::new(Crew {
+                line: std::sync::Mutex::default(),
+                called: std::sync::Condvar::new(),
+                permits: std::sync::Arc::new(progress::Permits::new(cores)),
+            })),
+            limit,
+            depth: limit.min(cores.saturating_mul(DEPTH_PER_TWO_CORES).div_ceil(2)),
             budget: cores.saturating_mul(IN_FLIGHT_BYTES_PER_CORE),
             flying: std::sync::Arc::default(),
-            permits: Some(permits),
         }
     }
 
     fn inline() -> Self {
         Self {
-            sender: None,
-            workers: Vec::new(),
+            crew: None,
+            limit: 0,
             depth: 0,
             budget: 0,
             flying: std::sync::Arc::default(),
-            permits: None,
         }
+    }
+
+    fn permits(&self) -> Option<std::sync::Arc<progress::Permits>> {
+        self.crew.as_ref().map(|crew| crew.permits.clone())
     }
 
     fn flying(&self) -> usize {
         self.flying.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The most threads there have been at one time.
+    #[cfg(test)]
+    fn peak(&self) -> usize {
+        self.crew
+            .as_ref()
+            .and_then(|crew| crew.line.lock().ok().map(|line| line.peak))
+            .unwrap_or(0)
+    }
+
+    /// Threads there are now.
+    #[cfg(test)]
+    fn alive(&self) -> usize {
+        self.crew
+            .as_ref()
+            .and_then(|crew| crew.line.lock().ok().map(|line| line.alive))
+            .unwrap_or(0)
     }
 
     fn run(&self, task: Task) {
@@ -5362,22 +5475,59 @@ impl Pool {
             let _lands = lands;
             task();
         });
-        match &self.sender {
-            Some(sender) => {
-                if let Err(unsent) = sender.send(task) {
-                    (unsent.0)();
-                }
-            }
-            None => task(),
+        let Some(crew) = &self.crew else {
+            task();
+            return;
+        };
+        if let Some(unsent) = Self::hand_over(crew, self.limit, task) {
+            unsent();
         }
+    }
+
+    /// Puts `task` in the line, with a new thread when every one there is
+    /// has a task already. Gives the task back when there is no thread
+    /// and none could be started.
+    fn hand_over(crew: &std::sync::Arc<Crew>, limit: usize, task: Task) -> Option<Task> {
+        let Ok(mut line) = crew.line.lock() else {
+            return Some(task);
+        };
+        line.tasks.push_back(task);
+        if line.tasks.len() > line.idle && line.alive < limit {
+            line.workers.retain(|worker| !worker.is_finished());
+            let index = line.alive;
+            let theirs = crew.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("h264-{index}"))
+                .spawn(move || theirs.work());
+            if let Ok(worker) = spawned {
+                line.workers.push(worker);
+                line.alive += 1;
+                line.peak = line.peak.max(line.alive);
+            } else if line.alive == 0 {
+                return line.tasks.pop_back();
+            }
+        }
+        drop(line);
+        crew.called.notify_one();
+        None
     }
 }
 
 impl Drop for Pool {
     fn drop(&mut self) {
-        // Closing the channel ends each thread once it has no task left.
-        self.sender = None;
-        for worker in self.workers.drain(..) {
+        let Some(crew) = &self.crew else {
+            return;
+        };
+        // Each thread ends once the line is closed and has no task left.
+        let workers = match crew.line.lock() {
+            Ok(mut line) => {
+                line.closed = true;
+                std::mem::take(&mut line.workers)
+            }
+            Err(_) => Vec::new(),
+        };
+        crew.called.notify_all();
+        for worker in workers {
             let _ = worker.join();
         }
     }
@@ -6185,6 +6335,12 @@ mod tests {
 
     /// Pictures with motion in every direction, some of it off the edges.
     fn moving_pictures(width: u32, height: u32, count: usize) -> Vec<Packet> {
+        keyed_pictures(width, height, count, 0)
+    }
+
+    /// [`moving_pictures`] with a key picture every `every` pictures, or
+    /// only the first when that is 0.
+    fn keyed_pictures(width: u32, height: u32, count: usize, every: usize) -> Vec<Packet> {
         let mut params = CodecParams::video(CodecId::H264, width, height);
         params.nal_length_size = 0;
         params.bitrate = 600_000;
@@ -6209,7 +6365,7 @@ mod tests {
                 pts: index as i64,
                 duration: 1,
                 timescale: 30,
-                force_keyframe: index == 0,
+                force_keyframe: index == 0 || (every > 0 && index % every == 0),
             };
             packets.extend(encoder.push(&input).unwrap());
         }
@@ -6256,6 +6412,316 @@ mod tests {
                 assert!(got == want, "{threads} threads differ");
             }
         }
+    }
+
+    /// The pictures of `outputs` as their time and packed bytes.
+    fn packed_of(outputs: Vec<Output>) -> Vec<(i64, Vec<u8>)> {
+        outputs
+            .into_iter()
+            .map(|output| {
+                let Output::Picture(picture) = output else {
+                    panic!("audio");
+                };
+                let PictureSamples::Cpu(bytes) = picture.samples() else {
+                    panic!("platform buffer");
+                };
+                (picture.pts(), bytes.to_vec())
+            })
+            .collect()
+    }
+
+    /// `frames` as their time and packed bytes.
+    fn packed_shown(frames: &[Shown]) -> Vec<(i64, Vec<u8>)> {
+        frames
+            .iter()
+            .map(|(pts, y, u, v)| (*pts, [y.as_slice(), u, v].concat()))
+            .collect()
+    }
+
+    fn annex_b_params(width: u32, height: u32) -> CodecParams {
+        let mut params = CodecParams::video(CodecId::H264, width, height);
+        params.nal_length_size = 0;
+        params
+    }
+
+    #[test]
+    fn the_app_openers_give_the_same_bytes_on_every_thread_count() {
+        let (width, height) = (176, 144);
+        let packets = keyed_pictures(width, height, 40, 16);
+        let params = annex_b_params(width, height);
+        let one = shown(&mut H264Decoder::open(&params).unwrap(), &packets);
+        assert_eq!(one.len(), 40);
+        let want = packed_shown(&one);
+        for cores in [1, 2, 3, 4, 5, 6, 7, 8, 16] {
+            for _ in 0..3 {
+                let mut engine = super::open_access(&params, cores).unwrap();
+                let mut got = Vec::new();
+                for packet in &packets {
+                    got.extend(packed_of(Decoder::push(&mut engine, packet).unwrap()));
+                }
+                got.extend(packed_of(Decoder::drain(&mut engine).unwrap()));
+                assert!(got == want, "the engine decoder on {cores} cores differs");
+                assert!(Decoder::drain(&mut engine).unwrap().is_empty());
+                let mut video = H264Decoder::open(&params)
+                    .unwrap()
+                    .with_threads_from_the_second_picture(cores);
+                assert!(
+                    shown(&mut video, &packets) == one,
+                    "the video decoder on {cores} cores differs"
+                );
+                assert!(video.drain().unwrap().is_empty());
+            }
+        }
+        // What the factory opens, on as many cores as this machine gives.
+        let mut factory = DecodeFactory::new();
+        register_decoders(&mut factory);
+        let mut engine = factory.open(&params).unwrap();
+        let mut got = Vec::new();
+        for packet in &packets {
+            got.extend(packed_of(engine.push(packet).unwrap()));
+        }
+        got.extend(packed_of(engine.drain().unwrap()));
+        assert!(got == want, "the registered decoder differs");
+        let mut video = factory.open_video(&params).unwrap();
+        let mut frames = Vec::new();
+        for packet in &packets {
+            frames.extend(video.push(packet).unwrap());
+        }
+        frames.extend(video.drain().unwrap());
+        let got: Vec<(i64, Vec<u8>)> = frames
+            .iter()
+            .map(|frame| {
+                let picture = &frame.picture;
+                (frame.pts, [picture.y(), picture.u(), picture.v()].concat())
+            })
+            .collect();
+        assert!(got == want, "the registered video decoder differs");
+    }
+
+    #[test]
+    fn a_decoder_asked_for_one_picture_starts_no_thread() {
+        let packets = keyed_pictures(64, 48, 12, 6);
+        let params = annex_b_params(64, 48);
+        let want = packed_shown(&shown(&mut H264Decoder::open(&params).unwrap(), &packets));
+        let mut engine = super::open_access(&params, 4).unwrap();
+        // The first picture alone, then after a seek the key picture at 6.
+        for key in [0usize, 6] {
+            let mut got = packed_of(Decoder::push(&mut engine, &packets[key]).unwrap());
+            got.extend(packed_of(Decoder::drain(&mut engine).unwrap()));
+            assert!(got == want[key..=key], "the key picture at {key} differs");
+            let pool = engine.inner.pool.as_ref().expect("threads were asked for");
+            assert_eq!(pool.peak(), 0, "one picture started a thread");
+            Decoder::reset(&mut engine);
+        }
+        // Going on past the first picture does start them.
+        for packet in &packets {
+            Decoder::push(&mut engine, packet).unwrap();
+        }
+        Decoder::drain(&mut engine).unwrap();
+        let pool = engine.inner.pool.as_ref().expect("threads were asked for");
+        assert!(pool.peak() > 0, "no thread for twelve pictures");
+        assert!(pool.peak() <= 4 * super::IN_FLIGHT_PER_CORE);
+    }
+
+    /// Which call returned each picture: for every push, and then the
+    /// drain, the times of the pictures it gave.
+    fn calls(decoder: &mut H264Decoder, packets: &[Packet]) -> Vec<Vec<i64>> {
+        let mut out: Vec<Vec<i64>> = packets
+            .iter()
+            .map(|packet| {
+                let frames = decoder.push(packet).unwrap();
+                frames.iter().map(|frame| frame.pts).collect()
+            })
+            .collect();
+        let frames = decoder.drain().unwrap();
+        out.push(frames.iter().map(|frame| frame.pts).collect());
+        out
+    }
+
+    #[test]
+    fn the_first_picture_comes_out_of_the_call_it_would_on_one_thread() {
+        let packets = keyed_pictures(64, 48, 12, 6);
+        let params = annex_b_params(64, 48);
+        let one = calls(&mut H264Decoder::open(&params).unwrap(), &packets);
+        let first = one.iter().position(|call| !call.is_empty()).unwrap();
+        let mut decoder = H264Decoder::open(&params)
+            .unwrap()
+            .with_threads_from_the_second_picture(4);
+        for _ in 0..3 {
+            let got = calls(&mut decoder, &packets);
+            assert_eq!(got[..first], one[..first]);
+            assert_eq!(got[first].first(), one[first].first());
+            // Later pictures may come later, never sooner or out of order.
+            let flat = |calls: &[Vec<i64>]| calls.concat();
+            assert_eq!(flat(&got), flat(&one));
+            for upto in 0..one.len() {
+                assert!(flat(&got[..upto]).len() <= flat(&one[..upto]).len());
+            }
+            decoder.reset();
+        }
+        // An error in the first picture is returned by its own push, and
+        // the decoder is as it was.
+        let mut cut = packets[0].clone();
+        cut.data.truncate(cut.data.len() / 2);
+        assert!(decoder.push(&cut).is_err());
+        assert_eq!(calls(&mut decoder, &packets).concat(), one.concat());
+    }
+
+    /// What scrubbing does: seek to the key picture at or before `target`,
+    /// reset, and push from there until the picture at `target` comes
+    /// out, draining if the packets run out first. The bytes of that
+    /// picture.
+    fn scrub_to(decoder: &mut dyn Decoder, packets: &[Packet], target: i64) -> Vec<u8> {
+        decoder.reset();
+        let key = packets
+            .iter()
+            .rposition(|packet| packet.keyframe && packet.pts <= target)
+            .unwrap();
+        for packet in &packets[key..] {
+            for (pts, bytes) in packed_of(decoder.push(packet).unwrap()) {
+                if pts == target {
+                    return bytes;
+                }
+            }
+        }
+        packed_of(decoder.drain().unwrap())
+            .into_iter()
+            .find(|(pts, _)| *pts == target)
+            .expect("the picture asked for")
+            .1
+    }
+
+    #[test]
+    fn scrubbing_gets_the_picture_asked_for_on_every_thread_count() {
+        let packets = keyed_pictures(64, 48, 30, 10);
+        let params = annex_b_params(64, 48);
+        let want = packed_shown(&shown(&mut H264Decoder::open(&params).unwrap(), &packets));
+        for cores in [1, 2, 4, 8] {
+            let mut engine = super::open_access(&params, cores).unwrap();
+            // Back and forth, onto key pictures, the ones after them, the
+            // last of a group and the last of the stream.
+            for target in [29i64, 0, 10, 11, 9, 20, 1, 19, 28, 10, 29, 5] {
+                let got = scrub_to(&mut engine, &packets, target);
+                let (_, picture) = &want[target as usize];
+                assert!(&got == picture, "picture {target} on {cores} cores");
+            }
+            // And straight on from the end of the stream without a reset.
+            let mut got = Vec::new();
+            for packet in &packets {
+                got.extend(packed_of(Decoder::push(&mut engine, packet).unwrap()));
+            }
+            got.extend(packed_of(Decoder::drain(&mut engine).unwrap()));
+            assert!(
+                got.ends_with(&want),
+                "playing on after a drain, {cores} cores"
+            );
+        }
+    }
+
+    #[test]
+    fn threads_end_when_the_decoder_is_left_alone_and_start_again() {
+        let packets = moving_pictures(64, 48, 12);
+        let params = annex_b_params(64, 48);
+        let want = shown(&mut H264Decoder::open(&params).unwrap(), &packets);
+        let mut decoder = H264Decoder::open(&params).unwrap().with_threads(4);
+        assert!(shown(&mut decoder, &packets) == want);
+        let started = decoder.pool.as_ref().unwrap().peak();
+        assert!(started > 0);
+        let waited = std::time::Instant::now();
+        while decoder.pool.as_ref().unwrap().alive() > 0 {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(20),
+                "threads are still there"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        decoder.reset();
+        assert!(shown(&mut decoder, &packets) == want);
+        assert!(decoder.pool.as_ref().unwrap().alive() > 0);
+    }
+
+    #[test]
+    fn the_app_opener_reports_a_broken_picture_and_decodes_on_after_a_reset() {
+        let good = keyed_pictures(64, 48, 12, 6);
+        let params = annex_b_params(64, 48);
+        let want = packed_shown(&shown(&mut H264Decoder::open(&params).unwrap(), &good));
+        let mut packets = good.clone();
+        let cut = packets[4].data.len() / 2;
+        packets[4].data.truncate(cut);
+        let mut engine = super::open_access(&params, 4).unwrap();
+        let mut errors = 0;
+        for packet in &packets {
+            if Decoder::push(&mut engine, packet).is_err() {
+                errors += 1;
+            }
+        }
+        for _ in 0..packets.len() + 2 {
+            match Decoder::drain(&mut engine) {
+                Ok(_) => break,
+                Err(_) => errors += 1,
+            }
+        }
+        assert!(errors > 0, "the broken picture was not reported");
+        Decoder::reset(&mut engine);
+        let mut got = Vec::new();
+        for packet in &good {
+            got.extend(packed_of(Decoder::push(&mut engine, packet).unwrap()));
+        }
+        got.extend(packed_of(Decoder::drain(&mut engine).unwrap()));
+        assert!(got == want);
+    }
+
+    #[test]
+    fn interlaced_and_wide_chroma_stay_on_the_calling_thread_in_the_app_opener() {
+        let Some(ff) = ffmpeg_bin() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cutlass-h264-here-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The pixel format, the profile, x264's own options, and whether
+        // the pictures go to other threads.
+        let cases = [
+            ("yuv420p", "high", "interlaced=1:bframes=2", false),
+            ("yuv422p", "high422", "bframes=2", false),
+            ("yuv444p", "high444", "bframes=2", false),
+            ("yuv420p", "high", "bframes=2", true),
+            ("yuv420p10le", "high10", "bframes=2", true),
+        ];
+        let (width, height) = (96u32, 64u32);
+        for (index, (pixel, profile, options, threaded)) in cases.into_iter().enumerate() {
+            let h264 = dir.join(format!("{index}.h264"));
+            let encoded = Command::new(&ff)
+                .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+                .arg(format!("testsrc2=size={width}x{height}:rate=30"))
+                .args(["-frames:v", "12", "-c:v", "libx264", "-profile:v", profile])
+                .args(["-pix_fmt", pixel, "-x264-params", options, "-f", "h264"])
+                .arg(&h264)
+                .status();
+            if !encoded.is_ok_and(|status| status.success()) {
+                continue;
+            }
+            let name = format!("{pixel} {options}");
+            let packets: Vec<Packet> = access_units(&std::fs::read(&h264).unwrap())
+                .into_iter()
+                .enumerate()
+                .map(|(at, unit)| Packet::video(unit, at as i64, 1, 30, at == 0))
+                .collect();
+            let params = annex_b_params(width, height);
+            let one = shown(&mut H264Decoder::open(&params).unwrap(), &packets);
+            assert_eq!(one.len(), 12, "{name}");
+            let want = packed_shown(&one);
+            let mut engine = super::open_access(&params, 4).unwrap();
+            let mut got = Vec::new();
+            for packet in &packets {
+                got.extend(packed_of(Decoder::push(&mut engine, packet).unwrap()));
+            }
+            got.extend(packed_of(Decoder::drain(&mut engine).unwrap()));
+            assert!(got == want, "{name} differs from one thread");
+            let peak = engine.inner.pool.as_ref().unwrap().peak();
+            assert_eq!(peak > 0, threaded, "{name}: {peak} threads");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -6449,7 +6915,11 @@ mod tests {
             (4u8, Vec::new()),
             (4, vec![0, 0, 1, 0x80]),
             (4, vec![0, 0, 1, 0x02]),
-            (4, vec![0, 0, 1, 0x0d]),
+            // An IDR slice with nothing in it. (A unit of type 13 stood
+            // here while that type was refused; it is skipped now, which
+            // `a_unit_of_only_skipped_types_shows_nothing_and_changes_nothing`
+            // checks.)
+            (4, vec![0, 0, 1, 0x05]),
             (4, huge),
             (4, vec![0, 0, 0, 10, 0x67]),
             (0, cut),
@@ -6954,15 +7424,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every picture of `packets` from the opener the engine uses, each
-    /// dropped before the next packet is pushed, as the address of its
-    /// bytes and a copy of them.
-    fn engine_pictures_let_go(packets: &[Packet], size: (u32, u32)) -> Vec<(usize, Vec<u8>)> {
+    /// Every picture of `packets` from the engine's decoder on `cores`
+    /// cores, each dropped before the next packet is pushed, as the
+    /// address of its bytes and a copy of them.
+    fn engine_pictures_let_go(
+        packets: &[Packet],
+        size: (u32, u32),
+        cores: usize,
+    ) -> Vec<(usize, Vec<u8>)> {
         let mut params = CodecParams::video(CodecId::H264, size.0, size.1);
         params.nal_length_size = 0;
-        let mut factory = DecodeFactory::new();
-        register_decoders(&mut factory);
-        let mut decoder = factory.open(&params).unwrap();
+        let mut decoder = super::open_access(&params, cores).unwrap();
         let mut seen = Vec::new();
         let mut note = |outputs: Vec<Output>| {
             for output in outputs {
@@ -6976,9 +7448,9 @@ mod tests {
             }
         };
         for packet in packets {
-            note(decoder.push(packet).unwrap());
+            note(Decoder::push(&mut decoder, packet).unwrap());
         }
-        note(decoder.drain().unwrap());
+        note(Decoder::drain(&mut decoder).unwrap());
         seen
     }
 
@@ -6998,7 +7470,15 @@ mod tests {
         let want = packed_planes(&shown(&mut H264Decoder::open(&params).unwrap(), &packets));
         // Let go at once: the same few buffers come round again, and each
         // time hold the right picture.
-        let seen = engine_pictures_let_go(&packets, (64, 48));
+        let seen = engine_pictures_let_go(&packets, (64, 48), 1);
+        // On several threads a call may return several pictures, so more
+        // are out at once; the bytes are the same.
+        for (got, want) in engine_pictures_let_go(&packets, (64, 48), 4)
+            .iter()
+            .zip(&want)
+        {
+            assert!(&got.1 == want);
+        }
         assert_eq!(seen.len(), want.len());
         for ((_, got), want) in seen.iter().zip(&want) {
             assert!(got == want);

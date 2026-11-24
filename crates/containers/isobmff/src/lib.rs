@@ -39,4 +39,6 @@ pub use legacy::{
 #[cfg(test)]
 mod behavior;
 #[cfg(test)]
+mod mux_tests;
+#[cfg(test)]
 mod oracle;

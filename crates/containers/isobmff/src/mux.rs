@@ -23,7 +23,12 @@
 //! `fragment_millis` of video, or once any track holds that much when there
 //! is no video. It also ends when it would pass `fragment_bytes` or
 //! `samples_per_fragment`, and when one track has waited ten times the
-//! target. Each track has one `traf` with one `trun` in a fragment.
+//! target with no keyframe to cut at: twice the target in a recoverable
+//! file, whose fragments are only ever read after a crash, so that little
+//! is lost when the keyframes are far apart. Each track has one `traf` in a
+//! fragment. Fragmented output keeps the caller's interleave, with a `trun`
+//! for each run of a track's samples; a recoverable file lays each track's
+//! samples together under one `trun`.
 //!
 //! Packet decode times on a track start at 0 and advance by each sample's
 //! duration. Presentation time may differ; that difference is the composition
@@ -62,8 +67,10 @@ const SHIFT_BLOCK: usize = 4 * 1024 * 1024;
 /// Seconds from 1904-01-01, the epoch of the header times, to 1970-01-01.
 const EPOCH_1904: u64 = 2_082_844_800;
 
-/// A track waits at most this many fragment lengths before a cut is forced.
+/// A track waits at most this many fragment lengths for a video keyframe
+/// before a cut is forced: in fragmented output, and in a recoverable file.
 const FORCED_CUT_LENGTHS: u64 = 10;
+const FORCED_CUT_LENGTHS_RECOVERABLE: u64 = 2;
 
 const SAMPLE_KEY: u32 = 0x0200_0000;
 const SAMPLE_NOT_KEY: u32 = 0x0101_0000;
@@ -677,7 +684,12 @@ impl<W: Write + Seek> IsoBmffMux<W> {
         // Compared as ticks * 1000 against milliseconds * timescale.
         let waited = u128::from(held.pending_ticks) * 1000;
         let target = u128::from(self.options.fragment_millis) * u128::from(scale);
-        if waited >= target * u128::from(FORCED_CUT_LENGTHS) {
+        let lengths = if self.options.fragmented {
+            FORCED_CUT_LENGTHS
+        } else {
+            FORCED_CUT_LENGTHS_RECOVERABLE
+        };
+        if waited >= target * u128::from(lengths) {
             return true;
         }
         // The first fragment carries the sample descriptions, so it waits
@@ -1253,6 +1265,8 @@ fn trak(
         sum.saturating_add(u64::from(sample.duration))
     });
     let edits = present_edits(track, media_duration, movie_scale);
+    let end_cut = end_cut(track, samples, media_duration);
+    let media_duration = media_duration - u64::from(end_cut);
     let presented = if edits.is_empty() {
         scale_u(media_duration, track.params.timescale.get(), movie_scale)
     } else {
@@ -1267,7 +1281,7 @@ fn trak(
     let mut mdia = Vec::new();
     mdia.extend(mdhd(track, media_duration, times));
     mdia.extend(hdlr(track));
-    mdia.extend(minf(track, samples, shift)?);
+    mdia.extend(minf(track, samples, shift, end_cut)?);
     body.extend(sized_box(b"mdia", &mdia)?);
     Ok((sized_box(b"trak", &body)?, presented))
 }
@@ -1377,6 +1391,24 @@ fn present_edits(track: &TrackOut, media_duration: u64, movie_scale: u32) -> Vec
 }
 
 /// Version 1, with 64-bit durations and media times, when an edit needs it.
+/// The ticks taken off the last sample's duration: the trailing padding of
+/// a track whose gapless trim becomes its edit, when that padding ends
+/// inside the last sample. The edit says where play stops, and QuickTime
+/// follows it; FFmpeg and the players built on it stop a sound track where
+/// its last sample's duration does, as FFmpeg's own muxer writes it.
+fn end_cut(track: &TrackOut, samples: &[Sample], media_duration: u64) -> u32 {
+    let Some((delay, padding)) = track.gapless else {
+        return 0;
+    };
+    if !track.edits.is_empty() || media_duration <= delay.saturating_add(padding) {
+        return 0;
+    }
+    match (samples.last(), u32::try_from(padding)) {
+        (Some(last), Ok(padding)) if padding < last.duration => padding,
+        _ => 0,
+    }
+}
+
 fn elst(edits: &[Edit]) -> Vec<u8> {
     let wide = edits.iter().any(|edit| {
         u32::try_from(edit.segment_duration).is_err()
@@ -1420,7 +1452,7 @@ fn hdlr(track: &TrackOut) -> Vec<u8> {
     box_bytes(b"hdlr", &payload)
 }
 
-fn minf(track: &TrackOut, samples: &[Sample], shift: u64) -> Result<Vec<u8>, Error> {
+fn minf(track: &TrackOut, samples: &[Sample], shift: u64, end_cut: u32) -> Result<Vec<u8>, Error> {
     let mut body = Vec::new();
     body.extend(match track.params.kind {
         MediaKind::Video(_) => box_bytes(b"vmhd", &[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]),
@@ -1431,18 +1463,18 @@ fn minf(track: &TrackOut, samples: &[Sample], shift: u64) -> Result<Vec<u8>, Err
     let mut dref = vec![0, 0, 0, 0, 0, 0, 0, 1];
     dref.extend(url);
     body.extend(box_bytes(b"dinf", &box_bytes(b"dref", &dref)));
-    body.extend(stbl(track, samples, shift)?);
+    body.extend(stbl(track, samples, shift, end_cut)?);
     sized_box(b"minf", &body)
 }
 
-fn stbl(track: &TrackOut, samples: &[Sample], shift: u64) -> Result<Vec<u8>, Error> {
+fn stbl(track: &TrackOut, samples: &[Sample], shift: u64, end_cut: u32) -> Result<Vec<u8>, Error> {
     let mut body = Vec::new();
     body.extend(stsd(track)?);
     if let Some(frame) = pcm_frame_bytes(track) {
         body.extend(pcm_tables(samples, frame, shift)?);
         return sized_box(b"stbl", &body);
     }
-    body.extend(stts(samples)?);
+    body.extend(stts(samples, end_cut)?);
     if samples.iter().any(|sample| sample.cts != 0) {
         body.extend(ctts(samples)?);
         if samples.iter().any(|sample| sample.cts < 0) {
@@ -1685,17 +1717,24 @@ fn count(rows: usize, what: &'static str) -> Result<[u8; 4], Error> {
         })
 }
 
-fn stts(samples: &[Sample]) -> Result<Vec<u8>, Error> {
+/// `stts`, with the last sample `end_cut` ticks shorter than it was
+/// written.
+fn stts(samples: &[Sample], end_cut: u32) -> Result<Vec<u8>, Error> {
     let mut runs: Vec<(u32, u32)> = Vec::new();
-    for sample in samples {
+    for (index, sample) in samples.iter().enumerate() {
+        let duration = if index + 1 == samples.len() {
+            sample.duration.saturating_sub(end_cut)
+        } else {
+            sample.duration
+        };
         if let Some(last) = runs.last_mut()
-            && last.1 == sample.duration
+            && last.1 == duration
             && last.0 < u32::MAX
         {
             last.0 += 1;
             continue;
         }
-        runs.push((1, sample.duration));
+        runs.push((1, duration));
     }
     let mut payload = vec![0, 0, 0, 0];
     payload.extend_from_slice(&count(runs.len(), "stts rows")?);

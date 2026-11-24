@@ -751,6 +751,29 @@ fn a_fragment_does_not_wait_forever_for_a_keyframe() {
     // 60 frames are 1.001 s, the first count past ten times 100 ms.
     assert_eq!(whole_fragments(&bytes), [60, 60, 59]);
     assert_eq!(read_all(&bytes), packets);
+
+    // A recoverable file waits only twice the target, 12 frames here, so a
+    // crash between far keyframes loses little.
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut mux = IsoBmffMux::new(
+            &mut cursor,
+            MuxOptions {
+                recoverable: true,
+                fragment_millis: 100,
+                ..MuxOptions::default()
+            },
+        );
+        mux.add_stream(&video()).unwrap();
+        for packet in &packets {
+            mux.write_packet(packet).unwrap();
+        }
+    }
+    let unfinished = cursor.into_inner();
+    let fragments = whole_fragments(&unfinished);
+    assert_eq!(fragments.len(), 179 / 12);
+    assert!(fragments.iter().all(|samples| *samples == 12));
+    assert_eq!(read_all(&unfinished), packets[..fragments.len() * 12]);
 }
 
 fn chunk_count(trak: &[u8]) -> u32 {
@@ -1128,9 +1151,15 @@ mod export_mux {
         assert_eq!(be32(elst, 8), 96_256 - 1024 - 256);
         assert_eq!(be32(elst, 12), 1024);
         assert_eq!(be32(elst, 16), 0x0001_0000);
-        // The track presents what the edit plays; the media keeps it all.
+        // The track presents what the edit plays. The media ends where the
+        // padding starts: the last sample is 256 ticks short, which is how
+        // FFmpeg knows to stop there.
         assert_eq!(tkhd(find(sound, &[b"tkhd"])), (0, 94_976));
-        assert_eq!(timed(find(sound, &[b"mdia", b"mdhd"])), (0, 48_000, 96_256));
+        assert_eq!(timed(find(sound, &[b"mdia", b"mdhd"])), (0, 48_000, 96_000));
+        let stts = find(sound, &[b"mdia", b"minf", b"stbl", b"stts"]);
+        assert_eq!(be32(stts, 4), 2);
+        assert_eq!((be32(stts, 8), be32(stts, 12)), (93, 1024));
+        assert_eq!((be32(stts, 16), be32(stts, 20)), (1, 768));
         // The picture track has no edit, and the packets are untouched.
         assert!(children(traks(&bytes)[0], b"edts").is_empty());
         let file = crate::IsoBmffFile::open(std::io::Cursor::new(bytes.clone())).unwrap();

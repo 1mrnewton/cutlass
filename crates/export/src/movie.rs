@@ -4,10 +4,17 @@
 //! moved there only once it is finished, so a stopped or failed export
 //! leaves nothing behind. Every app calls this; each picks its own sizes,
 //! bitrates and encoders.
+//!
+//! An MP4, MOV or M4A file is written as [`MovieLayout`] says. By default
+//! its index comes before its media, and while it is being written the part
+//! file is a fragmented movie: if the process dies, the part file is still
+//! there and plays up to the last fragment written, about a second before
+//! the end.
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cutlass_avi::AviMux;
 use cutlass_caf::CafMux;
@@ -16,7 +23,7 @@ use cutlass_container::Mux;
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Fonts, ReaderFactory};
 use cutlass_flac_container::FlacMux;
-use cutlass_isobmff::{FileBrand, Mp4Mux};
+use cutlass_isobmff::{FileBrand, MovieFile, Mp4Mux, Mp4Options};
 use cutlass_matroska::MatroskaMux;
 use cutlass_model::{COVER_FILE, Draft};
 use cutlass_mp3_container::Mp3Mux;
@@ -66,6 +73,57 @@ pub struct MovieSources<'a> {
     pub encoders: &'a EncodeFactory,
 }
 
+/// How an MP4, MOV or M4A file is laid out. Other containers ignore it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MovieLayout {
+    /// The index before the media, so a player or a browser starts on the
+    /// first bytes. The media is moved up once at the end of the export,
+    /// which reads and writes the file one more time.
+    pub fast_start: bool,
+    /// Write fragments during the export and make them a normal movie at
+    /// the end, so a part file left by a crash still plays.
+    pub recoverable: bool,
+}
+
+impl Default for MovieLayout {
+    /// Both on.
+    fn default() -> Self {
+        Self {
+            fast_start: true,
+            recoverable: true,
+        }
+    }
+}
+
+impl MovieLayout {
+    /// The muxer's options for a file of `brand`, created now.
+    fn options(self, brand: FileBrand) -> Mp4Options {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_secs());
+        Mp4Options {
+            brand,
+            fast_start: self.fast_start,
+            recoverable: self.recoverable,
+            creation_time: now,
+        }
+    }
+}
+
+/// The part file, created or emptied, open for writing and for the reading
+/// a muxer does when it moves what it wrote.
+fn create(part: &Path) -> Result<BufWriter<File>, ExportError> {
+    File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(part)
+        .map(BufWriter::new)
+        .map_err(file)
+}
+
 /// The hidden file a movie is written to before it is moved into place.
 #[must_use]
 pub fn part_path(destination: &Path) -> Option<PathBuf> {
@@ -86,11 +144,29 @@ pub fn part_path(destination: &Path) -> Option<PathBuf> {
 /// A caption sidecar the request asks for
 /// is written in the same folder. `progress` hears the frames done and the
 /// frames in all after each picture, and stops the export by returning
-/// false. Clip sound is each clip's file, mixed as in playback.
+/// false. Clip sound is each clip's file, mixed as in playback. An MP4 or
+/// MOV file has the default [`MovieLayout`].
 pub fn write_movie(
     sources: &MovieSources<'_>,
     request: &ExportRequest,
     destination: &Path,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<ExportResult, ExportError> {
+    write_movie_with(
+        sources,
+        request,
+        destination,
+        MovieLayout::default(),
+        progress,
+    )
+}
+
+/// [`write_movie`] with the MP4 or MOV file laid out as `layout` says.
+pub fn write_movie_with(
+    sources: &MovieSources<'_>,
+    request: &ExportRequest,
+    destination: &Path,
+    layout: MovieLayout,
     progress: &mut dyn FnMut(u64, u64) -> bool,
 ) -> Result<ExportResult, ExportError> {
     if !matches!(
@@ -100,7 +176,7 @@ pub fn write_movie(
         return Err(ExportError::Container);
     }
     let part = part_path(destination).ok_or(ExportError::Path)?;
-    let written = write_part(sources, request, &part, progress).and_then(|result| {
+    let written = write_part(sources, request, &part, layout, progress).and_then(|result| {
         fs::rename(&part, destination)
             .map(|()| result)
             .map_err(file)
@@ -115,9 +191,10 @@ fn write_part(
     sources: &MovieSources<'_>,
     request: &ExportRequest,
     part: &Path,
+    layout: MovieLayout,
     progress: &mut dyn FnMut(u64, u64) -> bool,
 ) -> Result<ExportResult, ExportError> {
-    let out = BufWriter::new(File::create(part).map_err(file)?);
+    let out = create(part)?;
     let (result, out) = match request.container {
         ContainerId::Avi => {
             let mut mux = AviMux::new(out);
@@ -164,13 +241,14 @@ fn write_part(
             } else {
                 FileBrand::Mp4
             };
-            let mut mux = Mp4Mux::with_brand(out, brand);
+            let mut mux = Mp4Mux::with_options(MovieFile::new(out), layout.options(brand));
             if let Some(jpeg) = cover(sources) {
                 // A cover the muxer refuses is left out.
                 let _ = mux.set_cover_art(jpeg);
             }
             let result = run_movie(sources, request, part, progress, &mut mux)?;
-            (result, mux.into_writer().map_err(ExportError::Mux)?)
+            let out = mux.into_writer().map_err(ExportError::Mux)?;
+            (result, out.into_inner())
         }
     };
     finish(out)?;
@@ -182,7 +260,8 @@ fn write_part(
 /// FLAC file, MP3 in an MP3 file, Opus in an Ogg (`.opus`) file, or Vorbis
 /// in an Ogg (`.ogg`) file, as `request.audio` names. Any of them but
 /// Vorbis also goes in a CAF file when `request.container` asks for one.
-/// An M4A carries the draft's cover as cover art, as a movie does.
+/// An M4A carries the draft's cover as cover art, as a movie does, and has
+/// the default [`MovieLayout`].
 /// The file is written beside its destination and moved there when done.
 pub fn write_sound(
     sources: &MovieSources<'_>,
@@ -198,10 +277,11 @@ pub fn write_sound(
     let part = part_path(destination).ok_or(ExportError::Path)?;
     let audio = file_audio(sources.readers, sources.draft, sources.root);
     let written = (|| {
-        let out = BufWriter::new(File::create(&part).map_err(file)?);
+        let out = create(&part)?;
         let out = match (codec, request.container) {
             (CodecId::Aac | CodecId::Alac | CodecId::Ac3 | CodecId::Eac3, ContainerId::Isobmff) => {
-                let mut mux = Mp4Mux::with_brand(out, FileBrand::M4a);
+                let options = MovieLayout::default().options(FileBrand::M4a);
+                let mut mux = Mp4Mux::with_options(MovieFile::new(out), options);
                 if let Some(jpeg) = cover(sources) {
                     // A cover the muxer refuses is left out.
                     let _ = mux.set_cover_art(jpeg);
@@ -214,7 +294,7 @@ pub fn write_sound(
                     audio,
                     Some(progress),
                 )?;
-                mux.into_writer().map_err(ExportError::Mux)?
+                mux.into_writer().map_err(ExportError::Mux)?.into_inner()
             }
             (CodecId::Pcm, ContainerId::Riff) => {
                 let mut mux = WavMux::new(out);
@@ -1756,6 +1836,199 @@ mod tests {
                     names.0
                 );
             }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Top-level boxes of `bytes`: kind, start and end. A size of 0 runs to
+    /// the end; a box cut short by the end of the bytes is left out.
+    fn boxes(bytes: &[u8]) -> Vec<([u8; 4], usize, usize)> {
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while at + 8 <= bytes.len() {
+            let size32 = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+            let kind: [u8; 4] = bytes[at + 4..at + 8].try_into().unwrap();
+            let size = match size32 {
+                0 => bytes.len() - at,
+                1 if at + 16 <= bytes.len() => {
+                    u64::from_be_bytes(bytes[at + 8..at + 16].try_into().unwrap()) as usize
+                }
+                1 => break,
+                size => size as usize,
+            };
+            if size < 8 || at + size > bytes.len() {
+                break;
+            }
+            out.push((kind, at, at + size));
+            at += size;
+        }
+        out
+    }
+
+    fn kinds(bytes: &[u8]) -> Vec<String> {
+        boxes(bytes)
+            .iter()
+            .map(|(kind, _, _)| String::from_utf8_lossy(kind).into_owned())
+            .collect()
+    }
+
+    /// Every packet of an MP4: track, time, bytes.
+    fn mp4_packets(bytes: Vec<u8>) -> Vec<(u32, i64, Vec<u8>)> {
+        use cutlass_container::Demux;
+        let mut movie = cutlass_isobmff::IsoBmffFile::open(std::io::Cursor::new(bytes)).unwrap();
+        let mut out = Vec::new();
+        while let Some(packet) = movie.read_packet().unwrap() {
+            let time = packet.timestamp().presentation_or_decode().unwrap();
+            out.push((packet.stream(), time, packet.bytes().to_vec()));
+        }
+        out.sort();
+        out
+    }
+
+    /// An MP4 is written index first by default, with the sound's priming
+    /// behind an edit and a creation time. The same export with the layout
+    /// options off puts the index last and holds the same packets. And the
+    /// part file, copied while the export runs as a crash would leave it,
+    /// is a fragmented movie that reads back from its first picture.
+    #[test]
+    fn an_mp4_is_fast_start_and_its_part_file_survives_a_crash() {
+        use cutlass_isobmff::{Demux as _, IsoBmff, SliceSource};
+
+        let dir = std::env::temp_dir().join(format!("cutlass-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Three seconds, so that fragments reach the file before the end.
+        let mut draft = two_colours();
+        draft.duration = cutlass_model::Micros(3_000_000);
+        draft.tracks[0].segments[1].target = TimeRange::new(0, 3_000_000);
+        let readers = ReaderFactory::new();
+        let mut encoders = EncodeFactory::new();
+        cutlass_mpeg4::register_engine_encoders(&mut encoders);
+        cutlass_aac::register_encoders(&mut encoders);
+        let sources = MovieSources {
+            draft: &draft,
+            root: None,
+            readers: &readers,
+            fonts: &NoFonts,
+            renderer: None,
+            encoders: &encoders,
+        };
+        let request = ExportRequest {
+            range: TimeRange::new(0, 3_000_000),
+            short_side: 480,
+            codec: CodecId::Mpeg4,
+            bitrate: 400_000,
+            frame_rate: FrameRate {
+                numerator: 10,
+                denominator: 1,
+            },
+            container: ContainerId::Isobmff,
+            audio: Some(AudioExport {
+                codec: CodecId::Aac,
+                bitrate: 128_000,
+                sample_rate: 48_000,
+                channels: 2,
+                limiter: 0,
+            }),
+            sidecar: None,
+            late_by: 0,
+            constant_rate: false,
+            prores: crate::ProresProfile::Standard,
+        };
+
+        let path = dir.join("cut.mp4");
+        let part = part_path(&path).unwrap();
+        let crashed = dir.join("crashed.mp4");
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let result = super::write_movie(&sources, &request, &path, &mut |done, _| {
+            // What a crash after the 28th picture would leave behind.
+            if done == 28 {
+                std::fs::copy(&part, &crashed).unwrap();
+            }
+            true
+        })
+        .unwrap();
+        assert_eq!(result.frames.len(), 30);
+        assert!(!part.exists());
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(kinds(&bytes), ["ftyp", "moov", "mdat"]);
+        let moov = boxes(&bytes)[1];
+        let moov = &bytes[moov.1 + 8..moov.2];
+        let inside: Vec<_> = boxes(moov).iter().map(|found| found.0).collect();
+        assert_eq!(
+            inside,
+            [*b"mvhd", *b"trak", *b"trak"],
+            "no mvex: a plain movie"
+        );
+        // Creation and modification time, in seconds since 1904.
+        let created = u64::from(u32::from_be_bytes(moov[12..16].try_into().unwrap()));
+        assert!((before..before + 600).contains(&(created - 2_082_844_800)));
+        assert_eq!(moov[12..16], moov[16..20]);
+
+        // The sound plays from sample 1024, past the encoder's priming, for
+        // the three seconds asked for.
+        let mut source = SliceSource::new(&bytes);
+        let movie = IsoBmff::open(&mut source).unwrap();
+        let sound = &movie.streams()[1];
+        assert_eq!(sound.edits.len(), 1);
+        assert_eq!(sound.edits[0].media_time, Some(1024));
+        assert_eq!(movie.movie_timescale().get(), 48_000);
+        assert_eq!(sound.edits[0].segment_duration, 144_000);
+        assert!(movie.streams()[0].edits.is_empty());
+        if let Some(ffmpeg) = oracle("ffmpeg") {
+            let out = std::process::Command::new(ffmpeg)
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args(["-map", "0:a", "-f", "f32le", "-"])
+                .output()
+                .unwrap();
+            assert!(out.status.success() && out.stderr.is_empty());
+            // FFmpeg drops the priming packet the edit skips and decodes
+            // the other 141 whole, as it does for a file of its own.
+            assert_eq!(out.stdout.len(), 141 * 1024 * 2 * 4);
+        }
+        if let Some(ffprobe) = oracle("ffprobe") {
+            // And it reports the track as the three seconds asked for.
+            let out = std::process::Command::new(ffprobe)
+                .args(["-v", "error", "-select_streams", "a:0"])
+                .args(["-show_entries", "stream=duration_ts", "-of", "csv=p=0"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "144000");
+        }
+
+        // The options off: index last, the same packets.
+        let plain_path = dir.join("plain.mp4");
+        let layout = super::MovieLayout {
+            fast_start: false,
+            recoverable: false,
+        };
+        super::write_movie_with(&sources, &request, &plain_path, layout, &mut |_, _| true).unwrap();
+        let plain = std::fs::read(&plain_path).unwrap();
+        assert_eq!(kinds(&plain), ["ftyp", "mdat", "moov"]);
+        let packets = mp4_packets(bytes);
+        assert_eq!(packets.iter().filter(|packet| packet.0 == 1).count(), 30);
+        assert!(
+            packets == mp4_packets(plain),
+            "the layouts hold different packets"
+        );
+
+        // The crashed copy: a fragmented movie with at least the first two
+        // seconds of pictures, each as the finished file has it.
+        let crashed = std::fs::read(&crashed).unwrap();
+        let found = kinds(&crashed);
+        assert_eq!(found[..5], ["ftyp", "free", "moov", "moof", "mdat"]);
+        // Cut to its last whole box, as a recovery tool would.
+        let whole = boxes(&crashed).last().unwrap().2;
+        let recovered = mp4_packets(crashed[..whole].to_vec());
+        let pictures: Vec<_> = recovered.iter().filter(|packet| packet.0 == 1).collect();
+        assert!(pictures.len() >= 20, "{} pictures", pictures.len());
+        for packet in &recovered {
+            assert!(packets.contains(packet), "a recovered packet differs");
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }

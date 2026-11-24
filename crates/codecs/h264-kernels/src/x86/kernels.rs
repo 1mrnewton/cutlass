@@ -25,12 +25,13 @@ use core::arch::x86_64::{
     _mm_cmpgt_epi8, _mm_cvtepu8_epi16, _mm_cvtsi32_si128, _mm_cvtsi128_si32, _mm_extract_epi16,
     _mm_extract_epi32, _mm_loadl_epi64, _mm_loadu_si128, _mm_madd_epi16, _mm_maddubs_epi16,
     _mm_max_epi8, _mm_max_epu8, _mm_min_epi8, _mm_min_epu8, _mm_movemask_epi8, _mm_mullo_epi16,
-    _mm_or_si128, _mm_packs_epi16, _mm_packs_epi32, _mm_packus_epi16, _mm_prefetch, _mm_set_epi32,
-    _mm_set1_epi8, _mm_set1_epi16, _mm_set1_epi32, _mm_setzero_si128, _mm_slli_epi16,
-    _mm_sra_epi16, _mm_sra_epi32, _mm_srai_epi16, _mm_srai_epi32, _mm_srli_epi16, _mm_srli_si128,
-    _mm_storel_epi64, _mm_storeu_si128, _mm_sub_epi8, _mm_sub_epi16, _mm_sub_epi32, _mm_subs_epu8,
-    _mm_unpackhi_epi8, _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpackhi_epi64,
-    _mm_unpacklo_epi8, _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_epi64, _mm_xor_si128,
+    _mm_or_si128, _mm_packs_epi16, _mm_packs_epi32, _mm_packus_epi16, _mm_prefetch, _mm_sad_epu8,
+    _mm_set_epi16, _mm_set_epi32, _mm_set1_epi8, _mm_set1_epi16, _mm_set1_epi32, _mm_setzero_si128,
+    _mm_shuffle_epi8, _mm_slli_epi16, _mm_sra_epi16, _mm_sra_epi32, _mm_srai_epi16, _mm_srai_epi32,
+    _mm_srli_epi16, _mm_srli_si128, _mm_storel_epi64, _mm_storeu_si128, _mm_sub_epi8,
+    _mm_sub_epi16, _mm_sub_epi32, _mm_subs_epu8, _mm_unpackhi_epi8, _mm_unpackhi_epi16,
+    _mm_unpackhi_epi32, _mm_unpackhi_epi64, _mm_unpacklo_epi8, _mm_unpacklo_epi16,
+    _mm_unpacklo_epi32, _mm_unpacklo_epi64, _mm_xor_si128,
 };
 
 use super::wide::luma16;
@@ -2197,6 +2198,61 @@ feat! {
         crate::scalar::store(plane, at, down, rows)
     }
 
+    /// (a + 2·b + c + 2) >> 2 in each byte: the rounded average of b and
+    /// the halved sum of a and c.
+    #[inline]
+    fn avg3(a: __m128i, b: __m128i, c: __m128i) -> __m128i {
+        _mm_avg_epu8(b, half_sum(a, c))
+    }
+
+    /// `row` to each of the sixteen rows of a 16×16 block.
+    ///
+    /// # Safety
+    ///
+    /// Sixteen bytes must be writable in each of the sixteen rows from
+    /// `block`, `down` apart.
+    #[inline]
+    unsafe fn fill16(block: *mut u8, down: usize, row: __m128i) {
+        for y in 0..16 {
+            // SAFETY: the caller's promise.
+            unsafe { st16(block.add(y * down), row) };
+        }
+    }
+
+    /// The rows of a plane prediction, equations 8-126 and 8-144: sample
+    /// (x, y) is (`first` + b·x + c·y) >> 5 clipped, where `first` is the
+    /// sum at the block's first sample. Every sum fits 16 bits: see the
+    /// NEON build's note. `W` is 8 or 16, the block's width and height.
+    ///
+    /// # Safety
+    ///
+    /// `W` bytes must be writable in each of the `W` rows from `block`,
+    /// `down` apart.
+    #[inline]
+    unsafe fn plane_rows<const W: usize>(block: *mut u8, down: usize, first: i32, b: i32, c: i32) {
+        let steps = _mm_mullo_epi16(
+            _mm_set1_epi16(b as i16),
+            _mm_set_epi16(7, 6, 5, 4, 3, 2, 1, 0),
+        );
+        let mut lo = _mm_add_epi16(_mm_set1_epi16(first as i16), steps);
+        let mut hi = _mm_add_epi16(lo, _mm_set1_epi16((8 * b) as i16));
+        let c = _mm_set1_epi16(c as i16);
+        for y in 0..W {
+            // SAFETY: the caller's promise.
+            unsafe {
+                let row = block.add(y * down);
+                if W == 16 {
+                    st16(row, _mm_packus_epi16(_mm_srai_epi16::<5>(lo), _mm_srai_epi16::<5>(hi)));
+                } else {
+                    let lanes = _mm_srai_epi16::<5>(lo);
+                    st8(row, _mm_packus_epi16(lanes, lanes));
+                }
+            }
+            lo = _mm_add_epi16(lo, c);
+            hi = _mm_add_epi16(hi, c);
+        }
+    }
+
     /// See [`crate::intra::pred16`].
     pub(crate) fn pred16(
         plane: &mut [u8],
@@ -2205,7 +2261,51 @@ feat! {
         mode: u8,
         near: (bool, bool),
     ) -> bool {
-        crate::scalar::pred16(plane, at, down, mode, near)
+        let Some(start) = crate::intra::corner_at::<16>(plane.len(), at, down) else {
+            return false;
+        };
+        let (above, left) = near;
+        if mode == 3 && above && left {
+            let (corner, up, side) = crate::scalar::beside::<16>(plane, start, down);
+            let h = crate::scalar::gradient(&up, corner);
+            let v = crate::scalar::gradient(&side, corner);
+            let (b, c) = ((5 * h + 32) >> 6, (5 * v + 32) >> 6);
+            let first = 16 * (up[15] + side[15]) + 16 - 7 * (b + c);
+            // SAFETY: `corner_at` found the block in the plane.
+            unsafe { plane_rows::<16>(plane.as_mut_ptr().add(at), down, first, b, c) };
+            return true;
+        }
+        // SAFETY: `corner_at` found the block in the plane, with the row
+        // above it from the corner on and the column to its left.
+        unsafe {
+            let block = plane.as_mut_ptr().add(at);
+            let up = ld16(block.sub(down));
+            match mode {
+                0 if above => fill16(block, down, up),
+                1 if left => {
+                    for y in 0..16 {
+                        let row = block.add(y * down);
+                        st16(row, splat(*row.sub(1)));
+                    }
+                }
+                2 if above || left => {
+                    let halves = _mm_sad_epu8(up, _mm_setzero_si128());
+                    let along = _mm_cvtsi128_si32(halves) + _mm_extract_epi16::<4>(halves);
+                    let mut beside = 0i32;
+                    for y in 0..16 {
+                        beside += i32::from(*block.add(y * down).sub(1));
+                    }
+                    let dc = match (above, left) {
+                        (true, true) => (along + beside + 16) >> 5,
+                        (true, false) => (along + 8) >> 4,
+                        _ => (beside + 8) >> 4,
+                    };
+                    fill16(block, down, splat(dc as u8));
+                }
+                _ => fill16(block, down, splat(128)),
+            }
+        }
+        true
     }
 
     /// See [`crate::intra::pred_chroma`].
@@ -2216,16 +2316,312 @@ feat! {
         mode: u8,
         near: (bool, bool),
     ) -> bool {
-        crate::scalar::pred_chroma(plane, at, down, mode, near)
+        let Some(start) = crate::intra::corner_at::<8>(plane.len(), at, down) else {
+            return false;
+        };
+        let (above, left) = near;
+        let (corner, up, side) = crate::scalar::beside::<8>(plane, start, down);
+        // SAFETY: `corner_at` found the block in the plane, with the row
+        // above it and the column to its left.
+        unsafe {
+            let block = plane.as_mut_ptr().add(at);
+            match mode {
+                1 if left => {
+                    for y in 0..8 {
+                        let row = block.add(y * down);
+                        st8(row, splat(*row.sub(1)));
+                    }
+                }
+                2 if above => {
+                    let row = ld8(block.sub(down));
+                    for y in 0..8 {
+                        st8(block.add(y * down), row);
+                    }
+                }
+                3 if above && left => {
+                    let h = crate::scalar::gradient(&up, corner);
+                    let v = crate::scalar::gradient(&side, corner);
+                    let (b, c) = ((17 * h + 16) >> 5, (17 * v + 16) >> 5);
+                    let first = 16 * (up[7] + side[7]) + 16 - 3 * (b + c);
+                    plane_rows::<8>(block, down, first, b, c);
+                }
+                _ => {
+                    // The DC of each 4×4 quarter: from both edges beside
+                    // it when the quarter touches both, else from the one
+                    // edge it touches, else from the other.
+                    let sum = |samples: &[i32; 8], half: usize| {
+                        samples[half * 4..half * 4 + 4].iter().sum::<i32>()
+                    };
+                    let quarter = |x: usize, y: usize| {
+                        let (along, beside) = (sum(&up, x), sum(&side, y));
+                        let dc = match (above, left) {
+                            (true, true) if x == y => (along + beside + 4) >> 3,
+                            (true, true) if y == 0 => (along + 2) >> 2,
+                            (true, true) | (false, true) => (beside + 2) >> 2,
+                            (true, false) => (along + 2) >> 2,
+                            (false, false) => 128,
+                        };
+                        dc as u64 * 0x0101_0101
+                    };
+                    for half in 0..2 {
+                        let row = quarter(0, half) | (quarter(1, half) << 32);
+                        for y in 0..4 {
+                            block.add((half * 4 + y) * down).cast::<u64>().write_unaligned(row);
+                        }
+                    }
+                }
+            }
+        }
+        true
     }
 
-    /// See [`crate::intra::pred8`].
+    /// The two-sample and three-sample averages of the eighteen bytes at
+    /// `edge`, sixteen of each, shuffled by `picks` into sixteen samples
+    /// of a directional prediction.
+    ///
+    /// # Safety
+    ///
+    /// Eighteen bytes from `edge` must be readable.
+    #[inline]
+    unsafe fn picked(edge: *const u8, picks: &([u8; 16], [u8; 16])) -> __m128i {
+        // SAFETY: the caller's promise; each table is sixteen bytes.
+        unsafe {
+            let (a, b, c) = (ld16(edge), ld16(edge.add(1)), ld16(edge.add(2)));
+            _mm_or_si128(
+                _mm_shuffle_epi8(_mm_avg_epu8(a, b), ld16(picks.0.as_ptr())),
+                _mm_shuffle_epi8(avg3(a, b, c), ld16(picks.1.as_ptr())),
+            )
+        }
+    }
+
+    /// See [`crate::intra::pred8`]: the edges are gathered and filtered
+    /// as the plain twin does it, and the block made from them.
     pub(crate) fn pred8(plane: &mut [u8], at: usize, down: usize, mode: u8, near: Near8) -> bool {
-        crate::scalar::pred8(plane, at, down, mode, near)
+        let Some(start) = crate::intra::corner8_at(plane.len(), at, down) else {
+            return false;
+        };
+        let edges = crate::scalar::edges8(plane, (start, at, down), near);
+        let (above, left) = (&edges.above, &edges.left);
+        let both = near.above && near.left;
+        let directional = match mode {
+            3 | 7 => near.above,
+            4..=6 => both,
+            8 => near.left,
+            _ => false,
+        };
+        // SAFETY: `corner8_at` found the block's eight rows of eight in
+        // the plane. The edge buffers hold the 18 bytes a shuffle reads.
+        unsafe {
+            let block = plane.as_mut_ptr().add(at);
+            if directional {
+                // The samples a direction reads, in a row: the column to
+                // the left, bottom first, the corner, and the row above;
+                // or, for horizontal-up, the column top first. The last
+                // sample repeats past each end.
+                let mut line = [0u8; 34];
+                match mode {
+                    3 | 7 => {
+                        line[..16].copy_from_slice(above);
+                        line[16..].fill(above[15]);
+                    }
+                    8 => {
+                        line[..8].copy_from_slice(left);
+                        line[8..].fill(left[7]);
+                    }
+                    _ => {
+                        for (sample, &value) in line.iter_mut().zip(left.iter().rev()) {
+                            *sample = value;
+                        }
+                        line[8] = edges.corner;
+                        line[9..25].copy_from_slice(above);
+                    }
+                }
+                let picks = &PICKS8[usize::from(mode - 3)];
+                for (pair, picks) in picks.iter().enumerate() {
+                    let rows = picked(line.as_ptr(), picks);
+                    st8(block.add(2 * pair * down), rows);
+                    st8(block.add((2 * pair + 1) * down), _mm_srli_si128::<8>(rows));
+                }
+                return true;
+            }
+            match mode {
+                0 if near.above => {
+                    let row = ld8(above.as_ptr());
+                    for y in 0..8 {
+                        st8(block.add(y * down), row);
+                    }
+                }
+                1 if near.left => {
+                    for (y, &sample) in left.iter().enumerate() {
+                        st8(block.add(y * down), splat(sample));
+                    }
+                }
+                _ => {
+                    let sum = |samples: &[u8]| samples.iter().map(|&s| u32::from(s)).sum::<u32>();
+                    let dc = match (near.above, near.left) {
+                        (true, true) => (sum(&above[..8]) + sum(left) + 8) >> 4,
+                        (true, false) => (sum(&above[..8]) + 4) >> 3,
+                        (false, true) => (sum(left) + 4) >> 3,
+                        (false, false) => 128,
+                    };
+                    let row = splat(dc as u8);
+                    for y in 0..8 {
+                        st8(block.add(y * down), row);
+                    }
+                }
+            }
+        }
+        true
     }
 
-    /// See [`crate::intra::pred4`].
+    /// See [`crate::intra::pred4`]: the edges are gathered as the plain
+    /// twin does it, and the block made from them.
     pub(crate) fn pred4(plane: &mut [u8], at: usize, down: usize, mode: u8, near: Near4) -> bool {
-        crate::scalar::pred4(plane, at, down, mode, near)
+        let Some(start) = crate::intra::corner4_at(plane.len(), at, down) else {
+            return false;
+        };
+        let Some(&top) = plane[start..].first_chunk::<9>() else {
+            return false;
+        };
+        let side = core::array::from_fn(|y| plane[at - 1 + y * down]);
+        let (above, left, corner) = crate::intra::edges4(&top, side, near);
+        let directional = match mode {
+            3 | 7 => near.above,
+            4..=6 => near.above && near.left,
+            8 => near.left,
+            _ => false,
+        };
+        // SAFETY: `corner4_at` found the block's four rows of four in the
+        // plane. The edge buffer holds the 18 bytes a shuffle reads.
+        unsafe {
+            let block = plane.as_mut_ptr().add(at);
+            let rows = if directional {
+                let mut line = [0u8; 18];
+                match mode {
+                    3 | 7 => {
+                        line[..8].copy_from_slice(&above);
+                        line[8..].fill(above[7]);
+                    }
+                    8 => {
+                        line[..4].copy_from_slice(&left);
+                        line[4..].fill(left[3]);
+                    }
+                    _ => {
+                        line[..4].copy_from_slice(&[left[3], left[2], left[1], left[0]]);
+                        line[4] = corner;
+                        line[5..13].copy_from_slice(&above);
+                    }
+                }
+                picked(line.as_ptr(), &PICKS4[usize::from(mode - 3)])
+            } else {
+                match mode {
+                    0 if near.above => _mm_set1_epi32(i32::from_le_bytes([
+                        above[0], above[1], above[2], above[3],
+                    ])),
+                    1 if near.left => _mm_set_epi32(
+                        i32::from_le_bytes([left[3]; 4]),
+                        i32::from_le_bytes([left[2]; 4]),
+                        i32::from_le_bytes([left[1]; 4]),
+                        i32::from_le_bytes([left[0]; 4]),
+                    ),
+                    _ => splat(crate::intra::dc4(&above, &left, near)),
+                }
+            };
+            st4(block, rows);
+            st4(block.add(down), _mm_srli_si128::<4>(rows));
+            st4(block.add(2 * down), _mm_srli_si128::<8>(rows));
+            st4(block.add(3 * down), _mm_srli_si128::<12>(rows));
+        }
+        true
     }
 }
+
+/// Where sample (`x`, `y`) of an `n`×`n` block comes from in a directional
+/// Intra_4x4 or Intra_8x8 mode, 3 to 8: whether it is a three-sample
+/// average, (a + 2b + c + 2) >> 2, rather than a two-sample one, and the
+/// place of its first sample in the line the mode reads. That line is the
+/// row above for modes 3 and 7, the column to the left top first for mode
+/// 8, and for the rest the column bottom first, then the corner, then the
+/// row above; its last sample repeats. These are equations 8-46 to 8-60
+/// and their 8×8 twins with each sample's place written out.
+const fn pick(n: i32, mode: u8, x: i32, y: i32) -> (bool, i32) {
+    match mode {
+        // Diagonal down left.
+        3 => (true, x + y),
+        // Vertical left.
+        7 => (y % 2 == 1, x + y / 2),
+        // Diagonal down right.
+        4 => (true, n - 1 + x - y),
+        // Vertical right.
+        5 => {
+            let (z, along) = (2 * x - y, x - (y >> 1));
+            if z >= 0 && z % 2 == 0 {
+                (false, n + along)
+            } else if z >= -1 {
+                (true, n - 1 + along)
+            } else {
+                (true, n - y + 2 * x)
+            }
+        }
+        // Horizontal down.
+        6 => {
+            let (z, along) = (2 * y - x, y - (x >> 1));
+            if z >= 0 && z % 2 == 0 {
+                (false, n - 1 - along)
+            } else if z >= -1 {
+                (true, n - 1 - along)
+            } else {
+                (true, n - 2 + x - 2 * y)
+            }
+        }
+        // Horizontal up.
+        _ => (x % 2 == 1, y + x / 2),
+    }
+}
+
+/// The byte shuffles that make sixteen samples of a directional mode,
+/// those from `first` on in raster order of an `n`-wide block, from the
+/// two-sample averages of its line and from the three-sample ones: 0x80
+/// takes nothing from that set.
+const fn picks(n: usize, mode: u8, first: usize) -> ([u8; 16], [u8; 16]) {
+    let mut two = [0x80u8; 16];
+    let mut three = [0x80u8; 16];
+    let mut index = 0;
+    while index < 16 {
+        let at = first + index;
+        let (is_three, from) = pick(n as i32, mode, (at % n) as i32, (at / n) as i32);
+        if is_three {
+            three[index] = from as u8;
+        } else {
+            two[index] = from as u8;
+        }
+        index += 1;
+    }
+    (two, three)
+}
+
+/// [`picks`] for a 4×4 block in each of modes 3 to 8.
+const PICKS4: [([u8; 16], [u8; 16]); 6] = [
+    picks(4, 3, 0),
+    picks(4, 4, 0),
+    picks(4, 5, 0),
+    picks(4, 6, 0),
+    picks(4, 7, 0),
+    picks(4, 8, 0),
+];
+
+/// [`picks`] for each pair of rows of an 8×8 block in each of modes 3 to
+/// 8.
+const PICKS8: [[([u8; 16], [u8; 16]); 4]; 6] = {
+    let mut all = [[([0u8; 16], [0u8; 16]); 4]; 6];
+    let mut mode = 0;
+    while mode < 6 {
+        let mut pair = 0;
+        while pair < 4 {
+            all[mode][pair] = picks(8, mode as u8 + 3, 16 * pair);
+            pair += 1;
+        }
+        mode += 1;
+    }
+    all
+};

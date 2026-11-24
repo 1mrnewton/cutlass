@@ -664,7 +664,11 @@ pub fn predict_420<'r>(
 
 /// The samples beside an `N`×`N` block of a plane: the corner, the row
 /// above and the column to the left.
-fn beside<const N: usize>(plane: &[u8], start: usize, down: usize) -> (i32, [i32; N], [i32; N]) {
+pub(crate) fn beside<const N: usize>(
+    plane: &[u8],
+    start: usize,
+    down: usize,
+) -> (i32, [i32; N], [i32; N]) {
     (
         i32::from(plane[start]),
         core::array::from_fn(|x| i32::from(plane[start + 1 + x])),
@@ -674,7 +678,7 @@ fn beside<const N: usize>(plane: &[u8], start: usize, down: usize) -> (i32, [i32
 
 /// The plane prediction's gradient along `samples`, equations 8-128 and
 /// 8-129 and their chroma twins: the sample before the first is `corner`.
-fn gradient<const N: usize>(samples: &[i32; N], corner: i32) -> i32 {
+pub(crate) fn gradient<const N: usize>(samples: &[i32; N], corner: i32) -> i32 {
     let half = N / 2;
     (0..half)
         .map(|step| {
@@ -773,7 +777,7 @@ pub fn pred_chroma(plane: &mut [u8], at: usize, down: usize, mode: u8, near: (bo
 /// filters them: missing samples are 128 and stay unfiltered, missing
 /// samples above and right repeat the last one above, and a missing corner
 /// is left out of the filter.
-fn edges8(
+pub(crate) fn edges8(
     plane: &[u8],
     (start, at, down): (usize, usize, usize),
     near: crate::intra::Near8,

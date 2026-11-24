@@ -101,6 +101,13 @@ pub fn register_codecs_with(
     cutlass_prores::register_encoders(&mut encoders);
     cutlass_vp8::register_engine_decoders(&mut decoders);
     cutlass_vp8::register_engine_encoders(&mut encoders);
+    // VP9 beside VP8, after the platform codecs: VideoToolbox decodes VP9
+    // where it accepts the stream, and the Rust decoder takes what it
+    // declines, every stream on Windows and Linux, and every stream with
+    // hardware decode off. No platform encoder here writes VP9, so export
+    // opens the Rust one.
+    cutlass_vp9::register_engine_decoders(&mut decoders);
+    cutlass_vp9::register_engine_encoders(&mut encoders);
     // After the platform codecs: the Rust HEVC, MPEG-2 and MPEG-4 Visual
     // decoders serve Linux, and the other platforms when hardware decode is
     // off. No platform encodes MPEG-2. VideoToolbox claims MPEG-4 Visual on
@@ -429,6 +436,65 @@ mod tests {
             cutlass_mp3::register_decoders(&mut reversed);
             let platform = mp3_round_trip(&rust_encoders, &reversed);
             assert!(platform.1 != rust.1, "the platform decoder was not picked");
+        }
+    }
+
+    /// With hardware decode off the VP9 decoder is the Rust one on every
+    /// platform: it decodes the crate's libvpx fixture to the pictures
+    /// FFmpeg decoded, as CPU samples. The encoder export opens is the Rust
+    /// one whatever the switches say.
+    #[test]
+    fn vp9_decodes_and_encodes_in_rust_when_the_platform_is_off() {
+        use cutlass_decode::{Output, Packet, PictureSamples};
+        use cutlass_settings::Hardware;
+
+        let off = Hardware {
+            decode: false,
+            encode: false,
+            ..Hardware::default()
+        };
+        let (decoders, encoders) = super::register_codecs_with(&off);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/codecs/vp9/fixtures");
+        let want = std::fs::read(root.join("vp9_altref64.yuv")).expect("reference");
+        let mut decoder = decoders
+            .open(&CodecParams::video(CodecId::Vp9, 64, 64))
+            .expect("rust vp9 decoder");
+        assert_eq!(decoder.codec(), CodecId::Vp9);
+        let mut outputs = Vec::new();
+        for index in 0..8 {
+            let frame =
+                std::fs::read(root.join(format!("vp9_altref64_{index}.bin"))).expect("fixture");
+            outputs.extend(
+                decoder
+                    .push(&Packet::video(frame, index, 1, 30, index == 0))
+                    .expect("decode"),
+            );
+        }
+        outputs.extend(decoder.drain().expect("drain"));
+        assert_eq!(outputs.len(), 8);
+        let mut got = Vec::new();
+        for (index, output) in outputs.iter().enumerate() {
+            let Output::Picture(picture) = output else {
+                panic!("a picture");
+            };
+            assert_eq!(picture.pts(), index as i64);
+            assert_eq!(picture.info().pixel, PixelFormat::Yuv420p);
+            let PictureSamples::Cpu(samples) = picture.samples() else {
+                panic!("the rust decoder returns cpu samples");
+            };
+            got.extend_from_slice(samples);
+        }
+        assert_eq!(got, want);
+
+        for factory in [&encoders, &super::register_codecs().1] {
+            let encoder = factory
+                .open(&picture(CodecId::Vp9, 64, 48))
+                .expect("rust vp9 encoder");
+            assert_eq!(
+                cutlass_encode::Encoder::codec(encoder.as_ref()),
+                CodecId::Vp9
+            );
         }
     }
 

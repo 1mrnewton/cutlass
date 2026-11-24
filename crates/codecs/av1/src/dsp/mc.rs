@@ -159,14 +159,54 @@ impl Taps {
 //   equals `(A << (8 - n)) + ((B + (1 << (n - 1))) >> n)`.
 
 /// Halves a filter row (all coefficients are even).
-#[inline(always)]
-fn half(f: &[i16; 8]) -> [i16; 8] {
+const fn half(f: &[i16; 8]) -> [i16; 8] {
     let mut h = [0i16; 8];
-    for t in 0..8 {
+    let mut t = 0;
+    while t < 8 {
         h[t] = f[t] >> 1;
+        t += 1;
     }
     h
 }
+
+/// Every row of `SUBPEL_FILTERS`, halved.
+static SUBPEL_HALF: [[[i16; 8]; 16]; 6] = {
+    let mut out = [[[0i16; 8]; 16]; 6];
+    let mut f = 0;
+    while f < 6 {
+        let mut m = 0;
+        while m < 16 {
+            out[f][m] = half(&SUBPEL_FILTERS[f][m]);
+            m += 1;
+        }
+        f += 1;
+    }
+    out
+};
+
+/// The rows of `SUBPEL_FILTERS` as the kernels of `cutlass-simd` take
+/// them, in signed bytes: every tap of a row with a fraction fits one.
+/// The rows of fraction 0 (one tap of 128), which the kernels do not
+/// read, are zeros.
+static SUBPEL_BYTES: [[[i8; 8]; 16]; 6] = {
+    let mut out = [[[0i8; 8]; 16]; 6];
+    let mut f = 0;
+    while f < 6 {
+        let mut m = 1;
+        while m < 16 {
+            let mut t = 0;
+            while t < 8 {
+                let v = SUBPEL_FILTERS[f][m][t];
+                assert!(v >= -128 && v <= 127);
+                out[f][m][t] = v as i8;
+                t += 1;
+            }
+            m += 1;
+        }
+        f += 1;
+    }
+    out
+};
 
 /// Horizontal filter of one row with halved coefficients `fh`. `src` starts
 /// 3 samples left of the first output sample. `wr` receives the
@@ -445,25 +485,14 @@ fn kernel_block<P: Pixel>(
     if P::HBD || bd != 8 || !kernel::accelerated() {
         return None;
     }
-    // Every tap of a row with a fraction fits a signed byte.
-    let row = |f: &[i16; 8], frac: usize| -> Option<[i8; 8]> {
-        let mut out = [0i8; 8];
-        if frac == 0 {
-            return Some(out);
-        }
-        for (o, &t) in out.iter_mut().zip(f) {
-            *o = i8::try_from(t).ok()?;
-        }
-        Some(out)
-    };
     Some(KernelBlock {
         src: P::bytes(src)?,
         start: src_off.checked_sub(3 * src_stride + 3)?,
         src_stride,
         w,
         h,
-        fh: row(&SUBPEL_FILTERS[fx][mx], mx)?,
-        fv: row(&SUBPEL_FILTERS[fy][my], my)?,
+        fh: SUBPEL_BYTES[fx][mx],
+        fv: SUBPEL_BYTES[fy][my],
     })
 }
 
@@ -510,24 +539,14 @@ fn kernel_block16<P: Pixel>(
     if !P::HBD || !kernel::accelerated16() {
         return None;
     }
-    let row = |f: &[i16; 8], frac: usize| -> Option<[i8; 8]> {
-        let mut out = [0i8; 8];
-        if frac == 0 {
-            return Some(out);
-        }
-        for (o, &t) in out.iter_mut().zip(f) {
-            *o = i8::try_from(t).ok()?;
-        }
-        Some(out)
-    };
     Some(KernelBlock16 {
         src: P::words(src)?,
         start: src_off.checked_sub(3 * src_stride + 3)?,
         src_stride,
         w,
         h,
-        fh: row(&SUBPEL_FILTERS[fx][mx], mx)?,
-        fv: row(&SUBPEL_FILTERS[fy][my], my)?,
+        fh: SUBPEL_BYTES[fx][mx],
+        fv: SUBPEL_BYTES[fy][my],
         bd,
     })
 }
@@ -732,8 +751,8 @@ pub fn put<P: Pixel>(
     } else {
         255
     };
-    let fh = half(&SUBPEL_FILTERS[fx][mx]);
-    let fv = half(&SUBPEL_FILTERS[fy][my]);
+    let fh = SUBPEL_HALF[fx][mx];
+    let fv = SUBPEL_HALF[fy][my];
     match (mx != 0, my != 0) {
         (false, false) => match w {
             4 => copy_w::<P, 4>(dst, dst_stride, src, src_off, src_stride, w, h),
@@ -870,7 +889,7 @@ pub fn put_h_rows<P: Pixel>(
     fx: usize,
     bd: u32,
 ) {
-    let fh = half(&SUBPEL_FILTERS[fx][mx]);
+    let fh = SUBPEL_HALF[fx][mx];
     h_pass_dyn::<P, i16>(
         mid,
         w,
@@ -911,7 +930,7 @@ pub fn put_v_rows<P: Pixel>(
     } else {
         255
     };
-    let fv = half(&SUBPEL_FILTERS[fy][my]);
+    let fv = SUBPEL_HALF[fy][my];
     v_pass_dyn::<i16, P, V_SPLIT_HI>(
         dst,
         dst_stride,
@@ -944,8 +963,8 @@ pub fn prep<P: Pixel>(
 ) {
     let r0 = inter_round0(bd);
     let bias = prep_bias(bd) as i16;
-    let fh = half(&SUBPEL_FILTERS[fx][mx]);
-    let fv = half(&SUBPEL_FILTERS[fy][my]);
+    let fh = SUBPEL_HALF[fx][mx];
+    let fv = SUBPEL_HALF[fy][my];
     match (mx != 0, my != 0) {
         (false, false) => wide(
             #[inline(always)]

@@ -41,14 +41,12 @@ pub(super) enum Out<'a> {
 /// 16 bits. Every row of the AV1 subpel filters passes.
 #[inline]
 pub(super) fn exact(f: &[i8; 8]) -> bool {
-    let (mut pos, mut neg, mut odd) = (0i32, 0i32, 0i32);
-    for &t in f {
-        let t = i32::from(t);
-        odd |= t & 1;
-        pos += t.max(0);
-        neg -= t.min(0);
-    }
-    odd == 0 && pos <= 256 && neg <= 256
+    // In 16 bits, eight to a vector: the sums are at most 8 * 128.
+    let t = f.map(i16::from);
+    let odd = t.iter().fold(0, |a, &t| a | t) & 1;
+    let pos: i16 = t.iter().map(|&t| t.max(0)).sum();
+    let neg: i16 = t.iter().map(|&t| t.min(0)).sum();
+    odd == 0 && pos <= 256 && neg >= -256
 }
 
 /// Whether a filter's first and last taps are 0.

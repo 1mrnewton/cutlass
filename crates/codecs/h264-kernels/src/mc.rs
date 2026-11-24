@@ -242,6 +242,9 @@ mod tests {
             mixed_blocks_match_the_plain_ones,
             averages_match_the_plain_ones,
             chroma_samples_match_the_plain_ones,
+            chroma_blocks_at_the_plane_edges_match_the_plain_ones,
+            blocks_that_do_not_fit_are_refused_untouched,
+            averages_of_every_length_match_the_plain_ones,
         );
     }
 
@@ -423,8 +426,9 @@ mod tests {
                             let last_read = if frac.0 == 0 { x + w } else { x - 2 + 2 * w };
                             last_row * stride + last_read <= plane.len()
                         };
-                        // The plain twin reads without checking first.
-                        if !fits && !cfg!(target_arch = "aarch64") {
+                        // The plain twin reads without checking first; the
+                        // vector versions check, and refuse the block.
+                        if !fits && !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
                             continue;
                         }
                         let mut fast = vec![7u8; dst_stride * 16];
@@ -847,6 +851,230 @@ mod tests {
                 scalar::chroma8(&top, &bottom, xf, yf),
                 "xf {xf} yf {yf}"
             );
+        }
+    }
+
+    fn chroma_blocks_at_the_plane_edges_match_the_plain_ones() {
+        // Every place in a small plane, at every eighth offset and every
+        // size a 4:2:0 partition has. The vector versions read nine bytes
+        // from the start of each row and of the row after the last, and
+        // refuse a block whose rows do not all hold them; the plain twin
+        // reads one sample past the block. Where both take the block they
+        // make the same samples, and neither writes outside it.
+        if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
+            return;
+        }
+        let mut rng = Lcg(31);
+        let (stride, rows) = (20usize, 14usize);
+        let plane: Vec<u8> = (0..stride * rows).map(|_| rng.sample()).collect();
+        let dst_stride = 12;
+        let mut taken_count = 0;
+        for (w, h) in [(4, 2), (4, 4), (4, 8), (8, 4), (8, 8), (8, 2)] {
+            for frac in (0..64u8).map(|i| (i % 8, i / 8)) {
+                for y in 0..rows {
+                    for x in 0..stride {
+                        let block = super::Block {
+                            src: &plane,
+                            stride,
+                            at: (x, y),
+                            size: (w, h),
+                        };
+                        let fits = (y + h) * stride + x + 9 <= plane.len();
+                        let mut fast = vec![7u8; dst_stride * 8];
+                        let taken = super::chroma_block(&mut fast, dst_stride, block, frac);
+                        assert_eq!(taken, fits, "chroma {w}x{h} at {x},{y} frac {frac:?}");
+                        if !taken {
+                            assert_eq!(fast, vec![7u8; dst_stride * 8]);
+                            continue;
+                        }
+                        taken_count += 1;
+                        let mut plain = vec![7u8; dst_stride * 8];
+                        assert!(scalar::chroma_block(&mut plain, dst_stride, block, frac));
+                        assert_eq!(fast, plain, "chroma {w}x{h} at {x},{y} frac {frac:?}");
+                    }
+                }
+            }
+        }
+        assert!(taken_count > 50_000, "{taken_count}");
+    }
+
+    fn blocks_that_do_not_fit_are_refused_untouched() {
+        let mut rng = Lcg(37);
+        let (stride, rows) = (32usize, 24usize);
+        let plane: Vec<u8> = (0..stride * rows).map(|_| rng.sample()).collect();
+        let block = |size| super::Block {
+            src: &plane,
+            stride,
+            at: (4, 4),
+            size,
+        };
+        let fresh = vec![9u8; 16 * 16];
+        // Sizes no routine takes, offsets past a quarter or an eighth, a
+        // destination too short or with rows closer than the block is wide.
+        let mut dst = fresh.clone();
+        for size in [(0, 8), (12, 8), (16, 17), (32, 16)] {
+            assert!(
+                !super::luma_block(&mut dst, 16, block(size), (1, 1)),
+                "{size:?}"
+            );
+        }
+        if cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
+            assert!(!super::luma_block(&mut dst, 16, block((8, 0)), (1, 1)));
+            assert!(!super::luma_block(&mut dst, 16, block((8, 8)), (4, 0)));
+            assert!(!super::luma_block(&mut dst, 16, block((8, 8)), (0, 4)));
+            assert!(!super::luma_block(&mut dst, 4, block((8, 8)), (2, 2)));
+            assert!(!super::luma_block(
+                &mut dst[..100],
+                16,
+                block((16, 16)),
+                (2, 2)
+            ));
+            assert!(!super::chroma_block(&mut dst, 16, block((8, 8)), (8, 0)));
+            assert!(!super::chroma_block(&mut dst, 16, block((8, 8)), (0, 8)));
+            assert!(!super::chroma_block(&mut dst, 16, block((8, 3)), (1, 1)));
+            assert!(!super::chroma_block(
+                &mut dst[..60],
+                16,
+                block((8, 8)),
+                (1, 1)
+            ));
+        }
+        for size in [(0, 4), (4, 0), (6, 4), (16, 8)] {
+            assert!(
+                !super::chroma_block(&mut dst, 16, block(size), (3, 5)),
+                "{size:?}"
+            );
+        }
+        // A pair whose second block is another size, or lies past its
+        // source, writes nothing, not even the first prediction.
+        let far = super::Block {
+            at: (4, rows - 4),
+            ..block((8, 8))
+        };
+        let first = (block((8, 8)), (2, 2));
+        assert!(!super::luma_pair(
+            &mut dst,
+            16,
+            first,
+            Some((block((16, 8)), (0, 0)))
+        ));
+        if cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
+            assert!(!super::luma_pair(&mut dst, 16, first, Some((far, (0, 2)))));
+            assert!(!super::chroma_pair(
+                &mut dst,
+                16,
+                first,
+                Some((far, (0, 2)))
+            ));
+        }
+        assert_eq!(dst, fresh);
+        // Both chroma planes: a source plane too short for the block, or
+        // a destination plane too short, and neither plane is written.
+        let source = |cr: &'static [u8]| super::ChromaSource {
+            cb: &plane,
+            cr,
+            stride,
+            at: (4, 4),
+            frac: (3, 5),
+        };
+        static SHORT: [u8; 40] = [1; 40];
+        let (mut cb, mut cr) = (fresh.clone(), fresh.clone());
+        assert!(!super::chroma_planes(
+            (&mut cb, &mut cr),
+            16,
+            (8, 8),
+            source(&SHORT),
+            None
+        ));
+        let whole = super::ChromaSource {
+            cr: &plane,
+            ..source(&SHORT)
+        };
+        assert!(!super::chroma_planes(
+            (&mut cb, &mut cr[..50]),
+            16,
+            (8, 8),
+            whole,
+            None
+        ));
+        assert!(!super::chroma_planes(
+            (&mut cb, &mut cr),
+            16,
+            (8, 8),
+            whole,
+            Some(source(&SHORT))
+        ));
+        assert_eq!((&cb, &cr), (&fresh, &fresh));
+        // Rows shorter than their destination.
+        assert!(!super::avg_row(&mut dst[..20], &plane[..19], &plane[..40]));
+        assert!(!super::avg_block(
+            &mut dst,
+            16,
+            &plane[..63],
+            &plane,
+            (8, 8)
+        ));
+        assert!(!super::avg_block(
+            &mut dst[..100],
+            16,
+            &plane,
+            &plane,
+            (8, 8)
+        ));
+        assert_eq!(dst, fresh);
+    }
+
+    fn averages_of_every_length_match_the_plain_ones() {
+        // Lengths that leave every size of tail after the sixteens.
+        let mut rng = Lcg(43);
+        let a: Vec<u8> = (0..80).map(|_| rng.sample()).collect();
+        let b: Vec<u8> = (0..80).map(|_| rng.sample()).collect();
+        for n in 0..=64 {
+            let (mut fast, mut plain) = (vec![3u8; n + 2], vec![3u8; n + 2]);
+            assert!(super::avg_row(&mut fast[..n], &a, &b));
+            assert!(scalar::avg_row(&mut plain[..n], &a, &b));
+            assert_eq!(fast, plain, "average of {n}");
+        }
+        for (w, h) in [
+            (1, 3),
+            (2, 2),
+            (3, 5),
+            (5, 4),
+            (7, 2),
+            (9, 3),
+            (13, 2),
+            (15, 4),
+            (16, 5),
+        ] {
+            let stride = 18;
+            let (mut fast, mut plain) = (vec![3u8; stride * 5], vec![3u8; stride * 5]);
+            assert!(super::avg_block(&mut fast, stride, &a, &b, (w, h)));
+            assert!(scalar::avg_block(&mut plain, stride, &a, &b, (w, h)));
+            assert_eq!(fast, plain, "average {w}x{h}");
+            let weight = super::BiWeight {
+                w0: -37,
+                w1: 101,
+                shift: 6,
+                offset: -3,
+            };
+            let (mut fast, mut plain) = (vec![3u8; stride * 5], vec![3u8; stride * 5]);
+            assert!(super::weight_block(
+                &mut fast,
+                stride,
+                &a,
+                &b,
+                (w, h),
+                weight
+            ));
+            assert!(scalar::weight_block(
+                &mut plain,
+                stride,
+                &a,
+                &b,
+                (w, h),
+                weight
+            ));
+            assert_eq!(fast, plain, "weights {w}x{h}");
         }
     }
 }

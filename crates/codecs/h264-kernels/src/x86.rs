@@ -206,3 +206,52 @@ macro_rules! x86_luma {
 
 pub(crate) mod avx2;
 pub(crate) mod sse41;
+
+#[cfg(test)]
+mod tests {
+    use super::{Level, detected, each_tier, level};
+    use core::cell::RefCell;
+
+    thread_local! {
+        static SEEN: RefCell<Vec<Level>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn note() {
+        SEEN.with(|seen| seen.borrow_mut().push(level()));
+    }
+
+    #[test]
+    fn each_tier_runs_every_vector_version_this_cpu_has() {
+        each_tier(note);
+        let seen = SEEN.with(RefCell::take);
+        let want: &[Level] = match detected() {
+            Level::Avx2 => &[Level::Sse41, Level::Avx2],
+            Level::Sse41 => &[Level::Sse41],
+            Level::Scalar => &[Level::Scalar],
+        };
+        assert_eq!(seen, want);
+        // Afterwards the CPU's best is back.
+        assert_eq!(level(), detected());
+    }
+
+    #[test]
+    fn detection_gives_the_same_answer_every_time() {
+        let first = detected();
+        assert!((0..100).all(|_| detected() == first));
+        // The best tier is the one the CPU's features allow.
+        let sse41 =
+            std::is_x86_feature_detected!("ssse3") && std::is_x86_feature_detected!("sse4.1");
+        let avx2 = sse41
+            && std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("bmi1")
+            && std::is_x86_feature_detected!("bmi2")
+            && std::is_x86_feature_detected!("lzcnt")
+            && std::is_x86_feature_detected!("popcnt");
+        let want = match (sse41, avx2) {
+            (_, true) => Level::Avx2,
+            (true, false) => Level::Sse41,
+            (false, false) => Level::Scalar,
+        };
+        assert_eq!(first, want);
+    }
+}

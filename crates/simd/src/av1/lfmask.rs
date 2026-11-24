@@ -6,11 +6,23 @@
 //! size, and an 8-byte record of its block whose first four bytes are
 //! the block's filter levels.
 
+#[cfg(target_arch = "x86_64")]
+mod avx2;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod neon;
 mod scalar;
 #[cfg(test)]
 mod tests;
+
+use super::cpu;
+
+/// Whether the entries run a vector kernel on this CPU: NEON where the
+/// build has it, or AVX2. Without one they run the scalar twin.
+#[must_use]
+#[inline]
+pub fn accelerated() -> bool {
+    cpu::vector()
+}
 
 /// A unit's transform size: the base-2 logarithms of its width and
 /// height in 4x4 units, in the low three bits and the three above them.
@@ -67,7 +79,17 @@ pub fn edge_codes(u: &EdgeUnits, edges: Edges, luma: bool) -> ([u16; 16], u16) {
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::edge_codes(u, edges, luma)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            let out = unsafe { avx2::edge_codes(u, edges, luma) };
+            return out;
+        }
+        scalar::edge_codes(u, edges, luma)
+    }
 }
 
 /// The low 6 bits of byte `i` (0 to 3, a filter level) of each of
@@ -84,7 +106,17 @@ pub fn levels(records: &[[u8; 4]; 16], i: usize) -> [u8; 16] {
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::levels(records, i & 3)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            let out = unsafe { avx2::levels(records, i & 3) };
+            return out;
+        }
+        scalar::levels(records, i & 3)
+    }
 }
 
 /// [`levels`] of each odd record of thirty-two: the records of the luma
@@ -102,5 +134,15 @@ pub fn levels_odd(records: &[[u8; 4]; 32], i: usize) -> [u8; 16] {
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::levels_odd(records, i & 3)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            let out = unsafe { avx2::levels_odd(records, i & 3) };
+            return out;
+        }
+        scalar::levels_odd(records, i & 3)
+    }
 }

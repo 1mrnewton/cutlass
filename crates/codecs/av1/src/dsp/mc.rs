@@ -441,7 +441,7 @@ fn kernel_block<P: Pixel>(
     (fy, my): (usize, usize),
     bd: u32,
 ) -> Option<KernelBlock<'_>> {
-    if !kernel::ACCELERATED || P::HBD || bd != 8 {
+    if P::HBD || bd != 8 || !kernel::accelerated() {
         return None;
     }
     // Every tap of a row with a fraction fits a signed byte.
@@ -506,7 +506,7 @@ fn kernel_block16<P: Pixel>(
     (fy, my): (usize, usize),
     bd: u32,
 ) -> Option<KernelBlock16<'_>> {
-    if !kernel::ACCELERATED || !P::HBD {
+    if !P::HBD || !kernel::accelerated16() {
         return None;
     }
     let row = |f: &[i16; 8], frac: usize| -> Option<[i8; 8]> {

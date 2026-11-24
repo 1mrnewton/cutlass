@@ -4,29 +4,38 @@ use cutlass_decode::CodecError;
 
 /// Reads bits from one component's data. Past the end it reads zeros, and
 /// [`Self::overrun`] says so.
+///
+/// The next bits sit at the top of a 64-bit window, refilled from the data
+/// when fewer than 32 are left in it, so most reads touch no memory.
 pub(crate) struct BitReader<'a> {
     data: &'a [u8],
     pos: usize,
     end: usize,
     /// Bit offset of `data` in the frame, for error positions.
     base: u64,
+    /// The bits from `pos` on, first bit highest; zeros below `valid`.
+    window: u64,
+    valid: u32,
 }
 
 impl<'a> BitReader<'a> {
+    #[inline(always)]
     pub(crate) fn new(data: &'a [u8], base: u64) -> Self {
         Self {
             data,
             pos: 0,
             end: data.len().saturating_mul(8),
             base,
+            window: 0,
+            valid: 0,
         }
     }
 
-    /// The next 32 bits, zero-filled past the end.
-    #[inline]
-    pub(crate) fn peek32(&self) -> u32 {
+    /// Loads the window from the byte holding `pos`: 57 bits or more.
+    #[inline(always)]
+    fn refill(&mut self) {
         let byte = self.pos >> 3;
-        let shift = self.pos & 7;
+        let shift = (self.pos & 7) as u32;
         let word = match self.data.get(byte..byte.saturating_add(8)) {
             Some(bytes) => match <[u8; 8]>::try_from(bytes) {
                 Ok(array) => u64::from_be_bytes(array),
@@ -34,10 +43,21 @@ impl<'a> BitReader<'a> {
             },
             None => self.tail_word(byte),
         };
-        ((word << shift) >> 32) as u32
+        self.window = word << shift;
+        self.valid = 64 - shift;
+    }
+
+    /// The next 32 bits, zero-filled past the end.
+    #[inline(always)]
+    pub(crate) fn peek32(&mut self) -> u32 {
+        if self.valid < 32 {
+            self.refill();
+        }
+        (self.window >> 32) as u32
     }
 
     #[cold]
+    #[inline(never)]
     fn tail_word(&self, byte: usize) -> u64 {
         let mut array = [0u8; 8];
         if let Some(rest) = self.data.get(byte..) {
@@ -48,13 +68,20 @@ impl<'a> BitReader<'a> {
         u64::from_be_bytes(array)
     }
 
-    #[inline]
+    /// Skips `bits` bits, 0 to 32, that the last [`Self::peek32`] showed.
+    #[inline(always)]
     pub(crate) fn skip(&mut self, bits: u32) {
         self.pos = self.pos.saturating_add(bits as usize);
+        if bits <= self.valid {
+            self.window <<= bits;
+            self.valid -= bits;
+        } else {
+            self.valid = 0;
+        }
     }
 
     /// Reads `bits` bits, 0 to 32.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn read(&mut self, bits: u32) -> u32 {
         if bits == 0 {
             return 0;
@@ -65,13 +92,13 @@ impl<'a> BitReader<'a> {
     }
 
     /// Bits left before the end. Negative after an overrun.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn left(&self) -> isize {
         (self.end as isize).saturating_sub(self.pos as isize)
     }
 
     /// True when a read went past the end.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn overrun(&self) -> bool {
         self.pos > self.end
     }
@@ -81,6 +108,8 @@ impl<'a> BitReader<'a> {
         self.base.saturating_add(self.pos as u64)
     }
 
+    #[cold]
+    #[inline(never)]
     pub(crate) fn malformed(&self, what: &'static str) -> CodecError {
         CodecError::Malformed {
             at_bit: self.at(),
@@ -90,8 +119,8 @@ impl<'a> BitReader<'a> {
 
     /// True when every bit left is zero and fewer than 32 remain: the
     /// component's coefficients have ended.
-    #[inline]
-    pub(crate) fn at_end_of_data(&self) -> bool {
+    #[inline(always)]
+    pub(crate) fn at_end_of_data(&mut self) -> bool {
         let left = self.left();
         left <= 0 || (left < 32 && self.peek32() == 0)
     }
@@ -101,7 +130,7 @@ impl<'a> BitReader<'a> {
     /// The codebook byte holds the Rice order in bits 7..5, the exp-Golomb
     /// order in bits 4..2, and the switch point in bits 1..0. A codeword
     /// longer than 31 bits is refused.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn code(&mut self, codebook: u8) -> Result<u32, CodecError> {
         let buf = self.peek32();
         let switch = u32::from(codebook & 3);
@@ -264,6 +293,28 @@ mod tests {
         assert!(reader.code(0x04).is_err());
         let mut reader = BitReader::new(&[], 0);
         assert!(reader.code(FIRST_DC_CODEBOOK).is_err());
+    }
+
+    #[test]
+    fn the_window_reads_what_a_bit_at_a_time_reads() {
+        // Mixed widths across many refills, against one bit per read.
+        let bytes: Vec<u8> = (0u32..600)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let mut single = BitReader::new(&bytes, 0);
+        let mut mixed = BitReader::new(&bytes, 0);
+        let mut width = 0u32;
+        while mixed.left() > 0 {
+            width = (width * 7 + 3) % 33;
+            let got = mixed.read(width);
+            let mut want = 0u64;
+            for _ in 0..width {
+                want = (want << 1) | u64::from(single.read(1));
+            }
+            assert_eq!(u64::from(got), want, "width {width}");
+            assert_eq!(mixed.at(), single.at());
+        }
+        assert!(mixed.at_end_of_data());
     }
 
     #[test]

@@ -1,14 +1,20 @@
 //! Frame decoding: slices in parallel, each into its own band of rows.
+//!
+//! A job decodes one macroblock row of every picture into its own working
+//! rows, a few tens of kilobytes that stay in cache, and then writes its
+//! band of the output from them: the wide samples, or the 8-bit 4:2:0 the
+//! app shows. Nothing is left for one thread to do after the jobs.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use cutlass_decode::{CodecError, PixelFormat, Plane, VideoFrame};
 use cutlass_pool::Pool;
 
 use crate::bits::BitReader;
 use crate::color;
-use crate::dct::idct;
+use crate::convert::{Narrow, chroma_row_422, chroma_row_444, luma_row};
+use crate::dct::{basis, idct_columns, transposed};
 use crate::header::{
     AlphaBits, Chroma, FRAME_PREFIX, FrameHeader, Interlace, Picture, SliceRef, parse_frame_header,
     parse_picture,
@@ -24,12 +30,73 @@ const MAX_BLOCKS: usize = 32;
 const MAX_EIGHTHS: i64 = 32_768;
 /// Largest coefficient magnitude kept before dequantization.
 const MAX_LEVEL: u32 = 1 << 20;
+/// Working sets and returned planes kept for the next frame.
+const MAX_KEPT: usize = 32;
 
 /// A decoded frame and the header it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecodedFrame {
     pub header: FrameHeader,
     pub frame: VideoFrame,
+}
+
+/// A frame as tight 8-bit 4:2:0: Y, then U, then V.
+pub(crate) struct Picture420 {
+    pub header: FrameHeader,
+    /// The even size 4:2:0 needs; an odd edge grows by one repeated sample.
+    pub width: u32,
+    pub height: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// Memory a decoder keeps between frames: each job's working rows, and
+/// planes the caller handed back.
+#[derive(Default)]
+pub(crate) struct Reuse {
+    scratch: Mutex<Vec<Scratch>>,
+    spare: Mutex<Vec<Vec<u8>>>,
+}
+
+impl Reuse {
+    fn scratch(&self) -> Scratch {
+        lock(&self.scratch).pop().unwrap_or_default()
+    }
+
+    fn keep_scratch(&self, scratch: Scratch) {
+        let mut kept = lock(&self.scratch);
+        if kept.len() < MAX_KEPT {
+            kept.push(scratch);
+        }
+    }
+
+    /// A buffer of `len` bytes. One handed back earlier is not cleared:
+    /// a frame that decodes writes every sample of every plane.
+    fn plane(&self, len: usize) -> Vec<u8> {
+        let mut spare = lock(&self.spare);
+        match spare.iter().position(|buffer| buffer.len() == len) {
+            Some(at) => spare.swap_remove(at),
+            None => {
+                drop(spare);
+                vec![0u8; len]
+            }
+        }
+    }
+
+    /// Takes a buffer back for a later frame of the same size.
+    pub(crate) fn keep_plane(&self, buffer: Vec<u8>) {
+        let mut spare = lock(&self.spare);
+        if spare.len() >= MAX_KEPT {
+            spare.remove(0);
+        }
+        spare.push(buffer);
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 /// Decodes one frame to `depth`-bit samples (10 or 12), slices spread over `pool`.
@@ -39,106 +106,135 @@ pub fn decode_frame(
     pool: &Pool,
     cancel: &AtomicBool,
 ) -> Result<DecodedFrame, CodecError> {
-    if depth != 10 && depth != 12 {
-        return Err(CodecError::InvalidApi {
-            what: "output bit depth",
-        });
+    decode_wide(data, depth, pool, cancel, &Reuse::default())
+}
+
+/// The headers of one frame and where its rows go.
+struct Parsed {
+    header: FrameHeader,
+    pictures: Vec<Picture>,
+    frame_size: usize,
+    width: usize,
+    height: usize,
+    chroma_width: usize,
+    /// Frame rows one job writes: a macroblock row of every picture.
+    band_rows: usize,
+    alpha_bytes: usize,
+}
+
+impl Parsed {
+    fn new(data: &[u8], depth: u8) -> Result<Self, CodecError> {
+        if depth != 10 && depth != 12 {
+            return Err(CodecError::InvalidApi {
+                what: "output bit depth",
+            });
+        }
+        let header = parse_frame_header(data)?;
+        let frame = &data[..header.frame_size];
+        let mut at = FRAME_PREFIX + header.header_size;
+        let mut pictures = Vec::with_capacity(2);
+        for index in 0..header.pictures() {
+            let (picture, end) = parse_picture(frame, &header, index, at)?;
+            pictures.push(picture);
+            at = end;
+        }
+        let width = header.width as usize;
+        Ok(Self {
+            frame_size: header.frame_size,
+            width,
+            height: header.height as usize,
+            chroma_width: match header.chroma {
+                Chroma::Yuv422 => width.div_ceil(2),
+                Chroma::Yuv444 => width,
+            },
+            band_rows: if header.interlace == Interlace::Progressive {
+                16
+            } else {
+                32
+            },
+            alpha_bytes: if header.alpha == AlphaBits::Sixteen {
+                2
+            } else {
+                1
+            },
+            header,
+            pictures,
+        })
     }
-    let header = parse_frame_header(data)?;
-    let frame = &data[..header.frame_size];
-    let mut at = FRAME_PREFIX + header.header_size;
-    let mut pictures = Vec::with_capacity(2);
-    for index in 0..header.pictures() {
-        let (picture, end) = parse_picture(frame, &header, index, at)?;
-        pictures.push(picture);
-        at = end;
+
+    fn bands(&self) -> usize {
+        self.height.div_ceil(self.band_rows)
     }
-    let width = header.width as usize;
-    let height = header.height as usize;
-    let chroma_width = match header.chroma {
-        Chroma::Yuv422 => width.div_ceil(2),
-        Chroma::Yuv444 => width,
-    };
-    let band_rows = if header.interlace == Interlace::Progressive {
-        16
-    } else {
-        32
-    };
-    let alpha_bytes = if header.alpha == AlphaBits::Sixteen {
-        2
-    } else {
-        1
-    };
-    let mut y = vec![0u8; width * 2 * height];
-    let mut u = vec![0u8; chroma_width * 2 * height];
-    let mut v = vec![0u8; chroma_width * 2 * height];
-    let mut a = (header.alpha != AlphaBits::None).then(|| vec![0u8; width * alpha_bytes * height]);
-    let band_count = height.div_ceil(band_rows);
+
+    fn context<'a>(&'a self, data: &'a [u8], depth: u8) -> Context<'a> {
+        let scan = if self.header.interlace == Interlace::Progressive {
+            &PROGRESSIVE_SCAN
+        } else {
+            &INTERLACED_SCAN
+        };
+        let padded = self.header.width_in_mb() as usize * 16;
+        Context {
+            frame: &data[..self.frame_size],
+            header: &self.header,
+            pictures: &self.pictures,
+            depth,
+            width: self.width,
+            height: self.height,
+            chroma_width: self.chroma_width,
+            band_rows: self.band_rows,
+            alpha_bytes: self.alpha_bytes,
+            stride: padded,
+            chroma_stride: match self.header.chroma {
+                Chroma::Yuv422 => padded / 2,
+                Chroma::Yuv444 => padded,
+            },
+            scan: scan.map(transposed),
+            basis: basis(),
+        }
+    }
+}
+
+/// Decodes one frame to wide planes, with alpha when the frame has it.
+pub(crate) fn decode_wide(
+    data: &[u8],
+    depth: u8,
+    pool: &Pool,
+    cancel: &AtomicBool,
+    reuse: &Reuse,
+) -> Result<DecodedFrame, CodecError> {
+    let parsed = Parsed::new(data, depth)?;
+    let (width, height) = (parsed.width, parsed.height);
+    let (chroma_width, band_rows) = (parsed.chroma_width, parsed.band_rows);
+    let alpha_bytes = parsed.alpha_bytes;
+    let mut y = reuse.plane(width * 2 * height);
+    let mut u = reuse.plane(chroma_width * 2 * height);
+    let mut v = reuse.plane(chroma_width * 2 * height);
+    let mut a =
+        (parsed.header.alpha != AlphaBits::None).then(|| reuse.plane(width * alpha_bytes * height));
     let mut alpha_chunks: Vec<Option<&mut [u8]>> = match a.as_mut() {
         Some(buf) => buf
             .chunks_mut(width * alpha_bytes * band_rows)
             .map(Some)
             .collect(),
-        None => (0..band_count).map(|_| None).collect(),
+        None => (0..parsed.bands()).map(|_| None).collect(),
     };
-    let bands: Vec<Mutex<Band<'_>>> = y
+    let bands: Vec<Mutex<Out<'_>>> = y
         .chunks_mut(width * 2 * band_rows)
         .zip(u.chunks_mut(chroma_width * 2 * band_rows))
         .zip(v.chunks_mut(chroma_width * 2 * band_rows))
         .zip(alpha_chunks.drain(..))
-        .map(|(((y, u), v), a)| {
-            Mutex::new(Band {
-                rows: y.len() / (width * 2),
-                y,
-                u,
-                v,
-                a,
-            })
-        })
+        .map(|(((y, u), v), a)| Mutex::new(Out::Wide { y, u, v, a }))
         .collect();
-    let ctx = Context {
-        frame,
-        header: &header,
-        depth,
-        width,
-        chroma_width,
-        alpha_bytes,
-        scan: if header.interlace == Interlace::Progressive {
-            &PROGRESSIVE_SCAN
-        } else {
-            &INTERLACED_SCAN
-        },
-    };
-    let results = pool.slices(bands.len(), |index| {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(CodecError::Cancelled);
-        }
-        let Some(cell) = bands.get(index) else {
-            return Err(CodecError::InvalidApi { what: "band index" });
-        };
-        let mut band = cell
-            .lock()
-            .map_err(|_| CodecError::InvalidApi { what: "band lock" })?;
-        let mut scratch = Scratch::new();
-        for picture in &pictures {
-            let row = index as u32;
-            if row >= picture.height_in_mb {
-                continue;
-            }
-            let start = index * picture.slices_per_row;
-            let Some(slices) = picture.slices.get(start..start + picture.slices_per_row) else {
-                return Err(CodecError::InvalidApi { what: "slice row" });
-            };
-            for slice in slices {
-                ctx.slice(slice, picture, row, &mut band, &mut scratch)?;
-            }
-        }
-        Ok(())
-    });
+    let ctx = parsed.context(data, depth);
+    let outcome = run_bands(&ctx, &bands, pool, cancel, reuse);
     drop(bands);
-    for result in results {
-        result?;
+    if let Err(error) = outcome {
+        for buffer in [Some(y), Some(u), Some(v), a].into_iter().flatten() {
+            reuse.keep_plane(buffer);
+        }
+        return Err(error);
     }
+    let header = parsed.header;
     let format = match (header.chroma, depth) {
         (Chroma::Yuv422, 10) => PixelFormat::Yuv422p10,
         (Chroma::Yuv422, _) => PixelFormat::Yuv422p12,
@@ -166,51 +262,137 @@ pub fn decode_frame(
     Ok(DecodedFrame { header, frame: out })
 }
 
-/// The rows of every plane one job writes.
-struct Band<'a> {
-    rows: usize,
-    y: &'a mut [u8],
-    u: &'a mut [u8],
-    v: &'a mut [u8],
-    a: Option<&'a mut [u8]>,
+/// Decodes one frame straight to 8-bit 4:2:0. Alpha is checked and dropped.
+pub(crate) fn decode_yuv420(
+    data: &[u8],
+    depth: u8,
+    pool: &Pool,
+    cancel: &AtomicBool,
+    reuse: &Reuse,
+) -> Result<Picture420, CodecError> {
+    let parsed = Parsed::new(data, depth)?;
+    let out_w = parsed.width.div_ceil(2) * 2;
+    let out_h = parsed.height.div_ceil(2) * 2;
+    let band_rows = parsed.band_rows;
+    let mut bytes = vec![0u8; out_w * out_h * 3 / 2];
+    let (y, chroma) = bytes.split_at_mut(out_w * out_h);
+    let (u, v) = chroma.split_at_mut(out_w / 2 * (out_h / 2));
+    let chroma_band = out_w / 2 * (band_rows / 2);
+    let bands: Vec<Mutex<Out<'_>>> = y
+        .chunks_mut(out_w * band_rows)
+        .zip(u.chunks_mut(chroma_band))
+        .zip(v.chunks_mut(chroma_band))
+        .map(|((y, u), v)| Mutex::new(Out::Narrow { y, u, v }))
+        .collect();
+    let ctx = parsed.context(data, depth);
+    let outcome = run_bands(&ctx, &bands, pool, cancel, reuse);
+    drop(bands);
+    outcome?;
+    Ok(Picture420 {
+        header: parsed.header,
+        width: out_w as u32,
+        height: out_h as u32,
+        bytes,
+    })
+}
+
+/// Runs every band's job on `pool`. The first band that failed, in picture
+/// order, gives the error.
+fn run_bands(
+    ctx: &Context<'_>,
+    bands: &[Mutex<Out<'_>>],
+    pool: &Pool,
+    cancel: &AtomicBool,
+    reuse: &Reuse,
+) -> Result<(), CodecError> {
+    let results = pool.slices(bands.len(), |index| {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CodecError::Cancelled);
+        }
+        let Some(cell) = bands.get(index) else {
+            return Err(CodecError::InvalidApi { what: "band index" });
+        };
+        let mut out = cell
+            .lock()
+            .map_err(|_| CodecError::InvalidApi { what: "band lock" })?;
+        ctx.job(index, &mut out, reuse)
+    });
+    results.into_iter().collect()
+}
+
+/// The rows of the output one job writes.
+enum Out<'a> {
+    /// 16-bit little-endian planes, and alpha at its coded width.
+    Wide {
+        y: &'a mut [u8],
+        u: &'a mut [u8],
+        v: &'a mut [u8],
+        a: Option<&'a mut [u8]>,
+    },
+    /// 8-bit 4:2:0 at the even output size.
+    Narrow {
+        y: &'a mut [u8],
+        u: &'a mut [u8],
+        v: &'a mut [u8],
+    },
 }
 
 struct Context<'a> {
     frame: &'a [u8],
     header: &'a FrameHeader,
+    pictures: &'a [Picture],
     depth: u8,
     width: usize,
+    height: usize,
     chroma_width: usize,
+    band_rows: usize,
     alpha_bytes: usize,
-    scan: &'a [u8; 64],
+    /// Samples in a working row: the width in whole macroblocks.
+    stride: usize,
+    chroma_stride: usize,
+    /// The scan, giving each coefficient's place in the transform's layout.
+    scan: [u8; 64],
+    basis: &'static [[f32; 8]; 8],
 }
 
 /// Per-job working memory.
 struct Scratch {
-    coefs: Box<[[i32; 64]; MAX_BLOCKS]>,
+    coefs: Box<[[f32; 64]; MAX_BLOCKS]>,
     alpha: Vec<u16>,
+    /// The band's samples, every macroblock whole: `band_rows` rows of
+    /// `stride` (`chroma_stride`) samples.
+    y: Vec<u16>,
+    u: Vec<u16>,
+    v: Vec<u16>,
 }
 
-impl Scratch {
-    fn new() -> Self {
+impl Default for Scratch {
+    fn default() -> Self {
         Self {
-            coefs: Box::new([[0; 64]; MAX_BLOCKS]),
+            coefs: Box::new([[0.0; 64]; MAX_BLOCKS]),
             alpha: Vec::new(),
+            y: Vec::new(),
+            u: Vec::new(),
+            v: Vec::new(),
         }
     }
 }
 
-/// Where a block's samples land: rows of one plane inside a band.
-struct Target<'a> {
-    buf: &'a mut [u8],
-    /// Bytes from one frame row to the next.
+/// How samples leave the transform: offset, floor, clamp to the legal range.
+#[derive(Clone, Copy)]
+struct Store {
+    bias: f32,
+    low: f32,
+    high: f32,
+}
+
+/// Where a block lands in a working plane: column `x`, from row `row`
+/// every `step` rows.
+#[derive(Clone, Copy)]
+struct Place {
     stride: usize,
-    /// Samples in a frame row; columns past it are cropped.
-    width: usize,
-    /// Frame rows in the band; rows past it are cropped.
-    rows: usize,
-    /// Band row of picture row 0 of this macroblock row, and the step between picture rows.
-    first: usize,
+    x: usize,
+    row: usize,
     step: usize,
 }
 
@@ -222,13 +404,101 @@ fn be16(data: &[u8], at: usize) -> usize {
 }
 
 impl Context<'_> {
+    /// One band, compiled for the widest vectors the CPU has.
+    fn job(&self, index: usize, out: &mut Out<'_>, reuse: &Reuse) -> Result<(), CodecError> {
+        let mut scratch = reuse.scratch();
+        let result = cutlass_simd::wide::wide(
+            #[inline(always)]
+            || self.band(index, out, &mut scratch),
+        );
+        reuse.keep_scratch(scratch);
+        result
+    }
+
+    #[inline(always)]
+    fn band(
+        &self,
+        index: usize,
+        out: &mut Out<'_>,
+        scratch: &mut Scratch,
+    ) -> Result<(), CodecError> {
+        scratch.y.resize(self.stride * self.band_rows, 0);
+        scratch.u.resize(self.chroma_stride * self.band_rows, 0);
+        scratch.v.resize(self.chroma_stride * self.band_rows, 0);
+        let top = index * self.band_rows;
+        // Frame rows in this band.
+        let rows = self.height.saturating_sub(top).min(self.band_rows);
+        let row = index as u32;
+        for picture in self.pictures {
+            if row >= picture.height_in_mb {
+                continue;
+            }
+            let start = index * picture.slices_per_row;
+            let Some(slices) = picture.slices.get(start..start + picture.slices_per_row) else {
+                return Err(CodecError::InvalidApi { what: "slice row" });
+            };
+            for slice in slices {
+                let alpha = match out {
+                    Out::Wide { a, .. } => a.as_deref_mut(),
+                    Out::Narrow { .. } => None,
+                };
+                self.slice(slice, picture, row, rows, scratch, alpha)?;
+            }
+        }
+        match out {
+            Out::Wide { y, u, v, .. } => {
+                copy_rows(&scratch.y, self.stride, self.width, y);
+                copy_rows(&scratch.u, self.chroma_stride, self.chroma_width, u);
+                copy_rows(&scratch.v, self.chroma_stride, self.chroma_width, v);
+            }
+            Out::Narrow { y, u, v } => self.narrow(rows, scratch, y, u, v),
+        }
+        Ok(())
+    }
+
+    /// Writes the band as 8-bit 4:2:0. Rows and columns past the picture
+    /// repeat its last.
+    #[inline(always)]
+    fn narrow(&self, rows: usize, scratch: &Scratch, y: &mut [u8], u: &mut [u8], v: &mut [u8]) {
+        if rows == 0 {
+            return;
+        }
+        let narrow = Narrow::new(self.depth);
+        let out_w = self.width.div_ceil(2) * 2;
+        let last = rows - 1;
+        for (r, dst) in y.chunks_exact_mut(out_w).enumerate() {
+            let at = r.min(last) * self.stride;
+            if let Some(src) = scratch.y.get(at..at + self.width) {
+                luma_row(src, dst, narrow);
+            }
+        }
+        for (plane, out) in [(&scratch.u, u), (&scratch.v, v)] {
+            for (r, dst) in out.chunks_exact_mut(out_w / 2).enumerate() {
+                let a = (2 * r).min(last) * self.chroma_stride;
+                let b = (2 * r + 1).min(last) * self.chroma_stride;
+                let (Some(a), Some(b)) = (
+                    plane.get(a..a + self.chroma_width),
+                    plane.get(b..b + self.chroma_width),
+                ) else {
+                    continue;
+                };
+                match self.header.chroma {
+                    Chroma::Yuv422 => chroma_row_422(a, b, dst, narrow),
+                    Chroma::Yuv444 => chroma_row_444(a, b, dst, narrow),
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
     fn slice(
         &self,
         slice: &SliceRef,
         picture: &Picture,
         row: u32,
-        band: &mut Band<'_>,
+        rows: usize,
         scratch: &mut Scratch,
+        alpha_out: Option<&mut [u8]>,
     ) -> Result<(), CodecError> {
         let base = slice.offset as u64 * 8;
         let malformed = |what| CodecError::Malformed { at_bit: base, what };
@@ -266,48 +536,47 @@ impl Context<'_> {
         let mbs = slice.mbs as usize;
         let first = picture.first_row as usize;
         let step = picture.row_step as usize;
-        let rows = band.rows;
-        let scan = self.scan;
+        // Eighths of F become output-scale samples: 2^(b - 9) / 8.
+        let scale = f32::from(1u16 << (self.depth - 9)) / 8.0;
+        let store = Store {
+            bias: f32::from(1u16 << (self.depth - 1)) + 0.5,
+            low: 4.0,
+            high: ((1i32 << self.depth) - 5) as f32,
+        };
 
         let luma_blocks = 4 * mbs;
-        let mut weights = [0i32; 64];
-        for (w, &m) in weights.iter_mut().zip(&self.header.luma_matrix) {
-            *w = i32::from(m) * qscale;
-        }
+        let weights = weights_of(&self.header.luma_matrix, qscale);
         let ac = component(
             &data[y_at..cb_at],
             base + y_at as u64 * 8,
             luma_blocks,
-            scan,
+            &self.scan,
+            &weights,
+            scale,
             &mut scratch.coefs,
         )?;
-        let mut target = Target {
-            buf: band.y,
-            stride: self.width * 2,
-            width: self.width,
-            rows,
-            first,
-            step,
-        };
         let x0 = slice.mb_x as usize * 16;
         for block in 0..luma_blocks {
             let mb = block / 4;
             let sub = block % 4;
             let x = x0 + mb * 16 + (sub & 1) * 8;
             let y = (sub >> 1) * 8;
+            let at = Place {
+                stride: self.stride,
+                x,
+                row: first + step * y,
+                step,
+            };
             self.put(
                 &scratch.coefs[block],
                 ac & (1 << block) != 0,
-                &weights,
-                &mut target,
-                x,
-                y,
+                store,
+                &mut scratch.y,
+                at,
             );
         }
 
-        for (w, &m) in weights.iter_mut().zip(&self.header.chroma_matrix) {
-            *w = i32::from(m) * qscale;
-        }
+        let weights = weights_of(&self.header.chroma_matrix, qscale);
         let (chroma_blocks, chroma_x0) = match self.header.chroma {
             Chroma::Yuv422 => (2 * mbs, slice.mb_x as usize * 8),
             Chroma::Yuv444 => (4 * mbs, slice.mb_x as usize * 16),
@@ -317,17 +586,15 @@ impl Context<'_> {
                 &data[at..end],
                 base + at as u64 * 8,
                 chroma_blocks,
-                scan,
+                &self.scan,
+                &weights,
+                scale,
                 &mut scratch.coefs,
             )?;
-            let buf: &mut [u8] = if plane == 0 { band.u } else { band.v };
-            let mut target = Target {
-                buf,
-                stride: self.chroma_width * 2,
-                width: self.chroma_width,
-                rows,
-                first,
-                step,
+            let buf = if plane == 0 {
+                &mut scratch.u
+            } else {
+                &mut scratch.v
             };
             for block in 0..chroma_blocks {
                 let (x, y) = match self.header.chroma {
@@ -337,18 +604,23 @@ impl Context<'_> {
                         (chroma_x0 + (block / 4) * 16 + (sub >> 1) * 8, (sub & 1) * 8)
                     }
                 };
+                let at = Place {
+                    stride: self.chroma_stride,
+                    x,
+                    row: first + step * y,
+                    step,
+                };
                 self.put(
                     &scratch.coefs[block],
                     ac & (1 << block) != 0,
-                    &weights,
-                    &mut target,
-                    x,
-                    y,
+                    store,
+                    buf,
+                    at,
                 );
             }
         }
 
-        if let Some(out) = band.a.as_deref_mut() {
+        if alpha {
             let visible = (picture.height - row * 16).min(16) as usize;
             let columns = 16 * mbs;
             let count = columns * visible;
@@ -367,6 +639,9 @@ impl Context<'_> {
                 count,
                 &mut scratch.alpha,
             )?;
+            let Some(out) = alpha_out else {
+                return Ok(());
+            };
             let x0 = slice.mb_x as usize * 16;
             let stride = self.width * self.alpha_bytes;
             for r in 0..visible {
@@ -393,78 +668,93 @@ impl Context<'_> {
         Ok(())
     }
 
-    /// Dequantizes, transforms, and stores one block.
-    fn put(
-        &self,
-        coefs: &[i32; 64],
-        has_ac: bool,
-        weights: &[i32; 64],
-        target: &mut Target<'_>,
-        x: usize,
-        y: usize,
-    ) {
-        // Eighths of F become output-scale samples: 2^(b - 9) / 8.
-        let scale = f32::from(1u16 << (self.depth - 9)) / 8.0;
-        let bias = f32::from(1u16 << (self.depth - 1)) + 0.5;
-        let low = 4i32;
-        let high = (1i32 << self.depth) - 5;
-        let mut block = [0f32; 64];
-        if has_ac {
-            for k in 0..64 {
-                block[k] = dequant(coefs[k], weights[k]) * scale;
-            }
-            idct(&mut block);
+    /// Transforms one block and stores it at `at`.
+    #[inline(always)]
+    fn put(&self, coefs: &[f32; 64], has_ac: bool, store: Store, plane: &mut [u16], at: Place) {
+        let block = if has_ac {
+            idct_columns(coefs, self.basis)
         } else {
-            block = [dequant(coefs[0], weights[0]) * scale / 8.0; 64];
-        }
-        for yy in 0..8 {
-            let band_row = target.first + target.step * (y + yy);
-            if band_row >= target.rows {
-                break;
-            }
-            if x >= target.width {
-                break;
-            }
-            let keep = (target.width - x).min(8);
-            let start = band_row * target.stride + x * 2;
-            let Some(dest) = target.buf.get_mut(start..start + keep * 2) else {
+            [[coefs[0] / 8.0; 8]; 8]
+        };
+        for (yy, values) in block.iter().enumerate() {
+            let start = (at.row + at.step * yy) * at.stride + at.x;
+            let Some(dest) = plane.get_mut(start..start + 8) else {
                 break;
             };
-            for (pair, &value) in dest
-                .as_chunks_mut::<2>()
-                .0
-                .iter_mut()
-                .zip(&block[yy * 8..yy * 8 + 8])
-            {
-                let sample = ((value + bias).floor() as i32).clamp(low, high) as u16;
-                *pair = sample.to_le_bytes();
+            for (sample, &value) in dest.iter_mut().zip(values) {
+                // Clamped first, so truncating is the floor: every value
+                // left is positive.
+                let biased = value + store.bias;
+                let floored = if biased > store.low {
+                    biased
+                } else {
+                    store.low
+                };
+                let kept = if floored < store.high {
+                    floored
+                } else {
+                    store.high
+                };
+                *sample = kept as i32 as u16;
             }
         }
     }
 }
 
-#[inline]
-fn dequant(coef: i32, weight: i32) -> f32 {
-    (i64::from(coef) * i64::from(weight)).clamp(-MAX_EIGHTHS, MAX_EIGHTHS) as f32
+/// Copies `width` samples of each working row into tight little-endian rows.
+#[inline(always)]
+fn copy_rows(samples: &[u16], stride: usize, width: usize, out: &mut [u8]) {
+    if stride == 0 || width == 0 {
+        return;
+    }
+    for (row, dest) in samples
+        .chunks_exact(stride)
+        .zip(out.chunks_exact_mut(width * 2))
+    {
+        for (pair, &value) in dest.as_chunks_mut::<2>().0.iter_mut().zip(row) {
+            *pair = value.to_le_bytes();
+        }
+    }
+}
+
+/// Each coefficient's weight times the slice's scale, in the transform's layout.
+#[inline(always)]
+fn weights_of(matrix: &[u8; 64], qscale: i32) -> [i32; 64] {
+    let mut out = [0i32; 64];
+    for (raster, &weight) in matrix.iter().enumerate() {
+        out[usize::from(transposed(raster as u8))] = i32::from(weight) * qscale;
+    }
+    out
+}
+
+/// A dequantized coefficient at output scale.
+#[inline(always)]
+fn dequant(coef: i32, weight: i32, scale: f32) -> f32 {
+    (i64::from(coef) * i64::from(weight)).clamp(-MAX_EIGHTHS, MAX_EIGHTHS) as f32 * scale
 }
 
 /// Decodes one component's DC and AC coefficients into `coefs[..blocks]`,
-/// raster order. Returns a mask of the blocks that have an AC coefficient.
+/// dequantized, in the transform's layout. Returns a mask of the blocks
+/// that have an AC coefficient.
+#[inline(always)]
 fn component(
     data: &[u8],
     base: u64,
     blocks: usize,
     scan: &[u8; 64],
-    coefs: &mut [[i32; 64]; MAX_BLOCKS],
+    weights: &[i32; 64],
+    scale: f32,
+    coefs: &mut [[f32; 64]; MAX_BLOCKS],
 ) -> Result<u32, CodecError> {
     let mut bits = BitReader::new(data, base);
     for block in coefs.iter_mut().take(blocks) {
-        *block = [0; 64];
+        *block = [0.0; 64];
     }
     // DC: the first coefficient, then signed differences.
     let code = bits.code(FIRST_DC_CODEBOOK)?;
     let mut dc = to_signed(code);
-    coefs[0][0] = dc.clamp(-(MAX_LEVEL as i32), MAX_LEVEL as i32);
+    let limit = MAX_LEVEL as i32;
+    coefs[0][0] = dequant(dc.clamp(-limit, limit), weights[0], scale);
     let mut previous = FIRST_DC_SYMBOL;
     let mut negative = false;
     for block in coefs.iter_mut().take(blocks).skip(1) {
@@ -476,7 +766,7 @@ fn component(
         }
         let magnitude = code.div_ceil(2).min(MAX_LEVEL) as i32;
         dc = dc.saturating_add(if negative { -magnitude } else { magnitude });
-        block[0] = dc.clamp(-(MAX_LEVEL as i32), MAX_LEVEL as i32);
+        block[0] = dequant(dc.clamp(-limit, limit), weights[0], scale);
         previous = code;
     }
     // AC: runs and levels interleaved across the blocks.
@@ -498,7 +788,8 @@ fn component(
         let block = pos & mask;
         let index = usize::from(scan[pos >> log2]);
         let magnitude = level.min(MAX_LEVEL) as i32;
-        coefs[block][index] = if sign == 1 { -magnitude } else { magnitude };
+        let signed = if sign == 1 { -magnitude } else { magnitude };
+        coefs[block][index] = dequant(signed, weights[index], scale);
         has_ac |= 1 << block;
     }
     if bits.overrun() {

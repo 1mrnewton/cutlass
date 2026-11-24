@@ -163,3 +163,88 @@ fn one_worker_and_many_give_the_same_bytes() {
     assert_eq!(a.header.chroma, Chroma::Yuv422);
     assert_eq!(a.header.interlace, Interlace::Progressive);
 }
+
+/// Frames in the shapes the 8-bit path must handle: both chroma layouts,
+/// odd edges, one pixel, more than one band, and alpha.
+fn shapes() -> Vec<(Profile, Vec<u8>)> {
+    let mut out = Vec::new();
+    for (profile, format) in [
+        (Profile::Hq, PixelFormat::Yuv422p10),
+        (Profile::P4444, PixelFormat::Yuv444p12),
+    ] {
+        for (width, height) in [(96, 64), (33, 17), (1, 1), (47, 50), (200, 120), (2, 35)] {
+            let mut source = busy(format, width, height);
+            if profile.is_444() && width == 47 {
+                let alpha = plane16(width, height, |x, y| ((x * 31 + y * 17) % 256) as u16);
+                source = source.with_alpha(8, alpha).expect("alpha");
+            }
+            let mut encoder = ProresEncoder::open(&params(profile)).expect("open");
+            out.push((profile, encoder.encode(&source).expect("encode")));
+        }
+    }
+    out
+}
+
+#[test]
+fn the_picture_path_gives_the_wide_frame_converted() {
+    for (profile, bytes) in shapes() {
+        for threads in [1, 5] {
+            let mut decoder = ProresDecoder::open(&params(profile))
+                .expect("open")
+                .with_threads(threads);
+            let wide = decoder.decode(&bytes).expect("wide");
+            let (width, height, expected) = crate::to_yuv420p(&wide.frame).expect("convert");
+            let picture = decoder.decode_yuv420(&bytes).expect("picture");
+            let size = (wide.header.width, wide.header.height);
+            assert_eq!((picture.width, picture.height), (width, height), "{size:?}");
+            assert_eq!(picture.bytes, expected, "{profile:?} {size:?} {threads}");
+            assert_eq!(picture.header, wide.header);
+        }
+    }
+}
+
+#[test]
+fn the_picture_path_refuses_what_the_wide_path_refuses() {
+    for (profile, bytes) in shapes() {
+        let mut decoder = ProresDecoder::open(&params(profile)).expect("open");
+        let mut damaged: Vec<Vec<u8>> = (0..bytes.len())
+            .step_by(bytes.len().div_ceil(40))
+            .map(|cut| bytes[..cut].to_vec())
+            .collect();
+        for at in (0..bytes.len()).step_by(bytes.len().div_ceil(120)) {
+            let mut flipped = bytes.clone();
+            flipped[at] ^= 0x5a;
+            damaged.push(flipped);
+        }
+        for frame in damaged {
+            let wide = decoder.decode(&frame).map(|decoded| decoded.header);
+            let picture = decoder.decode_yuv420(&frame).map(|picture| picture.header);
+            assert_eq!(picture, wide);
+        }
+    }
+}
+
+#[test]
+fn a_recycled_frame_does_not_change_the_next_one() {
+    let first = busy(PixelFormat::Yuv444p12, 80, 48);
+    let mut second = busy(PixelFormat::Yuv444p12, 80, 48);
+    let alpha = plane16(80, 48, |x, y| ((x * 911 + y * 13) % 65_536) as u16);
+    second = second.with_alpha(16, alpha).expect("alpha");
+    let mut encoder = ProresEncoder::open(&params(Profile::P4444)).expect("open");
+    let one = encoder.encode(&first).expect("first");
+    let two = encoder.encode(&second).expect("second");
+    let fresh = ProresDecoder::open(&params(Profile::P4444))
+        .expect("open")
+        .decode(&two)
+        .expect("fresh");
+    let mut decoder = ProresDecoder::open(&params(Profile::P4444)).expect("open");
+    for _ in 0..3 {
+        let decoded = decoder.decode(&one).expect("first");
+        decoder.recycle(decoded.frame);
+        // A frame that fails gives its planes back too.
+        assert!(decoder.decode(&two[..two.len() / 2]).is_err());
+        let again = decoder.decode(&two).expect("second");
+        assert_eq!(again, fresh);
+        decoder.recycle(again.frame);
+    }
+}

@@ -1,5 +1,6 @@
 //! The inverse transform of a block of an 8-bit stream (AV1 specification
-//! 7.13.3), added to the prediction: 16-bit values, eight to a vector.
+//! 7.13.3), added to the prediction: 16-bit values, eight to a vector on
+//! NEON and sixteen on AVX2.
 //!
 //! The row transforms run on eight rows at a time and the column
 //! transforms on eight columns at a time, so an entry of the array `T` a
@@ -16,6 +17,8 @@
 
 #[macro_use]
 mod macros;
+#[cfg(target_arch = "x86_64")]
+mod avx2;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod neon;
 mod scalar;
@@ -56,8 +59,14 @@ pub struct Block<'a> {
     pub flip_lr: bool,
 }
 
-/// Whether [`add`] is a vector kernel in this build.
-pub const ACCELERATED: bool = cfg!(all(target_arch = "aarch64", target_feature = "neon"));
+/// Whether [`add`] and [`add_flat`] run a vector kernel on this CPU: a
+/// build with NEON, or AVX2 found at run time. Without one they run the
+/// scalar twin, and a caller with its own loops does better to use those.
+#[must_use]
+#[inline]
+pub fn accelerated() -> bool {
+    super::cpu::vector()
+}
 
 /// Whether there is a transform `kind` of `n` values here.
 const fn has(kind: Kind, n: usize) -> bool {
@@ -108,7 +117,19 @@ pub fn add(b: &mut Block<'_>) -> bool {
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::add(b);
+    {
+        #[cfg(target_arch = "x86_64")]
+        if super::cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            unsafe {
+                avx2::add(b);
+            }
+            return true;
+        }
+        scalar::add(b);
+    }
     true
 }
 
@@ -132,6 +153,30 @@ pub fn add_flat(dst: &mut [u8], stride: usize, w: usize, h: usize, v: i32) -> bo
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::add_flat(dst, stride, w, h, v);
+    {
+        #[cfg(target_arch = "x86_64")]
+        if super::cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            unsafe {
+                avx2::add_flat(dst, stride, w, h, v);
+            }
+            return true;
+        }
+        scalar::add_flat(dst, stride, w, h, v);
+    }
     true
+}
+
+/// The AVX2 transform `kind` of `n` values on sixteen lanes, for tests;
+/// `None` on a CPU without AVX2.
+#[cfg(all(test, target_arch = "x86_64"))]
+fn one_dimension_avx2(kind: Kind, n: usize, nz: usize, t: &mut [[i16; 16]; 64]) -> Option<bool> {
+    if !super::cpu::avx2() {
+        return None;
+    }
+    // SAFETY: `cpu::avx2` checked at run time that the CPU has AVX2.
+    #[allow(unsafe_code)]
+    Some(unsafe { avx2::one_dimension(kind, n, nz, t) })
 }

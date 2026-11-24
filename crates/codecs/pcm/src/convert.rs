@@ -311,13 +311,24 @@ fn narrow_f64(value: f64) -> f32 {
 /// inside `low..=high`, so a sample past full scale is the end code and
 /// not a wrapped one.
 fn code(sample: f32, full: f64, low: f64, high: f64) -> i32 {
-    let scaled = (f64::from(sample) * full)
-        .round_ties_even()
-        .clamp(low, high);
+    // `max` then `min`, not `clamp`: the same value for a finite sample,
+    // and two instructions the vector loop keeps.
+    let scaled = nearest_even((f64::from(sample) * full).max(low).min(high));
     #[allow(clippy::cast_possible_truncation)]
     {
         scaled as i32
     }
+}
+
+/// `value` rounded to the nearest integer, ties to even, for a magnitude
+/// below 2^51. Adding 1.5 * 2^52 leaves no fraction bits, so the sum is
+/// rounded by the addition itself, in the default rounding mode, and the
+/// subtraction is exact. It is two additions, where `round_ties_even` is a
+/// library call on a baseline x86-64 target, so the loop over the samples
+/// stays a vector loop.
+fn nearest_even(value: f64) -> f64 {
+    const SHIFT: f64 = 6_755_399_441_055_744.0;
+    (value + SHIFT) - SHIFT
 }
 
 fn code24(sample: f32) -> i32 {

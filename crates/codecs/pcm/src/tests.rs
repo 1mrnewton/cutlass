@@ -455,6 +455,53 @@ fn s24_and_s32_encode_the_nearest_code_and_stop_at_full_scale() {
     assert_eq!(got, planes);
 }
 
+/// The encoder's rounding is the nearest integer with ties to even, the
+/// same value `f64::round_ties_even` gives, over ties, their neighbours
+/// and random values on both sides of zero.
+#[test]
+fn integer_encode_rounds_ties_to_even() {
+    let spec = layout(Coding::S32, Endian::Little, Arrangement::Interleaved);
+    let mut samples = Vec::new();
+    // k / 2^31 * (2^31 - 1) is not a tie in general; these are picked by
+    // the code they should give, from the exact product in f64.
+    let mut rng = Rng(0x7e57_ab1e);
+    for _ in 0..20_000 {
+        #[allow(clippy::cast_precision_loss)]
+        let unit = (rng.next() >> 40) as f32 / (1_u64 << 23) as f32 - 1.0;
+        samples.push(unit);
+        samples.push(unit / 4096.0);
+        samples.push(unit / 16_777_216.0);
+    }
+    samples.extend([0.0, -0.0, 0.5, -0.5, 0.25, -0.25, 1.0, -1.0, 1.5, -1.5]);
+    let bytes = encode_f32(spec, ChannelLayout::mono(), samples.clone());
+    for (chunk, sample) in bytes.as_chunks::<4>().0.iter().zip(&samples) {
+        let exact = (f64::from(*sample) * limit::S32_FULL)
+            .round_ties_even()
+            .clamp(-2_147_483_648.0, limit::S32_FULL);
+        #[allow(clippy::cast_possible_truncation)]
+        let want = exact as i32;
+        assert_eq!(i32::from_le_bytes(*chunk), want, "{sample}");
+    }
+    // Ties, which a 24-bit code times a half makes: 0.5 and 1.5 go to the
+    // even neighbour, 0 and 2, not up.
+    let spec = layout(Coding::S24, Endian::Little, Arrangement::Interleaved);
+    let tie = |code: f64| -> f32 {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            (code / limit::S24_FULL) as f32
+        }
+    };
+    // 4194303.5 is exact in f32 terms only at 0.5: the one float tie.
+    let bytes = encode_f32(spec, ChannelLayout::mono(), vec![0.5, -0.5, tie(3.0)]);
+    let codes: Vec<i32> = bytes
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|three| i32::from_le_bytes([0, three[0], three[1], three[2]]) >> 8)
+        .collect();
+    assert_eq!(codes, [4_194_304, -4_194_304, 3]);
+}
+
 /// All 2^24 codes: decoded to float and encoded again, each is itself.
 #[test]
 fn every_s24_code_survives_a_decode_and_an_encode() {

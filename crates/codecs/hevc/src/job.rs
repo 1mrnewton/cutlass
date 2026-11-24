@@ -60,8 +60,16 @@ pub fn packed_format(bit_depth: u8) -> (PixelFormat, u32) {
 /// shifted up by `up` bits.
 #[inline(always)]
 fn pack16(dst: &mut [u8], words: &[u16], up: u32) {
-    for (o, &s) in dst.as_chunks_mut::<2>().0.iter_mut().zip(words) {
-        *o = (s << up).to_le_bytes();
+    let pairs = dst.as_chunks_mut::<2>().0;
+    if up == 0 {
+        // 10 and 12 bits: a plain copy on a little-endian machine.
+        for (o, &s) in pairs.iter_mut().zip(words) {
+            *o = s.to_le_bytes();
+        }
+    } else {
+        for (o, &s) in pairs.iter_mut().zip(words) {
+            *o = (s << up).to_le_bytes();
+        }
     }
 }
 
@@ -271,11 +279,16 @@ impl OutRows {
                 }
             } else if wide {
                 // Deeper samples of a packed picture, as they are.
-                for (i, out) in dst.chunks_exact_mut(2 * w).enumerate() {
-                    if let Some(words) = P::words(row(i)) {
-                        pack16(out, words, up);
-                    }
-                }
+                cutlass_simd::wide::wide(
+                    #[inline(always)]
+                    || {
+                        for (i, out) in dst.chunks_exact_mut(2 * w).enumerate() {
+                            if let Some(words) = P::words(row(i)) {
+                                pack16(out, words, up);
+                            }
+                        }
+                    },
+                );
             } else {
                 // Deeper samples as the 8-bit plane beside the full ones,
                 // which `VideoOutput` defines as each sample shifted
@@ -346,7 +359,7 @@ impl OutRows {
             }
         };
         let (y, u, v) = (&mut y[rows(0)], &mut u[rows(1)], &mut v[rows(2)]);
-        if self.form == OutForm::Packed {
+        if self.form == OutForm::Packed && self.bytes == 1 {
             for band in [&mut *y, &mut *u, &mut *v] {
                 band.fill(0);
             }

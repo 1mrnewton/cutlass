@@ -150,9 +150,8 @@ impl Work {
             let nonzero = &mut self.nonzero[..64 * blocks];
             quantize(&coefs[..64 * blocks], blocks, steps, quantized, nonzero);
             let before = out.len();
-            let mut writer = BitWriter::onto(std::mem::take(out));
-            code_component(&mut writer, quantized, nonzero, blocks);
-            *out = writer.finish();
+            let writer = BitWriter::onto(std::mem::take(out));
+            *out = code_component(writer, quantized, nonzero, blocks).finish();
             sizes[part] = out.len() - before;
         }
         // The sizes are 16-bit fields. A slice that overflows one is over
@@ -313,15 +312,15 @@ pub(crate) fn quantize(
 /// and levels. `nonzero` is the map [`quantize`] wrote.
 ///
 /// Compiled on its own, not into the caller: it is all integer work that
-/// gains nothing from wide vectors, and by itself it keeps its state in
-/// registers.
+/// gains nothing from wide vectors. The sink comes in and goes back by
+/// value, so its state stays in registers while the coefficients are coded.
 #[inline(never)]
 pub(crate) fn code_component<S: Sink>(
-    sink: &mut S,
+    mut sink: S,
     quantized: &[i32],
     nonzero: &[u8],
     blocks: usize,
-) {
+) -> S {
     let first = quantized[0];
     sink.code(FIRST_DC_CODEBOOK, signed_code(first));
     let mut previous_dc = first;
@@ -393,6 +392,7 @@ pub(crate) fn code_component<S: Sink>(
             last = pos;
         }
     }
+    sink
 }
 
 #[inline]
@@ -454,7 +454,7 @@ pub(crate) fn encode_alpha(values: &[u16], sixteen: bool, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::{Counter, MAX_QUANT, Sink, code_component, encode_alpha, quantize, round_clamped};
-    use crate::bits::{BitWriter, LEVEL_WORDS, RUN_WORDS};
+    use crate::bits::BitWriter;
 
     #[test]
     fn rounding_is_round_half_away_clamped() {
@@ -523,10 +523,8 @@ mod tests {
             }
         }
         let nonzero: Vec<u8> = quantized.iter().map(|&q| u8::from(q != 0)).collect();
-        let mut counter = Counter::default();
-        code_component(&mut counter, &quantized, &nonzero, blocks);
-        let mut writer = BitWriter::default();
-        code_component(&mut writer, &quantized, &nonzero, blocks);
+        let mut counter = code_component(Counter::default(), &quantized, &nonzero, blocks);
+        let mut writer = code_component(BitWriter::default(), &quantized, &nonzero, blocks);
         assert_eq!(counter.bits as usize, writer.len_bits());
         counter.code_pair_then_bit((0x4c, 9), (0x28, 700), 1);
         writer.code_pair_then_bit((0x4c, 9), (0x28, 700), 1);

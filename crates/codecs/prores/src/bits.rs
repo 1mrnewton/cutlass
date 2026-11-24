@@ -465,10 +465,11 @@ mod tests {
         for (words, books) in tables {
             assert_eq!(words.len(), books.len());
             for (row, &book) in words.iter().zip(books) {
-                for value in 0..TABLE_VALUES {
+                assert_eq!(row.len(), TABLE_VALUES);
+                for (value, &word) in row.iter().enumerate() {
                     let (bits, zeros, payload) = code_parts(book, value as u32);
-                    assert_eq!(row[value] & 0xff, zeros + bits, "book {book:#x} {value}");
-                    assert_eq!(row[value] >> 8, payload, "book {book:#x} {value}");
+                    assert_eq!(word & 0xff, zeros + bits, "book {book:#x} {value}");
+                    assert_eq!(word >> 8, payload, "book {book:#x} {value}");
                     assert!(zeros + bits <= 24);
                 }
             }

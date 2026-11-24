@@ -138,6 +138,19 @@ pub(crate) use dc_add_rows;
 mod tests {
     use crate::scalar;
 
+    /// Each test below, on every vector version of the kernels this CPU
+    /// can run.
+    mod on_each_tier {
+        tests_on_each_tier!(
+            the_dc_add_matches_the_plain_one,
+            the_quarter_dc_add_matches_the_plain_one,
+            the_store_matches_the_plain_one,
+            the_transform_and_add_match_the_plain_ones,
+            the_8x8_transform_and_add_match_the_plain_ones,
+            a_lone_dc_adds_the_same_value_everywhere,
+        );
+    }
+
     struct Lcg(u64);
 
     impl Lcg {
@@ -150,7 +163,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn the_dc_add_matches_the_plain_one() {
         let mut rng = Lcg(11);
         for round in 0..20_000 {
@@ -172,7 +184,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn the_quarter_dc_add_matches_the_plain_one() {
         let mut rng = Lcg(13);
         for round in 0..20_000 {
@@ -203,7 +214,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn the_store_matches_the_plain_one() {
         let mut rng = Lcg(17);
         for round in 0..20_000u32 {
@@ -253,7 +263,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn the_transform_and_add_match_the_plain_ones() {
         let mut rng = Lcg(21);
         let stride = 12usize;
@@ -281,7 +290,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn the_8x8_transform_and_add_match_the_plain_ones() {
         let mut rng = Lcg(31);
         let stride = 20usize;
@@ -310,7 +318,6 @@ mod tests {
         assert!(!super::idct8_add(&mut plane, 1, 8, &[0; 64]));
     }
 
-    #[test]
     fn a_lone_dc_adds_the_same_value_everywhere() {
         let mut plane = vec![100u8; 16];
         let mut block = [0i32; 16];

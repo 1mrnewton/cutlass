@@ -29,8 +29,9 @@
 //! Every vector kernel is tested against its [`scalar`] twin on random and
 //! edge-like samples, and must give the same samples.
 
-/// Calls a kernel's vector version where the build has one, and its plain
-/// version elsewhere. This is the crate's only `unsafe`.
+/// Calls a kernel's vector version where the build has one for the CPU it
+/// runs on, and its plain version elsewhere. This is the crate's only
+/// `unsafe` outside the vector modules.
 macro_rules! kernel {
     ($name:ident($($argument:expr),*)) => {{
         #[cfg(target_arch = "aarch64")]
@@ -42,11 +43,53 @@ macro_rules! kernel {
                 crate::neon::$name($($argument),*)
             }
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        {
+            match crate::x86::level() {
+                // SAFETY: the callee is built for AVX2 and the features
+                // `level` found with it on this CPU. It is otherwise a
+                // safe function.
+                #[allow(unsafe_code)]
+                crate::x86::Level::Avx2 => unsafe { crate::x86::avx2::$name($($argument),*) },
+                // SAFETY: the callee is built for SSE4.1 and the features
+                // `level` found with it on this CPU. It is otherwise a
+                // safe function.
+                #[allow(unsafe_code)]
+                crate::x86::Level::Sse41 => unsafe { crate::x86::sse41::$name($($argument),*) },
+                crate::x86::Level::Scalar => crate::scalar::$name($($argument),*),
+            }
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             crate::scalar::$name($($argument),*)
         }
     }};
+}
+
+/// Runs a test's `body` once on each vector version of the kernels this
+/// CPU can run: on x86-64 the SSE4.1 one and, where the CPU has it, the
+/// AVX2 one. Elsewhere the build has one version and `body` runs once.
+#[cfg(test)]
+pub(crate) fn each_tier(body: fn()) {
+    #[cfg(target_arch = "x86_64")]
+    x86::each_tier(body);
+    #[cfg(not(target_arch = "x86_64"))]
+    body();
+}
+
+/// Makes a test of each function named, which runs it through
+/// [`each_tier`]. Used in a module inside the test module that holds the
+/// functions.
+#[cfg(test)]
+macro_rules! tests_on_each_tier {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                crate::each_tier(super::$name);
+            }
+        )*
+    };
 }
 
 /// Asks for `items[at]` to be brought into the cache before it is read,
@@ -79,11 +122,17 @@ mod neon_qpel;
 #[cfg(target_arch = "aarch64")]
 mod neon_residual;
 
+#[cfg(target_arch = "x86_64")]
+mod x86;
+
 pub mod scalar;
 
 #[cfg(test)]
 mod tests {
-    #[test]
+    mod on_each_tier {
+        tests_on_each_tier!(asking_for_an_item_changes_nothing);
+    }
+
     fn asking_for_an_item_changes_nothing() {
         // Items over several cache lines, a line exactly, and none at all;
         // places inside, at the end, and far past it.

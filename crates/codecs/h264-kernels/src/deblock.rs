@@ -119,6 +119,26 @@ mod tests {
     use super::{Lines, Rows};
     use crate::scalar;
 
+    /// Each test below, on every vector version of the kernels this CPU
+    /// can run.
+    mod on_each_tier {
+        tests_on_each_tier!(
+            the_normal_filter_matches_the_plain_one,
+            the_strong_filter_matches_the_plain_one,
+            the_chroma_filters_match_the_plain_ones,
+            whole_edges_match_the_plain_ones,
+            boundaries_alone_match_the_plain_ones,
+            chroma_boundaries_alone_match_the_plain_ones,
+            whole_macroblocks_match_the_plain_ones,
+            three_planes_match_the_plain_ones_and_all_or_none,
+            twin_chroma_planes_match_the_plain_ones,
+            a_macroblock_outside_the_plane_is_left_alone,
+            a_whole_edge_is_the_row_filter_on_its_rows,
+            the_extremes_match_the_plain_filters,
+            a_filter_leaves_the_outer_samples_alone,
+        );
+    }
+
     /// A small generator, so the samples are the same on every run.
     struct Lcg(u64);
 
@@ -175,7 +195,6 @@ mod tests {
         (alpha, beta, tc0)
     }
 
-    #[test]
     fn the_normal_filter_matches_the_plain_one() {
         let mut rng = Lcg(1);
         let mut changed = 0;
@@ -200,7 +219,6 @@ mod tests {
         assert!(changed > 5_000, "only {changed} blocks were filtered");
     }
 
-    #[test]
     fn the_strong_filter_matches_the_plain_one() {
         let mut rng = Lcg(2);
         for round in 0..40_000 {
@@ -219,7 +237,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn the_chroma_filters_match_the_plain_ones() {
         let mut rng = Lcg(4);
         let mut changed = 0;
@@ -251,7 +268,6 @@ mod tests {
         assert!(changed > 5_000, "only {changed} blocks were filtered");
     }
 
-    #[test]
     fn whole_edges_match_the_plain_ones() {
         let mut rng = Lcg(5);
         let stride = 24usize;
@@ -330,7 +346,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn boundaries_alone_match_the_plain_ones() {
         // Most macroblocks filter only their left and top edges, which the
         // vector version does on its own path.
@@ -359,7 +374,6 @@ mod tests {
         assert!(changed > 5_000, "only {changed} macroblocks were filtered");
     }
 
-    #[test]
     fn chroma_boundaries_alone_match_the_plain_ones() {
         let mut rng = Lcg(9);
         let mut changed = 0;
@@ -388,7 +402,6 @@ mod tests {
         assert!(changed > 5_000, "only {changed} macroblocks were filtered");
     }
 
-    #[test]
     fn whole_macroblocks_match_the_plain_ones() {
         let mut rng = Lcg(7);
         let mut changed = 0;
@@ -426,7 +439,6 @@ mod tests {
         assert!(changed > 4_000, "only {changed} macroblocks were filtered");
     }
 
-    #[test]
     fn three_planes_match_the_plain_ones_and_all_or_none() {
         let mut rng = Lcg(12);
         let mut changed = 0;
@@ -478,7 +490,6 @@ mod tests {
         assert!(refused > 300, "only {refused} were refused");
     }
 
-    #[test]
     fn twin_chroma_planes_match_the_plain_ones() {
         let mut rng = Lcg(13);
         let mut changed = 0;
@@ -544,7 +555,6 @@ mod tests {
         assert!(refused > 500, "only {refused} were refused");
     }
 
-    #[test]
     fn a_macroblock_outside_the_plane_is_left_alone() {
         let down = 32;
         let before = vec![90u8; down * 20];
@@ -566,7 +576,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_whole_edge_is_the_row_filter_on_its_rows() {
         // Ties the plane functions to the row filters the other tests check.
         let mut rng = Lcg(6);
@@ -591,7 +600,6 @@ mod tests {
         assert_ne!(filtered, plane);
     }
 
-    #[test]
     fn the_extremes_match_the_plain_filters() {
         for fill in [0u8, 1, 127, 128, 254, 255] {
             for other in [0u8, 255, 128] {
@@ -615,7 +623,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_filter_leaves_the_outer_samples_alone() {
         let mut rng = Lcg(3);
         for _ in 0..2_000 {

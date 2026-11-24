@@ -40,7 +40,7 @@ pub struct Filter {
 impl Filter {
     /// Whether the clipping values leave room for the two a filter may add
     /// to them in 8 bits: none is above 125. The tables stop at 25.
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     pub(crate) fn tame(&self) -> bool {
         let Some(tc0) = self.tc0 else {
             return true;

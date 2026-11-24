@@ -223,6 +223,28 @@ pub fn chroma8(top: &[u8; 9], bottom: &[u8; 9], xf: u8, yf: u8) -> [u8; 8] {
 mod tests {
     use crate::scalar;
 
+    /// Each test below, on every vector version of the kernels this CPU
+    /// can run.
+    mod on_each_tier {
+        tests_on_each_tier!(
+            half_samples_match_the_plain_filter,
+            half_samples_match_at_the_extremes,
+            centre_samples_match_the_plain_filter,
+            whole_blocks_match_the_plain_ones,
+            blocks_at_the_plane_edges_match_the_plain_ones,
+            partitions_match_the_plain_ones,
+            pairs_match_the_plain_ones,
+            both_chroma_planes_match_the_plain_ones,
+            scaled_blocks_match_the_plain_ones,
+            weights_onto_a_block_match_the_plain_ones,
+            weights_held_to_16_bits_match_the_plain_ones,
+            a_block_is_the_row_kernels_applied_to_its_rows,
+            mixed_blocks_match_the_plain_ones,
+            averages_match_the_plain_ones,
+            chroma_samples_match_the_plain_ones,
+        );
+    }
+
     struct Lcg(u64);
 
     impl Lcg {
@@ -259,7 +281,6 @@ mod tests {
         ]
     }
 
-    #[test]
     fn half_samples_match_the_plain_filter() {
         let mut rng = Lcg(11);
         for _ in 0..50_000 {
@@ -272,7 +293,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn half_samples_match_at_the_extremes() {
         // Every tap at one end or the other: 64 patterns reach the largest
         // and smallest sums.
@@ -288,7 +308,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn centre_samples_match_the_plain_filter() {
         let mut rng = Lcg(12);
         // A first-pass sum lies between −2550 and 10710.
@@ -320,7 +339,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn whole_blocks_match_the_plain_ones() {
         let mut rng = Lcg(15);
         let (stride, rows) = (40usize, 40usize);
@@ -375,7 +393,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn blocks_at_the_plane_edges_match_the_plain_ones() {
         // Every place in a plane with no samples around it. A direction
         // without an offset needs none beyond the block, so a block at the
@@ -424,7 +441,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn partitions_match_the_plain_ones() {
         // Pictures 48×32 in planes with rows 56 apart, the references cut
         // short at a random row as a picture still being decoded is, and
@@ -493,7 +509,6 @@ mod tests {
         assert!(taken.1 > 5_000 && taken.1 < 35_000, "{taken:?}");
     }
 
-    #[test]
     fn pairs_match_the_plain_ones() {
         let mut rng = Lcg(18);
         let (stride, rows) = (48usize, 48usize);
@@ -542,7 +557,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn both_chroma_planes_match_the_plain_ones() {
         let mut rng = Lcg(23);
         let (stride, rows) = (40usize, 30usize);
@@ -608,7 +622,6 @@ mod tests {
         assert!(written > 10_000);
     }
 
-    #[test]
     fn scaled_blocks_match_the_plain_ones() {
         let mut rng = Lcg(19);
         for round in 0..20_000u32 {
@@ -635,7 +648,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn weights_onto_a_block_match_the_plain_ones() {
         let mut rng = Lcg(23);
         for round in 0..20_000u32 {
@@ -666,7 +678,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn weights_held_to_16_bits_match_the_plain_ones() {
         // The weights a stream uses: implicit ones, whose sum is 64 at a
         // shift of 6, and explicit ones with small shifts and offsets,
@@ -722,7 +733,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_block_is_the_row_kernels_applied_to_its_rows() {
         // Ties the block functions to the single-row ones the other tests
         // check against the clause's formulas.
@@ -755,7 +765,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn mixed_blocks_match_the_plain_ones() {
         let mut rng = Lcg(17);
         for round in 0..30_000u32 {
@@ -818,7 +827,6 @@ mod tests {
         ));
     }
 
-    #[test]
     fn averages_match_the_plain_ones() {
         let mut rng = Lcg(13);
         for _ in 0..20_000 {
@@ -829,7 +837,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn chroma_samples_match_the_plain_ones() {
         let mut rng = Lcg(14);
         for round in 0..40_000u32 {

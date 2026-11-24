@@ -2,7 +2,9 @@
 //!
 //! The decoder accepts profiles 0, 1, 2, and 3. So does the encoder
 //! (8-, 10- and 12-bit, every chroma format).
-//! Playback and a WebM container are outside this crate.
+//! [`register_engine_decoders`] and [`register_engine_encoders`] put them
+//! on the engine's factories for playback and export. A WebM container is
+//! outside this crate.
 
 #![forbid(unsafe_code)]
 
@@ -11,6 +13,7 @@ mod dec;
 mod decode;
 mod dsp;
 mod enc;
+mod engine;
 mod geom;
 mod header;
 #[cfg(test)]
@@ -32,6 +35,7 @@ pub use enc::api::{
     AlphaCoded, AqMode, Chroma, ColorSpace, EngineEncoder, RoiMap, Tune, TuneContent, Vp9Encoder,
     Vp9Options, register_engine_encoders,
 };
+pub use engine::{EngineDecoder, register_engine_decoders};
 
 use cutlass_decode::video::VideoDecoder;
 use cutlass_decode::{CodecError, CodecId, CodecParams, VideoDecodeFactory};

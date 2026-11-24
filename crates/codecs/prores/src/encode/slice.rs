@@ -1,7 +1,7 @@
 //! One slice: forward transform, quantization, entropy coding, alpha.
 
 use super::source::{MAX_COLUMNS, Picture};
-use crate::bits::BitWriter;
+use crate::bits::{BitWriter, LEVEL_WORDS, RUN_WORDS};
 use crate::dct::fdct;
 use crate::header::Chroma;
 use crate::tables::{
@@ -27,6 +27,8 @@ pub(crate) struct Work {
     u: Vec<f32>,
     v: Vec<f32>,
     quantized: Vec<i32>,
+    /// One byte for each quantized coefficient: 1 where it is not zero.
+    nonzero: Vec<u8>,
     alpha_values: Vec<u16>,
     /// The slice's coded alpha, the same at every quantization index.
     alpha: Vec<u8>,
@@ -46,6 +48,7 @@ impl Default for Work {
             u: vec![0.0; coefs],
             v: vec![0.0; coefs],
             quantized: vec![0; coefs],
+            nonzero: vec![0; coefs],
             alpha_values: Vec::new(),
             alpha: Vec::new(),
             luma_blocks: 0,
@@ -144,10 +147,11 @@ impl Work {
         .enumerate()
         {
             let quantized = &mut self.quantized[..64 * blocks];
-            quantize(&coefs[..64 * blocks], blocks, steps, quantized);
+            let nonzero = &mut self.nonzero[..64 * blocks];
+            quantize(&coefs[..64 * blocks], blocks, steps, quantized, nonzero);
             let before = out.len();
             let mut writer = BitWriter::onto(std::mem::take(out));
-            code_component(&mut writer, quantized, blocks);
+            code_component(&mut writer, quantized, nonzero, blocks);
             *out = writer.finish();
             sizes[part] = out.len() - before;
         }
@@ -201,7 +205,10 @@ fn transform(samples: &[f32], at: Block, out: &mut [f32], basis: &[[f32; 8]; 8])
 /// Where coded bits go: counted, or written.
 pub(crate) trait Sink {
     fn code(&mut self, codebook: u8, value: u32);
-    fn bit(&mut self, value: u32);
+    /// A codeword from `first`, one from `second`, and the bit that follows.
+    fn code_pair_then_bit(&mut self, first: (u8, u32), second: (u8, u32), bit: u32);
+    /// The same for a run and a level given as table words.
+    fn pair_then_bit(&mut self, run: u32, level: u32, bit: u32);
 }
 
 #[cfg(test)]
@@ -212,26 +219,35 @@ pub(crate) struct Counter {
 
 #[cfg(test)]
 impl Sink for Counter {
-    #[inline]
     fn code(&mut self, codebook: u8, value: u32) {
         self.bits += crate::bits::code_len(codebook, value);
     }
 
-    #[inline]
-    fn bit(&mut self, _value: u32) {
+    fn code_pair_then_bit(&mut self, first: (u8, u32), second: (u8, u32), _bit: u32) {
+        self.code(first.0, first.1);
+        self.code(second.0, second.1);
         self.bits += 1;
+    }
+
+    fn pair_then_bit(&mut self, run: u32, level: u32, _bit: u32) {
+        self.bits += (run & 0xff) + (level & 0xff) + 1;
     }
 }
 
 impl Sink for BitWriter {
-    #[inline]
+    #[inline(always)]
     fn code(&mut self, codebook: u8, value: u32) {
         BitWriter::code(self, codebook, value);
     }
 
-    #[inline]
-    fn bit(&mut self, value: u32) {
-        self.put(1, value);
+    #[inline(always)]
+    fn code_pair_then_bit(&mut self, first: (u8, u32), second: (u8, u32), bit: u32) {
+        BitWriter::code_pair_then_bit(self, first, second, bit);
+    }
+
+    #[inline(always)]
+    fn pair_then_bit(&mut self, run: u32, level: u32, bit: u32) {
+        BitWriter::pair_then_bit(self, run, level, bit);
     }
 }
 
@@ -269,23 +285,43 @@ fn round_clamped(value: f32) -> i32 {
     if value < 0.0 { -whole } else { whole }
 }
 
-/// Quantizes one component, coded order in and out.
+/// Quantizes one component, coded order in and out. `nonzero` takes one
+/// byte for each coefficient: 1 where it did not quantize to zero.
 #[inline(always)]
-pub(crate) fn quantize(coefs: &[f32], blocks: usize, steps: &[f32; 64], out: &mut [i32]) {
-    for ((src, dst), &step) in coefs
+pub(crate) fn quantize(
+    coefs: &[f32],
+    blocks: usize,
+    steps: &[f32; 64],
+    out: &mut [i32],
+    nonzero: &mut [u8],
+) {
+    for (((src, dst), flags), &step) in coefs
         .chunks_exact(blocks)
         .zip(out.chunks_exact_mut(blocks))
+        .zip(nonzero.chunks_exact_mut(blocks))
         .zip(steps)
     {
-        for (d, &c) in dst.iter_mut().zip(src) {
-            *d = round_clamped(c * step);
+        for ((d, flag), &c) in dst.iter_mut().zip(flags).zip(src) {
+            let value = round_clamped(c * step);
+            *d = value;
+            *flag = u8::from(value != 0);
         }
     }
 }
 
-/// Codes one quantized component: DC differences, then interleaved runs and levels.
-#[inline(always)]
-pub(crate) fn code_component<S: Sink>(sink: &mut S, quantized: &[i32], blocks: usize) {
+/// Codes one quantized component: DC differences, then interleaved runs
+/// and levels. `nonzero` is the map [`quantize`] wrote.
+///
+/// Compiled on its own, not into the caller: it is all integer work that
+/// gains nothing from wide vectors, and by itself it keeps its state in
+/// registers.
+#[inline(never)]
+pub(crate) fn code_component<S: Sink>(
+    sink: &mut S,
+    quantized: &[i32],
+    nonzero: &[u8],
+    blocks: usize,
+) {
     let first = quantized[0];
     sink.code(FIRST_DC_CODEBOOK, signed_code(first));
     let mut previous_dc = first;
@@ -314,32 +350,50 @@ pub(crate) fn code_component<S: Sink>(sink: &mut S, quantized: &[i32], blocks: u
     let mut last = blocks - 1;
     let mut run = FIRST_RUN;
     let mut level = FIRST_LEVEL;
-    // Most coefficients are zero: whole groups of them are passed over
-    // with one test.
-    let ac = quantized.get(blocks..).unwrap_or_default();
-    for (group, values) in ac.chunks(ZERO_GROUP).enumerate() {
-        if values.iter().fold(0, |any, &value| any | value) == 0 {
-            continue;
+    // Most coefficients are zero. The map bytes of 64 coefficients are
+    // packed into one word, a bit each, and only the places it marks are
+    // visited.
+    let ac = nonzero.get(blocks..).unwrap_or_default();
+    for (group, flags) in ac.chunks(64).enumerate() {
+        let mut marks = 0u64;
+        for (byte, eight) in flags.chunks(8).enumerate() {
+            let mut word = [0u8; 8];
+            word[..eight.len()].copy_from_slice(eight);
+            // Eight bytes of 0 or 1 to eight bits: each product term lands
+            // on its own bit, so nothing carries.
+            let packed = u64::from_le_bytes(word).wrapping_mul(0x0102_0408_1020_4080) >> 56;
+            marks |= packed << (8 * byte);
         }
-        for (offset, &value) in values.iter().enumerate() {
-            if value == 0 {
-                continue;
-            }
-            let pos = blocks + group * ZERO_GROUP + offset;
+        while marks != 0 {
+            let offset = marks.trailing_zeros() as usize;
+            marks &= marks - 1;
+            let pos = blocks + group * 64 + offset;
+            let value = quantized.get(pos).copied().unwrap_or(0);
             let this_run = (pos - last - 1) as u32;
-            sink.code(run_codebook(run), this_run);
-            let magnitude = value.unsigned_abs();
-            sink.code(level_codebook(level), magnitude - 1);
-            sink.bit(u32::from(value < 0));
+            let magnitude = value.unsigned_abs().max(1);
+            let sign = u32::from(value < 0);
+            let run_row = &RUN_WORDS[run.min(15) as usize];
+            let level_row = &LEVEL_WORDS[level.clamp(1, 9) as usize - 1];
+            match (
+                run_row.get(this_run as usize),
+                level_row.get(magnitude as usize - 1),
+            ) {
+                // Small values, nearly all of them: two table words.
+                (Some(&run_word), Some(&level_word)) => {
+                    sink.pair_then_bit(run_word, level_word, sign);
+                }
+                _ => sink.code_pair_then_bit(
+                    (run_codebook(run), this_run),
+                    (level_codebook(level), magnitude - 1),
+                    sign,
+                ),
+            }
             run = this_run;
             level = magnitude;
             last = pos;
         }
     }
 }
-
-/// Coefficients tested for zero at once.
-const ZERO_GROUP: usize = 16;
 
 #[inline]
 fn signed_code(value: i32) -> u32 {
@@ -400,7 +454,7 @@ pub(crate) fn encode_alpha(values: &[u16], sixteen: bool, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::{Counter, MAX_QUANT, Sink, code_component, encode_alpha, quantize, round_clamped};
-    use crate::bits::BitWriter;
+    use crate::bits::{BitWriter, LEVEL_WORDS, RUN_WORDS};
 
     #[test]
     fn rounding_is_round_half_away_clamped() {
@@ -448,7 +502,11 @@ mod tests {
             *step = 1.0 / (4.0 + i as f32);
         }
         let mut out = vec![0i32; coefs.len()];
-        quantize(&coefs, blocks, &steps, &mut out);
+        let mut nonzero = vec![7u8; coefs.len()];
+        quantize(&coefs, blocks, &steps, &mut out, &mut nonzero);
+        for (&q, &flag) in out.iter().zip(&nonzero) {
+            assert_eq!(flag, u8::from(q != 0));
+        }
         for (at, (&q, &c)) in out.iter().zip(&coefs).enumerate() {
             let want = (c * steps[at / blocks]).round() as i32;
             assert_eq!(q, want, "coefficient {at}");
@@ -464,13 +522,15 @@ mod tests {
                 *q = ((i * 37) % 41) as i32 - 20;
             }
         }
+        let nonzero: Vec<u8> = quantized.iter().map(|&q| u8::from(q != 0)).collect();
         let mut counter = Counter::default();
-        code_component(&mut counter, &quantized, blocks);
+        code_component(&mut counter, &quantized, &nonzero, blocks);
         let mut writer = BitWriter::default();
-        code_component(&mut writer, &quantized, blocks);
+        code_component(&mut writer, &quantized, &nonzero, blocks);
         assert_eq!(counter.bits as usize, writer.len_bits());
-        counter.bit(1);
-        assert_eq!(counter.bits as usize, writer.len_bits() + 1);
+        counter.code_pair_then_bit((0x4c, 9), (0x28, 700), 1);
+        writer.code_pair_then_bit((0x4c, 9), (0x28, 700), 1);
+        assert_eq!(counter.bits as usize, writer.len_bits());
     }
 
     #[test]

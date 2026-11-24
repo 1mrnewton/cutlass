@@ -206,38 +206,71 @@ pub(crate) fn codeword(buf: u32, codebook: u8) -> (u32, u32) {
 }
 
 /// Writes bits MSB first, onto the end of a byte vector.
+///
+/// Every write stores the pending bits as eight bytes at the end and moves
+/// the end on by the whole bytes among them, so no write branches on how
+/// full the writer is. The vector is kept longer than what is written and
+/// cut to length by [`Self::finish`].
 #[derive(Default)]
 pub(crate) struct BitWriter {
     bytes: Vec<u8>,
-    /// Bits not yet in `bytes`, in the low `filled` bits; fewer than 32
+    /// Bytes of `bytes` that are written.
+    len: usize,
+    /// Bits not yet counted in `len`, in the low `filled` bits: at most 7
     /// between calls.
     acc: u64,
     filled: u32,
+    /// Bits written since the writer started.
+    #[cfg(test)]
+    written: usize,
 }
+
+/// Room kept past the written bytes, so a store of eight never grows the
+/// vector in the common case.
+const HEADROOM: usize = 4096;
 
 impl BitWriter {
     /// A writer that appends to `bytes`, so one buffer takes many parts.
     #[inline(always)]
     pub(crate) fn onto(bytes: Vec<u8>) -> Self {
         Self {
+            len: bytes.len(),
             bytes,
             acc: 0,
             filled: 0,
+            #[cfg(test)]
+            written: 0,
         }
+    }
+
+    /// Writes the low `bits` bits of `value`, 0 to 57.
+    #[inline(always)]
+    pub(crate) fn put_long(&mut self, bits: u32, value: u64) {
+        let bits = bits.min(57);
+        #[cfg(test)]
+        {
+            self.written += bits as usize;
+        }
+        // At most 7 bits are pending, so 64 hold them and these.
+        self.acc = (self.acc << bits) | (value & ((1u64 << bits) - 1));
+        self.filled += bits;
+        if self.bytes.len() < self.len + 8 {
+            grow(&mut self.bytes, self.len);
+        }
+        // The pending bits, first bit highest; `filled` is 1 to 64 here
+        // unless nothing is pending, when the store is of zeros.
+        let top = self.acc.checked_shl(64 - self.filled).unwrap_or(0);
+        if let Some(slot) = self.bytes.get_mut(self.len..self.len + 8) {
+            slot.copy_from_slice(&top.to_be_bytes());
+        }
+        self.len += (self.filled >> 3) as usize;
+        self.filled &= 7;
     }
 
     /// Writes the low `bits` bits of `value`, 0 to 32.
     #[inline(always)]
     pub(crate) fn put(&mut self, bits: u32, value: u32) {
-        let bits = bits.min(32);
-        let masked = u64::from(value) & ((1u64 << bits) - 1);
-        self.acc = (self.acc << bits) | masked;
-        self.filled += bits;
-        if self.filled >= 32 {
-            self.filled -= 32;
-            let word = (self.acc >> self.filled) as u32;
-            self.bytes.extend_from_slice(&word.to_be_bytes());
-        }
+        self.put_long(bits.min(32), u64::from(value));
     }
 
     /// Writes `count` zero bits.
@@ -253,19 +286,16 @@ impl BitWriter {
     /// Bits written so far, from where the writer started.
     #[cfg(test)]
     pub(crate) fn len_bits(&self) -> usize {
-        self.bytes.len() * 8 + self.filled as usize
+        self.written
     }
 
     /// Pads with zero bits to a byte boundary and returns the bytes.
     #[inline(always)]
     pub(crate) fn finish(mut self) -> Vec<u8> {
-        let pad = (8 - self.filled % 8) % 8;
-        self.acc <<= pad;
-        self.filled += pad;
-        while self.filled >= 8 {
-            self.filled -= 8;
-            self.bytes.push((self.acc >> self.filled) as u8);
+        if self.filled > 0 {
+            self.put_long(8 - self.filled, 0);
         }
+        self.bytes.truncate(self.len);
         self.bytes
     }
 
@@ -273,33 +303,116 @@ impl BitWriter {
     #[inline(always)]
     pub(crate) fn code(&mut self, codebook: u8, value: u32) {
         let (bits, zeros, payload) = code_parts(codebook, value);
-        if zeros + bits <= 32 {
+        if zeros + bits <= 57 {
             // The payload is below `bits` bits, so the zeros come with it.
-            self.put(zeros + bits, payload);
+            self.put_long(zeros + bits, u64::from(payload));
         } else {
             self.zeros(zeros);
             self.put(bits, payload);
         }
     }
+
+    /// Writes a run and the level and sign after it, each codeword given
+    /// as [`RUN_WORDS`] and [`LEVEL_WORDS`] hold them.
+    #[inline(always)]
+    pub(crate) fn pair_then_bit(&mut self, run: u32, level: u32, bit: u32) {
+        let (len_a, len_b) = (run & 0xff, (level & 0xff) + 1);
+        let tail = (u64::from(level >> 8) << 1) | u64::from(bit & 1);
+        // Two table words are at most 24 bits each.
+        self.put_long(len_a + len_b, (u64::from(run >> 8) << len_b) | tail);
+    }
+
+    /// Encodes a codeword from `first`, then one from `second`, then one bit.
+    #[inline(always)]
+    pub(crate) fn code_pair_then_bit(&mut self, first: (u8, u32), second: (u8, u32), bit: u32) {
+        let (bits_a, zeros_a, payload_a) = code_parts(first.0, first.1);
+        let (bits_b, zeros_b, payload_b) = code_parts(second.0, second.1);
+        let len_a = zeros_a + bits_a;
+        let len_b = zeros_b + bits_b + 1;
+        let tail = (u64::from(payload_b) << 1) | u64::from(bit & 1);
+        if len_a + len_b <= 57 && len_b <= 33 {
+            self.put_long(len_a + len_b, (u64::from(payload_a) << len_b) | tail);
+        } else {
+            self.zeros(zeros_a);
+            self.put(bits_a, payload_a);
+            self.zeros(zeros_b);
+            self.put(bits_b, payload_b);
+            self.put(1, bit);
+        }
+    }
+}
+
+/// Values each codeword table covers. Larger values are worked out.
+pub(crate) const TABLE_VALUES: usize = 64;
+
+/// A table word for `value` in `codebook`: the codeword's bits above its
+/// length in the low byte. Every codeword for a value under
+/// [`TABLE_VALUES`] is 24 bits or fewer.
+const fn table_word(codebook: u8, value: u32) -> u32 {
+    let switch = (codebook & 3) as u32;
+    let rice = (codebook >> 5) as u32;
+    let exp = ((codebook >> 2) & 7) as u32;
+    let base = (switch + 1) << rice;
+    if value < base {
+        let payload = (1 << rice) | (value & ((1 << rice) - 1));
+        (payload << 8) | ((value >> rice) + 1 + rice)
+    } else {
+        let x = value - base + (1 << exp);
+        let bits = 32 - x.leading_zeros();
+        (x << 8) | (2 * bits - exp + switch)
+    }
+}
+
+const fn table<const N: usize>(books: [u8; N]) -> [[u32; TABLE_VALUES]; N] {
+    let mut out = [[0u32; TABLE_VALUES]; N];
+    let mut book = 0;
+    while book < N {
+        let mut value = 0;
+        while value < TABLE_VALUES {
+            out[book][value] = table_word(books[book], value as u32);
+            value += 1;
+        }
+        book += 1;
+    }
+    out
+}
+
+/// Run codewords: `[previous run, 15 at most][run]`.
+pub(crate) static RUN_WORDS: [[u32; TABLE_VALUES]; 16] = table(crate::tables::RUN_CODEBOOK);
+/// Level codewords: `[previous level, 1 to 9, less 1][level less 1]`.
+pub(crate) static LEVEL_WORDS: [[u32; TABLE_VALUES]; 9] = table(crate::tables::LEVEL_CODEBOOK);
+
+/// Lengthens `bytes` to hold [`HEADROOM`] past `len`. Apart from the
+/// writer, so its other fields can stay in registers.
+#[cold]
+#[inline(never)]
+fn grow(bytes: &mut Vec<u8>, len: usize) {
+    bytes.resize(len + HEADROOM, 0);
 }
 
 /// The codeword for `value`: `zeros` leading zeros, then `bits` bits of `payload`.
-#[inline]
+///
+/// Both forms are worked out and one is chosen, so the choice is a select
+/// and not a branch on the value.
+#[inline(always)]
 pub(crate) fn code_parts(codebook: u8, value: u32) -> (u32, u32, u32) {
     let switch = u32::from(codebook & 3);
     let rice = u32::from(codebook >> 5);
     let exp = u32::from((codebook >> 2) & 7);
     let base = (switch + 1) << rice;
-    if value < base {
-        let zeros = value >> rice;
-        let mask = (1u32 << rice) - 1;
-        (1 + rice, zeros, (1 << rice) | (value & mask))
-    } else {
-        let x = value - base + (1 << exp);
-        let bits = 32 - x.leading_zeros();
-        let zeros = bits - exp + switch;
-        (bits, zeros, x)
-    }
+    // Rice: the quotient in unary, a one, then `rice` bits.
+    let short_zeros = value >> rice;
+    let short_payload = (1 << rice) | (value & ((1u32 << rice) - 1));
+    // Exp-Golomb, from the switch point up.
+    let x = value.wrapping_sub(base).wrapping_add(1 << exp);
+    let long_bits = 32 - x.leading_zeros();
+    let long_zeros = long_bits.wrapping_sub(exp).wrapping_add(switch);
+    let pick = u32::from(value < base).wrapping_neg();
+    (
+        ((1 + rice) & pick) | (long_bits & !pick),
+        (short_zeros & pick) | (long_zeros & !pick),
+        (short_payload & pick) | (x & !pick),
+    )
 }
 
 /// Length of a codeword in bits.
@@ -340,6 +453,67 @@ mod tests {
             }
             assert!(!reader.overrun());
         }
+    }
+
+    #[test]
+    fn table_words_are_the_worked_out_codewords() {
+        use super::{LEVEL_WORDS, RUN_WORDS, TABLE_VALUES, code_parts};
+        let tables = [
+            (&RUN_WORDS[..], &RUN_CODEBOOK[..]),
+            (&LEVEL_WORDS[..], &LEVEL_CODEBOOK[..]),
+        ];
+        for (words, books) in tables {
+            assert_eq!(words.len(), books.len());
+            for (row, &book) in words.iter().zip(books) {
+                for value in 0..TABLE_VALUES {
+                    let (bits, zeros, payload) = code_parts(book, value as u32);
+                    assert_eq!(row[value] & 0xff, zeros + bits, "book {book:#x} {value}");
+                    assert_eq!(row[value] >> 8, payload, "book {book:#x} {value}");
+                    assert!(zeros + bits <= 24);
+                }
+            }
+        }
+        // A table pair writes what two codewords and a bit write.
+        for (run, level, bit) in [(0u32, 0u32, 1u32), (63, 63, 0), (5, 40, 1), (17, 2, 0)] {
+            let mut tabled = BitWriter::default();
+            tabled.pair_then_bit(
+                RUN_WORDS[3][run as usize],
+                LEVEL_WORDS[8][level as usize],
+                bit,
+            );
+            let mut worked = BitWriter::default();
+            worked.code(RUN_CODEBOOK[3], run);
+            worked.code(LEVEL_CODEBOOK[8], level);
+            worked.put(1, bit);
+            assert_eq!(tabled.len_bits(), worked.len_bits());
+            assert_eq!(tabled.finish(), worked.finish());
+        }
+    }
+
+    #[test]
+    fn long_and_short_writes_give_the_same_bytes() {
+        // The same bits through writes of every width, against one bit at a time.
+        let mut single = BitWriter::default();
+        let mut mixed = BitWriter::onto(vec![0xab, 0xcd]);
+        let mut state = 77u64;
+        let mut total = 0;
+        for round in 0..5000u32 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let width = (round * 11 + 3) % 58;
+            let value = state >> 3;
+            mixed.put_long(width, value);
+            for bit in (0..width).rev() {
+                single.put(1, ((value >> bit) & 1) as u32);
+            }
+            total += width as usize;
+            assert_eq!(mixed.len_bits(), total);
+        }
+        let mixed = mixed.finish();
+        assert_eq!(&mixed[..2], &[0xab, 0xcd]);
+        assert_eq!(&mixed[2..], &single.finish()[..]);
+        assert_eq!(mixed.len(), 2 + total.div_ceil(8));
     }
 
     #[test]

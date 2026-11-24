@@ -1472,11 +1472,11 @@ fn decode_au<S: Sample>(
                 }
                 index += 1;
             }
-            _ => {
-                return Err(CodecError::Unsupported {
-                    what: "nal unit type",
-                });
-            }
+            // A sequence parameter set extension (13) and the slices of
+            // an auxiliary picture (19) describe an alpha plane that is
+            // not part of the primary picture. The rest are reserved or
+            // left to the application. None changes the primary picture.
+            _ => index += 1,
         }
     }
     let Some(pic) = picture else {
@@ -6652,6 +6652,53 @@ mod tests {
             .picture
             .y()
             .to_vec()
+    }
+
+    /// `unit` as an Annex B NAL unit: a start code, then the bytes.
+    fn annex_b_unit(unit: &[u8]) -> Vec<u8> {
+        let mut out = vec![0, 0, 0, 1];
+        out.extend_from_slice(unit);
+        out
+    }
+
+    #[test]
+    fn units_the_decoder_does_not_read_are_skipped() {
+        let good = idr_bytes();
+        let want = reference_luma(&good);
+        // An SPS extension, an auxiliary slice, and every reserved or
+        // unspecified type, before the picture and after it.
+        for kind in [0u8, 13, 17, 18, 19, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] {
+            for ref_idc in [0u8, 3] {
+                let unit = annex_b_unit(&[ref_idc << 5 | kind, 0x9a, 0x5c, 0xf1, 0x80]);
+                let mut before = unit.clone();
+                before.extend_from_slice(&good);
+                let mut after = good.clone();
+                after.extend_from_slice(&unit);
+                let mut params = CodecParams::video(CodecId::H264, 16, 16);
+                params.nal_length_size = 0;
+                for data in [before, after] {
+                    let mut decoder = H264Decoder::open(&params).unwrap();
+                    assert_eq!(luma_of(&mut decoder, &data), want, "type {kind}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_unit_of_only_skipped_types_shows_nothing_and_changes_nothing() {
+        let good = idr_bytes();
+        let want = reference_luma(&good);
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let mut alone = annex_b_unit(&[13, 0x80]);
+        alone.extend(annex_b_unit(&[19]));
+        alone.extend(annex_b_unit(&[0x7f, 0xff, 0xff]));
+        let out = decoder
+            .push(&Packet::video(alone, 0, 1, 30, false))
+            .unwrap();
+        assert!(out.is_empty());
+        assert_eq!(luma_of(&mut decoder, &good), want);
     }
 
     fn idr_bytes() -> Vec<u8> {

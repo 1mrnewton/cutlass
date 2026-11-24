@@ -26,7 +26,6 @@ Refused:
 - Monochrome (`chroma_format_idc` 0): `CodecError::Unsupported { what: "chroma format" }`.
 - A depth above 14 bits, or luma and chroma depths that differ: `Unsupported { what: "bit depth" }`.
 - Any other `profile_idc`: `Unsupported { what: "profile" }`.
-- NAL unit types the decoder does not name (0, 13, 17 to 19, 22 to 31): `Unsupported { what: "nal unit type" }` for the whole access unit.
 - Scalable, multiview, and 3D tools outside the tested cases: `Unsupported` with `"inter-layer prediction"`, `"3d"`, `"scan idx"`, `"reference base picture"`, `"svc vui"`, `"mvc vui"`, or `"mvcd vui"`.
 - A length prefix of 3 bytes: `Unsupported { what: "nal length size" }`.
 - A picture with missing macroblocks: `CodecError::Malformed`. There is no error concealment.
@@ -159,7 +158,8 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 
 Decoder gaps:
 
-- The refusals listed under "What it supports". The one most likely to meet a real file: an access unit that holds an auxiliary picture (NAL type 19), a sequence parameter set extension (type 13), or a reserved or unspecified NAL type fails as a whole instead of that one unit being skipped.
+- The refusals listed under "What it supports".
+- An auxiliary picture (NAL type 19, with its sequence parameter set extension, type 13) is skipped, as FFmpeg skips it, so an alpha plane carried that way is not returned. Reserved and unspecified NAL types (0, 17, 18, 22 to 31) are skipped too.
 - A damaged picture is not repaired. The bad-input tests only check that a later IDR picture still decodes.
 - Film grain follows H.274, whose random source is not fixed, so grained pictures need not match another decoder.
 - The opener `register_decoders` adds does not give the decoder threads, so the app decodes H.264 on one thread.

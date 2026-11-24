@@ -19,11 +19,17 @@ use std::io::{Read, Seek};
 pub(crate) struct RandomSource<R> {
     input: Input<R>,
     length: u64,
+    /// A read failed, so the reader may not be where `input` says it is.
+    lost: bool,
 }
 
 impl<R> RandomSource<R> {
     pub(crate) fn new(input: Input<R>, length: u64) -> Self {
-        Self { input, length }
+        Self {
+            input,
+            length,
+            lost: false,
+        }
     }
 }
 
@@ -39,8 +45,16 @@ impl<R: Read + Seek> Source for RandomSource<R> {
     }
 
     fn read_exact_at(&mut self, at: u64, buf: &mut [u8]) -> Result<(), Error> {
-        self.input.seek(at).map_err(source_error)?;
-        self.input.read_exact(buf).map_err(source_error)?;
+        // Samples of one chunk follow each other, so most reads start
+        // where the last one ended and need no seek.
+        if self.lost || self.input.position() != at {
+            self.input.seek(at).map_err(source_error)?;
+            self.lost = false;
+        }
+        if let Err(error) = self.input.read_exact(buf) {
+            self.lost = true;
+            return Err(source_error(error));
+        }
         Ok(())
     }
 }

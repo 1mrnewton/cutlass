@@ -2,6 +2,7 @@
 //! `av1C`, and the decoder-specific info inside `esds`. Nothing here decodes them.
 
 use crate::alac;
+use crate::index::Framing;
 use crate::legacy::{AudioParams, CodecId, ColorTags, Error, MediaKind, SampleFormat, VideoParams};
 use crate::limits::MAX_STSD;
 use crate::parse::{self, Reader};
@@ -13,6 +14,9 @@ pub struct SampleDesc {
     pub extradata: Vec<u8>,
     pub color: Option<ColorTags>,
     pub data_reference: u16,
+    /// For constant-size audio, the block the payload is cut on when the
+    /// entry states it: one PCM frame, or a version-1 compressed block.
+    pub framing: Option<Framing>,
 }
 
 pub fn parse_stsd(
@@ -83,6 +87,7 @@ fn parse_entry(
             extradata: payload.to_vec(),
             color: None,
             data_reference,
+            framing: None,
         })
     }
 }
@@ -128,6 +133,7 @@ fn parse_visual(
         extradata,
         color: configured.color,
         data_reference,
+        framing: None,
     })
 }
 
@@ -147,8 +153,23 @@ fn parse_audio(
     let mut sample_rate = u32::from(read_u16(&payload[24..26]));
     let mut format = pcm_format(fourcc, bits);
     let mut child_at = 28usize;
+    // A compressed block: its audio frames and its bytes over all channels.
+    let mut block = None;
+    // Version 2 states the bytes of one PCM frame.
+    let mut stated_frame = 0u32;
     if version == 1 {
+        // Version 1 adds samples per packet, bytes per packet, bytes per
+        // frame, and bytes per sample.
         child_at = 44;
+        if let (Some(per_packet), Some(per_frame)) = (read_u32(payload, 28), read_u32(payload, 36))
+            && per_packet > 1
+            && per_frame > 0
+        {
+            block = Some(Framing {
+                frames: per_packet,
+                bytes: per_frame,
+            });
+        }
     } else if version == 2 {
         // QuickTime sound description v2 replaces the rate and channel fields.
         if payload.len() < 64 {
@@ -187,6 +208,7 @@ fn parse_audio(
         .unwrap_or(0);
         let flags = u32::from_be_bytes([payload[52], payload[53], payload[54], payload[55]]);
         format = lpcm_format(bits, flags);
+        stated_frame = read_u32(payload, 56).unwrap_or(0);
         child_at = 64;
     }
     if child_at > payload.len() {
@@ -199,6 +221,14 @@ fn parse_audio(
     let codec = map_codec(fourcc, configured.object_type);
     if codec == CodecId::Pcm && format == SampleFormat::Unknown {
         format = pcm_format(fourcc, bits);
+    }
+    // ISO/IEC 23003-5 PCM: `pcmC` gives the byte order and the sample size.
+    if matches!(&fourcc, b"ipcm" | b"fpcm") {
+        let (little, size) = configured.pcm.unwrap_or((false, 0));
+        if size != 0 {
+            bits = u16::from(size);
+        }
+        format = iso_pcm_format(fourcc == *b"fpcm", little, bits);
     }
     // QuickTime's `in24`, `in32`, `fl32` and `fl64` are big-endian unless a
     // `wave` atom's `enda` says little, as FFmpeg writes them.
@@ -228,6 +258,43 @@ fn parse_audio(
         }
         configured.extradata = cookie;
     }
+    if rate == 0 {
+        // The 16.16 rate field stops at 65535, and some writers store 0
+        // above it. The codec configuration states the rate itself.
+        rate = match codec {
+            CodecId::Aac => aac_rate(&configured.extradata).unwrap_or(0),
+            CodecId::Flac => flac_rate(&configured.extradata).unwrap_or(0),
+            // Opus decodes at 48 kHz whatever the input rate in `dOps` was.
+            CodecId::Opus => 48_000,
+            _ => 0,
+        };
+    }
+    // The bytes of one frame over all channels. FFmpeg's mov.c frames PCM
+    // from the entry and not from `stsz`, where classic QuickTime writes 1.
+    // An `ipcm` or `fpcm` track keeps its `stsz` size, as FFmpeg reads it:
+    // FFmpeg 6.1 wrote 24-bit samples under a `pcmC` that says 32.
+    let frame = if matches!(&fourcc, b"ipcm" | b"fpcm") {
+        0
+    } else if codec == CodecId::Pcm {
+        let computed = u32::from(channels) * format_bytes(format);
+        if stated_frame != 0 {
+            stated_frame
+        } else {
+            computed
+        }
+    } else if matches!(&fourcc, b"alaw" | b"ulaw") {
+        u32::from(channels)
+    } else {
+        0
+    };
+    let framing = if frame != 0 {
+        Some(Framing {
+            frames: 1,
+            bytes: frame,
+        })
+    } else {
+        block
+    };
     Ok(SampleDesc {
         fourcc,
         codec,
@@ -240,7 +307,105 @@ fn parse_audio(
         extradata: configured.extradata,
         color: configured.color,
         data_reference,
+        framing,
     })
+}
+
+const fn format_bytes(format: SampleFormat) -> u32 {
+    match format {
+        SampleFormat::Unknown => 0,
+        SampleFormat::U8 | SampleFormat::S8 => 1,
+        SampleFormat::S16Le | SampleFormat::S16Be => 2,
+        SampleFormat::S24Le | SampleFormat::S24Be => 3,
+        SampleFormat::S32Le | SampleFormat::S32Be | SampleFormat::F32Le | SampleFormat::F32Be => 4,
+        SampleFormat::F64Le | SampleFormat::F64Be => 8,
+    }
+}
+
+fn iso_pcm_format(float: bool, little: bool, bits: u16) -> SampleFormat {
+    match (float, little, bits) {
+        (true, true, 64) => SampleFormat::F64Le,
+        (true, false, 64) => SampleFormat::F64Be,
+        (true, true, 32) => SampleFormat::F32Le,
+        (true, false, 32) => SampleFormat::F32Be,
+        (false, true, 16) => SampleFormat::S16Le,
+        (false, false, 16) => SampleFormat::S16Be,
+        (false, true, 24) => SampleFormat::S24Le,
+        (false, false, 24) => SampleFormat::S24Be,
+        (false, true, 32) => SampleFormat::S32Le,
+        (false, false, 32) => SampleFormat::S32Be,
+        _ => SampleFormat::Unknown,
+    }
+}
+
+/// MPEG-4 sampling frequencies by index (ISO/IEC 14496-3 table 1.18).
+const AAC_RATES: [u32; 13] = [
+    96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000,
+    7_350,
+];
+
+/// The output rate an `AudioSpecificConfig` states: the extension rate when
+/// it signals SBR or PS explicitly, as FFmpeg reports it, or the core rate.
+fn aac_rate(config: &[u8]) -> Option<u32> {
+    let mut bits = Bits {
+        data: config,
+        at: 0,
+    };
+    let object = aac_object(&mut bits)?;
+    let core = aac_frequency(&mut bits)?;
+    let _channels = bits.take(4)?;
+    if matches!(object, 5 | 29) {
+        return aac_frequency(&mut bits).or(Some(core));
+    }
+    Some(core)
+}
+
+fn aac_object(bits: &mut Bits<'_>) -> Option<u32> {
+    match bits.take(5)? {
+        31 => Some(32 + bits.take(6)?),
+        object => Some(object),
+    }
+}
+
+fn aac_frequency(bits: &mut Bits<'_>) -> Option<u32> {
+    let rate = match bits.take(4)? {
+        15 => bits.take(24)?,
+        index => *AAC_RATES.get(usize::try_from(index).ok()?)?,
+    };
+    (rate != 0).then_some(rate)
+}
+
+struct Bits<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl Bits<'_> {
+    /// The next `count` bits, most significant first. `count` is at most 32.
+    fn take(&mut self, count: usize) -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..count {
+            let byte = *self.data.get(self.at / 8)?;
+            let bit = (byte >> (7 - self.at % 8)) & 1;
+            value = (value << 1) | u32::from(bit);
+            self.at += 1;
+        }
+        Some(value)
+    }
+}
+
+/// The rate in a `dfLa` box: four bytes of version and flags, a metadata
+/// block header, then STREAMINFO, whose rate is 20 bits after ten bytes.
+fn flac_rate(dfla: &[u8]) -> Option<u32> {
+    let header = *dfla.get(4)?;
+    if header & 0x7f != 0 {
+        return None;
+    }
+    let [a, b, c] = *dfla.get(18..21)? else {
+        return None;
+    };
+    let rate = (u32::from(a) << 12) | (u32::from(b) << 4) | (u32::from(c) >> 4);
+    (rate != 0).then_some(rate)
 }
 
 struct Configured {
@@ -253,6 +418,8 @@ struct Configured {
     fiel: Option<[u8; 2]>,
     /// An `enda` box with a nonzero value: PCM samples are little-endian.
     little_endian: bool,
+    /// A `pcmC` box: whether samples are little-endian, and their bits.
+    pcm: Option<(bool, u8)>,
 }
 
 fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured, Error> {
@@ -262,6 +429,7 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
     let mut chan = None;
     let mut fiel = None;
     let mut little_endian = false;
+    let mut pcm = None;
     let boxes = parse::atoms(data, 0, budget)?;
     for atom in boxes {
         match &atom.kind {
@@ -288,6 +456,12 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
                 object_type = object_type.or(nested.object_type);
                 chan = chan.or(nested.chan);
                 little_endian |= nested.little_endian;
+                pcm = pcm.or(nested.pcm);
+            }
+            b"pcmC" => {
+                if let [_, _, _, _, flags, size, ..] = *atom.payload {
+                    pcm = Some((flags & 1 != 0, size));
+                }
             }
             b"enda" => little_endian = matches!(*atom.payload, [_, flag, ..] if flag != 0),
             b"colr" => color = color.or(parse_colr(atom.payload)),
@@ -307,6 +481,7 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
         object_type,
         fiel,
         little_endian,
+        pcm,
     })
 }
 
@@ -447,6 +622,10 @@ fn known_audio(fourcc: [u8; 4]) -> bool {
             | b"fl32"
             | b"fl64"
             | b"lpcm"
+            | b"ipcm"
+            | b"fpcm"
+            | b"alaw"
+            | b"ulaw"
             | b"NONE"
             | b".mp3"
             | b"samr"
@@ -562,9 +741,8 @@ fn map_codec(fourcc: [u8; 4], oti: Option<u8>) -> CodecId {
         b"alac" => CodecId::Alac,
         b"ac-3" | b"sac3" => CodecId::Ac3,
         b"ec-3" => CodecId::Eac3,
-        b"sowt" | b"twos" | b"raw " | b"in24" | b"in32" | b"fl32" | b"fl64" | b"lpcm" | b"NONE" => {
-            CodecId::Pcm
-        }
+        b"sowt" | b"twos" | b"raw " | b"in24" | b"in32" | b"fl32" | b"fl64" | b"lpcm" | b"ipcm"
+        | b"fpcm" | b"NONE" => CodecId::Pcm,
         b".mp3" => CodecId::Mp3,
         b"mp4a" => match oti {
             Some(0x69 | 0x6B) => CodecId::Mp3,
@@ -623,6 +801,14 @@ fn lpcm_format(bits: u16, flags: u32) -> SampleFormat {
         (false, false, 32) => SampleFormat::S32Le,
         (false, true, _) => SampleFormat::S16Be,
         (false, false, _) => SampleFormat::S16Le,
+    }
+}
+
+fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    let end = at.checked_add(4)?;
+    match bytes.get(at..end)? {
+        [a, b, c, d] => Some(u32::from_be_bytes([*a, *b, *c, *d])),
+        _ => None,
     }
 }
 

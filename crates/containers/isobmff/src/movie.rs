@@ -4,8 +4,10 @@
 
 use cutlass_container::DisplayQuarter;
 
-use crate::index::{self, ChunkMap, CtsRun, Run, Sample, Sizes, Sync, Tables};
-use crate::legacy::{Edit, Error, MediaKind, Stream, StreamParams, Timescale, VideoParams};
+use crate::index::{self, ChunkMap, CtsRun, Framing, Grouped, Run, Sample, Sizes, Sync, Tables};
+use crate::legacy::{
+    AudioParams, Edit, Error, MediaKind, Stream, StreamParams, Timescale, VideoParams,
+};
 use crate::limits::{MAX_EDITS, MAX_SAMPLES, MAX_TABLE_ROWS, MAX_TRACKS};
 use crate::parse::{self, Reader};
 use crate::stsd::{self, SampleDesc};
@@ -34,6 +36,9 @@ pub struct Built {
     pub duration: u64,
     pub matrix: [i32; 9],
     pub tracks: Vec<BuiltTrack>,
+    /// Beside `tracks`: the packets of a constant-size audio track, whose
+    /// `samples` stay empty.
+    pub grouped: Vec<Option<Grouped>>,
     pub trex: Vec<Trex>,
     pub fragmented: bool,
 }
@@ -66,6 +71,7 @@ pub fn parse_moov(payload: &[u8], budget: &mut u32, depth: u32) -> Result<Built,
         duration: 0,
         matrix: IDENTITY,
         tracks: Vec::new(),
+        grouped: Vec::new(),
         trex: Vec::new(),
         fragmented: false,
     };
@@ -79,7 +85,9 @@ pub fn parse_moov(payload: &[u8], budget: &mut u32, depth: u32) -> Result<Built,
                         value: u64::try_from(built.tracks.len()).unwrap_or(u64::MAX),
                     });
                 }
-                built.tracks.push(parse_trak(atom.payload, budget, depth)?);
+                let (track, grouped) = parse_trak(atom.payload, budget, depth)?;
+                built.tracks.push(track);
+                built.grouped.push(grouped);
             }
             b"mvex" => {
                 built.fragmented = true;
@@ -151,7 +159,11 @@ fn parse_mvex(
     Ok(())
 }
 
-fn parse_trak(payload: &[u8], budget: &mut u32, depth: u32) -> Result<BuiltTrack, Error> {
+fn parse_trak(
+    payload: &[u8],
+    budget: &mut u32,
+    depth: u32,
+) -> Result<(BuiltTrack, Option<Grouped>), Error> {
     let depth = parse::enter(depth)?;
     let mut draft = Draft {
         id: 0,
@@ -187,14 +199,15 @@ fn parse_trak(payload: &[u8], budget: &mut u32, depth: u32) -> Result<BuiltTrack
         });
     }
     let entry = draft.entries.first();
-    let (codec, kind, extradata, color, sample_entry, data_ref) = match entry {
+    let (codec, kind, extradata, color, sample_entry, data_ref, framing) = match entry {
         Some(desc) => (
             desc.codec,
-            fit_kind(desc.kind, draft.width, draft.height),
+            fit_kind(desc.kind, draft.width, draft.height, draft.timescale),
             desc.extradata.clone(),
             desc.color,
             desc.fourcc,
             desc.data_reference,
+            desc.framing,
         ),
         None => {
             return Err(Error::Missing {
@@ -219,15 +232,32 @@ fn parse_trak(payload: &[u8], budget: &mut u32, depth: u32) -> Result<BuiltTrack
         partial_sync: draft.partial_sync,
     };
     let no_sync = index::no_sync_samples(&tables.sync, &tables.partial_sync);
+    let mut grouped = None;
     let samples = if tables.sizes.count() == 0 {
+        Vec::new()
+    } else if matches!(kind, MediaKind::Audio(_)) && index::groupable(&tables) {
+        // One table sample is one audio frame. The entry's frame size wins
+        // over `stsz`, where classic QuickTime writes 1.
+        let stated = match tables.sizes {
+            Sizes::Constant { size, .. } => size,
+            Sizes::Table(_) => 0,
+        };
+        let framing = framing.unwrap_or(Framing {
+            frames: 1,
+            bytes: stated,
+        });
+        grouped = Some(index::group(&tables, framing)?);
         Vec::new()
     } else {
         index::build(&tables)?
     };
-    let duration_ticks = samples.iter().fold(0u64, |sum, sample| {
-        sum.saturating_add(u64::from(sample.duration))
-    });
-    Ok(BuiltTrack {
+    let duration_ticks = match &grouped {
+        Some(grouped) => grouped.frames(),
+        None => samples.iter().fold(0u64, |sum, sample| {
+            sum.saturating_add(u64::from(sample.duration))
+        }),
+    };
+    let track = BuiltTrack {
         stream: Stream {
             params: StreamParams {
                 track_id: draft.id,
@@ -249,13 +279,22 @@ fn parse_trak(payload: &[u8], budget: &mut u32, depth: u32) -> Result<BuiltTrack
         },
         matrix: draft.matrix,
         samples,
-        no_sync,
+        no_sync: no_sync && grouped.is_none(),
         self_contained,
-    })
+    };
+    Ok((track, grouped))
 }
 
-fn fit_kind(kind: MediaKind, tkhd_width: u32, tkhd_height: u32) -> MediaKind {
+fn fit_kind(kind: MediaKind, tkhd_width: u32, tkhd_height: u32, timescale: u32) -> MediaKind {
     match kind {
+        // Neither the entry nor the codec configuration gave a rate. The
+        // media timescale of an audio track is its rate, as FFmpeg takes it.
+        MediaKind::Audio(audio) if audio.sample_rate == 0 && timescale > 1 => {
+            MediaKind::Audio(AudioParams {
+                sample_rate: timescale,
+                ..audio
+            })
+        }
         MediaKind::Video(video) if video.width == 0 && video.height == 0 => {
             MediaKind::Video(VideoParams {
                 width: tkhd_width,
@@ -575,16 +614,18 @@ fn parse_stsz(payload: &[u8]) -> Result<Sizes, Error> {
     reader.skip(4)?;
     let sample_size = reader.u32()?;
     let count = reader.u32()?;
+    if sample_size != 0 {
+        // No row is stored for a constant size. `index::build` bounds the
+        // count when it makes a row per sample; grouped audio makes none.
+        return Ok(Sizes::Constant {
+            size: sample_size,
+            count: u64::from(count),
+        });
+    }
     if u64::from(count) > MAX_SAMPLES {
         return Err(Error::Limit {
             what: "samples",
             value: u64::from(count),
-        });
-    }
-    if sample_size != 0 {
-        return Ok(Sizes::Constant {
-            size: sample_size,
-            count: u64::from(count),
         });
     }
     let mut rows = Vec::new();
@@ -693,17 +734,4 @@ fn unpack_language(packed: u16) -> [u8; 3] {
 pub fn pack_language(language: [u8; 3]) -> u16 {
     let piece = |byte: u8| -> u16 { u16::from(byte.saturating_sub(0x60) & 0x1f) };
     (piece(language[0]) << 10) | (piece(language[1]) << 5) | piece(language[2])
-}
-
-trait SizeCount {
-    fn count(&self) -> u64;
-}
-
-impl SizeCount for Sizes {
-    fn count(&self) -> u64 {
-        match self {
-            Self::Constant { count, .. } => *count,
-            Self::Table(rows) => u64::try_from(rows.len()).unwrap_or(u64::MAX),
-        }
-    }
 }

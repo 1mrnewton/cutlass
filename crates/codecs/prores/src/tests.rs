@@ -188,7 +188,8 @@ fn shapes() -> Vec<(Profile, Vec<u8>)> {
 #[test]
 fn the_picture_path_gives_the_wide_frame_converted() {
     for (profile, bytes) in shapes() {
-        for threads in [1, 5] {
+        // Sixteen workers take the path whose jobs own their data.
+        for threads in [1, 5, 16] {
             let mut decoder = ProresDecoder::open(&params(profile))
                 .expect("open")
                 .with_threads(threads);
@@ -205,8 +206,11 @@ fn the_picture_path_gives_the_wide_frame_converted() {
 
 #[test]
 fn the_picture_path_refuses_what_the_wide_path_refuses() {
-    for (profile, bytes) in shapes() {
-        let mut decoder = ProresDecoder::open(&params(profile)).expect("open");
+    for (index, (profile, bytes)) in shapes().into_iter().enumerate() {
+        let threads = if index % 2 == 0 { 3 } else { 16 };
+        let mut decoder = ProresDecoder::open(&params(profile))
+            .expect("open")
+            .with_threads(threads);
         let mut damaged: Vec<Vec<u8>> = (0..bytes.len())
             .step_by(bytes.len().div_ceil(40))
             .map(|cut| bytes[..cut].to_vec())

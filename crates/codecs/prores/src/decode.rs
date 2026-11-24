@@ -6,7 +6,7 @@
 //! app shows. Nothing is left for one thread to do after the jobs.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use cutlass_decode::{CodecError, PixelFormat, Plane, VideoFrame};
 use cutlass_pool::Pool;
@@ -32,6 +32,8 @@ const MAX_EIGHTHS: i64 = 32_768;
 const MAX_LEVEL: u32 = 1 << 20;
 /// Working sets and returned planes kept for the next frame.
 const MAX_KEPT: usize = 32;
+/// Band buffers kept: the bands of the tallest frame, 16 384 rows.
+const MAX_BANDS: usize = 1024;
 
 /// A decoded frame and the header it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +57,8 @@ pub(crate) struct Picture420 {
 pub(crate) struct Reuse {
     scratch: Mutex<Vec<Scratch>>,
     spare: Mutex<Vec<Vec<u8>>>,
+    /// Buffers the owned jobs write their bands into.
+    bands: Mutex<Vec<Vec<u8>>>,
 }
 
 impl Reuse {
@@ -79,6 +83,19 @@ impl Reuse {
                 drop(spare);
                 vec![0u8; len]
             }
+        }
+    }
+
+    fn band(&self, len: usize) -> Vec<u8> {
+        let mut buffer = lock(&self.bands).pop().unwrap_or_default();
+        buffer.resize(len, 0);
+        buffer
+    }
+
+    fn keep_band(&self, buffer: Vec<u8>) {
+        let mut kept = lock(&self.bands);
+        if kept.len() < MAX_BANDS {
+            kept.push(buffer);
         }
     }
 
@@ -292,6 +309,120 @@ pub(crate) fn decode_yuv420(
         header: parsed.header,
         width: out_w as u32,
         height: out_h as u32,
+        bytes,
+    })
+}
+
+/// One frame for jobs that outlive the caller's borrows: the kept workers
+/// take only what they can own.
+struct Owned {
+    data: Vec<u8>,
+    parsed: Parsed,
+    depth: u8,
+    cancel: Arc<AtomicBool>,
+    reuse: Arc<Reuse>,
+    out_w: usize,
+    out_h: usize,
+}
+
+impl Owned {
+    /// Luma and chroma rows of band `index` in the 4:2:0 picture.
+    fn rows(&self, index: usize) -> (usize, usize) {
+        let band = self.parsed.band_rows;
+        let luma = self.out_h.saturating_sub(index * band).min(band);
+        let chroma = (self.out_h / 2)
+            .saturating_sub(index * band / 2)
+            .min(band / 2);
+        (luma, chroma)
+    }
+
+    /// Decodes band `index` into a buffer of its own: Y rows, U rows, V rows.
+    fn band(&self, index: usize) -> Result<Vec<u8>, CodecError> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(CodecError::Cancelled);
+        }
+        let (luma, chroma) = self.rows(index);
+        let (luma, chroma) = (luma * self.out_w, chroma * (self.out_w / 2));
+        let mut buffer = self.reuse.band(luma + 2 * chroma);
+        let (y, rest) = buffer.split_at_mut(luma);
+        let (u, v) = rest.split_at_mut(chroma);
+        let ctx = self.parsed.context(&self.data, self.depth);
+        match ctx.job(index, &mut Out::Narrow { y, u, v }, &self.reuse) {
+            Ok(()) => Ok(buffer),
+            Err(error) => {
+                self.reuse.keep_band(buffer);
+                Err(error)
+            }
+        }
+    }
+}
+
+/// [`decode_yuv420`] on the pool's kept workers. The packet is copied so
+/// the jobs own it, and the bands they return are joined into the picture.
+pub(crate) fn decode_yuv420_owned(
+    data: &[u8],
+    depth: u8,
+    pool: &Pool,
+    cancel: &Arc<AtomicBool>,
+    reuse: &Arc<Reuse>,
+) -> Result<Picture420, CodecError> {
+    let parsed = Parsed::new(data, depth)?;
+    let header = parsed.header.clone();
+    let bands = parsed.bands();
+    let frame = Arc::new(Owned {
+        data: data[..parsed.frame_size].to_vec(),
+        out_w: parsed.width.div_ceil(2) * 2,
+        out_h: parsed.height.div_ceil(2) * 2,
+        parsed,
+        depth,
+        cancel: Arc::clone(cancel),
+        reuse: Arc::clone(reuse),
+    });
+    let job = Arc::clone(&frame);
+    let results = pool.slices_owned(bands, move |index| job.band(index));
+    let mut done = Vec::with_capacity(bands);
+    let mut failed = None;
+    for result in results {
+        match result {
+            Ok(buffer) => done.push(buffer),
+            Err(error) => {
+                failed.get_or_insert(error);
+            }
+        }
+    }
+    let total = frame.out_w * frame.out_h * 3 / 2;
+    let mut bytes = Vec::new();
+    if failed.is_none() && done.len() == bands {
+        bytes.reserve_exact(total);
+        // Every band's Y rows, then every band's U rows, then V.
+        for part in 0..3 {
+            for (index, buffer) in done.iter().enumerate() {
+                let (luma, chroma) = frame.rows(index);
+                let (luma, chroma) = (luma * frame.out_w, chroma * (frame.out_w / 2));
+                let range = match part {
+                    0 => 0..luma,
+                    1 => luma..luma + chroma,
+                    _ => luma + chroma..luma + 2 * chroma,
+                };
+                if let Some(rows) = buffer.get(range) {
+                    bytes.extend_from_slice(rows);
+                }
+            }
+        }
+    }
+    for buffer in done {
+        reuse.keep_band(buffer);
+    }
+    if let Some(error) = failed {
+        return Err(error);
+    }
+    if bytes.len() != total {
+        return Err(CodecError::InvalidApi { what: "band rows" });
+    }
+    Ok(Picture420 {
+        header,
+        width: frame.out_w as u32,
+        height: frame.out_h as u32,
         bytes,
     })
 }

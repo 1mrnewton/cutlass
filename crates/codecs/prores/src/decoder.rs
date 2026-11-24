@@ -12,9 +12,21 @@ use cutlass_pool::Pool;
 
 use crate::color;
 
-use crate::decode::{DecodedFrame, Picture420, Reuse, decode_wide, decode_yuv420};
+use crate::decode::{
+    DecodedFrame, Picture420, Reuse, decode_wide, decode_yuv420, decode_yuv420_owned,
+};
 use crate::header::{AlphaBits, Chroma};
 use crate::profile::Profile;
+
+/// The most workers the picture path starts threads for on each frame.
+///
+/// Up to here the jobs borrow the packet and write the picture in place,
+/// on threads started for the frame. Past it, starting the threads costs
+/// more than a copy of the packet and of the picture, so the jobs own
+/// their data and run on the pool's kept workers. Measured 24 November
+/// 2026 on a 4-core Xeon at 1080p: the two ways are level from 2 to 8
+/// workers, and the kept workers are 4 % faster at 16.
+const SCOPED_WORKERS: usize = 8;
 
 /// Where slice jobs run.
 enum Workers {
@@ -29,7 +41,7 @@ pub struct ProresDecoder {
     depth: Option<u8>,
     workers: Workers,
     cancel: Arc<AtomicBool>,
-    reuse: Reuse,
+    reuse: Arc<Reuse>,
 }
 
 impl ProresDecoder {
@@ -47,7 +59,7 @@ impl ProresDecoder {
             depth: None,
             workers: Workers::Shared,
             cancel: Arc::new(AtomicBool::new(false)),
-            reuse: Reuse::default(),
+            reuse: Arc::new(Reuse::default()),
         })
     }
 
@@ -94,7 +106,12 @@ impl ProresDecoder {
     /// Decodes one frame as 8-bit 4:2:0, without alpha.
     pub(crate) fn decode_yuv420(&mut self, data: &[u8]) -> Result<Picture420, CodecError> {
         let depth = self.depth_for(data)?;
-        decode_yuv420(data, depth, self.pool(), &self.cancel, &self.reuse)
+        let pool = self.pool();
+        if pool.workers() > SCOPED_WORKERS {
+            decode_yuv420_owned(data, depth, pool, &self.cancel, &self.reuse)
+        } else {
+            decode_yuv420(data, depth, pool, &self.cancel, &self.reuse)
+        }
     }
 
     fn pool(&self) -> &Pool {

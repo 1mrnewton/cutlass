@@ -192,9 +192,8 @@ fn mastering(payload: &[u8]) -> Option<MasteringDisplay> {
         ]))
     };
     let scaled = |value: u64, to: u64, from: u64| (value * to + from / 2) / from;
-    let chroma = |i: usize| -> u16 {
-        u16::try_from(scaled(word(i), 1 << 16, 50_000)).unwrap_or(u16::MAX)
-    };
+    let chroma =
+        |i: usize| -> u16 { u16::try_from(scaled(word(i), 1 << 16, 50_000)).unwrap_or(u16::MAX) };
     let point = |i: usize| [chroma(2 * i), chroma(2 * i + 1)];
     let luminance = |at: usize, one: u64| -> u32 {
         u32::try_from(scaled(long(at), one, 10_000)).unwrap_or(u32::MAX)

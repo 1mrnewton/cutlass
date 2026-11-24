@@ -889,3 +889,34 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
         (st.writer, out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{pack16, packed_format};
+    use cutlass_decode::PixelFormat;
+
+    #[test]
+    fn each_depth_has_a_packed_format() {
+        assert_eq!(packed_format(8), (PixelFormat::Yuv420p, 0));
+        assert_eq!(packed_format(10), (PixelFormat::Yuv420p10, 0));
+        assert_eq!(packed_format(12), (PixelFormat::Yuv420p12, 0));
+        // 9 and 11 bits take the next format, doubled.
+        assert_eq!(packed_format(9), (PixelFormat::Yuv420p10, 1));
+        assert_eq!(packed_format(11), (PixelFormat::Yuv420p12, 1));
+    }
+
+    #[test]
+    fn deep_samples_pack_low_byte_first() {
+        let mut dst = [0xee; 8];
+        pack16(&mut dst, &[0x0001, 0x03ff, 0x0200, 0x0040], 0);
+        assert_eq!(dst, [0x01, 0x00, 0xff, 0x03, 0x00, 0x02, 0x40, 0x00]);
+        // 9-bit black, mid-gray and white as 10-bit samples.
+        let mut dst = [0; 6];
+        pack16(&mut dst, &[32, 256, 470], 1);
+        assert_eq!(dst, [64, 0, 0x00, 0x02, 0xac, 0x03]);
+        // A shorter side ends the copy: nothing past it is touched.
+        let mut dst = [0xee; 5];
+        pack16(&mut dst, &[0x0102, 0x0304, 0x0506], 0);
+        assert_eq!(dst, [0x02, 0x01, 0x04, 0x03, 0xee]);
+    }
+}

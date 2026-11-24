@@ -141,7 +141,37 @@ Measured on 10 November 2026 at commit `ed0743d2`, on an Apple M5 Pro (18 cores,
 
 Cutlass is **1.1× faster** than FFmpeg here.
 
-Writing files was not measured.
+Writing files was not measured on that machine. The two measurements below were made on another one.
+
+### Writing, 24 November 2026
+
+Measured at commit `a79d870a` on a 4-vCPU Intel Xeon (2.10 GHz) cloud VM with 15 GB of memory, Linux 6.18, an ext4 virtio disk, rustc 1.97.0, against FFmpeg 6.1.1. The disk's write-back makes wall time swing by a factor of two between identical runs on this machine, so CPU time and instruction counts are the steadier columns. `perf stat` has no hardware counters in this VM; the instruction counts are user-space instructions from `valgrind --tool=cachegrind`, which leaves out the kernel's share of the work.
+
+**What each layout costs.** `mux_cost write <layout> <file> 900` writes a synthetic 900 s movie, 4.59 GB: 53,946 video packets at about 40 Mbit/s and 38,759 sound packets, then syncs the file. Three runs in turn; the median and the range. All four files hold the same packets (`mux_cost hash` digests agree, and `ffprobe` counts the same packets and durations).
+
+| Layout | Total wall | In `finish` | Peak memory | File size |
+| --- | ---: | ---: | ---: | ---: |
+| Progressive | 6.4 s (4.3 to 6.9) | 0.008 s | 9.8 MB | 4,591,303,730 |
+| Fast start | 8.1 s (6.3 to 8.9) | 2.1 s (1.5 to 2.3) | 15.2 MB | 4,591,303,730 |
+| Recoverable | 6.4 s (6.2 to 6.9) | 0.004 s | 12.5 MB | 4,590,942,646 |
+| Recoverable, fast start | 8.8 s (7.2 to 9.0) | 1.7 s (1.6 to 2.2) | 16.9 MB | 4,590,942,646 |
+
+Fast start costs one more read and write of the file at the end, about 2 s for 4.6 GB here, and 5 MB of memory. Recoverable costs nothing measurable in time and 3 MB of memory, and on this file is 361 KB smaller, because one chunk for a track in a fragment needs a smaller index than one chunk for a frame.
+
+**Copying a file's packets into a new file, against `ffmpeg -c copy`.** Input: one 1.69 GB file FFmpeg encoded, 400 s of 1920×1080 H.264 with B-frames (23,976 packets) and AAC (17,228 packets). Each side reads it and writes a new MP4, one thread, no sync; five runs in turn, the median. Every output, FFmpeg's too, has the same `mux_cost hash` digests and the same `ffprobe` packet counts and durations as the input.
+
+|  | Wall | CPU (user + system) | User-space instructions | Peak memory |
+| --- | ---: | ---: | ---: | ---: |
+| Cutlass, progressive | 3.0 s | 1.0 s | 1.76 billion | 7.5 MB |
+| FFmpeg, default | 3.0 s | 2.5 s | 5.22 billion | 62 MB |
+| Cutlass, fast start | 3.5 s | 1.6 s | 1.78 billion | 12.2 MB |
+| FFmpeg, `-movflags +faststart` | 3.8 s | 2.9 s | 6.98 billion | 62 MB |
+| Cutlass, recoverable | 3.1 s | 1.2 s | 3.46 billion | 11.0 MB |
+| Cutlass, recoverable and fast start | 4.3 s | 2.0 s | 3.47 billion | 15.1 MB |
+
+Wall time is the disk's and is the same for both within the noise. Cutlass uses about 0.4 of FFmpeg's CPU time for the same copy. The recoverable layout doubles the user-space instructions, because each payload is copied into the fragment before it is written; FFmpeg 6.1.1 has no such mode to compare with.
+
+To run it again: `cargo build --release -p cutlass-isobmff --example mux_cost`, then `mux_cost write <layout> <out.mp4> <seconds>`, `mux_cost remux <layout> <in.mp4> <out.mp4>` (set `MUX_COST_NO_SYNC=1` to leave out the sync, as FFmpeg does), and `mux_cost hash <file>`.
 
 How it was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
 

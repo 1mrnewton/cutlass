@@ -27,6 +27,8 @@ Ready for the editor to open CAF sound and for export to write it. Every CAF fil
 | `pakt`: sizes, frames, or both | Yes, bounded | Written after `data` | all oracle tests |
 | Priming and remainder | `Trim` plus one edit; timestamps are not shifted | From `set_trim` and a short last packet | afinfo counts equal on every remux |
 | `data` of size -1 | Runs to the end of the file; a forward input reads whole frames until the source ends | Written while recording, patched at finish | 501 system files |
+| `data` cut short, or a `pakt` counting packets that are not there | Plays the whole packets present; `is_cut()` | — | `tests/external/damaged.rs` and `tests/fixtures`, samples equal to ffmpeg's decode |
+| Fractional `mSampleRate` | Nearest hertz | Whole rates only | same |
 | `chan` | Parsed and exposed | Mono or stereo by default, any layout through `set_channel_layout` | tests |
 | `info` | Parsed and exposed | Through `set_info` | tests |
 | `mark`, `regn`, `strg`, `uuid`, `midi` | Kept as stored, in file order (`kept_chunks()`), up to 1 MiB in all | Written before `data` through `add_chunk`, in the order added; the remux example carries them | `tests/external/kept.rs`: 176 system files' kept chunks equal what `afinfo -c` finds, before and after a remux, and afinfo lists the same markers; AudioToolbox's own `mark`, `strg` and `regn`, written by this crate, list as the same region and markers |
@@ -36,7 +38,10 @@ Ready for the editor to open CAF sound and for export to write it. Every CAF fil
 ## Behaviour
 
 - Times are in frames at the file's sample rate, starting at zero, priming included. The priming and remainder are reported as `Trim`, and an edit starts at the priming and lasts the valid frames, as the Ogg crate does for Opus pre-skip. libavformat instead starts at minus the priming and shortens the last packet; the oracle tests account for that.
-- PCM with one frame a packet is returned in runs of up to 4096 bytes, as libavformat groups it, so packet sizes and times match ffprobe's exactly.
+- PCM with one frame a packet is returned in runs of whole frames up to 64 KiB (`PCM_PACKET_BYTES`), the size the WAV and AIFF demuxers use. Until 24 November 2026 the runs were 4,096 bytes, libavformat's grouping; the oracle tests now compare the joined payload, the total frames and the first time for such files, and still compare packet by packet for every other format. A seek lands on the asked frame and the next run starts there.
+- A file that stops inside `data` plays the whole packets it holds, as libavformat does, and `is_cut()` says so: a `data` size past the end of the file is clamped to the file, constant packets are counted from the bytes that are there, and rows of a packet table whose bytes are not all there are dropped (`packet_count()` and `total_frames()` then count the rows kept; `packet_table()` still shows the header as stored). libavformat hands the cut packet to the decoder, which rejects it; this crate does not return it. A variable-packet file cut before its `pakt`, which ffmpeg writes after `data`, still cannot be framed and is refused.
+- `mSampleRate` is rounded to the nearest hertz, a half going up, so 22254.5454 Hz opens at 22255, the same as the AIFF demuxer. libavformat's CAF demuxer drops the fraction and reports 22254. A rate that rounds to zero, is negative or not finite, or is above `u32::MAX` is refused.
+- `indexed_end` gives the frames of every packet without reading one, so the engine does not walk a file to learn its length.
 - A broken chunk after `data` (seen in 51 macOS system sounds: a header one byte off claiming an absurd size, or a few stray bytes) ends the walk and is reported by `stopped_at()`; the file still opens. Essential chunks (`desc`, `kuki`, `pakt`, `chan`) that run past the file are refused.
 - ffmpeg ends a FLAC packet table with an entry of no bytes and no frames. It is counted, as AudioToolbox counts it, and skipped when reading, as libavformat stops at it.
 - `packet_count()` is the number of CAF packets (frames, for PCM), which is what afinfo prints.
@@ -72,7 +77,8 @@ AAC object types the AAC decoder does not read (`aacl`, `aace`, `aacf`, `aacg`: 
 All counts are from 12 November 2026 on an Apple M5 Pro running macOS 27.0.1, rustc 1.99.1, FFmpeg 8.1.1.
 
 - `cargo test -p cutlass-caf`: 75 unit and behaviour tests on files built byte by byte (`src/tests`): PCM runs, size -1 data on random and forward input, every table shape, seek landings with no payload read, mux round trips for every PCM coding, AAC, ALAC, FLAC and Opus, kept chunks in order and past their limit, and hostile input — lying counts and sizes, long and large varints, broken descriptions and cookies, duplicate chunks, every prefix and many single-byte changes of good files, failing readers and writers.
-- `tests/external/oracle.rs` (skips with a message when a tool is missing, as on Linux CI):
+- `tests/external/damaged.rs` reads the three files in `tests/fixtures` (see the README there): PCM cut inside a frame, ALAC cut inside the third of four packets, and a 22254.5454 Hz rate. With ffmpeg on the `PATH` the samples are compared with `ffmpeg -f s16le`.
+- `tests/external/oracle.rs` (skips with a message when a tool is missing, as on Linux CI). With FFmpeg 6.1.1, the version Ubuntu 24.04 ships, `ffmpeg_files_match_libavformat_and_afinfo` and `remuxed_files_read_and_decode_like_the_originals` fail, before and after the change of 24 November 2026: that ffprobe prints no duration for packets of variable size, and that ffmpeg cannot write AAC to CAF. They were written against FFmpeg 8.1.1:
   - afconvert writes 13 formats (`aac`, `alac`, `opus`, `flac`, `ulaw`, `alaw`, `LEI16`, `BEI24`, `LEF32`, `BEF64`, `I8`, `BEI32`, `ima4`); this crate's packets, times and payload equal libavformat's, and its counts equal afinfo's packets, bytes, valid, priming and remainder. libavformat refuses the IMA4 file (its `pakt` says 0 packets and comes before `data`, which `cafdec.c` cannot handle), so that one is checked against afinfo only.
   - ffmpeg writes 12 (`ac3`, `libmp3lame`, `alac`, `flac`, `pcm_s16be`, `pcm_s24le`, `pcm_s32be`, `pcm_f32le`, `pcm_f64be`, `pcm_alaw`, `pcm_mulaw`, `pcm_s8`); the same comparisons hold, afinfo included.
   - 12 files remuxed through this crate (8 from afconvert, 4 from ffmpeg) give afinfo and ffprobe the same counts and packets as the originals, and afconvert and ffmpeg decode them to the same samples; lossless ones decode to the source. ffmpeg's FLAC without a `kuki` is refused by the muxer, as intended. Every afconvert decode runs under the same file names, so AAC is compared sample for sample too (see [AudioToolbox's AAC decode](#audiotoolboxs-aac-decode)).
@@ -94,6 +100,16 @@ Phase one saw afconvert decode the same AAC CAF to different floats at different
 - In the remux test the original and the remuxed file were decoded under names of different lengths, which is why their AAC decodes differed. `af_decode` now copies each file to the same name and decodes to the same name, and the AAC decodes compare equal sample for sample, in five consecutive runs of the external tests.
 
 ## Speed against libavformat
+
+**PCM in 64 KiB runs, 24 November 2026.** Measured at commit `4439627d` on a 4-vCPU KVM guest (Intel Xeon at 2.10 GHz, 15 GB, Ubuntu 24.04, rustc 1.97.0) against FFmpeg 6.1.1, on 5 minutes of 48 kHz 16-bit stereo (57.6 MB) written by FFmpeg. Each figure is a whole process reading every packet and decoding none, start-up included: the median wall time of five runs, and user-space instructions from one run under `valgrind --tool=cachegrind`, because this virtual machine has no hardware counters for `perf stat`.
+
+|  | Cutlass, 4,096-byte runs (`bcab8681`) | Cutlass, 64 KiB runs | libavformat (`scripts/ffmpeg_decode.c`) | `ffmpeg -c copy -f null` |
+| --- | ---: | ---: | ---: | ---: |
+| Wall time | 12.6 ms | 11.1 ms | 50.2 ms | 317 ms |
+| Instructions | 74.5 M | 59.0 M | 97.9 M | 334.9 M |
+| Packets returned | 14,063 | 879 | 14,063 | |
+
+The larger runs took 21% of the instructions off a whole read and 1.5 ms of 12.6 off the wall time. The payload is still zero-filled before each read: `Input::read_limited` and `Input::read` take an initialised buffer, and that type is in `cutlass-container`, so dropping the fill is a change there, not here. The table below is the earlier measurement, on another machine and with start-up subtracted, and its PCM row predates this change.
 
 `cargo bench -p cutlass-caf`, same machine, commit `fc8f889c`. 20 minutes of 48 kHz stereo (a tone and noise from ffmpeg), written by afconvert. Each side does the job in one process, `repeat` times; the figure is the median of five runs less the median of five runs that only start up, divided by `repeat`, so neither side pays for process start or library loading. Instructions are those `/usr/bin/time -l` reports as retired; wall time on this machine is too noisy to compare.
 

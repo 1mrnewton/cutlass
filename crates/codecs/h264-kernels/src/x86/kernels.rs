@@ -1,23 +1,22 @@
-//! The x86-64 version of each kernel, in 128-bit registers. This source is
-//! built twice, as `crate::x86::sse41::kernels` and
-//! `crate::x86::avx2::kernels`: every function is inside `feat!`, which
-//! marks it as built for the tier's CPU features, so only the callers in
-//! this crate that have checked [`crate::x86::level`] reach them. The
-//! plain twins in [`crate::scalar`] are the reference, and the tests in
-//! [`crate::mc`], [`crate::deblock`], [`crate::residual`] and
-//! [`crate::intra`] compare each tier with them.
-//!
-//! # Memory
-//!
-//! As the NEON whole-block kernels do, these load and store through
-//! pointers, because a block is rows of a plane. Each kernel a caller can
-//! reach takes slices or fixed-size arrays and checks once, before any
-//! load, that every byte its loads and stores touch lies inside them; it
-//! returns `false`, or hands the block to the plain twin, when one does
-//! not. The pointer functions under them are `unsafe` and say what their
-//! caller has checked.
-
-#![allow(unsafe_code)]
+// The x86-64 version of each kernel, in 128-bit registers. This source is
+// not a module of its own: `x86/sse41.rs` and `x86/avx2.rs` each include
+// it, so it is built twice, as `crate::x86::sse41::kernels` and
+// `crate::x86::avx2::kernels`: every function is inside `feat!`, which
+// marks it as built for the tier's CPU features, so only the callers in
+// this crate that have checked [`crate::x86::level`] reach them. The
+// plain twins in [`crate::scalar`] are the reference, and the tests in
+// [`crate::mc`], [`crate::deblock`], [`crate::residual`] and
+// [`crate::intra`] compare each tier with them.
+//
+// # Memory
+//
+// As the NEON whole-block kernels do, these load and store through
+// pointers, because a block is rows of a plane. Each kernel a caller can
+// reach takes slices or fixed-size arrays and checks once, before any
+// load, that every byte its loads and stores touch lies inside them; it
+// returns `false`, or hands the block to the plain twin, when one does
+// not. The pointer functions under them are `unsafe` and say what their
+// caller has checked.
 
 use core::arch::x86_64::{
     __m128i, _MM_HINT_T0, _mm_add_epi8, _mm_add_epi16, _mm_add_epi32, _mm_adds_epi16,

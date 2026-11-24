@@ -10,8 +10,12 @@ macro_rules! feat {
     };
 }
 
-#[path = "kernels.rs"]
-mod kernels;
+/// The shared kernels, built for this tier. The source is included rather
+/// than declared, because a file can be one module only.
+#[allow(unsafe_code)]
+mod kernels {
+    include!("kernels.rs");
+}
 #[path = "wide_sse41.rs"]
 mod wide;
 

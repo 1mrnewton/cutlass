@@ -72,15 +72,6 @@ fn put(dst: &mut [u16], dst_stride: usize, b: &Block16<'_>, plain: (bool, bool))
 
 macro_rules! twin {
     ($name:ident, $dst:ty, $f:ident, $plain:expr) => {
-        #[cfg_attr(
-            all(
-                target_arch = "aarch64",
-                target_feature = "neon",
-                target_feature = "dotprod",
-                not(test)
-            ),
-            allow(dead_code)
-        )]
         pub(super) fn $name(dst: &mut [$dst], dst_stride: usize, b: &Block16<'_>) {
             $f(dst, dst_stride, b, $plain);
         }

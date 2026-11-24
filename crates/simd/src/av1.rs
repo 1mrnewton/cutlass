@@ -2,6 +2,7 @@
 
 pub mod blend;
 pub mod cdef;
+pub mod cpu;
 pub mod ipred;
 pub mod itx;
 pub mod lf;

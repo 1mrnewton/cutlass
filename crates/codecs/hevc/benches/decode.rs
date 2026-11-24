@@ -1,5 +1,8 @@
 //! Decode one HEVC stream with this crate and with FFmpeg, after checking
-//! that both return the same samples.
+//! that both return the same samples. The pictures are the ones the engine
+//! takes (`HevcDecoder::push_pictures`), at the depth of the stream: 8-bit
+//! samples as bytes, deeper ones as two bytes each, which is what
+//! `ffmpeg -f rawvideo` writes for them.
 //!
 //! The stream is `HEVC_BENCH` (an MP4, QuickTime or Annex B file) when that
 //! variable is set, else 240 pictures of 1920×1080 that FFmpeg writes from
@@ -18,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use cutlass_decode::{Packet, VideoDecoder, VideoOutput};
-use cutlass_hevc::HevcDecoder;
+use cutlass_decode::{Packet, PictureSamples};
+use cutlass_hevc::{HevcDecoder, HevcPicture};
 
 #[path = "../examples/common/mod.rs"]
 mod common;
@@ -164,25 +167,26 @@ fn decode(
         HevcDecoder::open_with_threads(params, threads).map_err(|e| format!("{e:?}"))?;
     let mut bytes = Vec::new();
     let mut pictures = 0;
-    let mut take = |p: &VideoOutput| {
+    let mut take = |p: &HevcPicture| {
         pictures += 1;
-        if keep {
-            for plane in [p.picture.y(), p.picture.u(), p.picture.v()] {
-                bytes.extend_from_slice(plane);
-            }
+        if keep && let PictureSamples::Cpu(samples) = p.picture.samples() {
+            bytes.extend_from_slice(samples);
         }
     };
     let start = Instant::now();
     for (index, unit) in units.iter().enumerate() {
         let packet = Packet::video(unit.clone(), index as i64, 1, 30, false);
         for p in &decoder
-            .push(&packet)
+            .push_pictures(&packet)
             .map_err(|e| format!("access unit {index}: {e:?}"))?
         {
             take(p);
         }
     }
-    for p in &decoder.drain().map_err(|e| format!("drain: {e:?}"))? {
+    for p in &decoder
+        .drain_pictures()
+        .map_err(|e| format!("drain: {e:?}"))?
+    {
         take(p);
     }
     Ok((start.elapsed().as_secs_f64(), bytes, pictures))

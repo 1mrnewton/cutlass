@@ -170,6 +170,14 @@ impl ProresPictureDecoder {
     }
 }
 
+/// The picture decoder over a wide decoder already set up, with its own
+/// threads say.
+impl From<ProresDecoder> for ProresPictureDecoder {
+    fn from(inner: ProresDecoder) -> Self {
+        Self { inner }
+    }
+}
+
 impl Decoder for ProresPictureDecoder {
     fn codec(&self) -> CodecId {
         CodecId::Prores

@@ -11,7 +11,7 @@ use std::sync::{Mutex, MutexGuard};
 use cutlass_decode::{CodecError, PixelFormat, Plane, VideoFrame};
 use cutlass_pool::Pool;
 
-use crate::bits::BitReader;
+use crate::bits::{BitReader, codeword};
 use crate::color;
 use crate::convert::{Narrow, chroma_row_422, chroma_row_444, luma_row};
 use crate::dct::{basis, idct_columns, transposed};
@@ -671,33 +671,55 @@ impl Context<'_> {
     /// Transforms one block and stores it at `at`.
     #[inline(always)]
     fn put(&self, coefs: &[f32; 64], has_ac: bool, store: Store, plane: &mut [u16], at: Place) {
-        let block = if has_ac {
-            idct_columns(coefs, self.basis)
-        } else {
-            [[coefs[0] / 8.0; 8]; 8]
-        };
+        if !has_ac {
+            // A flat block: one sample, repeated.
+            let flat = store.samples(&[coefs[0] / 8.0; 8]);
+            for yy in 0..8 {
+                let start = (at.row + at.step * yy) * at.stride + at.x;
+                if let Some(dest) = plane.get_mut(start..start + 8) {
+                    dest.copy_from_slice(&flat);
+                }
+            }
+            return;
+        }
+        let block = idct_columns(coefs, self.basis);
         for (yy, values) in block.iter().enumerate() {
             let start = (at.row + at.step * yy) * at.stride + at.x;
-            let Some(dest) = plane.get_mut(start..start + 8) else {
-                break;
-            };
-            for (sample, &value) in dest.iter_mut().zip(values) {
-                // Clamped first, so truncating is the floor: every value
-                // left is positive.
-                let biased = value + store.bias;
-                let floored = if biased > store.low {
-                    biased
-                } else {
-                    store.low
-                };
-                let kept = if floored < store.high {
-                    floored
-                } else {
-                    store.high
-                };
-                *sample = kept as i32 as u16;
+            if let Some(dest) = plane.get_mut(start..start + 8) {
+                dest.copy_from_slice(&store.samples(values));
             }
         }
+    }
+}
+
+/// Two to the 23rd: from here up a single-precision value is a whole number.
+const WHOLE: f32 = 8_388_608.0;
+
+impl Store {
+    /// Eight transform outputs as samples: `floor(value + bias)`, clamped.
+    ///
+    /// The clamp comes first, so every value is positive and small.
+    /// Adding [`WHOLE`] then rounds it to the nearest whole number, which
+    /// sits in the low bits of the sum, and one comes off where that
+    /// rounded up. This is the floor without a float-to-integer cast per
+    /// sample, which the compiler will not do eight at a time.
+    #[inline(always)]
+    fn samples(self, values: &[f32; 8]) -> [u16; 8] {
+        let mut out = [0u16; 8];
+        for (sample, &value) in out.iter_mut().zip(values) {
+            let biased = value + self.bias;
+            let raised = if biased > self.low { biased } else { self.low };
+            let kept = if raised < self.high {
+                raised
+            } else {
+                self.high
+            };
+            let lifted = kept + WHOLE;
+            let nearest = lifted - WHOLE;
+            let whole = lifted.to_bits() & 0x007f_ffff;
+            *sample = (whole - u32::from(nearest > kept)) as u16;
+        }
+        out
     }
 }
 
@@ -777,14 +799,33 @@ fn component(
     let mut run = FIRST_RUN;
     let mut level = FIRST_LEVEL;
     let mut has_ac = 0u32;
-    while !bits.at_end_of_data() {
-        run = bits.code(run_codebook(run))?;
+    loop {
+        // One refill covers the run and, unless the run was long, the level
+        // and its sign.
+        bits.refill();
+        if bits.ended() {
+            break;
+        }
+        let (value, len) = codeword(bits.top32(), run_codebook(run));
+        if len > 31 {
+            return Err(bits.malformed("codeword"));
+        }
+        bits.skip(len);
+        run = value;
         pos += run as usize + 1;
         if pos >= limit {
             return Err(bits.malformed("coefficient run past the block"));
         }
-        level = bits.code(level_codebook(level))?.saturating_add(1);
-        let sign = bits.read(1);
+        bits.ensure32();
+        let buf = bits.top32();
+        let (value, len) = codeword(buf, level_codebook(level));
+        if len > 31 {
+            return Err(bits.malformed("codeword"));
+        }
+        level = value.saturating_add(1);
+        // The sign is the bit after the codeword, inside the same 32.
+        let sign = (buf >> (31 - len)) & 1;
+        bits.skip(len + 1);
         let block = pos & mask;
         let index = usize::from(scan[pos >> log2]);
         let magnitude = level.min(MAX_LEVEL) as i32;
@@ -862,8 +903,56 @@ pub(crate) fn unpack_alpha_for_tests(data: &[u8], sixteen: bool, count: usize, o
 
 #[cfg(test)]
 mod tests {
-    use super::{to_signed, unpack_alpha};
+    use super::{Store, to_signed, unpack_alpha};
     use crate::bits::BitWriter;
+
+    #[test]
+    fn stored_samples_are_the_clamped_floor() {
+        for depth in [10u8, 12] {
+            let store = Store {
+                bias: f32::from(1u16 << (depth - 1)) + 0.5,
+                low: 4.0,
+                high: ((1i32 << depth) - 5) as f32,
+            };
+            let want = |value: f32| {
+                ((value + store.bias).floor() as i32).clamp(4, (1 << depth) - 5) as u16
+            };
+            let mut values = vec![
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                -0.0,
+                1e30,
+                -1e30,
+            ];
+            // Every whole and half step across the range, and its neighbours.
+            for k in -5000i32..5000 {
+                for part in [-0.5f32, -0.25, 0.0, 0.25, 0.5] {
+                    let value = k as f32 + part;
+                    values.push(value);
+                    for off in 1..3 {
+                        values.push(f32::from_bits(value.to_bits().wrapping_add(off)));
+                        values.push(f32::from_bits(value.to_bits().wrapping_sub(off)));
+                    }
+                }
+            }
+            let mut state = 9u32;
+            for _ in 0..200_000 {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                values.push((state as f32 / 4_294_967_296.0 - 0.5) * 12_000.0);
+            }
+            for group in values.chunks(8) {
+                let mut eight = [0f32; 8];
+                eight[..group.len()].copy_from_slice(group);
+                let got = store.samples(&eight);
+                for (value, sample) in eight.iter().zip(got) {
+                    assert_eq!(sample, want(*value), "{value} at {depth} bits");
+                }
+            }
+        }
+    }
 
     #[test]
     fn signed_symbols_alternate() {

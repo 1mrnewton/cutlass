@@ -775,13 +775,21 @@ pub fn register_decoders(factory: &mut DecodeFactory) {
 fn open_registered(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
     Ok(Box::new(AccessDecoder {
         inner: H264Decoder::open(params)?,
+        packed: Vec::new(),
     }))
 }
 
 /// The engine's decoder. It returns one packed picture per displayed frame.
 struct AccessDecoder {
     inner: H264Decoder,
+    /// The packed pictures handed out, newest last, to fill again once
+    /// every other holder has let one go.
+    packed: Vec<std::sync::Arc<Vec<u8>>>,
 }
+
+/// Packed pictures [`AccessDecoder`] keeps a hold on. One that is let go
+/// while it is among the last this many handed out is filled again.
+const PACKED_KEPT: usize = 4;
 
 fn open_decoder(params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError> {
     Ok(Box::new(H264Decoder::open(params)?))
@@ -942,19 +950,13 @@ impl Decoder for AccessDecoder {
     }
 
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
-        self.inner
-            .push(packet)?
-            .into_iter()
-            .map(picture_output)
-            .collect()
+        let frames = self.inner.push(packet)?;
+        self.outputs(frames)
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
-        self.inner
-            .drain()?
-            .into_iter()
-            .map(picture_output)
-            .collect()
+        let frames = self.inner.drain()?;
+        self.outputs(frames)
     }
 
     fn reset(&mut self) {
@@ -962,30 +964,86 @@ impl Decoder for AccessDecoder {
     }
 }
 
-fn picture_output(frame: VideoOutput) -> Result<Output, CodecError> {
-    let mut bytes = Vec::with_capacity(
-        frame
-            .picture
-            .y()
-            .len()
-            .saturating_add(frame.picture.u().len())
-            .saturating_add(frame.picture.v().len()),
+impl AccessDecoder {
+    fn outputs(&mut self, frames: Vec<VideoOutput>) -> Result<Vec<Output>, CodecError> {
+        frames
+            .iter()
+            .map(|frame| picture_output(frame, &mut self.packed))
+            .collect()
+    }
+}
+
+/// A buffer of `len` bytes to pack a picture into: one of `packed` that
+/// no one else holds, taken out of it, or else a new one. What it holds
+/// is for the caller to write over.
+fn packed_buffer(packed: &mut Vec<std::sync::Arc<Vec<u8>>>, len: usize) -> std::sync::Arc<Vec<u8>> {
+    let free = packed
+        .iter_mut()
+        .position(|kept| kept.len() == len && std::sync::Arc::get_mut(kept).is_some());
+    match free {
+        Some(at) => packed.remove(at),
+        None => std::sync::Arc::new(vec![0; len]),
+    }
+}
+
+/// The `matrix_coefficients` code of ISO/IEC 23091-2 for `matrix`. BT.601
+/// is written as 6 and BT.2020 as 9, non-constant luminance.
+fn matrix_cicp(matrix: ColorMatrix) -> u8 {
+    match matrix {
+        ColorMatrix::Identity => 0,
+        ColorMatrix::Bt709 => 1,
+        ColorMatrix::Unspecified => 2,
+        ColorMatrix::Fcc => 4,
+        ColorMatrix::Bt601 => 6,
+        ColorMatrix::Smpte240m => 7,
+        ColorMatrix::Ycgco => 8,
+        ColorMatrix::Bt2020 => 9,
+        ColorMatrix::Smpte2085 => 11,
+        ColorMatrix::ChromaDerived => 12,
+        ColorMatrix::ChromaDerivedConstant => 13,
+        ColorMatrix::Ictcp => 14,
+        ColorMatrix::IptC2 => 15,
+        ColorMatrix::YcgcoRe => 16,
+        ColorMatrix::YcgcoRo => 17,
+    }
+}
+
+/// The engine's packed picture: the three planes one after the other, with
+/// the colour description and the sample range the stream's VUI gave.
+fn picture_output(
+    frame: &VideoOutput,
+    packed: &mut Vec<std::sync::Arc<Vec<u8>>>,
+) -> Result<Output, CodecError> {
+    let planes = [frame.picture.y(), frame.picture.u(), frame.picture.v()];
+    let len = planes
+        .iter()
+        .fold(0usize, |len, plane| len.saturating_add(plane.len()));
+    let mut bytes = packed_buffer(packed, len);
+    if let Some(bytes) = std::sync::Arc::get_mut(&mut bytes) {
+        let mut rest = bytes.as_mut_slice();
+        for plane in planes {
+            let Some((into, after)) = rest.split_at_mut_checked(plane.len()) else {
+                break;
+            };
+            into.copy_from_slice(plane);
+            rest = after;
+        }
+    }
+    let mut info = PictureInfo::new(
+        frame.picture.width(),
+        frame.picture.height(),
+        PixelFormat::Yuv420p,
+        frame.primaries,
+        frame.transfer,
     );
-    bytes.extend_from_slice(frame.picture.y());
-    bytes.extend_from_slice(frame.picture.u());
-    bytes.extend_from_slice(frame.picture.v());
-    let picture = PictureOutput::cpu(
-        PictureInfo::new(
-            frame.picture.width(),
-            frame.picture.height(),
-            PixelFormat::Yuv420p,
-            frame.primaries,
-            frame.transfer,
-        ),
-        bytes,
-        frame.pts,
-        frame.timescale,
-    )?;
+    info.matrix = frame.matrix;
+    info.cicp_matrix = matrix_cicp(frame.matrix);
+    info.range = frame.range;
+    let picture = PictureOutput::cpu_shared(info, bytes.clone(), frame.pts, frame.timescale)?;
+    if packed.len() == PACKED_KEPT {
+        packed.remove(0);
+    }
+    packed.push(bytes);
     Ok(Output::Picture(picture))
 }
 
@@ -6652,6 +6710,324 @@ mod tests {
             .picture
             .y()
             .to_vec()
+    }
+
+    /// The encoder's 16×16 sequence parameter set with a VUI that names
+    /// the sample range and, with `colour`, the primaries, transfer and
+    /// matrix codes. `cut` leaves the set off inside the colour codes.
+    fn tagged_sps(full_range: bool, colour: Option<(u32, u32, u32)>, cut: bool) -> Vec<u8> {
+        let mut bits = Pack::new();
+        bits.u(8, 100);
+        bits.u(8, 0);
+        bits.u(8, 31);
+        bits.ue(0);
+        bits.ue(1);
+        bits.ue(0);
+        bits.ue(0);
+        bits.bit(false);
+        bits.bit(false);
+        bits.ue(0);
+        bits.ue(0);
+        bits.ue(0);
+        bits.ue(2);
+        bits.bit(false);
+        bits.ue(0);
+        bits.ue(0);
+        bits.bit(true);
+        bits.bit(true);
+        bits.bit(false);
+        // The VUI: no aspect ratio, no overscan, then the signal type.
+        bits.bit(true);
+        bits.bit(false);
+        bits.bit(false);
+        bits.bit(true);
+        bits.u(3, 5);
+        bits.bit(full_range);
+        bits.bit(colour.is_some());
+        if let Some((primaries, transfer, matrix)) = colour {
+            bits.u(8, primaries);
+            bits.u(8, transfer);
+            if cut {
+                return crate::nal::annex_b_nal(3, 7, &bits.finish());
+            }
+            bits.u(8, matrix);
+        }
+        // No chroma location, timing or HRD; the encoder's restrictions.
+        for _ in 0..5 {
+            bits.bit(false);
+        }
+        bits.bit(true);
+        bits.bit(true);
+        bits.ue(0);
+        bits.ue(0);
+        bits.ue(16);
+        bits.ue(16);
+        bits.ue(1);
+        bits.ue(2);
+        bits.bit(true);
+        crate::nal::annex_b_nal(3, 7, &bits.finish())
+    }
+
+    /// [`idr_bytes`] with its sequence parameter set replaced by `sps`.
+    fn idr_with_sps(sps: &[u8]) -> Vec<u8> {
+        let mut out = sps.to_vec();
+        for nal in crate::nal::access_unit(&idr_bytes(), 0).unwrap() {
+            if nal.kind != 7 {
+                out.extend(crate::nal::annex_b_nal(nal.ref_idc, nal.kind, &nal.rbsp));
+            }
+        }
+        out
+    }
+
+    /// The one picture of `data` from the opener the engine uses.
+    fn engine_picture(data: &[u8]) -> cutlass_decode::PictureOutput {
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut factory = DecodeFactory::new();
+        register_decoders(&mut factory);
+        let mut decoder = factory.open(&params).unwrap();
+        let mut out = decoder
+            .push(&Packet::video(data.to_vec(), 0, 1, 30, true))
+            .unwrap();
+        out.extend(decoder.drain().unwrap());
+        assert_eq!(out.len(), 1);
+        match out.remove(0) {
+            Output::Picture(picture) => picture,
+            Output::Audio(_) => panic!("audio"),
+        }
+    }
+
+    #[test]
+    fn the_engine_picture_names_the_range_and_matrix_of_the_vui() {
+        use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, Transfer};
+        let plain = engine_picture(&idr_bytes());
+        // (full range, codes) and what the picture then says: range,
+        // primaries, transfer, matrix and the matrix code.
+        let cases = [
+            (
+                (true, Some((1, 1, 1))),
+                ColorRange::Full,
+                ColorPrimaries::Bt709,
+                Transfer::Bt709,
+                (ColorMatrix::Bt709, 1),
+            ),
+            (
+                (false, Some((1, 1, 1))),
+                ColorRange::Limited,
+                ColorPrimaries::Bt709,
+                Transfer::Bt709,
+                (ColorMatrix::Bt709, 1),
+            ),
+            (
+                (false, Some((6, 6, 6))),
+                ColorRange::Limited,
+                ColorPrimaries::Bt601,
+                // SMPTE 170M has BT.709's curve, and is given its name.
+                Transfer::Bt709,
+                (ColorMatrix::Bt601, 6),
+            ),
+            (
+                (true, Some((5, 6, 5))),
+                ColorRange::Full,
+                ColorPrimaries::Bt601,
+                // SMPTE 170M has BT.709's curve, and is given its name.
+                Transfer::Bt709,
+                (ColorMatrix::Bt601, 6),
+            ),
+            (
+                (false, Some((9, 16, 9))),
+                ColorRange::Limited,
+                ColorPrimaries::Bt2020,
+                Transfer::Pq,
+                (ColorMatrix::Bt2020, 9),
+            ),
+            (
+                (true, Some((1, 13, 0))),
+                ColorRange::Full,
+                ColorPrimaries::Bt709,
+                Transfer::Srgb,
+                (ColorMatrix::Identity, 0),
+            ),
+            (
+                (true, None),
+                ColorRange::Full,
+                ColorPrimaries::Unspecified,
+                Transfer::Unspecified,
+                (ColorMatrix::Unspecified, 2),
+            ),
+        ];
+        for ((full, colour), range, primaries, transfer, (matrix, code)) in cases {
+            let data = idr_with_sps(&tagged_sps(full, colour, false));
+            let picture = engine_picture(&data);
+            let info = picture.info();
+            let name = format!("full {full}, codes {colour:?}");
+            assert_eq!(info.range, range, "{name}");
+            assert_eq!(info.primaries, primaries, "{name}");
+            assert_eq!(info.transfer, transfer, "{name}");
+            assert_eq!(info.matrix, matrix, "{name}");
+            assert_eq!(info.cicp_matrix, code, "{name}");
+            assert_eq!(info.cicp_primaries, primaries.cicp(), "{name}");
+            assert_eq!(info.cicp_transfer, transfer.cicp(), "{name}");
+            // The tags describe the samples; they do not change them.
+            assert_eq!(picture.samples(), plain.samples(), "{name}");
+            // The video decoder says the same.
+            let mut params = CodecParams::video(CodecId::H264, 16, 16);
+            params.nal_length_size = 0;
+            let mut video = H264Decoder::open(&params).unwrap();
+            let mut direct = video.push(&Packet::video(data, 0, 1, 30, true)).unwrap();
+            direct.extend(video.drain().unwrap());
+            assert_eq!(direct[0].range, range, "{name}");
+            assert_eq!(direct[0].matrix, matrix, "{name}");
+        }
+        // A stream that names nothing is studio swing with no matrix.
+        let info = plain.info();
+        assert_eq!(info.range, ColorRange::Limited);
+        assert_eq!(info.matrix, ColorMatrix::Unspecified);
+        assert_eq!(info.cicp_matrix, 2);
+    }
+
+    #[test]
+    fn a_vui_cut_inside_the_colour_codes_is_rejected() {
+        let good = idr_bytes();
+        let data = idr_with_sps(&tagged_sps(true, Some((1, 1, 1)), true));
+        rejects_then_decodes(0, data, &good);
+    }
+
+    #[test]
+    fn x264_range_and_matrix_tags_reach_the_engine_picture() {
+        use cutlass_decode::{ColorMatrix, ColorRange};
+        let Some(ff) = ffmpeg_bin() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cutlass-h264-tags-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cases = [
+            ("pc", "bt709", ColorRange::Full, ColorMatrix::Bt709, 1),
+            ("tv", "bt709", ColorRange::Limited, ColorMatrix::Bt709, 1),
+            ("pc", "smpte170m", ColorRange::Full, ColorMatrix::Bt601, 6),
+            (
+                "tv",
+                "smpte170m",
+                ColorRange::Limited,
+                ColorMatrix::Bt601,
+                6,
+            ),
+        ];
+        for (range, space, want_range, want_matrix, code) in cases {
+            let h264 = dir.join(format!("{range}-{space}.h264"));
+            let encoded = Command::new(&ff)
+                .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+                .arg("testsrc2=size=64x48:rate=30")
+                .args(["-frames:v", "6", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .args(["-color_range", range, "-colorspace", space])
+                .args(["-color_primaries", space, "-color_trc", space])
+                .args(["-f", "h264"])
+                .arg(&h264)
+                .status();
+            if !encoded.is_ok_and(|status| status.success()) {
+                continue;
+            }
+            let bytes = std::fs::read(&h264).unwrap();
+            let mut params = CodecParams::video(CodecId::H264, 64, 48);
+            params.nal_length_size = 0;
+            let mut factory = DecodeFactory::new();
+            register_decoders(&mut factory);
+            let mut decoder = factory.open(&params).unwrap();
+            let mut out = Vec::new();
+            for (index, unit) in access_units(&bytes).into_iter().enumerate() {
+                let packet = Packet::video(unit, index as i64, 1, 30, index == 0);
+                out.extend(decoder.push(&packet).unwrap());
+            }
+            out.extend(decoder.drain().unwrap());
+            assert_eq!(out.len(), 6, "{range} {space}");
+            for output in out {
+                let Output::Picture(picture) = output else {
+                    panic!("audio");
+                };
+                let info = picture.info();
+                assert_eq!(info.range, want_range, "{range} {space}");
+                assert_eq!(info.matrix, want_matrix, "{range} {space}");
+                assert_eq!(info.cicp_matrix, code, "{range} {space}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every picture of `packets` from the opener the engine uses, each
+    /// dropped before the next packet is pushed, as the address of its
+    /// bytes and a copy of them.
+    fn engine_pictures_let_go(packets: &[Packet], size: (u32, u32)) -> Vec<(usize, Vec<u8>)> {
+        let mut params = CodecParams::video(CodecId::H264, size.0, size.1);
+        params.nal_length_size = 0;
+        let mut factory = DecodeFactory::new();
+        register_decoders(&mut factory);
+        let mut decoder = factory.open(&params).unwrap();
+        let mut seen = Vec::new();
+        let mut note = |outputs: Vec<Output>| {
+            for output in outputs {
+                let Output::Picture(picture) = output else {
+                    panic!("audio");
+                };
+                let PictureSamples::Cpu(bytes) = picture.samples() else {
+                    panic!("platform buffer");
+                };
+                seen.push((bytes.as_ptr() as usize, bytes.to_vec()));
+            }
+        };
+        for packet in packets {
+            note(decoder.push(packet).unwrap());
+        }
+        note(decoder.drain().unwrap());
+        seen
+    }
+
+    /// `frames` as the engine's packed bytes.
+    fn packed_planes(frames: &[Shown]) -> Vec<Vec<u8>> {
+        frames
+            .iter()
+            .map(|(_, y, u, v)| [y.as_slice(), u, v].concat())
+            .collect()
+    }
+
+    #[test]
+    fn a_picture_let_go_is_filled_again_and_one_still_held_is_not() {
+        let packets = moving_pictures(64, 48, 12);
+        let mut params = CodecParams::video(CodecId::H264, 64, 48);
+        params.nal_length_size = 0;
+        let want = packed_planes(&shown(&mut H264Decoder::open(&params).unwrap(), &packets));
+        // Let go at once: the same few buffers come round again, and each
+        // time hold the right picture.
+        let seen = engine_pictures_let_go(&packets, (64, 48));
+        assert_eq!(seen.len(), want.len());
+        for ((_, got), want) in seen.iter().zip(&want) {
+            assert!(got == want);
+        }
+        let mut places: Vec<usize> = seen.iter().map(|(place, _)| *place).collect();
+        places.sort_unstable();
+        places.dedup();
+        assert!(
+            places.len() <= super::PACKED_KEPT,
+            "{} buffers for {} pictures",
+            places.len(),
+            seen.len()
+        );
+        // Held to the end: no picture is written over by a later one.
+        let mut factory = DecodeFactory::new();
+        register_decoders(&mut factory);
+        let mut decoder = factory.open(&params).unwrap();
+        let mut held = Vec::new();
+        for packet in &packets {
+            held.extend(decoder.push(packet).unwrap());
+        }
+        held.extend(decoder.drain().unwrap());
+        assert_eq!(held.len(), want.len());
+        for (output, want) in held.iter().zip(&want) {
+            let Output::Picture(picture) = output else {
+                panic!("audio");
+            };
+            assert!(picture.samples() == PictureSamples::Cpu(want));
+        }
     }
 
     /// `unit` as an Annex B NAL unit: a start code, then the bytes.

@@ -115,6 +115,17 @@ pub struct Vui {
     pub primaries: ColorPrimaries,
     pub transfer: Transfer,
     pub matrix: ColorMatrix,
+    /// `colour_primaries`, `transfer_characteristics` and `matrix_coeffs`
+    /// as the stream codes them; 2 (unspecified) when it names none.
+    pub cicp: [u8; 3],
+    /// `chroma_sample_loc_type_top_field`; 0 (left of the luma sample,
+    /// between two rows) when the stream names none (clause E.3.1).
+    pub chroma_loc: u32,
+    /// `field_seq_flag`: every picture is one field.
+    pub field_seq: bool,
+    /// `frame_field_info_present_flag`: picture timing SEI messages start
+    /// with `pic_struct`.
+    pub frame_field_info: bool,
     pub sample_aspect: SampleAspect,
     pub num_units: u32,
     pub time_scale: u32,
@@ -128,6 +139,10 @@ impl Vui {
             primaries: ColorPrimaries::Unspecified,
             transfer: Transfer::Unspecified,
             matrix: ColorMatrix::Unspecified,
+            cicp: [2; 3],
+            chroma_loc: 0,
+            field_seq: false,
+            frame_field_info: false,
             sample_aspect: SampleAspect::UNSPECIFIED,
             num_units: 0,
             time_scale: 0,
@@ -571,18 +586,20 @@ fn parse_vui(bits: &mut Bits<'_>, max_sub_layers: u8) -> Result<Vui, CodecError>
             ColorRange::Limited
         };
         if bits.bit()? {
-            vui.primaries = primaries_of(bits.u(8)?);
-            vui.transfer = transfer_of(bits.u(8)?);
-            vui.matrix = matrix_of(bits.u(8)?);
+            let codes = [bits.u(8)?, bits.u(8)?, bits.u(8)?];
+            vui.primaries = primaries_of(codes[0]);
+            vui.transfer = transfer_of(codes[1]);
+            vui.matrix = matrix_of(codes[2]);
+            vui.cicp = codes.map(|code| code as u8);
         }
     }
     if bits.bit()? {
-        let _top = bits.ue()?;
+        vui.chroma_loc = bits.ue()?;
         let _bottom = bits.ue()?;
     }
     let _neutral_chroma = bits.bit()?;
-    let _field_seq = bits.bit()?;
-    let _frame_field_info = bits.bit()?;
+    vui.field_seq = bits.bit()?;
+    vui.frame_field_info = bits.bit()?;
     if bits.bit()? {
         for _ in 0..4 {
             let _offset = bits.ue()?;
@@ -702,7 +719,7 @@ fn primaries_of(idc: u32) -> ColorPrimaries {
     }
 }
 
-fn transfer_of(idc: u32) -> Transfer {
+pub fn transfer_of(idc: u32) -> Transfer {
     match idc {
         1 | 6 => Transfer::Bt709,
         4 | 5 => Transfer::Bt601,

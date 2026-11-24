@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 
-use cutlass_decode::CodecError;
+use cutlass_decode::{CodecError, PixelFormat};
 use cutlass_pool::Rows;
 use cutlass_simd::shared_rows::{RowsWriter, SharedRows};
 
@@ -40,9 +40,34 @@ pub enum OutForm {
     Planes,
 }
 
+/// The format of the packed picture for samples of `bit_depth` bits, and
+/// how far each sample is shifted up to fill it. 10 and 12 bits are
+/// returned as they are. 9 and 11 bits have no format of their own and
+/// take the next one, each sample doubled: for studio swing that is the
+/// same level exactly (black 32 of 9 bits is black 64 of 10), for full
+/// swing white comes out one code low (1022 for 511).
+pub fn packed_format(bit_depth: u8) -> (PixelFormat, u32) {
+    match bit_depth {
+        9 => (PixelFormat::Yuv420p10, 1),
+        10 => (PixelFormat::Yuv420p10, 0),
+        11 => (PixelFormat::Yuv420p12, 1),
+        12 => (PixelFormat::Yuv420p12, 0),
+        _ => (PixelFormat::Yuv420p, 0),
+    }
+}
+
+/// Samples as the little-endian byte pairs of a packed picture, each
+/// shifted up by `up` bits.
+#[inline(always)]
+fn pack16(dst: &mut [u8], words: &[u16], up: u32) {
+    for (o, &s) in dst.as_chunks_mut::<2>().0.iter_mut().zip(words) {
+        *o = (s << up).to_le_bytes();
+    }
+}
+
 /// Whether a picture of samples above 8 bits is decoded with no samples
 /// in its frame: no later picture references it, and its output is the
-/// packed picture, uncropped, which its final rows are shifted into as
+/// packed picture, uncropped, which its final rows are copied into as
 /// they come. The frame's rows are then published empty, in step.
 pub fn staged(reference: bool, form: Option<OutForm>, sps: &Sps) -> bool {
     !reference && form == Some(OutForm::Packed) && sps.crop == [0; 4] && sps.bit_depth > 8
@@ -125,7 +150,8 @@ impl<P: Pixel> Job<P> {
 /// The cropped output samples of a picture, taken a band of rows at a
 /// time as its final rows are published, while they are still in cache.
 /// Packed output is one buffer of the picture's full size, its three planes
-/// one after another, each row written in its place; it is a buffer of an
+/// one after another, each row written in its place, a sample above 8
+/// bits as two bytes, low byte first; it is a buffer of an
 /// earlier picture when its holders have let it go (see
 /// [`crate::dec::HevcDecoder`]), and every byte of it is written again.
 /// Planes grow a band at a time.
@@ -133,6 +159,11 @@ pub struct OutRows {
     form: OutForm,
     /// Bits above 8 per sample.
     shift: u32,
+    /// Bytes per packed sample: 2 above 8 bits.
+    bytes: usize,
+    /// Bits a packed sample above 8 bits is shifted up by (see
+    /// [`packed_format`]).
+    up: u32,
     /// Left column, top row, width and height of each cropped plane.
     crop: [(usize, usize, usize, usize); 3],
     /// Rows of each cropped plane taken.
@@ -157,7 +188,12 @@ impl OutRows {
         ];
         let shift = u32::from(sps.bit_depth) - 8;
         let size = |c: usize| crop[c].2 * crop[c].3;
-        let total = size(0) + size(1) + size(2);
+        let bytes = if form == OutForm::Packed && shift > 0 {
+            2
+        } else {
+            1
+        };
+        let total = (size(0) + size(1) + size(2)) * bytes;
         let eight = match form {
             OutForm::Packed => [
                 spare
@@ -173,6 +209,8 @@ impl OutRows {
         Self {
             form,
             shift,
+            bytes,
+            up: packed_format(sps.bit_depth).1,
             crop,
             next: [0; 3],
             eight,
@@ -183,10 +221,11 @@ impl OutRows {
     /// Rows `from..from + n` of plane `c`, to write: in place for packed
     /// output, appended for planes.
     fn rows_mut(&mut self, c: usize, from: usize, n: usize) -> &mut [u8] {
-        let w = self.crop[c].2;
+        let w = self.crop[c].2 * self.bytes;
         match self.form {
             OutForm::Packed => {
                 let base: usize = self.crop[..c].iter().map(|&(_, _, w, h)| w * h).sum();
+                let base = base * self.bytes;
                 &mut self.eight[0][base + from * w..base + (from + n) * w]
             }
             OutForm::Planes => {
@@ -214,7 +253,7 @@ impl OutRows {
                 continue;
             };
             let n = have.saturating_sub(y0 + next).min(h - next);
-            let shift = self.shift;
+            let (shift, up, wide) = (self.shift, self.up, self.bytes == 2);
             let dst = self.rows_mut(c, next, n);
             let row = |i: usize| &rows[i * stride + x0..i * stride + x0 + w];
             if x0 == 0
@@ -230,9 +269,17 @@ impl OutRows {
                         out.copy_from_slice(bytes);
                     }
                 }
+            } else if wide {
+                // Deeper samples of a packed picture, as they are.
+                for (i, out) in dst.chunks_exact_mut(2 * w).enumerate() {
+                    if let Some(words) = P::words(row(i)) {
+                        pack16(out, words, up);
+                    }
+                }
             } else {
-                // Deeper samples, shifted down to 8 bits: compiled for
-                // AVX2 where the CPU has it.
+                // Deeper samples as the 8-bit plane beside the full ones,
+                // which `VideoOutput` defines as each sample shifted
+                // down: compiled for AVX2 where the CPU has it.
                 cutlass_simd::wide::wide(
                     #[inline(always)]
                     || {
@@ -269,9 +316,13 @@ impl OutRows {
         ])
     }
 
-    /// [`Self::band_mut`] as bytes, for samples of any depth shifted down.
+    /// [`Self::band_mut`] as bytes, for samples of any depth: two bytes
+    /// each in a packed picture above 8 bits.
     fn band_bytes(&mut self, lines: [usize; 3]) -> [&mut [u8]; 3] {
-        let (crop, next) = (self.crop, self.next);
+        let (mut crop, next) = (self.crop, self.next);
+        for plane in &mut crop {
+            plane.2 *= self.bytes;
+        }
         let mut taken = [0; 3];
         for c in 0..3 {
             taken[c] = lines[c].min(crop[c].3 - next[c]);
@@ -559,8 +610,8 @@ struct PipeState<P> {
     /// SAO writes the final rows to `out` instead of the frame, whose rows
     /// no picture reads (they are published all the same, in step).
     direct: bool,
-    /// For samples above 8 bits written to `out`: a band of them, shifted
-    /// down from here (the frame then holds no samples).
+    /// For samples above 8 bits written to `out`: a band of them, copied
+    /// from here (the frame then holds no samples).
     stage: [Vec<P>; 3],
 }
 
@@ -700,8 +751,9 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                         })
                     }
                     Some(out) if st.direct => {
-                        // Deeper samples: the band in 16 bits, then shifted
-                        // down into the output.
+                        // Deeper samples: the band in 16 bits, then copied
+                        // into the packed output as byte pairs (see
+                        // `staged`).
                         let width = self.pic.width;
                         let sizes = [lines * width, band[1] * (width / 2), band[2] * (width / 2)];
                         // SAO writes every sample of the band, and the
@@ -713,16 +765,14 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                         let [a, b, c] = &mut st.stage;
                         self.pic
                             .sao_row(self.work, f, [&mut a[..], &mut b[..], &mut c[..]]);
-                        let shift = out.shift;
+                        let up = out.up;
                         let dst = out.band_bytes(band);
                         cutlass_simd::wide::wide(
                             #[inline(always)]
                             || {
                                 for (d, s) in dst.into_iter().zip(&st.stage) {
                                     if let Some(s) = P::words(s) {
-                                        for (o, &v) in d.iter_mut().zip(s) {
-                                            *o = (v >> shift) as u8;
-                                        }
+                                        pack16(d, s, up);
                                     }
                                 }
                             },

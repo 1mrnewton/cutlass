@@ -42,7 +42,9 @@ mod nal;
 mod picture;
 mod pixel;
 mod ps;
+mod sei;
 mod slice;
 mod transform;
 
-pub use dec::{HevcDecoder, register_decoders};
+pub use dec::{HevcDecoder, HevcPicture, register_decoders};
+pub use sei::PicTiming;

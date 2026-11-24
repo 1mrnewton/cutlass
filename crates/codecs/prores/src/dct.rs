@@ -111,8 +111,8 @@ pub(crate) fn idct(block: &mut [f32; 64]) {
 }
 
 /// Forward DCT of samples `[y * 8 + x]`, in place to coefficients `[v * 8 + u]`.
-pub(crate) fn fdct(block: &mut [f32; 64]) {
-    let basis = &*BASIS;
+#[inline(always)]
+pub(crate) fn fdct(block: &mut [f32; 64], basis: &[[f32; 8]; 8]) {
     // Columns: c[v][x] = sum_y B[y][v] * f[y][x].
     let mut c = [0f32; 64];
     for v in 0..8 {
@@ -268,7 +268,7 @@ mod tests {
                 *p = rng.next(256, 255) as f32;
             }
             let original = block;
-            fdct(&mut block);
+            fdct(&mut block, super::basis());
             idct(&mut block);
             for (a, b) in block.iter().zip(original) {
                 assert!((a - b).abs() < 1e-3, "{a} vs {b}");

@@ -205,32 +205,43 @@ pub(crate) fn codeword(buf: u32, codebook: u8) -> (u32, u32) {
     )
 }
 
-/// Writes bits MSB first.
+/// Writes bits MSB first, onto the end of a byte vector.
 #[derive(Default)]
 pub(crate) struct BitWriter {
     bytes: Vec<u8>,
+    /// Bits not yet in `bytes`, in the low `filled` bits; fewer than 32
+    /// between calls.
     acc: u64,
     filled: u32,
 }
 
 impl BitWriter {
-    /// Writes the low `bits` bits of `value`, 0 to 32.
-    #[inline]
-    pub(crate) fn put(&mut self, bits: u32, value: u32) {
-        if bits == 0 {
-            return;
+    /// A writer that appends to `bytes`, so one buffer takes many parts.
+    #[inline(always)]
+    pub(crate) fn onto(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            acc: 0,
+            filled: 0,
         }
+    }
+
+    /// Writes the low `bits` bits of `value`, 0 to 32.
+    #[inline(always)]
+    pub(crate) fn put(&mut self, bits: u32, value: u32) {
+        let bits = bits.min(32);
         let masked = u64::from(value) & ((1u64 << bits) - 1);
         self.acc = (self.acc << bits) | masked;
         self.filled += bits;
-        while self.filled >= 8 {
-            self.filled -= 8;
-            self.bytes.push((self.acc >> self.filled) as u8);
+        if self.filled >= 32 {
+            self.filled -= 32;
+            let word = (self.acc >> self.filled) as u32;
+            self.bytes.extend_from_slice(&word.to_be_bytes());
         }
     }
 
     /// Writes `count` zero bits.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn zeros(&mut self, mut count: u32) {
         while count > 0 {
             let step = count.min(32);
@@ -239,27 +250,36 @@ impl BitWriter {
         }
     }
 
-    /// Bits written so far.
+    /// Bits written so far, from where the writer started.
     #[cfg(test)]
     pub(crate) fn len_bits(&self) -> usize {
         self.bytes.len() * 8 + self.filled as usize
     }
 
     /// Pads with zero bits to a byte boundary and returns the bytes.
+    #[inline(always)]
     pub(crate) fn finish(mut self) -> Vec<u8> {
-        if self.filled > 0 {
-            let pad = 8 - self.filled;
-            self.put(pad, 0);
+        let pad = (8 - self.filled % 8) % 8;
+        self.acc <<= pad;
+        self.filled += pad;
+        while self.filled >= 8 {
+            self.filled -= 8;
+            self.bytes.push((self.acc >> self.filled) as u8);
         }
         self.bytes
     }
 
     /// Encodes one codeword, the inverse of [`BitReader::code`].
-    #[inline]
+    #[inline(always)]
     pub(crate) fn code(&mut self, codebook: u8, value: u32) {
         let (bits, zeros, payload) = code_parts(codebook, value);
-        self.zeros(zeros);
-        self.put(bits, payload);
+        if zeros + bits <= 32 {
+            // The payload is below `bits` bits, so the zeros come with it.
+            self.put(zeros + bits, payload);
+        } else {
+            self.zeros(zeros);
+            self.put(bits, payload);
+        }
     }
 }
 
@@ -283,7 +303,7 @@ pub(crate) fn code_parts(codebook: u8, value: u32) -> (u32, u32, u32) {
 }
 
 /// Length of a codeword in bits.
-#[inline]
+#[cfg(test)]
 pub(crate) fn code_len(codebook: u8, value: u32) -> u32 {
     let (bits, zeros, _) = code_parts(codebook, value);
     bits + zeros

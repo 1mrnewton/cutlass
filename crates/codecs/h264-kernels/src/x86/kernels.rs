@@ -49,6 +49,173 @@ struct Mix {
     offset: __m128i,
 }
 
+/// Whether `rows` rows of `width` samples, the first at `at` and each
+/// `down` after the last, all lie in a plane of `len` samples. `rows` is
+/// at least 1.
+///
+/// This and the other checks here are plain functions, outside `feat!`:
+/// a closure inside a function built for a CPU feature is built for it
+/// too, and the library's `Option` and iterator methods, which are not,
+/// then call it rather than take it in.
+#[inline]
+fn rows_fit(len: usize, at: usize, down: usize, rows: usize, width: usize) -> bool {
+    (rows - 1)
+        .checked_mul(down)
+        .and_then(|span| span.checked_add(at))
+        .and_then(|start| start.checked_add(width))
+        .is_some_and(|end| end <= len)
+}
+
+/// The thresholds as the 8-bit filters take them, when they fit: a
+/// sample difference is at most 255, and a clipping value at most 125
+/// leaves room for the two that may be added to it.
+#[inline]
+fn small(alpha: i32, beta: i32, tc0: Option<[i8; 4]>) -> Option<(u8, u8)> {
+    if tc0.is_some_and(|tc0| tc0.iter().any(|&group| group > 125)) {
+        return None;
+    }
+    Some((u8::try_from(alpha).ok()?, u8::try_from(beta).ok()?))
+}
+
+/// Whether every edge's clipping values are in the 8-bit filters' range.
+#[inline]
+fn all_tame(edges: &MbEdges) -> bool {
+    let tame = |filter: &Option<Filter>| filter.is_none_or(|filter| filter.tame());
+    edges.vertical.iter().all(tame) && edges.horizontal.iter().all(tame)
+}
+
+/// The place `rows` rows of `down` samples before `at`, when there is
+/// one.
+#[inline]
+fn rows_before(at: usize, down: usize, rows: usize) -> Option<usize> {
+    at.checked_sub(down.checked_mul(rows)?)
+}
+
+/// The sum of `samples`.
+#[inline]
+fn sum_of(samples: &[u8]) -> u32 {
+    samples.iter().map(|&sample| u32::from(sample)).sum()
+}
+
+/// Where a luma block's routine reads, when that and the block's rows
+/// in `dst` all fit: the place of the block's top-left sample in its
+/// source. The rule is the NEON build's, so both take the same
+/// blocks. Each direction is read beyond the block only when it has
+/// an offset. Without a horizontal one, every source reads the `w`
+/// samples of the block's columns; with one, at most `2 × w` bytes
+/// from two samples left of each row. Without a vertical one, the
+/// sources read the block's rows; with one, two rows above them and
+/// three below.
+#[inline]
+fn luma_reach(block: &Block<'_>, frac: (u8, u8), dst: (&[u8], usize)) -> Option<usize> {
+    let Block {
+        src,
+        stride,
+        at: (x, y),
+        size: (w, h),
+    } = *block;
+    let (dst, dst_stride) = dst;
+    if (w != 8 && w != 16) || h == 0 || h > 16 || frac.0 > 3 || frac.1 > 3 {
+        return None;
+    }
+    if dst_stride < w || (h - 1) * dst_stride + w > dst.len() {
+        return None;
+    }
+    // Samples read left of the block and in each row from there.
+    let (left, span) = if frac.0 == 0 { (0, w) } else { (2, 2 * w) };
+    // Rows read above the block's first and below its last.
+    let (above, below) = if frac.1 == 0 { (0, 0) } else { (2, 3) };
+    if x < left || y < above || (frac.0 != 0 && stride < w + 5) {
+        return None;
+    }
+    let last = (y + h - 1 + below)
+        .checked_mul(stride)?
+        .checked_add(x - left + span)?;
+    if last > src.len() {
+        return None;
+    }
+    Some(y * stride + x)
+}
+
+/// Where a chroma block's routine reads, when that and the block's
+/// rows in `dst` all fit: the place of the block's top-left sample in
+/// its source. The rule is the NEON build's: nine bytes from the
+/// start of each row and of the row after the last, and an even
+/// height.
+#[inline]
+fn chroma_reach(block: &Block<'_>, frac: (u8, u8), dst: (&[u8], usize)) -> Option<usize> {
+    let Block {
+        src,
+        stride,
+        at: (x, y),
+        size: (w, h),
+    } = *block;
+    let (dst, dst_stride) = dst;
+    if (w != 4 && w != 8) || h == 0 || h % 2 != 0 || frac.0 > 7 || frac.1 > 7 {
+        return None;
+    }
+    if dst_stride < w || (h - 1).checked_mul(dst_stride)?.checked_add(w)? > dst.len() {
+        return None;
+    }
+    let last = (y.checked_add(h)?)
+        .checked_mul(stride)?
+        .checked_add(x.checked_add(9)?)?;
+    if last > src.len() {
+        return None;
+    }
+    Some(y * stride + x)
+}
+
+/// A block's luma in one reference: the plane, the place of the block's
+/// first sample in it, its row distance and the quarter offsets.
+type LumaSource<'r> = (&'r [u8], usize, usize, (u8, u8));
+
+/// A block's chroma in one reference: Cb, Cr, the place of the block's
+/// first sample in each, their row distance and the eighth offsets.
+type ChromaSources<'r> = (&'r [u8], &'r [u8], usize, usize, (u8, u8));
+
+/// A reference's luma for a block of `size` at (`x`, `y`) moved by
+/// `mv`, when every byte its routine reads is there: the plane, the place
+/// of the block's first sample in it, its row distance and the quarter
+/// offsets.
+#[inline]
+fn luma_source<'r>(
+    (planes, mv): (&Planes420<'r>, [i16; 2]),
+    (x, y): (usize, usize),
+    size: (usize, usize),
+) -> Option<LumaSource<'r>> {
+    let at = (
+        x as i64 + i64::from(mv[0] >> 2),
+        y as i64 + i64::from(mv[1] >> 2),
+    );
+    let frac = ((mv[0] & 3) as u8, (mv[1] & 3) as u8);
+    let at_sample = planes.luma_from(at, size, frac)?;
+    Some((planes.y(), at_sample, planes.stride(), frac))
+}
+
+/// [`luma_source`] for the chroma planes, at eighth offsets: Cb, Cr, the
+/// place in each, their row distance and the offsets.
+#[inline]
+fn chroma_source<'r>(
+    (planes, mv): (&Planes420<'r>, [i16; 2]),
+    (cx, cy): (usize, usize),
+    size: (usize, usize),
+) -> Option<ChromaSources<'r>> {
+    let at = (
+        cx as i64 + i64::from(mv[0] >> 3),
+        cy as i64 + i64::from(mv[1] >> 3),
+    );
+    let frac = ((mv[0] & 7) as u8, (mv[1] & 7) as u8);
+    let at_sample = planes.chroma_from(at, size, frac)?;
+    Some((
+        planes.cb(),
+        planes.cr(),
+        at_sample,
+        planes.stride() / 2,
+        frac,
+    ))
+}
+
 feat! {
     /// Sixteen bytes from `p`.
     ///
@@ -294,46 +461,6 @@ feat! {
 x86_luma!(luma8, __m128i, full8, rawh8, rawv8, round8, centre8v, put8);
 
 feat! {
-    /// Where a luma block's routine reads, when that and the block's rows
-    /// in `dst` all fit: the place of the block's top-left sample in its
-    /// source. The rule is the NEON build's, so both take the same
-    /// blocks. Each direction is read beyond the block only when it has
-    /// an offset. Without a horizontal one, every source reads the `w`
-    /// samples of the block's columns; with one, at most `2 × w` bytes
-    /// from two samples left of each row. Without a vertical one, the
-    /// sources read the block's rows; with one, two rows above them and
-    /// three below.
-    #[inline]
-    fn luma_reach(block: &Block<'_>, frac: (u8, u8), dst: (&[u8], usize)) -> Option<usize> {
-        let Block {
-            src,
-            stride,
-            at: (x, y),
-            size: (w, h),
-        } = *block;
-        let (dst, dst_stride) = dst;
-        if (w != 8 && w != 16) || h == 0 || h > 16 || frac.0 > 3 || frac.1 > 3 {
-            return None;
-        }
-        if dst_stride < w || (h - 1) * dst_stride + w > dst.len() {
-            return None;
-        }
-        // Samples read left of the block and in each row from there.
-        let (left, span) = if frac.0 == 0 { (0, w) } else { (2, 2 * w) };
-        // Rows read above the block's first and below its last.
-        let (above, below) = if frac.1 == 0 { (0, 0) } else { (2, 3) };
-        if x < left || y < above || (frac.0 != 0 && stride < w + 5) {
-            return None;
-        }
-        let last = (y + h - 1 + below)
-            .checked_mul(stride)?
-            .checked_add(x - left + span)?;
-        if last > src.len() {
-            return None;
-        }
-        Some(y * stride + x)
-    }
-
     /// The luma routine for a block `w` wide, 8 or 16.
     ///
     /// # Safety
@@ -530,35 +657,6 @@ feat! {
         }
     }
 
-    /// Where a chroma block's routine reads, when that and the block's
-    /// rows in `dst` all fit: the place of the block's top-left sample in
-    /// its source. The rule is the NEON build's: nine bytes from the
-    /// start of each row and of the row after the last, and an even
-    /// height.
-    #[inline]
-    fn chroma_reach(block: &Block<'_>, frac: (u8, u8), dst: (&[u8], usize)) -> Option<usize> {
-        let Block {
-            src,
-            stride,
-            at: (x, y),
-            size: (w, h),
-        } = *block;
-        let (dst, dst_stride) = dst;
-        if (w != 4 && w != 8) || h == 0 || h % 2 != 0 || frac.0 > 7 || frac.1 > 7 {
-            return None;
-        }
-        if dst_stride < w || (h - 1).checked_mul(dst_stride)?.checked_add(w)? > dst.len() {
-            return None;
-        }
-        let last = (y.checked_add(h)?)
-            .checked_mul(stride)?
-            .checked_add(x.checked_add(9)?)?;
-        if last > src.len() {
-            return None;
-        }
-        Some(y * stride + x)
-    }
-
     /// See [`crate::mc::chroma_block`].
     pub(crate) fn chroma_block(
         dst: &mut [u8],
@@ -673,17 +771,13 @@ feat! {
         }
         let (dst_y, dst_u, dst_v, stride) = dst.planes();
         let luma = (w == 8 || w == 16) && (1..=16).contains(&h) && {
-            let from = |(planes, mv): (&Planes420<'r>, [i16; 2])| {
-                let at = (
-                    x as i64 + i64::from(mv[0] >> 2),
-                    y as i64 + i64::from(mv[1] >> 2),
-                );
-                let frac = ((mv[0] & 3) as u8, (mv[1] & 3) as u8);
-                let at_sample = planes.luma_from(at, (w, h), frac)?;
-                Some((planes.y(), at_sample, planes.stride(), frac))
+            let one = luma_source(first, (x, y), (w, h));
+            let two = match second {
+                Some(source) => luma_source(source, (x, y), (w, h)).map(Some).ok_or(()),
+                None => Ok(None),
             };
-            match (from(first), second.map(from)) {
-                (Some(one), two @ (None | Some(Some(_)))) => {
+            match (one, two) {
+                (Some(one), Ok(two)) => {
                     let out = y * stride + x;
                     // SAFETY: `holds` put the block's rows inside `dst_y`,
                     // and `luma_from` every byte each routine reads inside
@@ -692,7 +786,7 @@ feat! {
                         let out = (dst_y.as_mut_ptr().add(out), stride);
                         let (src, at, src_stride, frac) = one;
                         luma_run(w, false, out, (src.as_ptr().add(at), src_stride), h, frac);
-                        if let Some(Some((src, at, src_stride, frac))) = two {
+                        if let Some((src, at, src_stride, frac)) = two {
                             luma_run(w, true, out, (src.as_ptr().add(at), src_stride), h, frac);
                         }
                     }
@@ -704,17 +798,13 @@ feat! {
         let (cw, ch) = (w / 2, h / 2);
         let chroma = (cw == 4 || cw == 8) && ch != 0 && ch <= 8 && ch % 2 == 0 && {
             let (cx, cy) = (x / 2, y / 2);
-            let from = |(planes, mv): (&Planes420<'r>, [i16; 2])| {
-                let at = (
-                    cx as i64 + i64::from(mv[0] >> 3),
-                    cy as i64 + i64::from(mv[1] >> 3),
-                );
-                let frac = ((mv[0] & 7) as u8, (mv[1] & 7) as u8);
-                let at_sample = planes.chroma_from(at, (cw, ch), frac)?;
-                Some((planes.cb(), planes.cr(), at_sample, planes.stride() / 2, frac))
+            let one = chroma_source(first, (cx, cy), (cw, ch));
+            let two = match second {
+                Some(source) => chroma_source(source, (cx, cy), (cw, ch)).map(Some).ok_or(()),
+                None => Ok(None),
             };
-            match (from(first), second.map(from)) {
-                (Some(one), two @ (None | Some(Some(_)))) => {
+            match (one, two) {
+                (Some(one), Ok(two)) => {
                     let stride = stride / 2;
                     let out = cy * stride + cx;
                     // SAFETY: `holds` put the block's rows inside both
@@ -727,7 +817,7 @@ feat! {
                         let (cb, cr, at, s, frac) = one;
                         chroma_run(cw, false, out_u, (cb.as_ptr().add(at), s), ch, frac);
                         chroma_run(cw, false, out_v, (cr.as_ptr().add(at), s), ch, frac);
-                        if let Some(Some((cb, cr, at, s, frac))) = two {
+                        if let Some((cb, cr, at, s, frac)) = two {
                             chroma_run(cw, true, out_u, (cb.as_ptr().add(at), s), ch, frac);
                             chroma_run(cw, true, out_v, (cr.as_ptr().add(at), s), ch, frac);
                         }
@@ -796,11 +886,7 @@ feat! {
         if w == 0 || h == 0 || a.len() < area || b.len() < area {
             return false;
         }
-        let Some(end) = (h - 1).checked_mul(dst_stride).and_then(|rows| rows.checked_add(w))
-        else {
-            return false;
-        };
-        if dst.len() < end {
+        if !rows_fit(dst.len(), 0, dst_stride, h, w) {
             return false;
         }
         for row in 0..h {
@@ -890,11 +976,7 @@ feat! {
         if !weight.fits() || w == 0 || h == 0 || a.len() < area || b.len() < area {
             return false;
         }
-        let Some(end) = (h - 1).checked_mul(dst_stride).and_then(|rows| rows.checked_add(w))
-        else {
-            return false;
-        };
-        if dst.len() < end {
+        if !rows_fit(dst.len(), 0, dst_stride, h, w) {
             return false;
         }
         for row in 0..h {
@@ -1106,13 +1188,10 @@ feat! {
             if index >= plane.len() {
                 return;
             }
-            let sample = plane.as_ptr().wrapping_add(index);
-            // A hint that reads, writes and faults on nothing.
-            _mm_prefetch::<_MM_HINT_T0>(sample.cast());
-            let Some(next) = index.checked_add(stride) else {
-                return;
-            };
-            index = next;
+            // A hint that reads, writes and faults on nothing; the address
+            // is inside `plane` all the same.
+            _mm_prefetch::<_MM_HINT_T0>(plane.as_ptr().wrapping_add(index).cast());
+            index = index.saturating_add(stride);
         }
     }
 
@@ -1375,17 +1454,6 @@ feat! {
         let all = _mm_cvtsi32_si128(i32::from_le_bytes(tc0?.map(i8::cast_unsigned)));
         let twice = _mm_unpacklo_epi8(all, all);
         Some(_mm_unpacklo_epi64(twice, twice))
-    }
-
-    /// The thresholds as the 8-bit filters take them, when they fit: a
-    /// sample difference is at most 255, and a clipping value at most 125
-    /// leaves room for the two that may be added to it.
-    #[inline]
-    fn small(alpha: i32, beta: i32, tc0: Option<[i8; 4]>) -> Option<(u8, u8)> {
-        if tc0.is_some_and(|tc0| tc0.iter().any(|&group| group > 125)) {
-            return None;
-        }
-        Some((u8::try_from(alpha).ok()?, u8::try_from(beta).ok()?))
     }
 
     /// A luma edge along a row: `q0` is its first sample below the edge,
@@ -1738,11 +1806,7 @@ feat! {
             let Some(first) = at.checked_sub(4) else {
                 return false;
             };
-            let end = 15usize
-                .checked_mul(down)
-                .and_then(|rows| rows.checked_add(first))
-                .and_then(|start| start.checked_add(8));
-            if end.is_none_or(|end| end > plane.len()) {
+            if !rows_fit(plane.len(), first, down, 16, 8) {
                 return false;
             }
             // SAFETY: sixteen lines of eight bytes from `first` are in
@@ -1750,14 +1814,10 @@ feat! {
             unsafe { luma_lines_at(plane.as_mut_ptr().add(at), down, alpha, beta, tc0) };
             return true;
         }
-        let Some(first) = down.checked_mul(4).and_then(|rows| at.checked_sub(rows)) else {
+        let Some(first) = rows_before(at, down, 4) else {
             return false;
         };
-        let end = 7usize
-            .checked_mul(down)
-            .and_then(|rows| rows.checked_add(first))
-            .and_then(|start| start.checked_add(16));
-        if end.is_none_or(|end| end > plane.len()) {
+        if !rows_fit(plane.len(), first, down, 8, 16) {
             return false;
         }
         // SAFETY: eight rows of sixteen bytes from `first` are in the
@@ -1776,11 +1836,7 @@ feat! {
             let Some(first) = at.checked_sub(2) else {
                 return false;
             };
-            let end = 7usize
-                .checked_mul(down)
-                .and_then(|rows| rows.checked_add(first))
-                .and_then(|start| start.checked_add(4));
-            if end.is_none_or(|end| end > plane.len()) {
+            if !rows_fit(plane.len(), first, down, 8, 4) {
                 return false;
             }
             // SAFETY: eight lines of four bytes from `first` are in the
@@ -1788,14 +1844,10 @@ feat! {
             unsafe { chroma_lines_at(plane.as_mut_ptr().add(at), down, alpha, beta, tc0) };
             return true;
         }
-        let Some(first) = down.checked_mul(2).and_then(|rows| at.checked_sub(rows)) else {
+        let Some(first) = rows_before(at, down, 2) else {
             return false;
         };
-        let end = 3usize
-            .checked_mul(down)
-            .and_then(|rows| rows.checked_add(first))
-            .and_then(|start| start.checked_add(8));
-        if end.is_none_or(|end| end > plane.len()) {
+        if !rows_fit(plane.len(), first, down, 4, 8) {
             return false;
         }
         // SAFETY: four rows of eight bytes from `first` are in the plane.
@@ -1929,8 +1981,7 @@ feat! {
         if !some_chroma {
             return true;
         }
-        let tame = |filter: &Option<Filter>| filter.is_none_or(|filter| filter.tame());
-        if !(chroma.vertical.iter().all(tame) && chroma.horizontal.iter().all(tame)) {
+        if !all_tame(chroma) {
             mb_edges(cb, chroma, 2);
             mb_edges(cr, chroma, 2);
             return true;
@@ -2007,11 +2058,7 @@ feat! {
 
     /// See [`crate::residual::idct4_add`].
     pub(crate) fn idct4_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 16]) -> bool {
-        let end = 3usize
-            .checked_mul(down)
-            .and_then(|span| span.checked_add(at))
-            .and_then(|start| start.checked_add(4));
-        if down < 4 || end.is_none_or(|end| end > plane.len()) {
+        if down < 4 || !rows_fit(plane.len(), at, down, 4, 4) {
             return false;
         }
         // SAFETY: `block` is sixteen 32-bit levels, and the four rows of
@@ -2087,11 +2134,7 @@ feat! {
 
     /// See [`crate::residual::idct8_add`].
     pub(crate) fn idct8_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 64]) -> bool {
-        let end = 7usize
-            .checked_mul(down)
-            .and_then(|span| span.checked_add(at))
-            .and_then(|start| start.checked_add(8));
-        if down < 8 || end.is_none_or(|end| end > plane.len()) {
+        if down < 8 || !rows_fit(plane.len(), at, down, 8, 8) {
             return false;
         }
         // SAFETY: `block` is 64 32-bit levels, and the eight rows of
@@ -2123,14 +2166,7 @@ feat! {
         if !(size == 4 || size == 8) {
             return false;
         }
-        let Some(rest) = plane.len().checked_sub(at) else {
-            return false;
-        };
-        if (size - 1)
-            .checked_mul(down)
-            .and_then(|rows| rows.checked_add(size))
-            .is_none_or(|end| end > rest)
-        {
+        if !rows_fit(plane.len(), at, down, size, size) {
             return false;
         }
         // A sample moves by at most 255 either way.
@@ -2155,16 +2191,11 @@ feat! {
 
     /// See [`crate::residual::dc_add_quads`].
     pub(crate) fn dc_add_quads(plane: &mut [u8], at: usize, down: usize, dcs: [i32; 4]) -> bool {
-        if down < 8
-            || 7usize
-                .checked_mul(down)
-                .and_then(|rows| rows.checked_add(8))
-                .and_then(|span| span.checked_add(at))
-                .is_none_or(|end| end > plane.len())
-        {
+        if down < 8 || !rows_fit(plane.len(), at, down, 8, 8) {
             return false;
         }
-        let dcs = dcs.map(|dc| dc.clamp(-255, 255));
+        let held = |dc: i32| dc.clamp(-255, 255);
+        let dcs = [held(dcs[0]), held(dcs[1]), held(dcs[2]), held(dcs[3])];
         // How far the samples rise and how far they fall: the left
         // quarter's value in the low four bytes and the right one's in the
         // next four.
@@ -2456,11 +2487,10 @@ feat! {
                     }
                 }
                 _ => {
-                    let sum = |samples: &[u8]| samples.iter().map(|&s| u32::from(s)).sum::<u32>();
                     let dc = match (near.above, near.left) {
-                        (true, true) => (sum(&above[..8]) + sum(left) + 8) >> 4,
-                        (true, false) => (sum(&above[..8]) + 4) >> 3,
-                        (false, true) => (sum(left) + 4) >> 3,
+                        (true, true) => (sum_of(&above[..8]) + sum_of(left) + 8) >> 4,
+                        (true, false) => (sum_of(&above[..8]) + 4) >> 3,
+                        (false, true) => (sum_of(left) + 4) >> 3,
                         (false, false) => 128,
                     };
                     let row = splat(dc as u8);
@@ -2482,7 +2512,12 @@ feat! {
         let Some(&top) = plane[start..].first_chunk::<9>() else {
             return false;
         };
-        let side = core::array::from_fn(|y| plane[at - 1 + y * down]);
+        let side = [
+            plane[at - 1],
+            plane[at - 1 + down],
+            plane[at - 1 + 2 * down],
+            plane[at - 1 + 3 * down],
+        ];
         let (above, left, corner) = crate::intra::edges4(&top, side, near);
         let directional = match mode {
             3 | 7 => near.above,

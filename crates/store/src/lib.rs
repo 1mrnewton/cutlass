@@ -21,6 +21,7 @@ mod reframe;
 mod relight;
 mod repair;
 mod stable;
+mod templates;
 mod upgrade;
 
 use std::fmt;
@@ -45,6 +46,10 @@ pub use reframe::{ReframeKey, SubjectPath, load_subject_path, save_subject_path}
 pub use relight::{RelightKey, find_relight, relight_file};
 pub use repair::{RepairNote, repair};
 pub use stable::{StableKey, load_camera_path, save_camera_path};
+pub use templates::{
+    ListedTemplate, TEMPLATE_FILE, TEMPLATE_FORMAT_VERSION, TemplateInfo, delete_template,
+    list_templates, listed_template, save_as_template, use_template,
+};
 pub use upgrade::{BUILD, Protocol, upgrade};
 
 /// Why a folder could not be read or written.
@@ -74,6 +79,10 @@ pub enum StoreError {
     Held { path: PathBuf },
     /// A project name is empty or only spaces.
     EmptyName,
+    /// A project saved as a template marks no clip as a slot.
+    NoSlots,
+    /// A file the project plays from outside its folder is not there.
+    MissingMedia { path: PathBuf },
 }
 
 impl fmt::Display for StoreError {
@@ -129,6 +138,12 @@ impl fmt::Display for StoreError {
                 write!(formatter, "the folder {} is already held", path.display())
             }
             Self::EmptyName => formatter.write_str("a project needs a name"),
+            Self::NoSlots => {
+                formatter.write_str("a template needs at least one clip marked as a slot")
+            }
+            Self::MissingMedia { path } => {
+                write!(formatter, "the file {} is missing", path.display())
+            }
         }
     }
 }

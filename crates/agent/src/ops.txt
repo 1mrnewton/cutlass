@@ -236,6 +236,9 @@ set_blend: Blend a clip with the picture below by mode blend-multiply, blend-scr
 set_blend_on: Turn a clip's Blend switch on or off; off draws it solid and mixed normally, keeping its opacity and blend mode for when it is on again.
 {"op":"set_blend_on","segment_id":"a","on":false}
 
+set_template_mark: Mark a clip for a project template, or take its mark off with mark null. {"role":"slot","takes":"either"|"video"|"photo"} on a photo or video clip makes it a slot someone using the template fills with their own media; {"role":"text"} on a text clip lets them change its words; {"role":"music"} on a sound clip lets them swap it, and moves the music mark off any other clip. A mark that does not fit the clip is refused.
+{"op":"set_template_mark","segment_id":"a","mark":{"role":"slot","takes":"either"}}
+
 add_adjustment: Place an adjustment layer from start for duration (microseconds) on adjust lane track_id, made when missing, with new ids segment_id and material_id; set its sliders with set_adjust; it acts on every picture below.
 {"op":"add_adjustment","track_id":"adjust-1","segment_id":"adj-2","material_id":"adj-2-adjust","start":5000000,"duration":3000000}
 

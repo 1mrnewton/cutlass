@@ -5,6 +5,7 @@ use crate::clip::{Clip, UniformScale};
 use crate::enums::{SegmentSource, TrackAttribute};
 use crate::id::{MaterialId, SegmentId};
 use crate::keyframe::CommonKeyframeGroup;
+use crate::template_mark::TemplateMark;
 use crate::time::TimeRange;
 
 fn one() -> f64 {
@@ -175,6 +176,14 @@ pub struct Segment {
         skip_serializing_if = "is_false"
     )]
     pub blend_off: bool,
+    /// What the clip is in a project template: a slot, editable text, or
+    /// the music. `None` on a clip that is not marked.
+    #[serde(
+        default,
+        rename = "cutlass_template",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub template_mark: Option<TemplateMark>,
     /// Keys this model does not name yet. Video-only fields land here.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
@@ -240,6 +249,7 @@ impl Segment {
             enable_color_adjust_pro: false,
             segment_color_tag: String::new(),
             blend_off: false,
+            template_mark: None,
             rest: Map::new(),
         }
     }
@@ -300,6 +310,22 @@ mod tests {
         let json = serde_json::to_value(&segment).unwrap();
         assert!(json.get("target_timerange").is_some());
         assert!(json.get("target_time_range").is_none());
+    }
+
+    #[test]
+    fn a_template_mark_is_written_only_when_set_and_reads_back() {
+        let mut segment = Segment::new("s", "m", TimeRange::new(0, 1));
+        let bare = serde_json::to_value(&segment).unwrap();
+        assert!(bare.get("cutlass_template").is_none());
+        segment.template_mark = Some(TemplateMark::Slot {
+            takes: crate::SlotTakes::Photo,
+        });
+        let stored = serde_json::to_value(&segment).unwrap();
+        assert_eq!(stored["cutlass_template"]["role"], "slot");
+        assert_eq!(stored["cutlass_template"]["takes"], "photo");
+        let read: Segment = serde_json::from_value(stored).unwrap();
+        assert_eq!(read.template_mark, segment.template_mark);
+        assert!(read.rest.get("cutlass_template").is_none());
     }
 
     #[test]

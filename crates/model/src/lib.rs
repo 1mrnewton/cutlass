@@ -27,6 +27,7 @@ mod relationship;
 mod segment;
 mod serde_util;
 mod shape_keys;
+mod template_mark;
 mod text_keys;
 mod time;
 mod track;
@@ -84,6 +85,7 @@ pub use shape_keys::{
     MAX_SHAPE_SHADOW_DISTANCE, MAX_SHAPE_SIZE, MAX_SHAPE_STROKE, SHAPE_STYLE_KEYS, ShapeStyleKey,
     shape_style_at,
 };
+pub use template_mark::{SlotTakes, TemplateMark};
 pub use text_keys::{
     GLOW_RANGE_KEYS, GLOW_STRENGTH_KEYS, TEXT_STYLE_KEYS, TextStyleKey, glow_at, glow_keyed,
     text_style_at,

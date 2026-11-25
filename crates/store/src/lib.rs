@@ -47,8 +47,9 @@ pub use relight::{RelightKey, find_relight, relight_file};
 pub use repair::{RepairNote, repair};
 pub use stable::{StableKey, load_camera_path, save_camera_path};
 pub use templates::{
-    ListedTemplate, TEMPLATE_FILE, TEMPLATE_FORMAT_VERSION, TemplateInfo, delete_template,
-    list_templates, listed_template, save_as_template, use_template,
+    ListedTemplate, TEMPLATE_FILE, TEMPLATE_FORMAT_VERSION, TemplateInfo, TemplateInside,
+    delete_template, list_templates, listed_template, save_as_template, template_inside,
+    use_template,
 };
 pub use upgrade::{BUILD, Protocol, upgrade};
 

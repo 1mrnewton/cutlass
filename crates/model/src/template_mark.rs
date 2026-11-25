@@ -6,12 +6,16 @@
 //! the one sound they may swap. Everything else stays as the author made
 //! it. The mark is the app's own: the reference editor does not read it.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::draft::Draft;
-use crate::id::SegmentId;
-use crate::materials::MaterialRef;
-use crate::time::Micros;
+use crate::id::{MaterialId, SegmentId};
+use crate::materials::{MaterialDraft, MaterialRef};
+use crate::segment::Segment;
+use crate::time::{Micros, TimeRange};
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(value: &bool) -> bool {
@@ -135,7 +139,7 @@ pub fn template_music(draft: &Draft) -> Option<SegmentId> {
 pub fn template_clip<'a>(
     draft: &'a Draft,
     segment_id: &SegmentId,
-) -> Option<(&'a crate::MaterialDraft, &'a Draft)> {
+) -> Option<(&'a MaterialDraft, &'a Draft)> {
     let segment = draft
         .tracks
         .iter()
@@ -148,6 +152,132 @@ pub fn template_clip<'a>(
         return None;
     }
     Some((material, material.draft.as_deref()?))
+}
+
+/// How long `draft` plays: the end of its last clip.
+#[must_use]
+pub fn template_length(draft: &Draft) -> Micros {
+    Micros(
+        draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .map(|segment| {
+                segment
+                    .target
+                    .start
+                    .0
+                    .saturating_add(segment.target.duration.0)
+            })
+            .max()
+            .unwrap_or_default(),
+    )
+}
+
+/// The material a template clip plays: `inside` as one closed piece named
+/// `name`. The inside keeps its clips' gaps, like any nested draft.
+///
+/// The inside takes `id` as its own id, and every clip and material in it
+/// has its id put under `id`, as `id.old`. A template comes from another
+/// project, so its ids could otherwise be ones this project already uses,
+/// and sound and pictures are looked up by clip id.
+#[must_use]
+pub fn template_material(id: MaterialId, name: &str, inside: Draft) -> MaterialDraft {
+    let mut inside = under(inside, id.as_str());
+    inside.id = id.as_str().into();
+    inside.config.maintrack_adsorb = false;
+    inside.duration = template_length(&inside);
+    MaterialDraft {
+        id,
+        name: name.to_owned(),
+        combination_type: "compound".to_owned(),
+        draft: Some(Box::new(inside)),
+        template: true,
+        ..MaterialDraft::default()
+    }
+}
+
+/// `draft` with every clip and material id, at any depth, renamed to
+/// `prefix.id`, and every mention of one renamed with it. The draft comes
+/// back as it was if it cannot be read as JSON and back.
+fn under(draft: Draft, prefix: &str) -> Draft {
+    fn take(item: &Value, ids: &mut BTreeSet<String>) {
+        if let Some(id) = item.get("id").and_then(Value::as_str)
+            && !id.is_empty()
+        {
+            ids.insert(id.to_owned());
+        }
+    }
+    fn list(value: Option<&Value>) -> impl Iterator<Item = &Value> {
+        value.and_then(Value::as_array).into_iter().flatten()
+    }
+    fn collect(draft: &Value, ids: &mut BTreeSet<String>) {
+        for track in list(draft.get("tracks")) {
+            for segment in list(track.get("segments")) {
+                take(segment, ids);
+            }
+        }
+        let pools = draft.get("materials").and_then(Value::as_object);
+        for pool in pools.into_iter().flat_map(|pools| pools.values()) {
+            for item in list(Some(pool)) {
+                take(item, ids);
+                if let Some(child) = item.get("draft").filter(|child| child.is_object()) {
+                    collect(child, ids);
+                }
+            }
+        }
+    }
+    fn rename(value: &mut Value, ids: &BTreeSet<String>, prefix: &str) {
+        match value {
+            Value::String(text) if ids.contains(text.as_str()) => {
+                *text = format!("{prefix}.{text}");
+            }
+            Value::Array(items) => {
+                for item in items {
+                    rename(item, ids, prefix);
+                }
+            }
+            Value::Object(map) => {
+                for (key, item) in map.iter_mut() {
+                    // What a thing is, never which one: an id that reads
+                    // like a kind must not rename the kind.
+                    if !(matches!(key.as_str(), "type" | "role") && item.is_string()) {
+                        rename(item, ids, prefix);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let Ok(mut value) = serde_json::to_value(&draft) else {
+        return draft;
+    };
+    let mut ids = BTreeSet::new();
+    collect(&value, &mut ids);
+    rename(&mut value, &ids, prefix);
+    serde_json::from_value(value).unwrap_or(draft)
+}
+
+/// The clip that plays the whole of the template `material` from `start`.
+/// `None` when the template plays nothing.
+#[must_use]
+pub fn template_segment(id: SegmentId, material: &MaterialDraft, start: Micros) -> Option<Segment> {
+    let length = template_length(material.draft.as_deref()?);
+    if length.0 <= 0 {
+        return None;
+    }
+    let mut segment = Segment::new(id, material.id.clone(), TimeRange::new(start.0, length.0));
+    segment.source_range = Some(TimeRange::new(0, length.0));
+    Some(segment)
+}
+
+/// How many slots of `draft` still hold their sample.
+#[must_use]
+pub fn template_unfilled(draft: &Draft) -> usize {
+    template_slots(draft)
+        .iter()
+        .filter(|slot| !slot.filled)
+        .count()
 }
 
 fn marked(draft: &Draft, mark: TemplateMark) -> Vec<SegmentId> {
@@ -178,7 +308,10 @@ impl TemplateMark {
 mod tests {
     use serde_json::json;
 
-    use super::{SlotTakes, TemplateMark, template_music, template_slots, template_texts};
+    use super::{
+        SlotTakes, TemplateMark, template_clip, template_material, template_music,
+        template_segment, template_slots, template_texts, template_unfilled,
+    };
     use crate::{Draft, MaterialVideo, MetaType, Segment, TimeRange, Track};
 
     fn slot(id: &str, material: &str, start: i64) -> Segment {
@@ -271,5 +404,37 @@ mod tests {
         assert!(SlotTakes::Either.accepts(true) && SlotTakes::Either.accepts(false));
         assert!(SlotTakes::Video.accepts(false) && !SlotTakes::Video.accepts(true));
         assert!(SlotTakes::Photo.accepts(true) && !SlotTakes::Photo.accepts(false));
+    }
+
+    #[test]
+    fn a_template_clip_plays_the_whole_inside_as_one_closed_piece() {
+        let mut inside = Draft::empty("in");
+        let mut video = MaterialVideo::new("v");
+        video.kind = MetaType::Video.as_str().to_owned();
+        inside.materials.videos.push(video);
+        // An id that reads like a mark's role leaves the role alone.
+        let mut filled = slot("slot", "v", 0);
+        filled.template_mark = Some(TemplateMark::Slot {
+            takes: SlotTakes::Either,
+            filled: true,
+        });
+        inside.tracks[0]
+            .segments
+            .extend([filled, slot("b", "v", 3_000_000)]);
+        let material = template_material("tpl".into(), "Trip", inside);
+        assert!(material.template);
+        let segment = template_segment("clip".into(), &material, crate::Micros(1_000_000)).unwrap();
+        assert_eq!(segment.target, TimeRange::new(1_000_000, 5_000_000));
+        assert_eq!(segment.source_range, Some(TimeRange::new(0, 5_000_000)));
+        let mut draft = Draft::empty("D");
+        draft.materials.drafts.push(material);
+        draft.tracks[0].segments.push(segment);
+        let (found, inside) = template_clip(&draft, &"clip".into()).unwrap();
+        assert_eq!(found.name, "Trip");
+        assert_eq!(template_unfilled(inside), 1);
+        // The project's own slots are not the template's.
+        assert!(template_slots(&draft).is_empty());
+        let empty = template_material("none".into(), "Empty", Draft::empty("e"));
+        assert!(template_segment("x".into(), &empty, crate::Micros(0)).is_none());
     }
 }

@@ -5,14 +5,17 @@
 //! names it and files it under a category. The slots, editable texts and
 //! music are the marks on the draft's clips, so nothing else has to agree
 //! with the timeline. The sample media stays in the folder, so a template
-//! previews exactly as it was made. Using one copies it into a new
-//! project; the template itself is never changed.
+//! previews exactly as it was made. Using one puts it in a project as a
+//! single closed clip, with its files copied into the project; the
+//! template itself is never changed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cutlass_model::{Micros, template_slots};
+use cutlass_model::{
+    Draft, MaterialId, Micros, SegmentId, template_material, template_segment, template_slots,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -141,24 +144,110 @@ pub fn list_templates(root: &Path) -> Vec<ListedTemplate> {
     templates
 }
 
+/// A template read for a project: what its clip plays.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TemplateInside {
+    pub name: String,
+    /// The template's draft, with every file it plays pointing into the
+    /// project's `Resources`.
+    pub draft: Draft,
+    /// The files copied into the project, so a caller that does not place
+    /// the template after all can take them back out.
+    pub copied: Vec<PathBuf>,
+}
+
+/// Read the template at `template` for the project at `project`: copy the
+/// files it plays into the project's `Resources` and return its draft
+/// pointing at the copies. The template itself is never changed. On any
+/// failure the copies made so far are removed.
+pub fn template_inside(template: &Path, project: &Path) -> Result<TemplateInside, StoreError> {
+    let info = read_info(template)?;
+    let mut draft = Folder::read(template)?.draft;
+    let resources = project.join(crate::folder::RESOURCES_DIR);
+    let mut copied: Vec<PathBuf> = Vec::new();
+    let carried = (|| {
+        let mut carried: Vec<(String, String)> = Vec::new();
+        let paths = draft
+            .materials
+            .videos
+            .iter_mut()
+            .map(|video| &mut video.path)
+            .chain(
+                draft
+                    .materials
+                    .audios
+                    .iter_mut()
+                    .map(|audio| &mut audio.path),
+            );
+        for path in paths {
+            if path.is_empty() || Path::new(path.as_str()).is_absolute() {
+                continue;
+            }
+            if let Some((_, stored)) = carried.iter().find(|(from, _)| from == path) {
+                path.clone_from(stored);
+                continue;
+            }
+            let source = template.join(path.as_str());
+            let Some(file_name) = source.file_name().filter(|_| source.is_file()) else {
+                return Err(StoreError::MissingMedia { path: source });
+            };
+            fs::create_dir_all(&resources).map_err(|error| io(&resources, &error))?;
+            let copy = free_file(&resources, &file_name.to_string_lossy());
+            fs::copy(&source, &copy).map_err(|error| io(&copy, &error))?;
+            let stored = copy.file_name().map_or_else(String::new, |name| {
+                format!(
+                    "{}/{}",
+                    crate::folder::RESOURCES_DIR,
+                    name.to_string_lossy()
+                )
+            });
+            copied.push(copy);
+            carried.push((path.clone(), stored.clone()));
+            *path = stored;
+        }
+        Ok(())
+    })();
+    if let Err(error) = carried {
+        for file in copied {
+            let _ = fs::remove_file(file);
+        }
+        return Err(error);
+    }
+    Ok(TemplateInside {
+        name: info.name,
+        draft,
+        copied,
+    })
+}
+
 /// Start a new project under `projects` from the template at `template`,
-/// and return its folder. The project is a copy, named after the
-/// template, with its marks kept so its slots can be filled; the template
-/// file stays behind.
+/// and return its folder. The project is named after the template, takes
+/// its canvas and frame rate, and holds one thing: the template as a
+/// single closed clip at the start of the main row.
 pub fn use_template(template: &Path, projects: &Path) -> Result<PathBuf, StoreError> {
     let info = read_info(template)?;
     fs::create_dir_all(projects).map_err(|error| io(projects, &error))?;
     let target = free_folder(projects, &info.name)?;
     let made = (|| {
-        copy_tree(template, &target)?;
-        let info_file = target.join(TEMPLATE_FILE);
-        fs::remove_file(&info_file).map_err(|error| io(&info_file, &error))?;
-        let mut copied = Folder::read(&target)?;
-        copied.draft.name.clone_from(&info.name);
+        fs::create_dir_all(&target).map_err(|error| io(&target, &error))?;
+        let inside = template_inside(template, &target)?;
         let now = unix_millis();
-        copied.draft.create_time = now;
-        copied.draft.update_time = now;
-        copied.save(&target)
+        let mut draft = Draft::empty(format!("project-{now}"));
+        draft.name.clone_from(&info.name);
+        draft.create_time = now;
+        draft.update_time = now;
+        draft.fps = inside.draft.fps;
+        draft.canvas_config = inside.draft.canvas_config.clone();
+        let material = template_material(MaterialId::new("template-1"), &info.name, inside.draft);
+        let segment = template_segment(SegmentId::new("template-clip-1"), &material, Micros(0))
+            .ok_or(StoreError::NoSlots)?;
+        draft.duration = segment.target.duration;
+        draft.materials.drafts.push(material);
+        let row = draft.tracks.first_mut().ok_or(StoreError::NoSlots)?;
+        row.segments.push(segment);
+        let mut folder = Folder::new(draft);
+        folder.set_linkage_enabled(true);
+        folder.save(&target)
     })();
     if let Err(error) = made {
         let _ = fs::remove_dir_all(&target);
@@ -313,11 +402,12 @@ mod tests {
 
     use cutlass_model::{
         Draft, MaterialVideo, MetaType, Micros, Segment, SlotTakes, TemplateMark, TimeRange,
+        template_clip, template_slots,
     };
 
     use super::{
         TEMPLATE_FILE, delete_template, list_templates, listed_template, save_as_template,
-        use_template,
+        template_inside, use_template,
     };
     use crate::{Folder, StoreError};
 
@@ -454,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn using_a_template_makes_a_new_project_and_leaves_the_template() {
+    fn using_a_template_makes_a_project_with_one_closed_template_clip() {
         let temp = Temp::new();
         let project = project(&temp.path, true, None);
         let root = temp.path.join("Templates");
@@ -467,10 +557,46 @@ mod tests {
             assert!(!made.join(TEMPLATE_FILE).exists());
             let draft = Folder::read(made).unwrap().draft;
             assert_eq!(draft.name, "Beach day");
-            assert!(draft.tracks[0].segments[0].template_mark.is_some());
+            let clips: Vec<_> = draft.tracks.iter().flat_map(|t| &t.segments).collect();
+            assert_eq!(clips.len(), 1, "only the template clip");
+            assert_eq!(clips[0].target, TimeRange::new(0, 2_000_000));
+            assert!(draft.materials.videos.is_empty());
+            let (material, inside) = template_clip(&draft, &clips[0].id).unwrap();
+            assert!(material.template);
+            assert_eq!(template_slots(inside).len(), 1);
+            assert_eq!(inside.materials.videos[0].path, "Resources/beach.mp4");
             assert!(made.join("Resources").join("beach.mp4").is_file());
         }
         assert!(listed_template(&template).is_some());
+    }
+
+    #[test]
+    fn a_template_read_for_a_project_copies_its_files_beside_what_is_there() {
+        let temp = Temp::new();
+        let project = project(&temp.path, true, None);
+        let root = temp.path.join("Templates");
+        let template = save_as_template(&project, &root, "Beach day", "").unwrap();
+        // The project already has a file of that name: the copy sits beside it.
+        let inside = template_inside(&template, &project).unwrap();
+        assert_eq!(inside.name, "Beach day");
+        assert_eq!(
+            inside.draft.materials.videos[0].path,
+            "Resources/beach 2.mp4"
+        );
+        assert_eq!(
+            inside.copied,
+            [project.join("Resources").join("beach 2.mp4")]
+        );
+        assert!(inside.copied[0].is_file());
+        // A template whose file is gone is refused and leaves nothing.
+        fs::remove_file(template.join("Resources").join("beach.mp4")).unwrap();
+        let other = temp.path.join("Other");
+        fs::create_dir_all(&other).unwrap();
+        assert!(matches!(
+            template_inside(&template, &other),
+            Err(StoreError::MissingMedia { .. })
+        ));
+        assert!(!other.join("Resources").join("beach.mp4").exists());
     }
 
     #[test]

@@ -10,7 +10,7 @@
 use std::fmt;
 
 use cutlass_model::{
-    Draft, MaterialAudio, MaterialRef, MaterialVideo, MetaType, Micros, SegmentId, TemplateMark,
+    Draft, MaterialAudio, MaterialRef, MaterialVideo, Micros, SegmentId, TemplateMark,
     template_slots,
 };
 use cutlass_session::{ImportedMedium, Request};
@@ -81,7 +81,7 @@ pub fn fits_slot(
         .ok_or_else(|| FillError::NotMarked {
             segment_id: segment_id.clone(),
         })?;
-    let photo = material.kind == MetaType::Photo.as_str();
+    let photo = material.is_still();
     if !slot.takes.accepts(photo) {
         return Err(FillError::Takes {
             segment_id: segment_id.clone(),
@@ -339,6 +339,9 @@ mod tests {
                 segment_id: SegmentId::new("two")
             })
         );
+        // A PNG still reads as an image and fills a photo-only slot.
+        let png = video("png", MetaType::Image, (16, 16), 3_000_000);
+        assert_eq!(fits_slot(&draft, &SegmentId::new("two"), &png), Ok(()));
         // A photo is always long enough.
         let photo = video("p", MetaType::Photo, (100, 100), 0);
         assert_eq!(fits_slot(&draft, &SegmentId::new("one"), &photo), Ok(()));

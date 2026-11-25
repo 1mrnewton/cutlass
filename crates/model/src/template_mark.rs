@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use crate::draft::Draft;
 use crate::id::SegmentId;
 use crate::materials::MaterialRef;
-use crate::meta::MetaType;
 use crate::time::Micros;
 
 /// What a slot takes.
@@ -98,7 +97,7 @@ pub fn template_slots(draft: &Draft) -> Vec<TemplateSlot> {
                     start: segment.target.start,
                     length: segment.target.duration,
                     needs,
-                    sample_is_photo: video.kind == MetaType::Photo.as_str(),
+                    sample_is_photo: video.is_still(),
                 },
             ));
         }

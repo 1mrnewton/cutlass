@@ -1,7 +1,7 @@
 //! Replace a clip's media and keep its edits: its place on the timeline,
 //! speed, look, keys and effects stay; only the file it plays changes.
 
-use cutlass_model::{Draft, MaterialId, MaterialRef, MetaType, Micros, SegmentId, TimeRange};
+use cutlass_model::{Draft, MaterialId, MaterialRef, Micros, SegmentId, TimeRange};
 
 use super::locate;
 use super::{EditError, ensure_unlocked};
@@ -9,7 +9,7 @@ use super::{EditError, ensure_unlocked};
 /// What a material plays, and for how long; `None` for a still.
 fn medium(draft: &Draft, material_id: &MaterialId) -> Option<(bool, Option<Micros>)> {
     match draft.materials.get(material_id.as_str())? {
-        MaterialRef::Video(video) if video.kind == MetaType::Photo.as_str() => Some((true, None)),
+        MaterialRef::Video(video) if video.is_still() => Some((true, None)),
         MaterialRef::Video(video) => Some((true, Some(video.duration))),
         MaterialRef::Audio(audio) => Some((false, Some(audio.duration))),
         _ => None,
@@ -174,6 +174,18 @@ mod tests {
             "old"
         );
         assert!(session.draft().materials.videos.len() == 1);
+    }
+
+    #[test]
+    fn an_image_still_is_as_long_as_it_needs_to_be() {
+        let mut session = session();
+        // A PNG reads as an image, with the short mapping length stored.
+        session
+            .apply(0, &[video("png", "image", 3_000_000), replace("png")])
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert_eq!(segment.material_id.as_str(), "png");
+        assert_eq!(segment.source_range, Some(TimeRange::new(0, 2_000_000)));
     }
 
     #[test]

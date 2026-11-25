@@ -1,7 +1,7 @@
 //! A clip's mark in a project template: a slot, editable text, or the
 //! music the user may swap.
 
-use cutlass_model::{Draft, MaterialRef, MetaType, SegmentId, TemplateMark};
+use cutlass_model::{Draft, MaterialRef, SegmentId, TemplateMark};
 
 use super::{EditError, ensure_unlocked, locate};
 
@@ -23,7 +23,7 @@ pub fn set_template_mark(
     let fits = match (mark, material) {
         (None, _) => true,
         (Some(TemplateMark::Slot { takes }), Some(MaterialRef::Video(video))) => {
-            takes.accepts(video.kind == MetaType::Photo.as_str())
+            takes.accepts(video.is_still())
         }
         (Some(TemplateMark::Text), Some(MaterialRef::Text(_)))
         | (Some(TemplateMark::Music), Some(MaterialRef::Audio(_))) => true,

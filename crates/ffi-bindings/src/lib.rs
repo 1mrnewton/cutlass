@@ -1470,6 +1470,91 @@ pub fn delete_project(root: String, project: String) -> Result<(), EditorError> 
     cutlass_ffi::delete_project(&project).map_err(|error| EditorError::from(FfiError::from(error)))
 }
 
+/// One project template in the gallery. `modified_ms` is milliseconds
+/// since 1970.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct TemplateSummary {
+    pub path: String,
+    pub name: String,
+    pub category: String,
+    pub duration_us: i64,
+    /// How many photos or videos it takes.
+    pub slots: u32,
+    pub width: i32,
+    pub height: i32,
+    pub modified_ms: i64,
+}
+
+/// The templates the user saved in the Cutlass folder at `root`, newest
+/// first. A missing root lists nothing.
+#[uniffi::export]
+#[must_use]
+pub fn list_templates(root: String) -> Vec<TemplateSummary> {
+    let Ok(home) = Home::at(root) else {
+        return Vec::new();
+    };
+    cutlass_ffi::list_templates(&home.templates())
+        .into_iter()
+        .map(|template| TemplateSummary {
+            path: template.path.display().to_string(),
+            name: template.name,
+            category: template.category,
+            duration_us: template.duration.0,
+            slots: u32::try_from(template.slots).unwrap_or(u32::MAX),
+            width: template.width,
+            height: template.height,
+            modified_ms: millis(template.modified),
+        })
+        .collect()
+}
+
+/// Save project `project` in the Cutlass folder at `root` as a template
+/// named `name` under `category`, and return the template's folder. A
+/// project with no clip marked as a slot is refused.
+#[uniffi::export]
+pub fn save_as_template(
+    root: String,
+    project: String,
+    name: String,
+    category: String,
+) -> Result<String, EditorError> {
+    let home = open_home(&root)?;
+    let project = PathBuf::from(project);
+    project_in(&home, &project)?;
+    cutlass_ffi::save_as_template(&project, &home.templates(), &name, &category)
+        .map(|path| path.display().to_string())
+        .map_err(|error| EditorError::from(FfiError::from(error)))
+}
+
+/// Start a new project from template `template` in the Cutlass folder at
+/// `root`, and return the new project's folder. The template is not changed.
+#[uniffi::export]
+pub fn use_template(root: String, template: String) -> Result<String, EditorError> {
+    let home = open_home(&root)?;
+    let template = PathBuf::from(template);
+    inside(&home.templates(), &template, "template")?;
+    cutlass_ffi::use_template(&template, &home.projects())
+        .map(|path| path.display().to_string())
+        .map_err(|error| EditorError::from(FfiError::from(error)))
+}
+
+/// Delete template `template` in the Cutlass folder at `root`. A folder
+/// that holds no template is refused.
+#[uniffi::export]
+pub fn delete_template(root: String, template: String) -> Result<(), EditorError> {
+    let home = open_home(&root)?;
+    let template = PathBuf::from(template);
+    inside(&home.templates(), &template, "template")?;
+    cutlass_ffi::delete_template(&template)
+        .map_err(|error| EditorError::from(FfiError::from(error)))
+}
+
+fn millis(time: std::time::SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |since| {
+        i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+    })
+}
+
 /// One line on the About page: a sticker set or a crate the app is built
 /// from.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -1524,7 +1609,12 @@ fn open_home(root: &str) -> Result<Home, EditorError> {
 /// A project folder must sit directly in the root's projects folder,
 /// named plainly: no `.` or `..` in the path.
 fn project_in(home: &Home, project: &Path) -> Result<(), EditorError> {
-    let plain = project.components().all(|part| {
+    inside(&home.projects(), project, "project")
+}
+
+/// `path` must sit directly in `folder`, named plainly: no `.` or `..`.
+fn inside(folder: &Path, path: &Path, what: &str) -> Result<(), EditorError> {
+    let plain = path.components().all(|part| {
         matches!(
             part,
             std::path::Component::Normal(_)
@@ -1532,14 +1622,11 @@ fn project_in(home: &Home, project: &Path) -> Result<(), EditorError> {
                 | std::path::Component::Prefix(_)
         )
     });
-    if plain && project.parent() == Some(home.projects().as_path()) {
+    if plain && path.parent() == Some(folder) {
         Ok(())
     } else {
         Err(EditorError::Failed {
-            message: format!(
-                "{} is not a project in the Cutlass folder",
-                project.display()
-            ),
+            message: format!("{} is not a {what} in the Cutlass folder", path.display()),
         })
     }
 }
@@ -2786,8 +2873,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use super::{
-        Editor, LaneKind, create_project, delete_project, duplicate_project, list_projects,
-        rename_project, start,
+        Editor, LaneKind, create_project, delete_project, delete_template, duplicate_project,
+        list_projects, list_templates, rename_project, save_as_template, start, use_template,
     };
 
     struct Temp(PathBuf);
@@ -3298,6 +3385,46 @@ mod tests {
             );
         }
         assert!(temp.0.join("Cutlass/Projects").is_dir());
+    }
+
+    #[test]
+    fn a_project_without_slots_is_not_saved_as_a_template() {
+        let temp = Temp::new();
+        let root = temp.root();
+        assert!(list_templates(root.clone()).is_empty());
+        let made = create_project(root.clone()).unwrap();
+        let Err(error) = save_as_template(root.clone(), made, "Trip".to_owned(), String::new())
+        else {
+            panic!("a project with no slot was saved");
+        };
+        assert!(error.to_string().contains("slot"), "{error}");
+        assert!(list_templates(root).is_empty());
+        assert!(!temp.0.join("Cutlass/Templates/Trip").exists());
+    }
+
+    #[test]
+    fn a_template_outside_the_templates_folder_is_refused() {
+        let temp = Temp::new();
+        let root = temp.root();
+        let project = create_project(root.clone()).unwrap();
+        let templates = format!("{root}/Templates");
+        for outside in [
+            project.clone(),
+            root.clone(),
+            format!("{templates}/.."),
+            format!("{templates}/./x"),
+        ] {
+            assert!(
+                use_template(root.clone(), outside.clone()).is_err(),
+                "{outside}"
+            );
+            assert!(
+                delete_template(root.clone(), outside.clone()).is_err(),
+                "{outside}"
+            );
+        }
+        assert!(std::path::Path::new(&project).is_dir());
+        assert_eq!(list_projects(root).len(), 1);
     }
 
     #[test]

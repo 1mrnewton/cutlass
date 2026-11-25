@@ -56,7 +56,9 @@ pub use cutlass_probe::{ProbeError, Probed};
 pub use cutlass_session::{Micros, SegmentId, TrackId};
 pub use cutlass_storage::Home;
 pub use cutlass_store::{
-    ListedProject, create_project, delete_project, duplicate_project, list_projects, rename_project,
+    ListedProject, ListedTemplate, create_project, delete_project, delete_template,
+    duplicate_project, list_projects, list_templates, rename_project, save_as_template,
+    use_template,
 };
 pub use effect::{NEW_EFFECT_LENGTH, PhoneEffect, phone_effects};
 pub use error::FfiError;

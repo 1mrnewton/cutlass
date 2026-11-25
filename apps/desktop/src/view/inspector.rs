@@ -50,7 +50,7 @@ pub(super) struct InspectorState {
     /// Typed text in a number or word field while it has focus.
     pub(super) fields: HashMap<String, String>,
     /// A slider or color being dragged; it is sent when the pointer lets go.
-    live: HashMap<String, f64>,
+    pub(super) live: HashMap<String, f64>,
     colors: HashMap<String, Color32>,
     /// A tab, page, and section a menu row asked for, opened on the next
     /// frame the panel draws.
@@ -139,6 +139,9 @@ pub(super) fn clip_tabs(shell: &Shell, ui: &mut Ui, view: &mut ViewState, inspec
                 "color-match",
                 "lut",
                 "adjust",
+                "template-clips",
+                "template-volume",
+                "template-text",
             ]
             .into_iter()
             .chain(matches!(panel, Panel::Text | Panel::Caption).then_some("blend"))
@@ -157,8 +160,15 @@ pub(super) fn clip_tabs(shell: &Shell, ui: &mut Ui, view: &mut ViewState, inspec
         }
     }
     let tab = state.tab;
+    // A template is one closed clip with a panel of its own.
+    let labels: &[&str] = if shell.selected_template().is_some() {
+        state.tab = 0;
+        &["Template"]
+    } else {
+        tab_labels(panel)
+    };
     ui.add_enabled_ui(!inspection.locked, |ui| {
-        tabs(ui, tab_labels(panel), &mut state.tab);
+        tabs(ui, labels, &mut state.tab);
     });
     if tab != state.tab {
         state.page = 0;
@@ -176,6 +186,12 @@ pub(super) fn clip_panel(
     let state = &mut view.inspector;
     if inspection.locked {
         note(ui, "This clip's row is locked.");
+    }
+    if let Some(template) = shell.selected_template() {
+        ui.add_enabled_ui(!inspection.locked, |ui| {
+            super::template::template_panel(shell, ui, state, inspection, &template);
+        });
+        return;
     }
     ui.add_enabled_ui(!inspection.locked, |ui| match panel {
         Panel::Main { still } | Panel::Overlay { still } => {

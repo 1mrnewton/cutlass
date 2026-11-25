@@ -1527,7 +1527,9 @@ pub fn save_as_template(
 }
 
 /// Start a new project from template `template` in the Cutlass folder at
-/// `root`, and return the new project's folder. The template is not changed.
+/// `root`, and return the new project's folder. The project holds one
+/// thing: the template as a single closed clip, which is never opened or
+/// ungrouped. The template is not changed.
 #[uniffi::export]
 pub fn use_template(root: String, template: String) -> Result<String, EditorError> {
     let home = open_home(&root)?;

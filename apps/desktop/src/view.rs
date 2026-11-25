@@ -124,7 +124,9 @@ impl Shelf {
             Self::Transitions => "No transitions in this project.",
             Self::Filters => "No filters in this project.",
             Self::Adjustments => "No adjustments in this project.",
-            Self::Templates => "No templates in this project.",
+            Self::Templates => {
+                "No templates yet. Mark clips as slots, then File › Save as template."
+            }
         }
     }
 }
@@ -512,12 +514,11 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
             let root = projects_root(view);
             template::save_sheet(shell, ui, &mut view.template, &root);
         }
-        if view.template.fill.is_some() {
-            match template::fill_sheet(shell, ui, &mut view.template) {
-                template::FillAsk::Nothing => {}
-                template::FillAsk::Slot(index) => view.dialogs.template_media(parent, Some(index)),
-                template::FillAsk::Music => view.dialogs.template_media(parent, None),
-            }
+        if let Some(ask) = shell.take_template_ask() {
+            // A file for a template clip: a slot's media, or its music.
+            let slot = ask.slot.is_some().then_some(0);
+            view.template.pending = Some(ask);
+            view.dialogs.template_media(parent, slot);
         }
         job_strip(shell, ui, full);
         shortcuts(shell, ui, view);
@@ -2827,6 +2828,25 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                 };
                 bin_cards(draft, &place, shelf, &query)
             }));
+            if shelf == Shelf::Templates && shell.draft().is_some() {
+                let root = projects_root(view);
+                let wanted = query.trim().to_lowercase();
+                cards.extend(
+                    view.template
+                        .listed(&root)
+                        .iter()
+                        .filter(|listed| {
+                            wanted.is_empty() || listed.name.to_lowercase().contains(&wanted)
+                        })
+                        .map(|listed| BinCard {
+                            id: crate::shell::template_card_id(&listed.path),
+                            name: listed.name.clone(),
+                            meta: template::template_meta(listed),
+                            on_timeline: false,
+                            look: CardLook::Swatch,
+                        }),
+                );
+            }
             if shelf == Shelf::Stickers && group == SHAPES {
                 cards = shape_cards(&query);
             }
@@ -3963,26 +3983,11 @@ fn bin_cards(
                 });
             }
         }
-        Shelf::Templates => {
-            for template in cutlass_editor::TITLE_TEMPLATES {
-                if !query.is_empty() && !template.name.to_lowercase().contains(&query) {
-                    continue;
-                }
-                cards.push(template_card(template));
-            }
-        }
+        // The user's saved templates are files outside the draft; the
+        // shelf adds them itself.
+        Shelf::Templates => {}
     }
     cards
-}
-
-fn template_card(template: &cutlass_editor::TitleTemplate) -> BinCard {
-    BinCard {
-        id: template.card_id(),
-        name: template.name.to_owned(),
-        meta: template.meta.to_owned(),
-        on_timeline: false,
-        look: CardLook::Title(Color32::from_hex(template.color()).unwrap_or(Color32::WHITE)),
-    }
 }
 
 fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
@@ -8880,6 +8885,9 @@ fn paint_clip(
         if lane.main {
             chips.push(shell.timecode_at(duration));
         }
+        if let Some(badge) = shell.template_badge(&clip.id) {
+            chips.push(badge);
+        }
         let chip = if audio {
             tokens::CLIP_AUDIO_CHIP
         } else {
@@ -8983,6 +8991,9 @@ fn paint_clip(
                 }
                 return;
             }
+            // A template is closed: a double-click shows its clips to
+            // replace again, and never opens it.
+            shell.show_template_strip();
         }
         if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(pos) = pointer_pos(ui, &response)
@@ -9056,6 +9067,12 @@ fn paint_clip(
     paint_clip_beats(shell, ui, clip, lanes_left, row);
     if shell.is_selected(&clip.id) {
         paint_clip_keys(shell, ui, clip, clip_rect, row);
+    }
+    if !ghost
+        && shell.template_strip_shown(&clip.id)
+        && let Some(template) = shell.template_clip(&clip.id)
+    {
+        template::slot_strip(shell, ui, &template, visible);
     }
 }
 
@@ -10460,10 +10477,8 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
             }
             Ok(())
         }
-        Picker::TemplateMedia(index) => {
-            if let Some(sheet) = view.template.fill.as_mut() {
-                sheet.picked(index, path);
-            }
+        Picker::TemplateMedia(_) => {
+            template::picked(shell, &mut view.template, &path);
             Ok(())
         }
         Picker::SaveLog => Shell::export_log(&path).map(|()| {

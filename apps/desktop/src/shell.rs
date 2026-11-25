@@ -68,6 +68,7 @@ pub use offscreen::{LeftOut, OpenRenderer};
 mod proxy;
 pub use proxy::ProxyState;
 mod transition;
+pub use template::{SlotView, TemplateAsk, TemplateClip, TemplateText, template_card_id};
 pub use transition::TransitionDrop;
 mod matting;
 mod reframe;
@@ -818,6 +819,10 @@ pub struct Shell {
     session: Option<Session>,
     /// The levels above an open compound clip, the project first.
     outer: Vec<compound::Outer>,
+    /// The template clip whose slot strip the person hid.
+    template_strip_hidden: Option<SegmentId>,
+    /// A file the window should ask for, for a template clip.
+    template_ask: Option<TemplateAsk>,
     folder: Option<Folder>,
     /// Library folder edits made, and how many the folder on disk holds.
     /// They are not undo steps, so they count apart from the session.
@@ -1030,6 +1035,8 @@ impl Shell {
             waiting_imports: std::collections::VecDeque::new(),
             session: None,
             outer: Vec::new(),
+            template_strip_hidden: None,
+            template_ask: None,
             folder: None,
             library_edits: 0,
             library_saved: 0,
@@ -1246,6 +1253,22 @@ impl Shell {
         let path = self.media_file(Some(&video.path))?;
         let key = ThumbKey {
             path,
+            time: Micros(0),
+        };
+        let thumb = thumbnails.get(&key);
+        if thumb.is_none() {
+            self.film_asks.push(key.clone());
+        }
+        Some((key, thumb))
+    }
+
+    /// The poster of the media file at `path`: a thumbnail of its first
+    /// frame, with the key it is stored under. Asked for when the frame
+    /// ends while missing.
+    pub fn file_poster(&mut self, path: &Path) -> Option<(ThumbKey, Option<Arc<Thumb>>)> {
+        let thumbnails = self.thumbnails.as_ref()?;
+        let key = ThumbKey {
+            path: path.to_path_buf(),
             time: Micros(0),
         };
         let thumb = thumbnails.get(&key);
@@ -3705,9 +3728,7 @@ impl Shell {
             } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
                 (TrackType::Text, TITLE_LENGTH)
             } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
-                let length = cutlass_editor::title_template(material_id)
-                    .map_or(TITLE_LENGTH, cutlass_editor::TitleTemplate::length);
-                (TrackType::Text, length)
+                (TrackType::Video, template::card_length(material_id)?)
             } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
                 (TrackType::Adjust, EFFECT_LENGTH)
             } else if material_id.starts_with(cutlass_editor::FILTER_CARD_PREFIX) {
@@ -3823,8 +3844,9 @@ impl Shell {
             self.place_sticker(sticker, duration, Some(track_id), start)
         } else if material_id.starts_with(cutlass_editor::SHAPE_CARD_PREFIX) {
             self.place_shape(material_id, track_id, start)
-        } else if material_id.starts_with(cutlass_editor::TEMPLATE_CARD_PREFIX) {
-            self.place_template(material_id, track_id, start)
+        } else if let Some(folder) = material_id.strip_prefix(cutlass_editor::TEMPLATE_CARD_PREFIX)
+        {
+            self.place_template(Path::new(folder), track_id, start, None)
         } else {
             let first_clip = self
                 .session_draft()?
@@ -4037,79 +4059,6 @@ impl Shell {
             face: self.face.name().to_owned(),
         };
         self.apply_requests(&title_requests(style, &place))?;
-        self.select(Some(place.segment_id));
-        Ok(())
-    }
-
-    /// Add the templates shelf's `card_id` at the playhead, on the first
-    /// text row with room, else on a new one. The template is picked.
-    pub fn add_template(&mut self, card_id: &str) -> Result<(), ShellError> {
-        let length = cutlass_editor::title_template(card_id)
-            .map_or(TITLE_LENGTH, cutlass_editor::TitleTemplate::length);
-        let start = self.playhead;
-        let track_id = free_row(self.session_draft()?, TrackType::Text, start, length)
-            .unwrap_or_else(|| TrackId::new(self.fresh("track")));
-        self.place_template(card_id, track_id, start)
-    }
-
-    /// Place the templates shelf's `card_id` where it was dropped.
-    pub fn drop_template(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
-        let length = cutlass_editor::title_template(card_id)
-            .map_or(TITLE_LENGTH, cutlass_editor::TitleTemplate::length);
-        let x = self.time_zero_x(x);
-        let outcome = {
-            let gesture = DropGesture {
-                kind: TrackType::Text,
-                duration: length,
-                pointer: Pointer { x, y },
-                scale: self.scale(),
-                playhead: self.playhead,
-                snap_threshold: self.snap_threshold(),
-            };
-            drop_gesture(self.session_draft()?, &gesture)
-                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
-        };
-        let (track_id, start) = match outcome {
-            DropOutcome::Miss => {
-                return Err(ShellError::Unavailable(
-                    "the drag missed the lanes".to_owned(),
-                ));
-            }
-            DropOutcome::Place { track_id, start } => (track_id, start),
-            DropOutcome::NewLane { start, .. } => (TrackId::new(self.fresh("track")), start),
-        };
-        self.place_template(card_id, track_id, start)
-    }
-
-    fn place_template(
-        &mut self,
-        card_id: &str,
-        track_id: TrackId,
-        start: Micros,
-    ) -> Result<(), ShellError> {
-        let template = cutlass_editor::title_template(card_id).ok_or_else(|| {
-            ShellError::Unavailable("the template is not on the templates shelf".to_owned())
-        })?;
-        let widgets = template
-            .widgets
-            .iter()
-            .map(|_| {
-                (
-                    TrackId::new(self.fresh("track")),
-                    SegmentId::new(self.fresh("seg")),
-                    MaterialId::new(self.fresh("text")),
-                )
-            })
-            .collect();
-        let place = cutlass_editor::TemplatePlace {
-            track_id,
-            start,
-            face: self.face.name().to_owned(),
-            segment_id: SegmentId::new(self.fresh("seg")),
-            material_id: MaterialId::new(self.fresh("mat")),
-            widgets,
-        };
-        self.apply_requests(&cutlass_editor::template_requests(template, &place))?;
         self.select(Some(place.segment_id));
         Ok(())
     }
@@ -13589,51 +13538,6 @@ mod tests {
         // Once in, it is back in the middle.
         let landed = middle(&mut desktop, 1_000_000);
         assert!(landed[0] > 200 && landed[1] < 120, "{landed:?}");
-    }
-
-    #[test]
-    fn a_template_lands_as_one_clip_that_draws_its_widgets_in_turn() {
-        let temp = Temp::new();
-        let mut draft = Draft::empty("draft");
-        draft.canvas_config.width = 320;
-        draft.canvas_config.height = 180;
-        Folder::new(draft).save(&temp.path).unwrap();
-        let mut desktop = shell();
-        desktop.open_folder(&temp.path).unwrap();
-        desktop.pixel_size = 0.001;
-        let lit = |desktop: &mut Shell, time: i64| {
-            desktop.seek(Micros(time));
-            let picture = desktop.preview_bytes().unwrap();
-            picture
-                .rgba
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .filter(|pixel| pixel[0] > 128 || pixel[1] > 128)
-                .count()
-        };
-        let before = desktop.draft().unwrap().clone();
-        let card = cutlass_editor::title_template("template:countdown")
-            .unwrap()
-            .card_id();
-        desktop.add_template(&card).unwrap();
-        let draft = desktop.draft().unwrap();
-        let clips: Vec<_> = draft
-            .tracks
-            .iter()
-            .flat_map(|track| &track.segments)
-            .collect();
-        assert_eq!(clips.len(), 1, "one compound clip");
-        assert_eq!(clips[0].target, TimeRange::new(0, 3_000_000));
-        assert_eq!(desktop.selected(), Some(&clips[0].id));
-        // Each number is drawn in its second, and nothing after.
-        assert!(lit(&mut desktop, 500_000) > 0);
-        assert!(lit(&mut desktop, 1_500_000) > 0);
-        assert!(lit(&mut desktop, 2_500_000) > 0);
-        assert_eq!(lit(&mut desktop, 3_500_000), 0);
-        desktop.undo().unwrap();
-        assert_eq!(desktop.draft().unwrap(), &before);
-        assert!(desktop.add_template("template:nope").is_err());
     }
 
     #[test]

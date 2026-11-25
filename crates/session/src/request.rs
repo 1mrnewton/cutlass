@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use cutlass_model::{
     AnimType, CommonKeyframeGroup, Cover, Crop, FreezeInfo, MaterialAudio, MaterialId,
     MaterialTransition, MaterialVideo, Micros, Segment, SegmentId, ShapeKind, ShapePoint,
-    SpeedPoint, TimeRange, TrackId, TrackType, WordColumns,
+    SpeedPoint, TemplateMark, TimeRange, TrackId, TrackType, WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
@@ -595,6 +595,12 @@ pub enum Request {
     /// Turn the clip's Blend switch on or off. Off, it is drawn solid and
     /// mixed normally, its opacity and mode kept for when it is on again.
     SetBlendOn { segment_id: SegmentId, on: bool },
+    /// Mark the clip as a template slot, editable text, or the music, or
+    /// take its mark off with `None`. A draft has one music clip.
+    SetTemplateMark {
+        segment_id: SegmentId,
+        mark: Option<TemplateMark>,
+    },
     /// Put an adjustment layer from `start` for `duration` on `track_id`,
     /// an adjust row made when it is missing. Its sliders, set with
     /// [`Request::SetAdjust`], run over every picture below it.

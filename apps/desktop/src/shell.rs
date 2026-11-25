@@ -157,6 +157,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::SoundNotSeparate) => {
                 formatter.write_str("the clip still has its sound")
             }
+            Self::Edit(EditError::TemplateMark) => {
+                formatter.write_str("that template mark does not fit this clip")
+            }
             Self::Edit(EditError::AlreadyExtracted) => {
                 formatter.write_str("the sound is already on its own clip")
             }

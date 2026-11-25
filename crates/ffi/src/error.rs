@@ -133,6 +133,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::NoSound => "the clip has no sound".to_owned(),
         EditError::AlreadyExtracted => "the sound is already on its own clip".to_owned(),
         EditError::SoundNotSeparate => "the clip still has its sound".to_owned(),
+        EditError::TemplateMark => "that template mark does not fit this clip".to_owned(),
         EditError::Angle => "the rotation is not a finite number of degrees".to_owned(),
         EditError::Pivot => {
             "the pivot is not a finite number, or is too far from the picture".to_owned()

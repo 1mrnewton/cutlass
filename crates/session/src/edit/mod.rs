@@ -39,6 +39,7 @@ mod shape;
 mod speed;
 mod split;
 mod stable;
+mod template;
 mod text;
 mod track;
 mod transition;
@@ -130,6 +131,11 @@ pub enum EditError {
     AlreadyExtracted,
     /// Recover audio on a picture that still has its own sound.
     SoundNotSeparate,
+    /// A template mark does not fit the clip: a slot on something other
+    /// than a photo or video, a slot that takes only a video on a photo or
+    /// the other way round, editable text on a clip that is not text, or
+    /// music on a clip that is not a sound.
+    TemplateMark,
     /// A track with this id is already on the draft, or this type cannot be a lane.
     TrackKind,
     /// The main track cannot be removed.
@@ -288,6 +294,7 @@ impl std::fmt::Display for EditError {
             Self::NoSound => "the clip has no sound, or its file path is empty",
             Self::AlreadyExtracted => "the clip's sound is already its own clip",
             Self::SoundNotSeparate => "the clip still has its own sound",
+            Self::TemplateMark => "that template mark does not fit this kind of clip",
             Self::TrackKind => "the track id is already used, or that kind cannot be a track",
             Self::MainTrack => "the main track cannot be removed",
             Self::Angle => "the rotation is not a finite number of degrees",
@@ -805,6 +812,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             mode,
         } => blend::set_blend(draft, segment_id, material_id, mode),
         Request::SetBlendOn { segment_id, on } => blend::set_blend_on(draft, segment_id, *on),
+        Request::SetTemplateMark { segment_id, mark } => {
+            template::set_template_mark(draft, segment_id, *mark)
+        }
         Request::AddAdjustment {
             track_id,
             segment_id,

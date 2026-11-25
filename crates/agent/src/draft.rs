@@ -703,6 +703,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::BindEffect { .. } => "bind_effect",
         Request::SetBlend { .. } => "set_blend",
         Request::SetBlendOn { .. } => "set_blend_on",
+        Request::SetTemplateMark { .. } => "set_template_mark",
         Request::SetAdjust { .. } => "set_adjust",
         Request::AddAdjustment { .. } => "add_adjustment",
         Request::AddFilter { .. } => "add_filter",

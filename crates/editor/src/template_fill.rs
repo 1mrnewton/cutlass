@@ -1,6 +1,12 @@
-//! Fill a project template's slots with the person's own media.
+//! Put a project template on the timeline and fill its slots with the
+//! person's own media.
 //!
-//! The fill is one list of requests, so it lands as one undo step: each
+//! A template lands as one closed clip that plays the template's draft
+//! inside. It is never opened: what a person may change is what the
+//! author marked, and each change is made to the draft inside and stored
+//! back on the clip as one undo step.
+//!
+//! A fill is one list of requests, so it lands as one undo step: each
 //! picked file is imported, played in its slot in place of the sample,
 //! and sized so it covers what the sample covered. The slot keeps its
 //! place, length, speed, effects, animations and transitions. Editable
@@ -10,10 +16,90 @@
 use std::fmt;
 
 use cutlass_model::{
-    Draft, MaterialAudio, MaterialRef, MaterialVideo, Micros, SegmentId, TemplateMark,
-    template_slots,
+    Draft, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, Micros, SegmentId, TemplateMark,
+    template_clip, template_length, template_material, template_slots,
 };
-use cutlass_session::{ImportedMedium, Request};
+use cutlass_session::{ImportedMedium, Request, Session};
+
+use crate::media_place::{MediaPlace, media_requests};
+
+/// A template card's id starts with this, then the template's folder, so
+/// a drop can tell a template from a file.
+pub const TEMPLATE_CARD_PREFIX: &str = "template:";
+
+/// The requests that put a template on the timeline as one closed clip,
+/// as one undo step. `inside` is the template's draft with its files
+/// already in the project; `place` says where the clip goes, and its
+/// material id is the new template material's. The clip plays the whole
+/// template, whatever length `place` gives. Empty when the template plays
+/// nothing.
+#[must_use]
+pub fn template_clip_requests(
+    draft: &Draft,
+    name: &str,
+    inside: Draft,
+    place: &MediaPlace,
+    linkage: bool,
+) -> Vec<Request> {
+    let material = template_material(MaterialId::new(place.material_id.as_str()), name, inside);
+    let Some(length) = material.draft.as_deref().map(template_length) else {
+        return Vec::new();
+    };
+    if length.0 <= 0 {
+        return Vec::new();
+    }
+    let place = MediaPlace {
+        duration: length,
+        ..place.clone()
+    };
+    let mut requests = vec![Request::Import {
+        medium: ImportedMedium::Template(Box::new(material)),
+    }];
+    requests.extend(media_requests(draft, &place, linkage));
+    requests
+}
+
+/// The one request that makes `changes` to the draft inside the template
+/// clip `segment_id` of `draft`. Nothing is built when the clip is not a
+/// template or the inside refuses a change. Empty when `changes` is.
+pub fn template_inside_requests(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    changes: &[Request],
+) -> Result<Vec<Request>, FillError> {
+    let (material, inside) =
+        template_clip(draft, segment_id).ok_or_else(|| FillError::NotMarked {
+            segment_id: segment_id.clone(),
+        })?;
+    if changes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut session = Session::open(inside.clone());
+    session
+        .apply(session.revision(), changes)
+        .map_err(|error| FillError::Refused {
+            reason: error.to_string(),
+        })?;
+    Ok(vec![Request::SetInside {
+        material_id: material.id.clone(),
+        inside: Box::new(session.draft().clone()),
+    }])
+}
+
+/// The one request that fills the template clip `segment_id` of `draft`
+/// with `fill`: the picks go in the slots, texts and music marked inside
+/// it. A picked material whose id the inside already uses is refused.
+pub fn template_clip_fill_requests(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    fill: &TemplateFill,
+) -> Result<Vec<Request>, FillError> {
+    let (_, inside) = template_clip(draft, segment_id).ok_or_else(|| FillError::NotMarked {
+        segment_id: segment_id.clone(),
+    })?;
+    let changes = template_fill_requests(inside, fill)?;
+    template_inside_requests(draft, segment_id, &changes)
+}
 
 /// What a person picked to fill a template.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -43,6 +129,8 @@ pub enum FillError {
     },
     /// The same slot or text was picked twice.
     Twice { segment_id: SegmentId },
+    /// The draft inside the template refused the change.
+    Refused { reason: String },
 }
 
 impl fmt::Display for FillError {
@@ -57,6 +145,7 @@ impl fmt::Display for FillError {
                 seconds(*needs)
             ),
             Self::Twice { .. } => formatter.write_str("that slot was picked twice"),
+            Self::Refused { reason } => formatter.write_str(reason),
         }
     }
 }
@@ -98,7 +187,8 @@ pub fn fits_slot(
 }
 
 /// The requests that fill `draft` with `fill`, as one undo step. Nothing
-/// is built when any pick does not fit. A slot left out keeps its sample.
+/// is built when any pick does not fit. A slot left out keeps its sample;
+/// a filled one is marked as filled.
 pub fn template_fill_requests(
     draft: &Draft,
     fill: &TemplateFill,
@@ -117,6 +207,15 @@ pub fn template_fill_requests(
         });
         if let Some(scale) = cover_scale(draft, segment_id, material) {
             requests.push(scale);
+        }
+        if let Some(TemplateMark::Slot { takes, .. }) = mark_of(draft, segment_id) {
+            requests.push(Request::SetTemplateMark {
+                segment_id: segment_id.clone(),
+                mark: Some(TemplateMark::Slot {
+                    takes,
+                    filled: true,
+                }),
+            });
         }
     }
     for (segment_id, words) in &fill.texts {
@@ -220,7 +319,11 @@ mod tests {
     };
     use cutlass_session::{Request, Session};
 
-    use super::{FillError, TemplateFill, cover_factor, fits_slot, template_fill_requests};
+    use super::{
+        FillError, TemplateFill, cover_factor, fits_slot, template_clip_fill_requests,
+        template_clip_requests, template_fill_requests, template_inside_requests,
+    };
+    use crate::MediaPlace;
 
     fn video(id: &str, kind: MetaType, size: (i32, i32), length: i64) -> MaterialVideo {
         let mut material = MaterialVideo::new(id);
@@ -403,7 +506,10 @@ mod tests {
             ..TemplateFill::default()
         };
         let requests = template_fill_requests(&draft, &fill).unwrap();
-        let Some(Request::SetScaleAxes { x, y, .. }) = requests.last() else {
+        let Some(Request::SetScaleAxes { x, y, .. }) = requests
+            .iter()
+            .find(|request| matches!(request, Request::SetScaleAxes { .. }))
+        else {
             panic!("no scale in {requests:?}");
         };
         // Fitted inside 1080x1920 the wide photo is 1080x607.5; it must
@@ -435,5 +541,122 @@ mod tests {
         // A square picture in a tall sample's place grows to its height.
         let square = cover_factor(canvas, (1080.0, 1920.0), (1000.0, 1000.0)).unwrap();
         assert!((square - 1920.0 / 1080.0).abs() < 1e-9);
+    }
+
+    /// A project with the template placed at the start of the main row.
+    fn placed() -> (Session, SegmentId) {
+        let mut session = Session::open(Draft::empty("project-1"));
+        let place = MediaPlace {
+            track_id: "main".into(),
+            segment_id: SegmentId::new("clip"),
+            material_id: "tpl".to_owned(),
+            start: Micros(0),
+            duration: Micros(0),
+            new_lane: None,
+        };
+        let requests = template_clip_requests(session.draft(), "Trip", template(), &place, true);
+        session.apply(0, &requests).unwrap();
+        (session, SegmentId::new("clip"))
+    }
+
+    #[test]
+    fn a_template_lands_as_one_closed_clip_and_undoes_in_one_step() {
+        let (mut session, clip) = placed();
+        let draft = session.draft();
+        let clips: Vec<_> = draft.tracks.iter().flat_map(|t| &t.segments).collect();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].target, TimeRange::new(0, 4_000_000));
+        let (material, inside) = cutlass_model::template_clip(draft, &clip).unwrap();
+        assert_eq!(material.name, "Trip");
+        assert_eq!(cutlass_model::template_unfilled(inside), 2);
+        assert_eq!(
+            session
+                .apply(
+                    session.revision(),
+                    &[Request::Ungroup {
+                        segment_id: clip.clone()
+                    }]
+                )
+                .unwrap_err(),
+            cutlass_session::EditError::ClosedTemplate
+        );
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &Draft::empty("project-1"));
+        // A template that plays nothing places nothing.
+        let place = MediaPlace {
+            track_id: "main".into(),
+            segment_id: SegmentId::new("x"),
+            material_id: "none".to_owned(),
+            start: Micros(0),
+            duration: Micros(0),
+            new_lane: None,
+        };
+        assert!(
+            template_clip_requests(session.draft(), "Empty", Draft::empty("e"), &place, true)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_fill_goes_inside_the_template_clip_as_one_undo_step() {
+        let (mut session, clip) = placed();
+        let before = session.draft().clone();
+        let fill = TemplateFill {
+            media: vec![(
+                SegmentId::new("tpl.two"),
+                video("photo", MetaType::Photo, (1080, 1920), 0),
+            )],
+            texts: vec![(SegmentId::new("tpl.title"), "Our trip".to_owned())],
+            music: None,
+        };
+        let requests = template_clip_fill_requests(session.draft(), &clip, &fill).unwrap();
+        assert_eq!(requests.len(), 1);
+        session.apply(session.revision(), &requests).unwrap();
+        let draft = session.draft();
+        // The project's own library and timeline hold nothing new.
+        assert!(draft.materials.videos.is_empty());
+        assert_eq!(draft.tracks.iter().flat_map(|t| &t.segments).count(), 1);
+        let (_, inside) = cutlass_model::template_clip(draft, &clip).unwrap();
+        assert_eq!(segment(inside, "tpl.two").material_id.as_str(), "photo");
+        assert_eq!(cutlass_model::template_unfilled(inside), 1);
+        let slots = cutlass_model::template_slots(inside);
+        assert!(!slots[0].filled && slots[1].filled);
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &before);
+    }
+
+    #[test]
+    fn a_fill_of_another_clip_or_a_refused_change_builds_nothing() {
+        let (session, clip) = placed();
+        let fill = TemplateFill {
+            texts: vec![(SegmentId::new("tpl.title"), "Hi".to_owned())],
+            ..TemplateFill::default()
+        };
+        assert!(matches!(
+            template_clip_fill_requests(session.draft(), &SegmentId::new("nope"), &fill),
+            Err(FillError::NotMarked { .. })
+        ));
+        // An id from before the template was placed is not a slot inside it.
+        let stale = TemplateFill {
+            texts: vec![(SegmentId::new("title"), "Hi".to_owned())],
+            ..TemplateFill::default()
+        };
+        assert!(matches!(
+            template_clip_fill_requests(session.draft(), &clip, &stale),
+            Err(FillError::NotMarked { .. })
+        ));
+        let refused = template_inside_requests(
+            session.draft(),
+            &clip,
+            &[Request::SetVolume {
+                segment_id: SegmentId::new("gone"),
+                volume: 0.5,
+            }],
+        );
+        assert!(matches!(refused, Err(FillError::Refused { .. })));
+        assert_eq!(
+            template_inside_requests(session.draft(), &clip, &[]),
+            Ok(Vec::new())
+        );
     }
 }

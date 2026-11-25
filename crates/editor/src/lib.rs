@@ -43,6 +43,7 @@ mod sticker_place;
 mod subtitles;
 mod sync;
 mod template;
+mod template_fill;
 mod text_catalog;
 mod text_effect;
 mod title;
@@ -140,6 +141,7 @@ pub use template::{
     TEMPLATE_CARD_PREFIX, TITLE_TEMPLATES, TemplatePlace, TitleTemplate, Widget, template_requests,
     title_template,
 };
+pub use template_fill::{FillError, TemplateFill, fits_slot, template_fill_requests};
 pub use text_catalog::{
     BUBBLE_CATEGORIES, BUBBLE_LOOKS, BubbleLook, CatalogTile, TILE_SIDE, bubble_look_of,
     bubble_look_requests, catalog_shows, tile_session,

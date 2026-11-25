@@ -33,6 +33,7 @@ mod remove_bg;
 mod retouch;
 mod shape;
 mod speed;
+mod template;
 
 pub(crate) use markdown::install_fonts;
 
@@ -283,6 +284,8 @@ pub struct ViewState {
     quitting: bool,
     listed: Vec<ListedProject>,
     listed_stamp: String,
+    /// The Templates tab, Save as template, and the fill sheet.
+    template: template::TemplateView,
     /// The recent projects outside the projects folder, read again only
     /// when the list or one of their drafts changes.
     recent: Vec<ListedProject>,
@@ -381,6 +384,7 @@ impl Default for ViewState {
             recent: Vec::new(),
             recent_stamp: String::new(),
             listed_stamp: String::new(),
+            template: template::TemplateView::default(),
             listed_checked: None,
             marquee_press: None,
             marquee: None,
@@ -502,6 +506,17 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
             cover::dialog(shell, ui, &mut view.cover, &mut pick);
             if pick {
                 view.dialogs.cover(parent);
+            }
+        }
+        if view.template.save.is_some() {
+            let root = projects_root(view);
+            template::save_sheet(shell, ui, &mut view.template, &root);
+        }
+        if view.template.fill.is_some() {
+            match template::fill_sheet(shell, ui, &mut view.template) {
+                template::FillAsk::Nothing => {}
+                template::FillAsk::Slot(index) => view.dialogs.template_media(parent, Some(index)),
+                template::FillAsk::Music => view.dialogs.template_media(parent, None),
             }
         }
         job_strip(shell, ui, full);
@@ -717,6 +732,11 @@ fn projects_home(
     ui::Scroll::vertical("projects")
         .auto_shrink([false, false])
         .show(&mut body_ui, |ui| {
+            template::home_tabs(ui, &mut view.template);
+            if view.template.tab == template::HomeTab::Templates {
+                template::templates_page(shell, ui, &mut view.template, &root);
+                return;
+            }
             if new_project_button(ui) {
                 open_created(shell, &root);
             }
@@ -847,6 +867,21 @@ fn new_project_button(ui: &mut Ui) -> bool {
 /// black when nothing is at the timeline's start. Until the picture is
 /// drawn, a quiet field shows there instead.
 fn project_card(ui: &mut Ui, shell: &mut Shell, project: &ListedProject) -> bool {
+    let meta = if project.duration.0 > 0 {
+        format!(
+            "{}  {}",
+            card_meta(project.duration.0),
+            modified_label(project.modified)
+        )
+    } else {
+        modified_label(project.modified)
+    };
+    card(ui, shell, &project.path, &project.name, &meta)
+}
+
+/// A card at home: the folder's first frame over a name and a line under
+/// it. A template's card is drawn the same way as a project's.
+fn card(ui: &mut Ui, shell: &mut Shell, path: &std::path::Path, name: &str, meta: &str) -> bool {
     const WIDTH: f32 = 220.0;
     const PICTURE: f32 = 124.0;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(WIDTH, PICTURE + 60.0), Sense::click());
@@ -863,7 +898,7 @@ fn project_card(ui: &mut Ui, shell: &mut Shell, project: &ListedProject) -> bool
         sw: 0,
         se: 0,
     };
-    match cover::card_picture(shell, ui.ctx(), &project.path) {
+    match cover::card_picture(shell, ui.ctx(), path) {
         Some(texture) => {
             let [w, h] = texture.size();
             ui.painter().add(
@@ -881,19 +916,10 @@ fn project_card(ui: &mut Ui, shell: &mut Shell, project: &ListedProject) -> bool
     ui.painter().text(
         text,
         Align2::LEFT_TOP,
-        &project.name,
+        name,
         FontId::proportional(14.0),
         tokens::TEXT,
     );
-    let meta = if project.duration.0 > 0 {
-        format!(
-            "{}  {}",
-            card_meta(project.duration.0),
-            modified_label(project.modified)
-        )
-    } else {
-        modified_label(project.modified)
-    };
     ui.painter().text(
         text + Vec2::new(0.0, 22.0),
         Align2::LEFT_TOP,
@@ -1500,7 +1526,8 @@ fn to_text_field(ctx: &egui::Context, id: &str) -> bool {
 /// Run the menu bar item `id`: a window command, or a shortcut action.
 pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe::Frame>, id: &str) {
     use crate::menubar::{
-        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS,
+        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SAVE_TEMPLATE,
+        SETTINGS,
     };
 
     let open = shell.draft().is_some();
@@ -1525,8 +1552,12 @@ pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe:
             shell.check_for_updates();
             Ok(())
         }
-        SAVE | IMPORT | EXPORT | PROJECTS if !open => Err(ShellError::NoProject),
+        SAVE | SAVE_TEMPLATE | IMPORT | EXPORT | PROJECTS if !open => Err(ShellError::NoProject),
         SAVE => shell.save(),
+        SAVE_TEMPLATE => {
+            view.template.open_save(shell);
+            Ok(())
+        }
         IMPORT => {
             view.dialogs.import(parent);
             Ok(())
@@ -10426,6 +10457,12 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
         Picker::Cover => {
             if let Some(dialog) = view.cover.as_mut() {
                 dialog.picked(path);
+            }
+            Ok(())
+        }
+        Picker::TemplateMedia(index) => {
+            if let Some(sheet) = view.template.fill.as_mut() {
+                sheet.picked(index, path);
             }
             Ok(())
         }

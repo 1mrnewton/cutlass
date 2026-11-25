@@ -286,6 +286,7 @@ fn video_panel(
             // sync, AI movement) wait for the next version.
             later_row(ui, "Camera tracking");
             canvas(shell, ui, state, inspection);
+            super::template::template_section(shell, ui, state, super::template::MarkKind::Picture);
         }
         1 => {
             pages(ui, &["Basic", "Voice changer"], &mut state.page);
@@ -2125,6 +2126,9 @@ fn text_basic(
     blend(shell, ui, state, inspection, false);
     if let Some(look) = shell.text_look() {
         text_parts(shell, ui, state, &look);
+    }
+    if !caption {
+        super::template::template_section(shell, ui, state, super::template::MarkKind::Text);
     }
 }
 

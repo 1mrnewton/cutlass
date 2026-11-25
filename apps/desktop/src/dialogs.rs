@@ -23,6 +23,8 @@ pub(crate) enum Picker {
     Replace,
     Link,
     Cover,
+    /// A file for a template slot by its place, or for the music with `None`.
+    TemplateMedia(Option<usize>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -105,6 +107,18 @@ impl Dialogs {
             ],
         );
         self.start(Picker::Cover, async move {
+            dialog
+                .pick_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        });
+    }
+
+    /// A photo or video for template slot `index`, or a sound for the
+    /// template's music with `None`.
+    pub(crate) fn template_media(&mut self, parent: Option<&eframe::Frame>, index: Option<usize>) {
+        let dialog = dialog(parent);
+        self.start(Picker::TemplateMedia(index), async move {
             dialog
                 .pick_file()
                 .await

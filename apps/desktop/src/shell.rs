@@ -78,6 +78,7 @@ mod shape;
 mod speech_model;
 mod stable;
 mod sync;
+mod template;
 mod thumbnail;
 mod update;
 

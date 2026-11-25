@@ -37,12 +37,7 @@ pub(super) fn template_section(
 ) {
     let mark = shell.template_mark();
     let (label, on_mark) = match kind {
-        MarkKind::Picture => (
-            "Template slot",
-            TemplateMark::Slot {
-                takes: SlotTakes::Either,
-            },
-        ),
+        MarkKind::Picture => ("Template slot", TemplateMark::slot(SlotTakes::Either)),
         MarkKind::Text => ("Editable in template", TemplateMark::Text),
         MarkKind::Sound => ("Template music", TemplateMark::Music),
     };
@@ -56,7 +51,7 @@ pub(super) fn template_section(
         return;
     }
     body(ui, |ui| match (kind, mark) {
-        (MarkKind::Picture, Some(TemplateMark::Slot { takes })) => {
+        (MarkKind::Picture, Some(TemplateMark::Slot { takes, .. })) => {
             let mut picked = None;
             label_row(ui, "Takes", |ui| {
                 egui::ComboBox::from_id_salt("template-takes")
@@ -74,7 +69,7 @@ pub(super) fn template_section(
             });
             if let Some(choice) = picked.filter(|choice| *choice != takes) {
                 send(shell, move |shell| {
-                    shell.set_template_mark(Some(TemplateMark::Slot { takes: choice }))
+                    shell.set_template_mark(Some(TemplateMark::slot(choice)))
                 });
             }
             note(ui, "Someone using the template puts their own media here.");
@@ -467,9 +462,7 @@ mod tests {
         photo.kind = MetaType::Photo.as_str().to_owned();
         draft.materials.videos.push(photo);
         let mut segment = Segment::new("a", "p", TimeRange::new(0, 1_000_000));
-        segment.template_mark = Some(TemplateMark::Slot {
-            takes: SlotTakes::Either,
-        });
+        segment.template_mark = Some(TemplateMark::slot(SlotTakes::Either));
         draft.tracks[0].segments.push(segment);
         cutlass_store::Folder::new(draft).save(&project).unwrap();
         let (decoders, encoders) = crate::register_codecs();

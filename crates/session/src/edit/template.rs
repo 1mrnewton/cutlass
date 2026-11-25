@@ -22,7 +22,7 @@ pub fn set_template_mark(
     let material = draft.materials.get(material_id.as_str());
     let fits = match (mark, material) {
         (None, _) => true,
-        (Some(TemplateMark::Slot { takes }), Some(MaterialRef::Video(video))) => {
+        (Some(TemplateMark::Slot { takes, .. }), Some(MaterialRef::Video(video))) => {
             takes.accepts(video.is_still())
         }
         (Some(TemplateMark::Text), Some(MaterialRef::Text(_)))
@@ -93,9 +93,7 @@ mod tests {
     }
 
     const fn slot() -> TemplateMark {
-        TemplateMark::Slot {
-            takes: SlotTakes::Either,
-        }
+        TemplateMark::slot(SlotTakes::Either)
     }
 
     fn mark_of(draft: &Draft, id: &str) -> Option<TemplateMark> {
@@ -131,18 +129,8 @@ mod tests {
             ("song", slot()),
             ("video", TemplateMark::Text),
             ("words", TemplateMark::Music),
-            (
-                "photo",
-                TemplateMark::Slot {
-                    takes: SlotTakes::Video,
-                },
-            ),
-            (
-                "video",
-                TemplateMark::Slot {
-                    takes: SlotTakes::Photo,
-                },
-            ),
+            ("photo", TemplateMark::slot(SlotTakes::Video)),
+            ("video", TemplateMark::slot(SlotTakes::Photo)),
         ];
         for (id, mark) in wrong {
             let mut draft = before.clone();
@@ -200,11 +188,51 @@ mod tests {
         session.apply(0, &[request]).unwrap();
         assert_eq!(
             mark_of(session.draft(), "video"),
-            Some(TemplateMark::Slot {
-                takes: SlotTakes::Video
-            })
+            Some(TemplateMark::slot(SlotTakes::Video))
         );
         session.undo().unwrap();
         assert_eq!(mark_of(session.draft(), "video"), None);
+    }
+
+    #[test]
+    fn a_template_clip_is_not_ungrouped() {
+        use crate::request::{ImportedMedium, Request};
+        let mut inside = Draft::empty("in");
+        inside.tracks[0]
+            .segments
+            .push(Segment::new("x", "v", TimeRange::new(0, 1_000_000)));
+        let mut session = crate::session::Session::open(Draft::empty("D"));
+        let track_id = session.draft().tracks[0].id.clone();
+        session
+            .apply(
+                0,
+                &[
+                    Request::Import {
+                        medium: ImportedMedium::Template(Box::new(cutlass_model::MaterialDraft {
+                            id: "tpl".into(),
+                            draft: Some(Box::new(inside)),
+                            ..cutlass_model::MaterialDraft::default()
+                        })),
+                    },
+                    Request::Place {
+                        track_id,
+                        segment: Box::new(Segment::new(
+                            "clip",
+                            "tpl",
+                            TimeRange::new(0, 1_000_000),
+                        )),
+                    },
+                ],
+            )
+            .unwrap();
+        let before = session.draft().clone();
+        let refused = session.apply(
+            1,
+            &[Request::Ungroup {
+                segment_id: SegmentId::new("clip"),
+            }],
+        );
+        assert_eq!(refused.unwrap_err(), EditError::ClosedTemplate);
+        assert_eq!(session.draft(), &before);
     }
 }

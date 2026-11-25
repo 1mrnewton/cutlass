@@ -251,14 +251,10 @@ mod tests {
         let mut first = Segment::new("one", "sample", TimeRange::new(0, 2_000_000));
         first.speed = 2.0;
         first.source_range = Some(TimeRange::new(0, 4_000_000));
-        first.template_mark = Some(TemplateMark::Slot {
-            takes: SlotTakes::Either,
-        });
+        first.template_mark = Some(TemplateMark::slot(SlotTakes::Either));
         let mut second = Segment::new("two", "still", TimeRange::new(2_000_000, 2_000_000));
         second.source_range = Some(TimeRange::new(0, 2_000_000));
-        second.template_mark = Some(TemplateMark::Slot {
-            takes: SlotTakes::Photo,
-        });
+        second.template_mark = Some(TemplateMark::slot(SlotTakes::Photo));
         draft.tracks[0].segments.extend([first, second]);
         let mut title = Segment::new("title", "words", TimeRange::new(0, 4_000_000));
         title.template_mark = Some(TemplateMark::Text);

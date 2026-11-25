@@ -13,6 +13,11 @@ use crate::id::SegmentId;
 use crate::materials::MaterialRef;
 use crate::time::Micros;
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// What a slot takes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +52,9 @@ pub enum TemplateMark {
     Slot {
         #[serde(default)]
         takes: SlotTakes,
+        /// The person put their own media here; the sample is gone.
+        #[serde(default, skip_serializing_if = "is_false")]
+        filled: bool,
     },
     /// A text clip whose words the user may change.
     Text,
@@ -68,6 +76,8 @@ pub struct TemplateSlot {
     pub needs: Micros,
     /// The sample in it is a photo.
     pub sample_is_photo: bool,
+    /// The person already put their own media here.
+    pub filled: bool,
 }
 
 /// The slots of `draft` in the order a person fills them: by start time,
@@ -78,7 +88,7 @@ pub fn template_slots(draft: &Draft) -> Vec<TemplateSlot> {
     let mut slots: Vec<(usize, TemplateSlot)> = Vec::new();
     for (row, track) in draft.tracks.iter().enumerate() {
         for segment in &track.segments {
-            let Some(TemplateMark::Slot { takes }) = segment.template_mark else {
+            let Some(TemplateMark::Slot { takes, filled }) = segment.template_mark else {
                 continue;
             };
             let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str())
@@ -98,6 +108,7 @@ pub fn template_slots(draft: &Draft) -> Vec<TemplateSlot> {
                     length: segment.target.duration,
                     needs,
                     sample_is_photo: video.is_still(),
+                    filled,
                 },
             ));
         }
@@ -118,6 +129,27 @@ pub fn template_music(draft: &Draft) -> Option<SegmentId> {
     marked(draft, TemplateMark::Music).into_iter().next()
 }
 
+/// The template clip `segment_id` of `draft`: its material's id and the
+/// draft inside it. `None` for any other clip, a compound clip included.
+#[must_use]
+pub fn template_clip<'a>(
+    draft: &'a Draft,
+    segment_id: &SegmentId,
+) -> Option<(&'a crate::MaterialDraft, &'a Draft)> {
+    let segment = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| &segment.id == segment_id)?;
+    let MaterialRef::Draft(material) = draft.materials.get(segment.material_id.as_str())? else {
+        return None;
+    };
+    if !material.template {
+        return None;
+    }
+    Some((material, material.draft.as_deref()?))
+}
+
 fn marked(draft: &Draft, mark: TemplateMark) -> Vec<SegmentId> {
     let mut found: Vec<(i64, usize, SegmentId)> = draft
         .tracks
@@ -131,6 +163,17 @@ fn marked(draft: &Draft, mark: TemplateMark) -> Vec<SegmentId> {
     found.into_iter().map(|(_, _, id)| id).collect()
 }
 
+impl TemplateMark {
+    /// A slot that takes `takes` and still holds its sample.
+    #[must_use]
+    pub const fn slot(takes: SlotTakes) -> Self {
+        Self::Slot {
+            takes,
+            filled: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -140,9 +183,7 @@ mod tests {
 
     fn slot(id: &str, material: &str, start: i64) -> Segment {
         let mut segment = Segment::new(id, material, TimeRange::new(start, 2_000_000));
-        segment.template_mark = Some(TemplateMark::Slot {
-            takes: SlotTakes::Either,
-        });
+        segment.template_mark = Some(TemplateMark::slot(SlotTakes::Either));
         segment
     }
 
@@ -199,9 +240,7 @@ mod tests {
     fn marks_store_as_a_role_and_read_back() {
         let marks = [
             (
-                TemplateMark::Slot {
-                    takes: SlotTakes::Video,
-                },
+                TemplateMark::slot(SlotTakes::Video),
                 json!({"role": "slot", "takes": "video"}),
             ),
             (TemplateMark::Text, json!({"role": "text"})),
@@ -219,12 +258,7 @@ mod tests {
     #[test]
     fn a_slot_without_takes_takes_either() {
         let mark: TemplateMark = serde_json::from_value(json!({"role": "slot"})).unwrap();
-        assert_eq!(
-            mark,
-            TemplateMark::Slot {
-                takes: SlotTakes::Either
-            }
-        );
+        assert_eq!(mark, TemplateMark::slot(SlotTakes::Either));
     }
 
     #[test]

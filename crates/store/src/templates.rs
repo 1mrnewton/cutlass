@@ -359,9 +359,7 @@ mod tests {
         draft.materials.videos.push(video);
         let mut segment = Segment::new("a", "v", TimeRange::new(0, 2_000_000));
         if slot {
-            segment.template_mark = Some(TemplateMark::Slot {
-                takes: SlotTakes::Either,
-            });
+            segment.template_mark = Some(TemplateMark::slot(SlotTakes::Either));
         }
         draft.tracks[0].segments.push(segment);
         if let Some(linked) = linked {

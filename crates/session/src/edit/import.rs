@@ -16,6 +16,13 @@ pub fn import(draft: &mut Draft, medium: ImportedMedium) -> Result<(), EditError
     match medium {
         ImportedMedium::Video(video) => draft.materials.videos.push(*video),
         ImportedMedium::Audio(audio) => draft.materials.audios.push(*audio),
+        ImportedMedium::Template(mut template) => {
+            if template.draft.is_none() {
+                return Err(EditError::Compound);
+            }
+            template.template = true;
+            draft.materials.drafts.push(*template);
+        }
     }
     Ok(())
 }
@@ -24,6 +31,7 @@ fn medium_id(medium: &ImportedMedium) -> MaterialId {
     match medium {
         ImportedMedium::Video(video) => video.id.clone(),
         ImportedMedium::Audio(audio) => audio.id.clone(),
+        ImportedMedium::Template(template) => template.id.clone(),
     }
 }
 
@@ -45,6 +53,27 @@ mod tests {
         Request::Import {
             medium: ImportedMedium::Video(Box::new(material)),
         }
+    }
+
+    #[test]
+    fn a_template_is_stored_closed_and_one_without_a_draft_is_refused() {
+        use cutlass_model::MaterialDraft;
+        let template = |inside: Option<Draft>| Request::Import {
+            medium: ImportedMedium::Template(Box::new(MaterialDraft {
+                id: "tpl".into(),
+                draft: inside.map(Box::new),
+                ..MaterialDraft::default()
+            })),
+        };
+        let mut session = Session::open(Draft::empty("D"));
+        assert_eq!(
+            session.apply(0, &[template(None)]).unwrap_err(),
+            EditError::Compound
+        );
+        session
+            .apply(0, &[template(Some(Draft::empty("in")))])
+            .unwrap();
+        assert!(session.draft().materials.drafts[0].template);
     }
 
     #[test]

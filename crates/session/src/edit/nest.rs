@@ -200,6 +200,14 @@ fn cut_to(
     Ok(Some(piece))
 }
 
+/// The clip plays a project template, which stays one closed piece.
+fn is_template(draft: &Draft, segment: &Segment) -> bool {
+    matches!(
+        draft.materials.get(segment.material_id.as_str()),
+        Some(MaterialRef::Draft(material)) if material.template
+    )
+}
+
 /// Put the clips a compound clip `segment_id` shows back on the timeline
 /// in its place. Its inside main row goes on its row; another row goes
 /// back on the row of its id when that is still here and has room, and on
@@ -209,6 +217,9 @@ pub fn ungroup(draft: &mut Draft, segment_id: &SegmentId) -> Result<(), EditErro
     ensure_unlocked(draft.tracks[host].attribute)?;
     let compound = draft.tracks[host].segments[index].clone();
     let inside = inside_of(draft, &compound).ok_or(EditError::Compound)?;
+    if is_template(draft, &compound) {
+        return Err(EditError::ClosedTemplate);
+    }
     if (compound.speed - 1.0).abs() > 1e-9 || curve_points(draft, &compound).is_some() {
         return Err(EditError::Compound);
     }

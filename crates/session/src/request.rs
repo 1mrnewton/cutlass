@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use cutlass_model::{
-    AnimType, CommonKeyframeGroup, Cover, Crop, FreezeInfo, MaterialAudio, MaterialId,
-    MaterialTransition, MaterialVideo, Micros, Segment, SegmentId, ShapeKind, ShapePoint,
-    SpeedPoint, TemplateMark, TimeRange, TrackId, TrackType, WordColumns,
+    AnimType, CommonKeyframeGroup, Cover, Crop, FreezeInfo, MaterialAudio, MaterialDraft,
+    MaterialId, MaterialTransition, MaterialVideo, Micros, Segment, SegmentId, ShapeKind,
+    ShapePoint, SpeedPoint, TemplateMark, TimeRange, TrackId, TrackType, WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
@@ -14,6 +14,10 @@ pub enum ImportedMedium {
     Video(Box<MaterialVideo>),
     /// A sound. Its track type is supplied by the import, not by lane category.
     Audio(Box<MaterialAudio>),
+    /// A project template: a draft played as one closed clip. It is
+    /// stored as a template whatever the record says, and must carry the
+    /// draft it plays.
+    Template(Box<MaterialDraft>),
 }
 
 /// One timed caption a subtitle file brings in.

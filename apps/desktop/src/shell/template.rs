@@ -234,14 +234,10 @@ mod tests {
         }
         let mut photo = Segment::new("a", "p", TimeRange::new(0, 1_000_000));
         photo.source_range = Some(TimeRange::new(0, 1_000_000));
-        photo.template_mark = Some(TemplateMark::Slot {
-            takes: SlotTakes::Photo,
-        });
+        photo.template_mark = Some(TemplateMark::slot(SlotTakes::Photo));
         let mut video = Segment::new("b", "v", TimeRange::new(1_000_000, 1_000_000));
         video.source_range = Some(TimeRange::new(0, 1_000_000));
-        video.template_mark = Some(TemplateMark::Slot {
-            takes: SlotTakes::Video,
-        });
+        video.template_mark = Some(TemplateMark::slot(SlotTakes::Video));
         draft.tracks[0].segments.extend([photo, video]);
         Folder::new(draft).save(path).unwrap();
     }

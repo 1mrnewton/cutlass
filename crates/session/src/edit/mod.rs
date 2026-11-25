@@ -136,6 +136,8 @@ pub enum EditError {
     /// the other way round, editable text on a clip that is not text, or
     /// music on a clip that is not a sound.
     TemplateMark,
+    /// A project template is one closed clip: it is not ungrouped.
+    ClosedTemplate,
     /// A track with this id is already on the draft, or this type cannot be a lane.
     TrackKind,
     /// The main track cannot be removed.
@@ -295,6 +297,7 @@ impl std::fmt::Display for EditError {
             Self::AlreadyExtracted => "the clip's sound is already its own clip",
             Self::SoundNotSeparate => "the clip still has its own sound",
             Self::TemplateMark => "that template mark does not fit this kind of clip",
+            Self::ClosedTemplate => "a template stays one clip and is not ungrouped",
             Self::TrackKind => "the track id is already used, or that kind cannot be a track",
             Self::MainTrack => "the main track cannot be removed",
             Self::Angle => "the rotation is not a finite number of degrees",

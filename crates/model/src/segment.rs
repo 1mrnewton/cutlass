@@ -317,9 +317,7 @@ mod tests {
         let mut segment = Segment::new("s", "m", TimeRange::new(0, 1));
         let bare = serde_json::to_value(&segment).unwrap();
         assert!(bare.get("cutlass_template").is_none());
-        segment.template_mark = Some(TemplateMark::Slot {
-            takes: crate::SlotTakes::Photo,
-        });
+        segment.template_mark = Some(TemplateMark::slot(crate::SlotTakes::Photo));
         let stored = serde_json::to_value(&segment).unwrap();
         assert_eq!(stored["cutlass_template"]["role"], "slot");
         assert_eq!(stored["cutlass_template"]["takes"], "photo");

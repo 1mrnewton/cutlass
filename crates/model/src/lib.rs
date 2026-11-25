@@ -86,7 +86,8 @@ pub use shape_keys::{
     shape_style_at,
 };
 pub use template_mark::{
-    SlotTakes, TemplateMark, TemplateSlot, template_music, template_slots, template_texts,
+    SlotTakes, TemplateMark, TemplateSlot, template_clip, template_music, template_slots,
+    template_texts,
 };
 pub use text_keys::{
     GLOW_RANGE_KEYS, GLOW_STRENGTH_KEYS, TEXT_STYLE_KEYS, TextStyleKey, glow_at, glow_keyed,

@@ -161,6 +161,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::TemplateMark) => {
                 formatter.write_str("that template mark does not fit this clip")
             }
+            Self::Edit(EditError::ClosedTemplate) => {
+                formatter.write_str("a template stays one clip")
+            }
             Self::Edit(EditError::AlreadyExtracted) => {
                 formatter.write_str("the sound is already on its own clip")
             }

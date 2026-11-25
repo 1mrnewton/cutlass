@@ -1614,43 +1614,40 @@ impl Shell {
         }
     }
 
-    /// The template the selected caption was styled with, by its id.
+    /// The preset the selected caption was styled with, by its id.
     #[must_use]
-    pub fn caption_template(&self) -> Option<String> {
+    pub fn caption_preset(&self) -> Option<String> {
         match (self.draft(), self.selected()) {
-            (Some(draft), Some(segment_id)) => {
-                cutlass_editor::caption_template_of(draft, segment_id)
-            }
+            (Some(draft), Some(segment_id)) => cutlass_editor::caption_preset_of(draft, segment_id),
             _ => None,
         }
     }
 
-    /// Style the selected caption as template `id`: its style, caption
+    /// Style the selected caption as preset `id`: its style, caption
     /// animation, stagger and look. While "Apply to all main captions" is
     /// on, every caption on its subtitle row takes it. One undo step.
-    pub fn set_caption_template(&mut self, id: &str) -> Result<(), ShellError> {
+    pub fn set_caption_preset(&mut self, id: &str) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
-        let template = cutlass_editor::caption_template(id).ok_or_else(|| {
-            ShellError::Unavailable("there is no such caption template".to_owned())
-        })?;
+        let preset = cutlass_editor::caption_preset(id)
+            .ok_or_else(|| ShellError::Unavailable("there is no such caption preset".to_owned()))?;
         let draft = self.session_draft()?;
         if cutlass_editor::caption_rows(draft, &segment_id).is_empty() {
             return Err(caption_miss(cutlass_editor::CaptionListMiss::NotCaption));
         }
-        let requests = cutlass_editor::caption_template_requests(
+        let requests = cutlass_editor::caption_preset_requests(
             draft,
             &segment_id,
-            template,
+            preset,
             self.all_captions(),
         );
         self.apply_requests(&requests)
     }
 
-    /// Take the selected caption's template off: the plain style, no
+    /// Take the selected caption's preset off: the plain style, no
     /// stagger and no caption animation, on every main caption while
     /// "Apply to all main captions" is on. One undo restores it.
-    pub fn clear_caption_template(&mut self) -> Result<(), ShellError> {
+    pub fn clear_caption_preset(&mut self) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
         let draft = self.session_draft()?;
@@ -3095,10 +3092,10 @@ pub(super) mod tests {
         let temp = Temp::new();
         let desktop = subtitle_row(&temp);
         let mut seen = std::collections::HashSet::new();
-        let tiles = cutlass_editor::CAPTION_TEMPLATES
+        let tiles = cutlass_editor::CAPTION_PRESETS
             .iter()
             .take(3)
-            .map(cutlass_editor::CatalogTile::Template)
+            .map(cutlass_editor::CatalogTile::Preset)
             .chain(
                 cutlass_editor::TEXT_EFFECTS
                     .iter()
@@ -3188,14 +3185,14 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_caption_template_styles_the_row_while_apply_to_all_is_on() {
+    fn a_caption_preset_styles_the_row_while_apply_to_all_is_on() {
         let temp = Temp::new();
         let mut desktop = subtitle_row(&temp);
         pick(&mut desktop, "first");
         let before = desktop.draft().unwrap().clone();
-        desktop.set_caption_template("cutlass-caption-pop").unwrap();
+        desktop.set_caption_preset("cutlass-caption-pop").unwrap();
         assert_eq!(
-            desktop.caption_template().as_deref(),
+            desktop.caption_preset().as_deref(),
             Some("cutlass-caption-pop")
         );
         let styles = |desktop: &Shell| -> Vec<String> {
@@ -3218,15 +3215,13 @@ pub(super) mod tests {
         assert_eq!(desktop.draft().unwrap(), &before);
 
         desktop.set_all_captions(false);
-        desktop
-            .set_caption_template("cutlass-caption-neon")
-            .unwrap();
+        desktop.set_caption_preset("cutlass-caption-neon").unwrap();
         assert_eq!(styles(&desktop), ["neon", "", ""]);
 
-        assert!(desktop.set_caption_template("nope").is_err());
+        assert!(desktop.set_caption_preset("nope").is_err());
         pick(&mut desktop, "title");
-        assert!(desktop.set_caption_template("cutlass-caption-pop").is_err());
-        assert_eq!(desktop.caption_template(), None);
+        assert!(desktop.set_caption_preset("cutlass-caption-pop").is_err());
+        assert_eq!(desktop.caption_preset(), None);
     }
 
     #[test]

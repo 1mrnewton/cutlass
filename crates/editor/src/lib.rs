@@ -9,8 +9,8 @@ mod act;
 mod animation;
 mod append;
 mod caption_list;
+mod caption_presets;
 mod caption_replace;
-mod caption_templates;
 mod caption_words;
 mod catalog;
 mod clip_rules;
@@ -61,11 +61,11 @@ pub use caption_list::{
     for_every_caption, main_caption_lane, paragraph_request, paragraphs, rematched,
     remove_caption_request, row_at, rows_matching, words_over,
 };
-pub use caption_replace::{Replaced, replace_ignoring_case, replace_in_captions};
-pub use caption_templates::{
-    CAPTION_TEMPLATES, CaptionTemplate, TEMPLATE_CATEGORIES, caption_template, caption_template_of,
-    caption_template_requests, plain_caption_requests,
+pub use caption_presets::{
+    CAPTION_PRESETS, CaptionPreset, PRESET_CATEGORIES, caption_preset, caption_preset_of,
+    caption_preset_requests, plain_caption_requests,
 };
+pub use caption_replace::{Replaced, replace_ignoring_case, replace_in_captions};
 pub use caption_words::{LINE_BREAK, breaks_before, join_words, retype_word, toggle_line_break};
 pub use catalog::{catalog_entries, catalog_search, is_bundled};
 pub use clip_rules::{can_turn, magnet_request};

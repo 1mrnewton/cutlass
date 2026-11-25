@@ -11552,7 +11552,7 @@ mod tests {
             output.textures_delta.clear();
         }
         for label in [
-            "Templates",
+            "Presets",
             "Bubble",
             "Tracking",
             "The 1 paragraph",
@@ -20953,7 +20953,7 @@ mod tests {
             page: 1,
             section: None,
         });
-        picture(&mut harness, "caption-templates");
+        picture(&mut harness, "caption-presets");
         harness.state_mut().1.inspector.focus(inspector::Focus {
             tab: 0,
             page: 2,

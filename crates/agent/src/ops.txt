@@ -191,7 +191,7 @@ set_text_bubble: Shape a title's background as bubble pill, speech, thought, bur
 set_caption_style: Draw a caption in style classic, karaoke, highlight, pop, word-by-word, one-word, neon, bold-box, fade or rise, or empty for plain.
 {"op":"set_caption_style","segment_id":"cap-1","style":"karaoke"}
 
-set_caption_template: Record which caption template a caption uses, by resource_id (such as cutlass-caption-karaoke) and name, or empty resource_id to clear the record; it does not change the look by itself.
+set_caption_template: Record which caption preset a caption uses, by resource_id (such as cutlass-caption-karaoke) and name, or empty resource_id to clear the record; it does not change the look by itself.
 {"op":"set_caption_template","segment_id":"cap-1","resource_id":"cutlass-caption-karaoke","name":"Karaoke"}
 
 set_caption_keyword: Mark word number word (from 0) of a caption as a keyword drawn in the style's spoken look (on true), or unmark it; a word the caption does not have is refused.

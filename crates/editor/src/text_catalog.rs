@@ -1,4 +1,4 @@
-//! What the text panel's Templates, Bubble and Effects pages offer, found
+//! What the text panel's Presets, Bubble and Effects pages offer, found
 //! by a search and a category, and a small project that draws each one as
 //! its tile's picture.
 
@@ -8,7 +8,7 @@ use cutlass_model::{
 };
 use cutlass_session::{Request, Session};
 
-use crate::caption_templates::CaptionTemplate;
+use crate::caption_presets::CaptionPreset;
 use crate::inspector::TextLook;
 use crate::text_effect::{TextEffect, text_effect_requests};
 
@@ -240,7 +240,7 @@ pub fn catalog_shows(name: &str, categories: &[&str], query: &str, category: &st
 /// What one tile shows.
 #[derive(Clone, Copy, Debug)]
 pub enum CatalogTile<'a> {
-    Template(&'a CaptionTemplate),
+    Preset(&'a CaptionPreset),
     Effect(&'a TextEffect),
     Bubble(&'a BubbleLook),
 }
@@ -259,7 +259,7 @@ const TILE_WORDS: [(&str, i64, i64); 2] = [("Say", 0, 500), ("it", 500, 2_000)];
 const TILE_TIME: Micros = Micros(900_000);
 
 /// A small project with one short text in `face`, styled as `tile`, and
-/// the time to draw it at. A template's text is a caption, so its style
+/// the time to draw it at. A preset's text is a caption, so its style
 /// marks the spoken word; an effect's and a bubble's is a title.
 #[must_use]
 pub fn tile_session(tile: CatalogTile<'_>, face: &str) -> (Session, Micros) {
@@ -269,7 +269,7 @@ pub fn tile_session(tile: CatalogTile<'_>, face: &str) -> (Session, Micros) {
     let mut text = MaterialText::new(TILE_CLIP);
     text.font_path = face.to_owned();
     text.text_color = "#FFFFFF".to_owned();
-    let caption = matches!(tile, CatalogTile::Template(_));
+    let caption = matches!(tile, CatalogTile::Preset(_));
     if caption {
         text.content = "Say it".to_owned();
         text.words.text = TILE_WORDS
@@ -303,11 +303,11 @@ pub fn tile_session(tile: CatalogTile<'_>, face: &str) -> (Session, Micros) {
     let mut session = Session::open(draft);
     let id = SegmentId::new(TILE_CLIP);
     let requests = match tile {
-        CatalogTile::Template(template) => {
-            let mut requests = crate::caption_templates::caption_template_requests(
+        CatalogTile::Preset(preset) => {
+            let mut requests = crate::caption_presets::caption_preset_requests(
                 session.draft(),
                 &id,
-                template,
+                preset,
                 false,
             );
             // A still tile has no loop to play.
@@ -338,21 +338,21 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::caption_templates::{CAPTION_TEMPLATES, TEMPLATE_CATEGORIES};
+    use crate::caption_presets::{CAPTION_PRESETS, PRESET_CATEGORIES};
     use crate::inspector::text_look;
     use crate::text_effect::{EFFECT_CATEGORIES, TEXT_EFFECTS};
 
     #[test]
     fn every_item_has_a_name_an_id_and_categories_its_page_offers() {
         let mut ids = HashSet::new();
-        for template in CAPTION_TEMPLATES {
-            assert!(ids.insert(template.id), "{}", template.id);
-            assert!(!template.categories.is_empty(), "{}", template.id);
+        for preset in CAPTION_PRESETS {
+            assert!(ids.insert(preset.id), "{}", preset.id);
+            assert!(!preset.categories.is_empty(), "{}", preset.id);
             assert!(
-                template
+                preset
                     .categories
                     .iter()
-                    .all(|c| TEMPLATE_CATEGORIES.contains(c))
+                    .all(|c| PRESET_CATEGORIES.contains(c))
             );
         }
         for effect in TEXT_EFFECTS {
@@ -375,9 +375,9 @@ mod tests {
             );
         }
         // Each category has something in it.
-        for category in TEMPLATE_CATEGORIES {
+        for category in PRESET_CATEGORIES {
             assert!(
-                CAPTION_TEMPLATES
+                CAPTION_PRESETS
                     .iter()
                     .any(|t| t.categories.contains(category))
             );
@@ -429,11 +429,11 @@ mod tests {
     fn a_tile_project_wears_its_item() {
         let id = SegmentId::new(TILE_CLIP);
         let segment = |session: &Session| session.draft().tracks[0].segments[0].clone();
-        for template in CAPTION_TEMPLATES {
-            let (session, _) = tile_session(CatalogTile::Template(template), "face.ttf");
+        for preset in CAPTION_PRESETS {
+            let (session, _) = tile_session(CatalogTile::Preset(preset), "face.ttf");
             assert_eq!(
-                crate::caption_template_of(session.draft(), &id).as_deref(),
-                Some(template.id)
+                crate::caption_preset_of(session.draft(), &id).as_deref(),
+                Some(preset.id)
             );
         }
         for effect in TEXT_EFFECTS {

@@ -67,7 +67,7 @@ pub(super) struct InspectorState {
     pub(super) chips: HashMap<&'static str, usize>,
     /// The LUT file picker was asked for; the view opens it.
     pub(super) wants_lut: bool,
-    /// The pictures drawn for the Templates, Bubble and Effects tiles, by
+    /// The pictures drawn for the Presets, Bubble and Effects tiles, by
     /// item id. They outlast a pick of another clip.
     pub(super) tiles: HashMap<String, egui::TextureHandle>,
     /// The pose part the Graphs row eases.
@@ -343,9 +343,9 @@ fn text_panel(
     match labels.get(state.tab).copied().unwrap_or_default() {
         "Captions" => caption_list(shell, ui, state),
         "Text" => {
-            // A caption has its templates before its bubble.
+            // A caption has its presets before its bubble.
             let names: &[&str] = if caption {
-                &["Basic", "Templates", "Bubble", "Effects"]
+                &["Basic", "Presets", "Bubble", "Effects"]
             } else {
                 &["Basic", "Bubble", "Effects"]
             };
@@ -368,8 +368,8 @@ fn text_panel(
                         send(shell, Shell::save_text_preset);
                     }
                 }
-                "Templates" => {
-                    caption_templates(shell, ui, state);
+                "Presets" => {
+                    caption_presets(shell, ui, state);
                     if !inspection.words.text.is_empty() {
                         ui.add_space(12.0);
                         ui.label(RichText::new("Word styles").size(12.0).color(tokens::MUTED));
@@ -3767,35 +3767,35 @@ fn catalog_tile(
     response
 }
 
-/// The Templates page: each caption template, the caption's own outlined.
+/// The Presets page: each caption preset, the caption's own outlined.
 /// A pick styles every main caption while "Apply to all main captions" is
 /// on, as one undo step.
-fn caption_templates(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
-    let items: Vec<CatalogItem> = cutlass_editor::CAPTION_TEMPLATES
+fn caption_presets(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let items: Vec<CatalogItem> = cutlass_editor::CAPTION_PRESETS
         .iter()
-        .map(|template| CatalogItem {
-            id: template.id,
-            name: template.name,
-            categories: template.categories,
-            tile: cutlass_editor::CatalogTile::Template(template),
+        .map(|preset| CatalogItem {
+            id: preset.id,
+            name: preset.name,
+            categories: preset.categories,
+            tile: cutlass_editor::CatalogTile::Preset(preset),
         })
         .collect();
-    let worn = shell.caption_template();
+    let worn = shell.caption_preset();
     let picked = catalog_page(
         shell,
         ui,
         state,
         &CatalogPage {
-            name: "templates",
-            search: Some("Search text templates"),
-            categories: cutlass_editor::TEMPLATE_CATEGORIES,
+            name: "presets",
+            search: Some("Search caption presets"),
+            categories: cutlass_editor::PRESET_CATEGORIES,
         },
         &items,
         Some(worn.as_deref().unwrap_or_default()),
     );
     match picked {
-        Some("") => send(shell, Shell::clear_caption_template),
-        Some(id) => send(shell, |shell| shell.set_caption_template(id)),
+        Some("") => send(shell, Shell::clear_caption_preset),
+        Some(id) => send(shell, |shell| shell.set_caption_preset(id)),
         None => {}
     }
 }

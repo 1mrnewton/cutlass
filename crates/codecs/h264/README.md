@@ -1,12 +1,12 @@
 # cutlass-h264
 
-An H.264 (AVC) decoder and encoder in safe Rust. The crate has `#![forbid(unsafe_code)]` and depends only on `cutlass-decode`, `cutlass-encode` and `cutlass-h264-kernels`, which holds its sample loops and the `unsafe` their NEON versions need. `H264Decoder::open` decodes on the caller's thread; `with_threads` gives it threads, and the decoders `register_decoders` adds, which are the ones the app opens, take up to eight of the machine's cores. The desktop app registers both: on macOS and Windows the platform codec is asked first when hardware decode or encode is on in Settings, and this crate is used when that opener declines, when hardware is off, and always on Linux.
+An H.264 (AVC) decoder and encoder in safe Rust. The crate has `#![forbid(unsafe_code)]` and depends only on `cutlass-decode`, `cutlass-encode` and `cutlass-h264-kernels`, which holds its sample loops and the `unsafe` their NEON, SSE4.1 and AVX2 versions need. `H264Decoder::open` decodes on the caller's thread; `with_threads` gives it threads, and the decoders `register_decoders` adds, which are the ones the app opens, take up to eight of the machine's cores. The desktop app registers both: on macOS and Windows the platform codec is asked first when hardware decode or encode is on in Settings, and this crate is used when that opener declines, when hardware is off, and always on Linux.
 
 ## What it supports
 
 | | Decoder | Encoder |
 | --- | --- | --- |
-| Profiles | `profile_idc` 66, 77, 88, 100, 110, 122, 244 (Baseline, Main, Extended, High, High 10, High 4:2:2, High 4:4:4 Predictive). The constraint flags are not checked. | High (`profile_idc` 100), `level_idc` 31 |
+| Profiles | `profile_idc` 66, 77, 88, 100, 110, 122, 244 (Baseline, Main, Extended, High, High 10, High 4:2:2, High 4:4:4 Predictive). The constraint flags are not checked. | High (`profile_idc` 100). `level_idc` is the lowest level of Table A-1 that holds the picture size, the macroblock rate at the first picture's frame rate, a two-frame picture buffer, and `bitrate` when it is not 0. |
 | Chroma and depth | 4:2:0, 4:2:2, 4:4:4 at 8 to 14 bits, luma and chroma depth equal. Separate color planes. | 8-bit 4:2:0, even width and height |
 | Entropy coding | CAVLC and CABAC | CABAC |
 | Slices | I, P, B, SP, SI. Several slices per picture, slice groups with map types 0 to 6, data partitions. SP and SI only at 8-bit 4:2:0. | One slice per picture. I, P, and one B between two references. |
@@ -14,8 +14,8 @@ An H.264 (AVC) decoder and encoder in safe Rust. The crate has `#![forbid(unsafe
 | Prediction | Skip, direct, partitions down to 4×4, explicit and implicit weighted prediction | Intra 4×4 DC. P: skip, 16×16, 16×8, 8×16, four 8×8. B: 16×16 on list 0, list 1, or both. |
 | Transform | 4×4 and 8×8, scaling lists, transform bypass, deblocking, frame crop | 4×4, and 8×8 for inter luma when its residual is closer |
 | Ordering | Picture order count types 0, 1, 2. Reference marking, list modification, `frame_num` gaps. | Type 0, sliding window, two reference frames |
-| SEI and VUI | Picture timing changes the output time. Film grain is applied to the shown picture, not to the reference. Other SEI is skipped. Sample aspect, timing, and color tags are returned with the picture; the engine's picture (`PictureInfo`) names the primaries, transfer, matrix (`matrix` and `cicp_matrix`) and the sample range, so a full-range stream is shown as full range. | No SEI. A VUI with bitstream restrictions. |
-| Framing | Annex B, length prefixes of 1, 2, or 4 bytes, `avcC` extradata | Annex B when `nal_length_size` is 0, else 4-byte lengths. `extradata()` is the `avcC` record. |
+| SEI and VUI | Picture timing changes the output time. Film grain is applied to the shown picture, not to the reference. Other SEI is skipped. Sample aspect, timing, and color tags are returned with the picture; the engine's picture (`PictureInfo`) names the primaries, transfer, matrix (`matrix` and `cicp_matrix`) and the sample range, so a full-range stream is shown as full range. | No SEI. A VUI with bitstream restrictions, and with the video signal type (range, primaries, transfer, matrix) when `CodecParams` names a range or a colour. No timing information. |
+| Framing | Annex B, length prefixes of 1, 2, or 4 bytes, `avcC` extradata | Annex B when `nal_length_size` is 0, else 4-byte lengths. `extradata()` is the `avcC` record. The SPS and PPS ride in the access unit of each IDR picture and of no other. |
 
 The decoder returns every picture as 8-bit 4:2:0 in `VideoOutput::picture`. A deeper or wider stream also fills `yuv420p10`, `yuv420_high`, `yuv422`, `yuv422_high`, `yuv444`, or `yuv444_high` with the full samples. The opener the engine uses (`Decoder`) returns only the packed 8-bit 4:2:0 picture.
 
@@ -39,7 +39,18 @@ One `push` to the decoder is one access unit. It returns the pictures that are r
 
 The decoders `register_decoders` adds decode on other threads, on as many cores as the machine has up to eight (`with_threads_from_the_second_picture`). The pictures and their order are the same as on one thread, byte for byte, on every thread count. What differs: the first picture after opening or a `reset` is decoded on the calling thread, so a seek that wants one picture gets it from the same call as before and starts no thread; the pictures after it may come out some calls later than on one thread (up to the pictures in flight, about one and a half per core), so a caller that wants a certain picture keeps pushing or drains, as the engine's reader does; and an error in one of those pictures is returned by the call that would have returned the picture. No thread is started until a second picture needs one, at most four per core are ever started (eight were seen on four cores), and a thread with nothing to decode for half a second ends, so a clip that is open but not playing holds none. Interlaced, 4:2:2, 4:4:4, multiview and scalable pictures stay on the calling thread. The engine's picture is packed into a buffer the decoder shares with it (`PictureOutput::cpu_shared`) and fills again once the engine has let it go. `nal_length_size` 0 means Annex B; an `avcC` record in `CodecParams::extra` sets the length size itself.
 
-The encoder holds one picture back so it can code a B picture, so a `push` may return no packet and `drain` returns the last one. A picture is intra only when it is the first one or `force_keyframe` is set. With `bitrate` set, the frame QP follows the bit budget; `constant_rate` resets that budget each second. With `bitrate` 0 the QP stays at 26.
+The encoder holds one picture back so it can code a B picture, so a `push` may return no packet and `drain` returns the last one. With `bitrate` set, the frame QP follows the bit budget, starting from the bits a sample at the first picture's frame rate; `constant_rate` resets that budget each second. With `bitrate` 0 the QP stays at 26.
+
+A picture is an IDR picture, a keyframe a player can seek to, when:
+
+- it is the first one;
+- the keyframe interval has passed since the last one. The interval is two seconds, counted from the `duration` and `timescale` of the pictures pushed; `set_keyframe_interval` changes it, and 0 turns it off. When the durations are zero or negative the interval is counted in pictures at 150 a second, 300 pictures for two seconds;
+- it is a scene cut (`set_scene_cut(false)` turns this off). The luma plane is reduced by 4, 8 or 16 on a side and each 8×8 block of it is matched within ±4 reduced samples in the picture before, with both blocks' means taken out. The picture is a cut when the match leaves at least 75% of the picture's own detail and at least 2 levels a sample. A cut a tenth of the interval or less after the last IDR picture stays a P picture;
+- `force_keyframe` is set.
+
+The picture held back before an IDR picture is coded as a P picture, so no B picture predicts across a keyframe.
+
+The level and the first QP need the frame rate, which `CodecParams` does not carry. They are set from the first picture's `duration` and `timescale` after an open or a reset, and 30 pictures a second is assumed when that duration is not positive. `extradata()` read before the first `push` therefore names the level for 30 pictures a second; read it after the first packet, as the export adapter does. The level is not raised if the frame rate rises later in the stream.
 
 ```rust
 use cutlass_decode::{CodecId, CodecParams, VideoDecoder, Yuv420p};
@@ -83,7 +94,7 @@ cargo test -p cutlass-h264 --release -- --ignored
 
 - **Decoder against FFmpeg.** Streams written by libx264 are decoded here and by `ffmpeg`, and every sample inside the cropped rectangle must be equal. This covers Baseline, Main, and High with CAVLC and CABAC, B pictures and temporal direct, weighted prediction, several slices, crop, scaling lists (`src/mb.rs`, `src/dec.rs`), High 10 (`src/high10.rs`), 4:2:2 and 4:4:4 at 8 and 10 bits, clean and noisy, on one thread and on four (`src/chroma.rs`), an intra field pair and macroblock-adaptive frames with I, P, and B under CABAC and CAVLC at 4:2:0 and at 8-bit and 10-bit 4:2:2 (`src/fields.rs`, `src/chroma.rs`; 4:4:4 interlaced is not checked), lossless, including noisy pictures libx264 writes partly as I_PCM inside CABAC slices (`src/lossless.rs`), and picture sizes up to the level limits (`src/annex_a.rs`).
 - **Decoder against the specification.** Tools FFmpeg does not decode are checked against sample values worked out from the specification on small hand-built streams: slice groups (`src/fmo.rs`), data partitions, SP and SI (`src/part.rs`, `src/sp.rs`), separate color planes (`src/planes.rs`), depths of 11 and 13 bits (`src/depth.rs`, which compares 9, 12, and 14 bits with FFmpeg), picture timing and film grain (`src/sei_pic.rs`), and the scalable, multiview, and 3D cases (`src/annex_g.rs`).
-- **Encoder.** The encoder's output is decoded by this decoder and by FFmpeg, and both must give the same samples (the `*_matches_ffmpeg` tests in `src/enc.rs`). `testsrc2_meets_the_luma_and_rate_gates` requires a luma PSNR of at least 30 dB and a size within 0.75 to 1.25 times `bitrate * duration`. `natural_clip_meets_the_luma_gate` requires 28 dB on a camera clip. `bottom_rows_survive_a_partial_macroblock_row` encodes scrolling pictures at 96×72, 96×80 and 88×72 and requires the bottom 24 rows to reach 35 dB luma and 28 dB chroma in every picture, with FFmpeg decoding the same samples: the encoder codes whole macroblocks, with the picture's last row and column repeated into the padding, and predicts from the uncropped reconstruction, as every decoder does.
+- **Encoder.** The encoder's output is decoded by this decoder and by FFmpeg, and both must give the same samples (the `*_matches_ffmpeg` tests in `src/enc.rs`). Keyframes are checked at the interval, at a cut, and not at a pan, a flash, a fade or a cut right after a keyframe, and a decoder started at each keyframe must show the same pictures as one that read the whole stream (`keyframes_come_at_the_interval`, `a_scene_cut_is_a_keyframe`, `motion_a_flash_and_an_early_cut_are_not_keyframes`). The level is checked against Table A-1 for 1280×720 at 30, 1920×1080 at 30 and 60 and 3840×2160 at 30, and the colour description is read back by this decoder (`the_sps_and_the_avcc_carry_the_level`, `the_colour_description_round_trips`). With FFmpeg installed, `ffprobe -show_streams` must report that level and colour and `ffprobe -show_frames` those keyframes (`ffprobe_reads_the_level_colour_and_keyframes`, `ffprobe_reads_the_level_of_hd_and_uhd`); last run on 24 November 2026 at commit `35319808` with FFmpeg 6.1.1 on a 4-core Intel Xeon at 2.1 GHz running Linux 6.18. `testsrc2_meets_the_luma_and_rate_gates` requires a luma PSNR of at least 30 dB and a size within 0.75 to 1.25 times `bitrate * duration`. `natural_clip_meets_the_luma_gate` requires 28 dB on a camera clip. `bottom_rows_survive_a_partial_macroblock_row` encodes scrolling pictures at 96×72, 96×80 and 88×72 and requires the bottom 24 rows to reach 35 dB luma and 28 dB chroma in every picture, with FFmpeg decoding the same samples: the encoder codes whole macroblocks, with the picture's last row and column repeated into the padding, and predicts from the uncropped reconstruction, as every decoder does.
 - **The app's opener.** The decoders `register_decoders` adds must return the same bytes as one thread on 1 to 8 and 16 cores, give the picture asked for when scrubbed back and forth (`reset`, then pushes from a key picture), return the first picture from the same call as one thread does without starting a thread, end their threads when left alone, keep interlaced, 4:2:2 and 4:4:4 streams on the calling thread, and name the range and matrix of the VUI (`src/dec.rs`).
 - **Bad input.** Truncated units, bad lengths, bad parameter sets, and 64 random packets must return an error, and a known picture must still decode afterward (`hostile_framing_is_rejected_and_the_decoder_stays_usable`, `hostile_parameter_sets_are_rejected`, `random_packets_fail_closed`).
 - Five films from 576×1024 to 3840×2160 decode to the same bytes as FFmpeg's decoder, on 1 thread and on 18 (see the speed section). The films are not in the repository, so no test repeats this.
@@ -143,7 +154,7 @@ Wall time and processor time (user plus system) of the whole process, median of 
 
 Four is every core this machine has, so there is no row above it. What the table says:
 
-- Cutlass is behind FFmpeg here on every row, 1.9 to 2.8 times the wall time. On this processor the sample loops run their portable versions, where FFmpeg has x86 assembly; the tables above, where Cutlass is level, are from an Arm machine, whose loops have NEON versions in `cutlass-h264-kernels`. Threads do not change that ratio much.
+- Cutlass is behind FFmpeg here on every row, 1.9 to 2.8 times the wall time. On this processor the sample loops ran their portable versions, where FFmpeg has x86 assembly (this was measured before the SSE4.1 and AVX2 kernels in the next section); the tables above, where Cutlass is level, are from an Arm machine, whose loops have NEON versions in `cutlass-h264-kernels`. Threads do not change that ratio much.
 - Threads are what the app gains. Before this change the app's opener decoded on one thread whatever the machine had: 5.52 s and 12.53 s for these two streams. On four cores it now takes 1.83 s and 4.12 s, 3.0 times faster on both, for 6 to 7% more processor time.
 - Retired instructions were not measured: this virtual machine gives `perf stat` no hardware counters (`instructions` and `cycles` are `<not supported>`).
 
@@ -156,6 +167,56 @@ Three smaller measurements from the same day and machine:
 - The packed picture is still a copy of the three planes, made on the calling thread. On four cores the same decoder without that copy (`examples/profile_decode.rs`, `THREADS=4`) took 1.62 s and 3.6 s where the app's opener took 1.83 s and 4.12 s, so the copy and the first picture decoded on the calling thread cost about a tenth. Packing on the decoding threads would win most of that back and is not done.
 
 On 10 November 2026, at commit `ed0743d2`, the decoder took 9.47 s on one thread for 600 pictures of 1920×1080 written by libx264, where FFmpeg took 2.48 s.
+
+**Decode, h264, on x86-64.** Measured on 24 November 2026 at commit `eb666531`, on an Intel Xeon (`Intel(R) Xeon(R) Processor @ 2.10GHz`, family 6 model 207, with AVX2 and AVX-512; 4 virtual CPUs of a KVM guest, 15 GB) running Ubuntu 24.04, against FFmpeg 6.1.1 built from its source (tag `n6.1.1`, gcc 13.3, static, with only the H.264 decoder, parser and raw demuxer in it). Ubuntu's own FFmpeg 6.1.1 took 1 to 6% longer than that build. Built with rustc 1.97.0 and `cargo build --release`, not through `scripts/pgo.py`. The input is eight Annex B streams made for this with `ffmpeg -c:v libx264 -bf 3 -crf 23` at the preset named, from FFmpeg's `mandelbrot` source with noise added, all High profile, 8-bit 4:2:0, CABAC; "pan" is its `testsrc2` source turned and scrolled, and "all intra" has a key picture every picture. They are not in the repository.
+
+Until this commit an x86-64 build ran every sample loop as plain Rust. "Before" is that build, at `bcab8681`. The kernels are now chosen when the first one is called: AVX2 where the CPU has it, else SSE4.1; "SSE4.1" is the same commit made to choose that on this CPU.
+
+One thread on both sides (FFmpeg's `thread_count` 1), processor time of the whole process, user and system (median of 7 runs taken in turn, 3 for "Before"; the whole table run three times and each cell the middle of the three):
+
+| Stream | Pictures | Before | Cutlass, AVX2 | Cutlass, SSE4.1 | FFmpeg (`h264`) | AVX2 ÷ FFmpeg |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1920×1080 superfast | 120 | 4.09 s | 2.31 s | 2.38 s | 1.96 s | 1.18 |
+| 1920×1080 veryfast | 120 | 2.47 s | 1.17 s | 1.26 s | 0.93 s | 1.26 |
+| 1920×1080 medium | 120 | 2.86 s | 1.40 s | 1.41 s | 1.08 s | 1.30 |
+| 1920×1080 slow | 120 | 2.84 s | 1.37 s | 1.42 s | 1.08 s | 1.27 |
+| 1920×1080 medium, pan | 120 | 2.63 s | 1.13 s | 1.19 s | 0.83 s | 1.36 |
+| 1920×1080 medium, all intra | 30 | 0.95 s | 0.51 s | 0.51 s | 0.54 s | 0.94 |
+| 3840×2160 veryfast | 48 | 3.82 s | 1.64 s | 1.68 s | 1.38 s | 1.19 |
+| 3840×2160 medium | 48 | 4.50 s | 2.10 s | 2.08 s | 1.55 s | 1.35 |
+
+Retired instructions of the whole process:
+
+| Stream | Before | Cutlass, AVX2 | Cutlass, SSE4.1 | FFmpeg (`h264`) | AVX2 ÷ FFmpeg |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1920×1080 superfast | 34.94G | 16.34G | 17.04G | 11.26G | 1.45 |
+| 1920×1080 veryfast | 24.81G | 9.07G | 9.68G | 6.30G | 1.44 |
+| 1920×1080 medium | 25.94G | 10.25G | 10.89G | 7.10G | 1.44 |
+| 1920×1080 slow | 25.16G | 10.12G | 10.76G | 6.95G | 1.46 |
+| 1920×1080 medium, pan | 24.83G | 8.78G | 9.38G | 5.90G | 1.49 |
+| 1920×1080 medium, all intra | 10.67G | 3.98G | 4.10G | 3.16G | 1.26 |
+| 3840×2160 veryfast | 35.73G | 11.78G | 12.62G | 8.41G | 1.40 |
+| 3840×2160 medium | 36.67G | 13.19G | 14.12G | 9.51G | 1.39 |
+
+The vector kernels halve the time of every stream (1.8 to 2.3 times as fast as before) and bring the instructions to 0.33 to 0.47 of what they were. Cutlass is still behind this FFmpeg on seven of the eight: it takes 1.18 to 1.36 times FFmpeg's time, and 0.94 of it on the all-intra stream. It retires 1.26 to 1.49 times FFmpeg's instructions on all eight, the all-intra one included, which it gets through in less time. Times on this shared machine moved by up to 5% from one run of the table to the next; the instruction counts do not move.
+
+Where the instructions go on the 1920×1080 medium stream, by the function they are counted in:
+
+| Area | Cutlass, AVX2 | FFmpeg | Difference |
+| --- | ---: | ---: | ---: |
+| Reading the stream: CABAC, macroblock syntax, motion vectors, levels and their scaling | 5.18G | 3.60G | 1.58G |
+| Inter prediction | 2.14G | 1.55G | 0.59G |
+| Deblocking, with finding each edge's strength | 2.08G | 1.65G | 0.43G |
+| Inverse transforms and adding the residual | 0.25G | 0.19G | 0.06G |
+| Intra prediction | 0.01G | 0.01G | 0.00G |
+| Everything else (clearing and copying memory, start-up, the harness) | 0.59G | 0.10G | 0.49G |
+| Whole process | 10.25G | 7.10G | 3.15G |
+
+Of Cutlass's 10.25G, 2.44G are in `cutlass-h264-kernels` and 7.81G outside it, in this crate and the memory clearing and copying it asks for: more than FFmpeg's whole decode. What is left to win is mostly here: reading residual levels under CABAC (`inter_luma_scaled` and `chroma_scaled`, 2.77G against about 1.84G for FFmpeg's `decode_cabac_residual_nondc_internal`, `decode_significance_x86` and `get_cabac`), finding the deblocking strengths (`deblock_rows_after`, 1.30G against 1.01G for FFmpeg's `loop_filter`, `ff_h264_filter_mb_fast` and its strength routine), and the calls around each prediction (`mc_plain`, `predict_parts` and `prefetch_motion`, 0.60G against 0.34G for `mc_part_420_simple_8`). Sampled processor time splits the same way: 56% reading the stream, 19% inter prediction, 15% deblocking in Cutlass, against 60%, 20% and 16% in FFmpeg.
+
+One thing was tried and left as it was. Asking the cache for a reference block's rows ahead of its prediction (`prefetch`) made the 3840×2160 medium stream 6 to 10% faster and two of the 1920×1080 ones 1 to 4% slower, in 7 runs of each with and without it; it is kept, as FFmpeg keeps its own. The AVX2 kernels, which are the 128-bit ones built a second time for AVX2 with sixteen-wide luma prediction in 256-bit registers, retire 3 to 7% fewer instructions than the SSE4.1 ones and take from 1% more to 7% less time, which on half the streams is within what the times move by.
+
+How this was measured: as the table above it, each side is a whole process, here timed with `/usr/bin/time`, and the Cutlass side is `examples/profile_decode.rs` with `NOHASH=1`, which reads the file, splits it into access units, pushes each to `H264Decoder` and drops the pictures. This machine gives `perf stat` no hardware counters, so the instructions are counted by Valgrind 3.22 (`--tool=callgrind`), which runs the same binaries on a CPU it presents as having AVX2 and no AVX-512, and there are no cycle counts. Before the timing, every sample of every picture of all eight streams was the same from FFmpeg, from the build before, and from Cutlass on its AVX2 and its SSE4.1 kernels.
 
 **Encode, h264.** Measured on 10 November 2026 at commit `ed0743d2`, same machine, FFmpeg 8.1.1, `cargo build --release` with rustc 1.99.1, and not measured again since. Input: 300 raw frames of 1920×1080 at 30 frames a second, asked for 8 Mbit/s.
 
@@ -196,12 +257,14 @@ Decoder gaps:
 
 Encoder gaps:
 
-- Intra macroblocks use only 4×4 DC prediction, and P and B pictures hold no intra macroblocks. A scene change inside a group of pictures is coded with inter prediction unless the caller sets `force_keyframe`.
+- Intra macroblocks use only 4×4 DC prediction, and P and B pictures hold no intra macroblocks. A scene change the cut check misses, or one a tenth of the keyframe interval or less after an IDR picture, is coded with inter prediction. So is a new object that covers part of a picture.
+- The cut check compares pictures at a quarter of their size or less. A picture under about 64 samples on a side has too few blocks for it to be reliable, and content with no likeness from one picture to the next (noise, a strobe) is a cut every tenth of the interval.
+- The keyframe interval and the cut check are set on `H264Encoder` itself. `CodecParams` has no field for them, so export always gets the defaults.
 - B pictures are 16×16 only, with no skip or direct macroblocks, and are never references.
 - The motion search is a four-point diamond of at most 16 steps and ±16 samples, then half and quarter sample steps.
 - No weighted prediction, 4×4 sub-macroblock partitions, CAVLC, interlace, several slices, or depths above 8 bits.
-- The stream always says level 3.1, also for a picture larger than that level allows.
-- The first QP is chosen as if the clip ran at 30 pictures a second.
+- The level is the Table A-1 row for the size, frame rate and requested bitrate. The rate control does not hold the stream to that level's buffer (no HRD), and the VUI carries no timing information, so a raw Annex B file does not say its frame rate.
+- `MatrixCoefficients::Rgb` is written as unspecified, because identity coefficients are for 4:4:4 only.
 - No presets and no multithreading.
 
 ## Specifications

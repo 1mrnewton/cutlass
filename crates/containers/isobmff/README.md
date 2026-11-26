@@ -18,7 +18,13 @@ Reading:
 | Display matrix | The `mvhd` and `tkhd` matrices are multiplied. A clockwise turn of 0, 90, 180, or 270 degrees is reported on the stream. |
 | HEIC and AVIF | Each item of the `meta` box is one packet at timescale 1, the primary item first. |
 
-One packet is one sample. `dts` and `pts` are ticks of the track's own timescale, and `pts` is `dts` plus the composition offset. Packets come back in file order (lowest byte offset first).
+One packet is one sample, except for constant-size audio. `dts` and `pts` are ticks of the track's own timescale, and `pts` is `dts` plus the composition offset. Packets come back in file order (lowest byte offset first).
+
+Constant-size audio is an audio track whose `stsz` has one sample size and whose `stts` rows all say one tick: raw PCM as QuickTime, cameras, FFmpeg, and this muxer store it, where each table sample is one audio frame. Such a track is not read one frame at a time. Each chunk is cut into packets of 1024 frames and the last packet of a chunk holds the rest, which is how FFmpeg's `mov_build_index` groups them, so 48 kHz sound is about 47 packets a second. A packet's `duration` is its frame count and every packet is a sync sample. The bytes of one frame come from the sample entry (channels times the sample width, or the bytes-per-packet field of a version 2 `lpcm` entry), not from `stsz`, where classic QuickTime writes 1. An `ipcm` or `fpcm` track uses its `stsz` size, as FFmpeg does. A version 1 sound description of a compressed codec (`ima4` and the like) is cut on its stated block instead. A packet is worked out from the chunk tables when it is read, so a track of any length holds only its chunk offsets in memory and the samples-per-track limit does not apply to it.
+
+A seek on such a track lands on the packet that holds the asked frame. The landing's time is that packet's first frame, so the asked frame is `asked time - landing time` frames into the next packet, and the preroll is 0.
+
+An audio entry whose rate field is 0 (the 16.16 field cannot hold a rate above 65535) takes its rate from the AAC `AudioSpecificConfig`, the FLAC `dfLa` STREAMINFO, or 48000 for Opus, and otherwise from the `mdhd` timescale.
 
 The sample entry names the codec:
 
@@ -36,6 +42,9 @@ The sample entry names the codec:
 | `.mp3`, `Opus`, `fLaC`, `alac` | MP3, Opus, FLAC, ALAC |
 | `ac-3`, `sac3`, `ec-3` | AC-3, E-AC-3 |
 | `sowt`, `twos`, `raw `, `in24`, `in32`, `fl32`, `fl64`, `lpcm`, `NONE` | PCM |
+| `ipcm`, `fpcm` with a `pcmC` box (ISO/IEC 23003-5) | PCM |
+
+The PCM rows were last changed on 24 November 2026 at commit `722398fb`, checked against FFmpeg 6.1.1 on an Intel Xeon at 2.10 GHz (4 cores) running Linux 6.18: grouped packets, the frame size from the entry, and `ipcm`/`fpcm`. FFmpeg 6.1 writes 24-bit PCM into MP4 under a `pcmC` that says 32 bits; the sample width is then taken from the `stsz` frame size, so such a file reads as the 24-bit sound it holds.
 
 The configuration boxes `avcC`, `hvcC`, `av1C`, `vpcC`, `esds`, `alac`, `dOps`, `dac3`, `dec3`, and `dfLa` are kept as the stream's extradata. Three entries are reshaped: an ALAC track gives the bare magic cookie (the `alac` box joined with its `chan` box), `IsoBmffFile` turns an Opus `dOps` into an `OpusHead`, and a ProRes entry, which has no configuration box, gives its fourcc. A QuickTime Motion JPEG entry gives its fourcc too, followed by the two `fiel` bytes when that box is present. An unknown sample entry is `CodecId::Unknown` and its packets are still returned.
 
@@ -106,6 +115,7 @@ cargo test -p cutlass-isobmff
 ```
 
 - Unit tests in `src/behavior.rs` build files by hand and through the muxer. They cover both index places, the sample tables, negative composition offsets, edit lists, the display matrix, seek, fragments, a HEIF item, an unknown codec, and hostile input (short header, wrong family, size past the parent, 40 nested boxes, external reference).
+- `src/demux/grouped_audio.rs` covers constant-size audio with files built byte by byte: `sowt` entries of version 0 and 1 with `stsz` sample size 1, a version 2 `lpcm` entry, a version 1 compressed block, entries with rate 0 at 96 and 88.2 kHz, seek to a frame inside a packet, tables that do not describe the payload, and a PCM movie longer than the samples limit written by this muxer and opened again. `ffmpeg_pcm_files_give_the_packets_ffprobe_lists` asks FFmpeg for `pcm_s16le`, `pcm_s24be`, and `pcm_f32le` in `.mov` and `.mp4` and compares every packet's times and size with `ffprobe -show_packets` and the bytes with FFmpeg's stream copy; it prints `not available` and passes without FFmpeg. `src/index.rs` checks the grouped packets against the row-per-frame table on 200 generated chunk layouts.
 - `src/oracle.rs` compares against FFmpeg. `ffmpeg_and_gstreamer_see_the_same_packets` reads FFmpeg's progressive MP4, fragmented MP4, and QuickTime files and compares packet count, payload hash, size, duration, keyframe flag, and composition offset with `ffmpeg -c copy -f framehash`. `ffmpeg_reads_files_this_muxer_wrote` does the reverse for files this muxer wrote. `ffmpeg_motion_jpeg_files_demux_and_remux` covers Motion JPEG. These tests print `not available` and pass when `ffmpeg` or `ffprobe` is not on the `PATH`. GStreamer's `gst-discoverer-1.0` is asked for the codec and width when it is installed.
 - Two fuzz loops run only when asked: `ISOBMFF_FUZZ_SECS=<seconds>` for probe, open, read, and seek on mutated input, and `ISOBMFF_MUX_FUZZ_SECS=<seconds>` for a mux round trip. Without the variable they print `not run` and pass.
 - Four tests read real media from a folder kept outside the repository, and one of them rewrites the files only when `ISOBMFF_LOCAL_WRITE=1`. They pass without checking anything when the folder or the named file is absent.
@@ -133,6 +143,20 @@ How it was measured: both sides get the same input from disk, do all of the work
 
 To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`.
 
+**Long PCM tracks.** Measured on 24 November 2026 at commit `722398fb`, on an Intel Xeon at 2.10 GHz (4 cores, a Firecracker guest) running Linux 6.18, against FFmpeg 6.1.1. Built with `cargo build --release` and rustc 1.97.0. The files are FFmpeg's own: `anoisesrc` or `sine` at 48 kHz written with `-c:a pcm_s16le` and the like. Before this change each of them failed to open with `samples limit exceeded`.
+
+| File | Packets | Same times and sizes as `ffprobe -show_packets` | Same bytes as `ffmpeg -c copy -f data` | Peak memory |
+| --- | ---: | --- | --- | ---: |
+| 10 minutes, `pcm_s16le`, stereo, `.mov` and `.mp4` | 28,125 | yes | yes | 2.3 MB |
+| 10 minutes, `pcm_s24be`, stereo, `.mov` and `.mp4` | 28,125 | yes | yes | 2.3 MB |
+| 10 minutes, `pcm_f32le`, stereo, `.mov` and `.mp4` | 28,125 | yes | yes | 2.3 MB |
+| 10 minutes, `pcm_s16le` beside MPEG-4 video, `.mov` | 28,125 | yes | yes | 2.3 MB |
+| 4 hours, `pcm_u8`, mono, `.mov` | 675,000 | yes | yes | 2.3 MB |
+
+Peak memory is the `VmHWM` of a process that opens the file with `IsoBmffFile` and reads every packet; a 0.1 second file gives the same 2.3 MB. No time against FFmpeg was measured for these files.
+
+`IsoBmffFile` no longer seeks before a read that starts where the last one ended. Reading the 10-minute `pcm_s16le` `.mov` from a `File` went from 28,134 `lseek` calls to 5 (`strace -c`), with the same 28,145 `read` calls and the same output checksum. It did not make the read measurably faster on this machine: the median of 15 runs was 175 ms before and 173 ms after, and user-space instructions counted by `valgrind --tool=callgrind` went from 694.5 million to 693.4 million, most of them the test program's checksum. Retired instructions from `perf stat` are not available in this guest.
+
 ## Limits and gaps
 
 Limits, from `src/limits.rs`:
@@ -141,7 +165,7 @@ Limits, from `src/limits.rs`:
 | --- | --- |
 | `moov`, `moof`, `meta`, or `sidx` held in memory | 64 MiB |
 | Tracks | 64 |
-| Samples per track | 4,000,000 |
+| Samples per track (constant-size audio is not counted) | 4,000,000 |
 | One packet | 64 MiB |
 | Box nesting | 32 |
 | Boxes visited at open | 2,000,000 |
@@ -154,6 +178,9 @@ Gaps:
 - Edit lists are returned and never applied to packet times.
 - A flip or any matrix that is not a quarter turn is reported as no turn. The muxer writes only the identity matrix.
 - Only the first sample description of a track is used.
+- Constant-size audio is grouped only when every `stts` row says one tick. A PCM track whose timescale is not its sample rate is still read one frame a packet and is held to the samples limit.
+- `alaw` and `ulaw` tracks are grouped into packets but have no codec id; they are `CodecId::Unknown`.
+- An AAC entry with a nonzero rate keeps that rate even when the `AudioSpecificConfig` states another.
 - A `trun` version 0 composition offset is read as unsigned. `ctts` is read as signed in both versions.
 - HEIF: a grid item is returned as its own packet and the picture is not assembled. The muxer does not write HEIF items. AVIF items go through the same code as HEIC items but have no test file.
 - `sidx` is parsed and tested on its own; no test seeks a whole file through it. The muxer does not write `sidx`.

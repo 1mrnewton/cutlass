@@ -133,7 +133,7 @@ fn edge<P: Pixel, const FS: usize, const HORZ: bool>(
     // side, or 8 for size 16. An edge closer to the plane's side than
     // that (no decoder has one) stays on the lanes below.
     let reach = if FS == 16 { 8 } else { 4 };
-    if cutlass_simd::ACCELERATED
+    if cutlass_simd::av1::lf::accelerated()
         && (HORZ || (x >= reach && x + reach <= stride))
         && let Some(bytes) = P::bytes_mut(buf)
     {

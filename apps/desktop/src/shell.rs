@@ -440,13 +440,13 @@ pub struct Inspection {
 
 #[derive(Clone, Debug)]
 pub struct ExportRequest {
-    /// The main file: a movie (`.mp4`, `.mov`), the sound alone (`.m4a`,
+    /// The main file: a movie (`.mp4`, `.mov`, `.webm`), the sound alone (`.m4a`,
     /// `.wav`), or a GIF when only the GIF is asked for. A GIF or a caption
     /// file asked for beside it takes the same name and folder.
     pub path: PathBuf,
     pub short_side: i32,
     /// PNG writes the frame at the playhead; H.264, HEVC, ProRes, Motion
-    /// JPEG or VP8 a movie.
+    /// JPEG, VP8 or VP9 a movie.
     pub codec: CodecId,
     pub replace: bool,
     pub span: ExportSpan,
@@ -7980,6 +7980,24 @@ impl Shell {
                 "VP8 is written in an MP4".to_owned(),
             ));
         }
+        // A `.webm` name asks for WebM, which holds a subset of codecs.
+        let webm = is_webm(&request.path);
+        if request.codec == CodecId::Vp9 && !webm {
+            return Err(ShellError::Unavailable(
+                "VP9 is written in a WebM".to_owned(),
+            ));
+        }
+        if webm && !matches!(request.codec, CodecId::Vp8 | CodecId::Vp9 | CodecId::Av1) {
+            return Err(ShellError::Unavailable(
+                "a WebM holds VP8, VP9 or AV1 pictures".to_owned(),
+            ));
+        }
+        if webm && request.sound && !matches!(request.audio.codec, CodecId::Opus | CodecId::Vorbis)
+        {
+            return Err(ShellError::Unavailable(
+                "WebM sound is Opus or Vorbis".to_owned(),
+            ));
+        }
         if request.codec == CodecId::Av1 && mov {
             return Err(ShellError::Unavailable(
                 "AV1 is written in an MP4".to_owned(),
@@ -8005,12 +8023,12 @@ impl Shell {
                 "MP3 sound is written alone, without a picture".to_owned(),
             ));
         }
-        if request.sound && request.audio.codec == CodecId::Opus {
+        if request.sound && request.audio.codec == CodecId::Opus && !webm {
             return Err(ShellError::Unavailable(
                 "Opus sound is written alone, in an Opus file".to_owned(),
             ));
         }
-        if request.sound && request.audio.codec == CodecId::Vorbis {
+        if request.sound && request.audio.codec == CodecId::Vorbis && !webm {
             return Err(ShellError::Unavailable(
                 "Vorbis sound is written alone, in an Ogg file".to_owned(),
             ));
@@ -8051,6 +8069,7 @@ impl Shell {
                 | CodecId::Prores
                 | CodecId::Mjpeg
                 | CodecId::Vp8
+                | CodecId::Vp9
                 | CodecId::Av1
                 | CodecId::Mpeg2
         ) {
@@ -8061,6 +8080,11 @@ impl Shell {
             bitrate,
             audio: request.sound.then(|| request.audio.export()),
             sidecar: captions,
+            container: if webm {
+                cutlass_codec::ContainerId::Matroska
+            } else {
+                base.container
+            },
             ..base.clone()
         };
         cutlass_export::validate(&movie).map_err(export_failure)?;
@@ -8908,6 +8932,12 @@ fn is_mov(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("mov"))
+}
+
+fn is_webm(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("webm"))
 }
 
 fn playhead_frame(rate: FrameRate, playhead: Micros) -> Result<TimeRange, ShellError> {
@@ -17249,7 +17279,8 @@ mod tests {
         let declined = desktop.export(ExportRequest {
             path: destination.clone(),
             short_side: 480,
-            codec: CodecId::Vp9,
+            // No platform and no Rust crate encodes uncompressed video.
+            codec: CodecId::RawVideo,
             replace: false,
             ..ExportRequest::default()
         });
@@ -17865,6 +17896,145 @@ mod tests {
         let (u, v) = chroma.split_at(chroma.len() / 2);
         let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
         assert!(near(y, 97) && near(u, 156) && near(v, 104));
+    }
+
+    /// VP9 exports through the Rust encoder into a WebM, with Opus sound.
+    /// The desktop's readers open it and the Rust decoder gives back the
+    /// clip's colour; FFmpeg, when installed, decodes it too. An MP4 or a
+    /// MOV is refused (the MP4 muxer writes no VP9), and so is a WebM asked
+    /// to hold a codec WebM has no place for.
+    #[test]
+    fn a_vp9_export_lands_a_webm_that_plays_back() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        // Hardware off: the Rust encoder and decoder are the ones asked.
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let (decoders, encoders) = crate::register_codecs_with(&software);
+        let mut desktop = Shell::new(decoders, encoders, Settings::default());
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Vp9));
+        let opus = super::SoundFormat {
+            codec: CodecId::Opus,
+            ..super::SoundFormat::default()
+        };
+        let refused = |desktop: &mut Shell, name: &str, codec, audio| {
+            desktop
+                .export(ExportRequest {
+                    path: temp.path.join(name),
+                    short_side: 480,
+                    codec,
+                    audio,
+                    ..ExportRequest::default()
+                })
+                .unwrap_err()
+                .to_string()
+        };
+        for name in ["vp9.mov", "vp9.mp4"] {
+            assert_eq!(
+                refused(
+                    &mut desktop,
+                    name,
+                    CodecId::Vp9,
+                    super::SoundFormat::default()
+                ),
+                "VP9 is written in a WebM"
+            );
+        }
+        assert_eq!(
+            refused(
+                &mut desktop,
+                "vp9.webm",
+                CodecId::Vp9,
+                super::SoundFormat::default()
+            ),
+            "WebM sound is Opus or Vorbis"
+        );
+        assert_eq!(
+            refused(&mut desktop, "h264.webm", CodecId::H264, opus),
+            "a WebM holds VP8, VP9 or AV1 pictures"
+        );
+        assert_eq!(
+            refused(&mut desktop, "vp8.mp4", CodecId::Vp8, opus),
+            "Opus sound is written alone, in an Opus file"
+        );
+        assert!(desktop.job().is_none());
+
+        let readers = crate::readers::readers_with(crate::register_codecs_with(&software).0);
+        {
+            let (name, audio) = ("vp9.webm", opus);
+            let marks = [&b"webm"[..], b"V_VP9", b"A_OPUS"];
+            let destination = temp.path.join(name);
+            desktop
+                .export(ExportRequest {
+                    path: destination.clone(),
+                    short_side: 480,
+                    codec: CodecId::Vp9,
+                    audio,
+                    ..ExportRequest::default()
+                })
+                .unwrap();
+            land_job(&mut desktop);
+            assert_eq!(desktop.notice(), format!("Exported {name}"));
+            let bytes = std::fs::read(&destination).unwrap();
+            for mark in marks {
+                assert!(
+                    bytes.windows(mark.len()).any(|w| w == mark),
+                    "{name}: {}",
+                    String::from_utf8_lossy(mark)
+                );
+            }
+
+            let mut media = readers.open(&destination).unwrap();
+            assert_eq!(
+                (media.info().width, media.info().height),
+                (Some(960), Some(480)),
+                "{name}"
+            );
+            let held = media
+                .decode_at(Micros(1_500_000), &TimeRange::new(0, 2_000_000))
+                .unwrap();
+            let cutlass_engine::DecodedFrame::Coded {
+                width,
+                height,
+                pixel,
+                matrix,
+                range,
+                bytes,
+                ..
+            } = held.frame
+            else {
+                panic!("a coded picture");
+            };
+            assert_eq!((width, height), (960, 480), "{name}");
+            assert_eq!(pixel, PixelFormat::Yuv420p);
+            assert_eq!(matrix, cutlass_decode::ColorMatrix::Bt709);
+            assert_eq!(range, cutlass_decode::ColorRange::Limited);
+            // 0x336699 in BT.709 limited range, as export converts it: Y 97,
+            // Cb 156, Cr 104.
+            let (y, chroma) = bytes.split_at(960 * 480);
+            let (u, v) = chroma.split_at(chroma.len() / 2);
+            let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
+            assert!(near(y, 97) && near(u, 156) && near(v, 104), "{name}");
+
+            // FFmpeg reads the file and decodes the same colour.
+            if let Some(ffmpeg) = ffmpeg() {
+                let rgba = ffmpeg_rgba(&ffmpeg, &destination, 45);
+                assert_eq!(rgba.len(), 960 * 480 * 4, "{name}");
+                assert!(
+                    rgba.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|p| p[0].abs_diff(0x33) <= 6
+                            && p[1].abs_diff(0x66) <= 6
+                            && p[2].abs_diff(0x99) <= 6),
+                    "{name}: ffmpeg's colour"
+                );
+            }
+        }
     }
 
     /// AV1 exports through the Rust encoder into an MP4 `av01` track with

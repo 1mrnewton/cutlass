@@ -99,6 +99,21 @@ mod fixtures {
 
     #[test]
     fn every_fixture_stream_matches_libdav1d() {
+        use cutlass_simd::av1::{cpu, mc};
+        // With the kernels the CPU has, then with the run-time choices
+        // forced off (the decoder as a CPU without AVX2 runs it), where
+        // that changes anything. No other test of this binary decodes, so
+        // the switch reaches only these passes.
+        check_every_stream("kernels on");
+        let chosen = (cpu::avx2(), mc::accelerated());
+        cpu::force_scalar(true);
+        if (cpu::avx2(), mc::accelerated()) != chosen {
+            check_every_stream("kernels forced off");
+        }
+        cpu::force_scalar(false);
+    }
+
+    fn check_every_stream(mode: &str) {
         let references = references();
         let streams = common::streams();
         let mut names: Vec<&String> = streams.keys().filter(|n| *n != REFUSED).collect();
@@ -173,7 +188,7 @@ mod fixtures {
                 assert_eq!(
                     fnv1a(compared),
                     want.digest,
-                    "{name} frame {index} ({threads:?} threads): samples differ from libdav1d"
+                    "{name} frame {index} ({threads:?} threads, {mode}): samples differ from libdav1d"
                 );
                 frames += 1;
             }

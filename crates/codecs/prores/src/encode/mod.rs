@@ -3,19 +3,20 @@
 mod frame;
 mod rate;
 mod slice;
+mod source;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cutlass_decode::{CodecError, CodecId, CodecParams, PixelFormat, Plane, VideoFrame};
+use cutlass_decode::{CodecError, CodecId, CodecParams, PixelFormat, VideoFrame};
 use cutlass_encode::video::{VideoEncoder, VideoInput};
 use cutlass_encode::{AudioInput, Encoder, FrameInput, Packet};
 use cutlass_pool::Pool;
 
 pub use rate::{target_frame_bits, target_mbps};
 
-use self::frame::{ColorCodes, encode_frame};
-use self::slice::{AlphaPlane, Planes};
+use self::frame::{ColorCodes, Kept, Settings, encode_frame};
+use self::source::Picture;
 use crate::color;
 use crate::header::{Chroma, MAX_EDGE, MAX_PIXELS};
 use crate::profile::Profile;
@@ -41,6 +42,7 @@ pub struct ProresEncoder {
     workers: Workers,
     cancel: Arc<AtomicBool>,
     last_index: Option<u8>,
+    kept: Kept,
 }
 
 impl ProresEncoder {
@@ -81,6 +83,7 @@ impl ProresEncoder {
             workers: Workers::Shared,
             cancel: Arc::new(AtomicBool::new(false)),
             last_index: None,
+            kept: Kept::default(),
         })
     }
 
@@ -122,10 +125,11 @@ impl ProresEncoder {
 
     /// Encodes a planar frame: 8-, 10- or 12-bit 4:2:0, 4:2:2 or 4:4:4.
     /// The frame's color tags are written when it names them, else the
-    /// parameters'. A 4444 profile keeps the frame's alpha.
+    /// parameters'. A 4444 profile keeps the frame's alpha. A plane that
+    /// does not hold the samples its size and stride say is refused.
     pub fn encode(&mut self, frame: &VideoFrame) -> Result<Vec<u8>, CodecError> {
         self.check_size(frame.width, frame.height)?;
-        let planes = planes_from_frame(frame, self.profile)?;
+        let picture = Picture::planar(frame, target_chroma(self.profile))?;
         let mut color = self.color;
         if frame.primaries != cutlass_decode::ColorPrimaries::Unspecified {
             color.primaries = color::primaries_code(frame.primaries);
@@ -136,7 +140,7 @@ impl ProresEncoder {
         if frame.matrix != cutlass_decode::MatrixCoefficients::Unspecified {
             color.matrix = color::matrix_code(frame.matrix);
         }
-        self.run(&planes, color)
+        self.run(&picture, color)
     }
 
     /// Encodes 8-bit RGBA as BT.709 limited range. A 4444 profile keeps alpha.
@@ -153,13 +157,26 @@ impl ProresEncoder {
                 what: "picture byte length",
             });
         }
-        let planes = planes_from_rgba(width, height, rgba, self.profile);
+        let picture = Picture::rgba(width, height, rgba, target_chroma(self.profile))?;
         let color = ColorCodes {
             primaries: 1,
             transfer: 1,
             matrix: 1,
         };
-        self.run(&planes, color)
+        self.run(&picture, color)
+    }
+
+    /// Encodes tight 8-bit 4:2:0: Y, then U, then V, with the parameters'
+    /// color tags.
+    fn encode_yuv420(
+        &mut self,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, CodecError> {
+        self.check_size(width, height)?;
+        let picture = Picture::yuv420(width, height, bytes, target_chroma(self.profile))?;
+        self.run(&picture, self.color)
     }
 
     fn check_size(&self, width: u32, height: u32) -> Result<(), CodecError> {
@@ -184,7 +201,7 @@ impl ProresEncoder {
         Ok(())
     }
 
-    fn run(&mut self, planes: &Planes, color: ColorCodes) -> Result<Vec<u8>, CodecError> {
+    fn run(&mut self, picture: &Picture<'_>, color: ColorCodes) -> Result<Vec<u8>, CodecError> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(CodecError::Cancelled);
         }
@@ -192,33 +209,15 @@ impl ProresEncoder {
             Workers::Shared => Pool::shared(),
             Workers::Own(pool) => pool,
         };
-        let encoded = encode_frame(
-            planes,
-            self.profile,
+        let settings = Settings {
+            profile: self.profile,
             color,
-            self.budget_scale,
-            self.last_index,
-            pool,
-            &self.cancel,
-        )?;
+            budget_scale: self.budget_scale,
+            hint: self.last_index,
+        };
+        let encoded = encode_frame(picture, settings, pool, &self.cancel, &self.kept)?;
         self.last_index = Some(encoded.index);
         Ok(encoded.bytes)
-    }
-}
-
-/// Reads one sample of a tight or strided plane, 1 or 2 bytes little-endian.
-fn sample(plane: &Plane, wide: bool, x: usize, y: usize) -> u32 {
-    if wide {
-        let at = y * plane.stride + x * 2;
-        plane
-            .samples
-            .get(at..at + 2)
-            .map_or(0, |pair| u32::from(u16::from_le_bytes([pair[0], pair[1]])))
-    } else {
-        plane
-            .samples
-            .get(y * plane.stride + x)
-            .map_or(0, |&byte| u32::from(byte))
     }
 }
 
@@ -227,190 +226,6 @@ fn target_chroma(profile: Profile) -> Chroma {
         Chroma::Yuv444
     } else {
         Chroma::Yuv422
-    }
-}
-
-fn padded(width: u32, height: u32, chroma: Chroma) -> (usize, usize, usize) {
-    let luma = width.div_ceil(16) as usize * 16;
-    let rows = height.div_ceil(16) as usize * 16;
-    let chroma_stride = match chroma {
-        Chroma::Yuv422 => luma / 2,
-        Chroma::Yuv444 => luma,
-    };
-    (luma, chroma_stride, rows)
-}
-
-fn planes_from_frame(frame: &VideoFrame, profile: Profile) -> Result<Planes, CodecError> {
-    let (depth, sx, sy): (u32, usize, usize) = match frame.format {
-        PixelFormat::Yuv420p => (8, 2, 2),
-        PixelFormat::Yuv422p => (8, 2, 1),
-        PixelFormat::Yuv444p => (8, 1, 1),
-        PixelFormat::Yuv420p10 => (10, 2, 2),
-        PixelFormat::Yuv420p12 => (12, 2, 2),
-        PixelFormat::Yuv422p10 => (10, 2, 1),
-        PixelFormat::Yuv422p12 => (12, 2, 1),
-        PixelFormat::Yuv444p10 => (10, 1, 1),
-        PixelFormat::Yuv444p12 => (12, 1, 1),
-        _ => {
-            return Err(CodecError::Unsupported {
-                what: "pixel format",
-            });
-        }
-    };
-    let wide = depth > 8;
-    let width = frame.width as usize;
-    let height = frame.height as usize;
-    let chroma = target_chroma(profile);
-    let (luma_stride, chroma_stride, rows) = padded(frame.width, frame.height, chroma);
-    let mid = (1u32 << (depth - 1)) as f32;
-    let unit = 2f32.powi(depth as i32 - 9);
-    let norm = move |value: u32| (value as f32 - mid) / unit;
-    let mut y = vec![0f32; luma_stride * rows];
-    for r in 0..rows {
-        let sr = r.min(height - 1);
-        for c in 0..luma_stride {
-            y[r * luma_stride + c] = norm(sample(&frame.y, wide, c.min(width - 1), sr));
-        }
-    }
-    let source_w = frame.u.width as usize;
-    let source_h = frame.u.height as usize;
-    let mut u = vec![0f32; chroma_stride * rows];
-    let mut v = vec![0f32; chroma_stride * rows];
-    let target_w = match chroma {
-        Chroma::Yuv422 => width.div_ceil(2),
-        Chroma::Yuv444 => width,
-    };
-    for (plane, out) in [(&frame.u, &mut u), (&frame.v, &mut v)] {
-        for r in 0..rows {
-            let fr = r.min(height - 1);
-            let sr = (fr / sy).min(source_h - 1);
-            for c in 0..chroma_stride {
-                let tc = c.min(target_w - 1);
-                let value = match (chroma, sx) {
-                    // 4:4:4 source into 4:2:2: average the pair.
-                    (Chroma::Yuv422, 1) => {
-                        let a = sample(plane, wide, (2 * tc).min(source_w - 1), sr);
-                        let b = sample(plane, wide, (2 * tc + 1).min(source_w - 1), sr);
-                        (norm(a) + norm(b)) * 0.5
-                    }
-                    (Chroma::Yuv422, _) => norm(sample(plane, wide, tc.min(source_w - 1), sr)),
-                    (Chroma::Yuv444, _) => {
-                        norm(sample(plane, wide, (tc / sx).min(source_w - 1), sr))
-                    }
-                };
-                out[r * chroma_stride + c] = value;
-            }
-        }
-    }
-    let alpha = match (&frame.alpha, chroma) {
-        (Some(alpha), Chroma::Yuv444) => {
-            let bits = u32::from(alpha.bit_depth);
-            let sixteen = bits > 8;
-            let max_in = (1u32 << bits) - 1;
-            let max_out = if sixteen { 65_535 } else { 255 };
-            let mut samples = vec![0u16; luma_stride * height];
-            for r in 0..height {
-                for c in 0..luma_stride {
-                    let raw = sample(&alpha.plane, sixteen, c.min(width - 1), r);
-                    let value = if max_in == max_out {
-                        raw
-                    } else {
-                        (raw * max_out + max_in / 2) / max_in
-                    };
-                    samples[r * luma_stride + c] = value as u16;
-                }
-            }
-            Some(AlphaPlane {
-                sixteen,
-                stride: luma_stride,
-                samples,
-            })
-        }
-        _ => None,
-    };
-    Ok(Planes {
-        width: frame.width,
-        height: frame.height,
-        chroma,
-        luma_stride,
-        chroma_stride,
-        y,
-        u,
-        v,
-        alpha,
-    })
-}
-
-/// BT.709 limited-range Y'CbCr of one RGBA pixel, in the transform domain:
-/// twice the 8-bit code less 128.
-fn ycbcr(pixel: &[u8]) -> (f32, f32, f32) {
-    let (r, g, b) = (
-        f32::from(pixel[0]),
-        f32::from(pixel[1]),
-        f32::from(pixel[2]),
-    );
-    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    let y = 16.0 + 219.0 / 255.0 * luma;
-    let cb = 128.0 + 224.0 / 255.0 * (b - luma) / 1.8556;
-    let cr = 128.0 + 224.0 / 255.0 * (r - luma) / 1.5748;
-    (2.0 * (y - 128.0), 2.0 * (cb - 128.0), 2.0 * (cr - 128.0))
-}
-
-fn planes_from_rgba(width: u32, height: u32, rgba: &[u8], profile: Profile) -> Planes {
-    let chroma = target_chroma(profile);
-    let (luma_stride, chroma_stride, rows) = padded(width, height, chroma);
-    let w = width as usize;
-    let h = height as usize;
-    let pixel = |x: usize, y: usize| {
-        let at = (y.min(h - 1) * w + x.min(w - 1)) * 4;
-        &rgba[at..at + 4]
-    };
-    let mut y = vec![0f32; luma_stride * rows];
-    let mut u = vec![0f32; chroma_stride * rows];
-    let mut v = vec![0f32; chroma_stride * rows];
-    for r in 0..rows {
-        for c in 0..luma_stride {
-            y[r * luma_stride + c] = ycbcr(pixel(c, r)).0;
-        }
-        for c in 0..chroma_stride {
-            let (cb, cr) = match chroma {
-                Chroma::Yuv444 => {
-                    let (_, cb, cr) = ycbcr(pixel(c, r));
-                    (cb, cr)
-                }
-                Chroma::Yuv422 => {
-                    let (_, b0, r0) = ycbcr(pixel(2 * c, r));
-                    let (_, b1, r1) = ycbcr(pixel(2 * c + 1, r));
-                    ((b0 + b1) * 0.5, (r0 + r1) * 0.5)
-                }
-            };
-            u[r * chroma_stride + c] = cb;
-            v[r * chroma_stride + c] = cr;
-        }
-    }
-    let alpha = (chroma == Chroma::Yuv444).then(|| {
-        let mut samples = vec![0u16; luma_stride * h];
-        for r in 0..h {
-            for c in 0..luma_stride {
-                samples[r * luma_stride + c] = u16::from(pixel(c, r)[3]);
-            }
-        }
-        AlphaPlane {
-            sixteen: false,
-            stride: luma_stride,
-            samples,
-        }
-    });
-    Planes {
-        width,
-        height,
-        chroma,
-        luma_stride,
-        chroma_stride,
-        y,
-        u,
-        v,
-        alpha,
     }
 }
 
@@ -464,24 +279,7 @@ impl Encoder for ProresEncoder {
         let bytes = match frame.pixel() {
             PixelFormat::Rgba8 => self.encode_rgba(frame.width(), frame.height(), frame.bytes())?,
             PixelFormat::Yuv420p => {
-                let (w, h) = (frame.width(), frame.height());
-                let luma = w as usize * h as usize;
-                let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-                let chroma = cw as usize * ch as usize;
-                let bytes = frame.bytes();
-                if bytes.len() != luma + 2 * chroma {
-                    return Err(CodecError::InvalidApi {
-                        what: "picture byte length",
-                    });
-                }
-                let picture = VideoFrame::yuv420p(
-                    w,
-                    h,
-                    Plane::tight(w, h, bytes[..luma].to_vec())?,
-                    Plane::tight(cw, ch, bytes[luma..luma + chroma].to_vec())?,
-                    Plane::tight(cw, ch, bytes[luma + chroma..].to_vec())?,
-                )?;
-                self.encode(&picture)?
+                self.encode_yuv420(frame.width(), frame.height(), frame.bytes())?
             }
             _ => {
                 return Err(CodecError::Unsupported {

@@ -52,14 +52,16 @@ fn check_wav(path: &std::path::Path) {
     assert_eq!(demux.consumed(), header);
     let packet = demux.read_packet().expect("read").expect("frame");
     assert_eq!(packet.timestamp().presentation(), Some(0));
-    assert_eq!(
-        packet.bytes().len(),
-        usize::from(demux.format().block_align())
-    );
+    // A PCM packet is a run of whole frames; the first frame leads it.
+    let align = usize::from(demux.format().block_align());
+    assert!(!packet.bytes().is_empty());
+    if demux.format().is_linear_pcm() {
+        assert!(packet.bytes().len().is_multiple_of(align));
+    }
     if tool_on_path("python3")
         && let Some(frame) = python_first_frame(path)
     {
-        assert_eq!(frame, packet.bytes());
+        assert_eq!(frame, &packet.bytes()[..align]);
     }
 
     let middle = i64::try_from(samples / 2).expect("middle");

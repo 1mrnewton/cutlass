@@ -9,6 +9,7 @@
     clippy::unwrap_used
 )]
 
+mod damaged;
 mod fuzz;
 mod layouts;
 mod local;

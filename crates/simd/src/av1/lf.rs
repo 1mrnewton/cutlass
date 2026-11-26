@@ -6,11 +6,24 @@
 //! limits. A caller with fewer than sixteen lines fills the rest with
 //! [`IDLE`] samples, which no filter changes, and ignores them afterwards.
 
+#[cfg(target_arch = "x86_64")]
+mod avx2;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod neon;
 mod scalar;
 #[cfg(test)]
 mod tests;
+
+use super::cpu;
+
+/// Whether the entries run a vector kernel on this CPU: NEON where the
+/// build has it, or AVX2. Without one they run the scalar twin, a line at
+/// a time, and a caller with its own loops does better to use those.
+#[must_use]
+#[inline]
+pub fn accelerated() -> bool {
+    cpu::vector()
+}
 
 /// The limits of 7.14.4 for 8-bit samples.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,7 +91,17 @@ pub fn by_sample(taps: &mut [[u8; 16]; 14], size: Size, lim: Limits) -> bool {
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::by_sample(taps, size, lim)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            let out = unsafe { avx2::by_sample(taps, size, lim) };
+            return out;
+        }
+        scalar::by_sample(taps, size, lim)
+    }
 }
 
 /// Filters sixteen lines given by line, eight samples each: `p3 .. p0`,
@@ -100,7 +123,17 @@ pub fn by_line(lines: &mut [[u8; 8]; 16], size: Size, lim: Limits) -> bool {
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::by_line(lines, size, lim)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            let out = unsafe { avx2::by_line(lines, size, lim) };
+            return out;
+        }
+        scalar::by_line(lines, size, lim)
+    }
 }
 
 /// [`by_line`] for [`Size::Sixteen`], sixteen samples a line: one unused
@@ -117,7 +150,17 @@ pub fn by_line_16(lines: &mut [[u8; 16]; 16], lim: Limits) -> bool {
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::by_line_16(lines, lim)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            let out = unsafe { avx2::by_line_16(lines, lim) };
+            return out;
+        }
+        scalar::by_line_16(lines, lim)
+    }
 }
 
 /// [`by_sample`] on sixteen columns of a picture of 8-bit samples, in
@@ -136,7 +179,17 @@ pub fn rows_in_place(buf: &mut [u8], stride: usize, at: usize, size: Size, lim: 
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::rows_in_place(buf, stride, at, size, lim)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            let out = unsafe { avx2::rows_in_place(buf, stride, at, size, lim) };
+            return out;
+        }
+        scalar::rows_in_place(buf, stride, at, size, lim)
+    }
 }
 
 /// [`by_line`] on sixteen rows of a picture of 8-bit samples, in place:
@@ -156,7 +209,17 @@ pub fn cols_in_place(buf: &mut [u8], stride: usize, at: usize, size: Size, lim: 
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::cols_in_place(buf, stride, at, size, lim)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            let out = unsafe { avx2::cols_in_place(buf, stride, at, size, lim) };
+            return out;
+        }
+        scalar::cols_in_place(buf, stride, at, size, lim)
+    }
 }
 
 /// [`by_line_16`] on sixteen rows of a picture of 8-bit samples, in
@@ -173,5 +236,15 @@ pub fn cols_16_in_place(buf: &mut [u8], stride: usize, at: usize, lim: Limits) -
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::cols_16_in_place(buf, stride, at, lim)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            let out = unsafe { avx2::cols_16_in_place(buf, stride, at, lim) };
+            return out;
+        }
+        scalar::cols_16_in_place(buf, stride, at, lim)
+    }
 }

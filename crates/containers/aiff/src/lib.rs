@@ -5,14 +5,17 @@
 //! decode samples.
 //!
 //! Normative layout: Audio Interchange File Format 1.3 (Apple, 1989) and
-//! AIFF-C (Apple, 1991). A declared size that runs past its parent is an
-//! error. One linear packet is one sample frame. A packetized compression
+//! AIFF-C (Apple, 1991). A header chunk whose declared size runs past its
+//! parent is an error; the sound is what the file holds of it, so a cut or
+//! unfinished file plays, as FFmpeg plays it. One linear packet is a run
+//! of whole sample frames. A packetized compression
 //! block stays compressed, and its duration is the sample frames that block
 //! represents. `QDM2`, `QDMC`, `Qclp`, `G722`, `G726`, `G728`, and any other
 //! unnamed fourcc are refused.
 //!
 //! PCM extradata is the three-byte layout the PCM decoder reads: coding,
-//! endian, then interleaved. Coding byte 6 is signed 8-bit. Float and
+//! endian, then interleaved. Coding byte 6 is signed 8-bit, and 11 is the
+//! unsigned 8-bit of the AIFF-C `raw ` compression. Float and
 //! little-endian integer are written as AIFF-C.
 //! Big-endian integer is written as AIFF.
 

@@ -1,7 +1,9 @@
 //! High-profile CABAC encoder.
 //!
-//! Each picture is one slice. A new picture is an intra slice. A later picture
-//! is a P slice: skipped when it matches the previous reconstruction, and
+//! Each picture is one slice. A stream opens with an IDR picture, and another
+//! follows when the keyframe interval has passed, when the picture is a scene
+//! cut, or when the caller forces one. The parameter sets ride with each IDR
+//! picture and with no other. A later picture is a P slice: skipped when it matches the previous reconstruction, and
 //! 16×16 motion otherwise. One frame is held back so the picture in between
 //! can be a B slice, using the previous and next reconstructions. The search
 //! is a radius-1 diamond, the same shape x264 uses, then a half-pel diamond
@@ -12,7 +14,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cutlass_decode::{CodecError, CodecId, CodecParams, Packet, VideoDecoder};
+use cutlass_decode::{
+    CodecError, CodecId, CodecParams, ColorRange, MatrixCoefficients, Packet, VideoDecoder,
+};
 use cutlass_encode::{VideoEncoder, VideoInput};
 
 use crate::dec::H264Decoder;
@@ -50,6 +54,78 @@ pub struct H264Encoder {
     constant: bool,
     /// Time noted in the current second, in the input timescale.
     window: i64,
+    /// What the VUI says about the samples.
+    signal: Signal,
+    /// `level_idc` in the SPS and the `avcC` record.
+    level: u8,
+    /// The first picture since the open or the last reset has set the level
+    /// and the starting QP from its frame rate.
+    settled: bool,
+    /// Longest time from one IDR picture to the next, in milliseconds. Zero
+    /// codes no IDR picture for time alone.
+    keyframe_ms: u32,
+    /// Code a scene cut as an IDR picture.
+    scene_cut: bool,
+    /// Time coded since the last IDR picture began, in `gop_timescale`.
+    gop_ticks: i64,
+    gop_timescale: u32,
+    /// Pictures since the last IDR picture, that one included.
+    gop_frames: u32,
+    /// The last input picture, reduced, to tell a scene cut from.
+    glance: Option<Glance>,
+}
+
+/// Two seconds, the keyframe interval when the caller names none.
+const KEYFRAME_MS: u32 = 2000;
+
+/// A frame rate no input is expected to pass. The keyframe interval counted
+/// in pictures at this rate bounds a group whose durations say nothing.
+const FASTEST_FPS: u64 = 150;
+
+/// Pictures the decoder holds for reference and reorder, as the VUI says.
+const DPB_FRAMES: u32 = 2;
+
+/// The colour description for the VUI, as ISO/IEC 23091-2 codes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Signal {
+    /// `None` when the caller did not name a range.
+    full_range: Option<bool>,
+    primaries: u8,
+    transfer: u8,
+    matrix: u8,
+}
+
+impl Signal {
+    const UNSPECIFIED: u8 = 2;
+
+    fn of(params: &CodecParams) -> Self {
+        let full_range = match params.range {
+            ColorRange::Unspecified => None,
+            ColorRange::Limited | ColorRange::Studio => Some(false),
+            ColorRange::Full => Some(true),
+        };
+        // Identity is for 4:4:4 only, and this encoder codes 4:2:0.
+        let matrix = match params.matrix {
+            MatrixCoefficients::Rgb => Self::UNSPECIFIED,
+            other => other.cicp(),
+        };
+        Self {
+            full_range,
+            primaries: params.primaries.cicp(),
+            transfer: params.transfer.cicp(),
+            matrix,
+        }
+    }
+
+    fn described(self) -> bool {
+        self.primaries != Self::UNSPECIFIED
+            || self.transfer != Self::UNSPECIFIED
+            || self.matrix != Self::UNSPECIFIED
+    }
+
+    fn present(self) -> bool {
+        self.full_range.is_some() || self.described()
+    }
 }
 
 struct Held {
@@ -107,9 +183,12 @@ impl H264Encoder {
         };
         let mb_w = params.width.div_ceil(16);
         let mb_h = params.height.div_ceil(16);
-        let sps = sequence(mb_w, mb_h, params.width, params.height);
+        let signal = Signal::of(params);
+        // The frame rate is not known until the first picture: 30 until then.
+        let level = level_for(mb_w, mb_h, (30, 1), params.bitrate);
+        let sps = sequence(mb_w, mb_h, params.width, params.height, level, signal);
         let pps = picture();
-        let extra = avcc(&sps, &pps);
+        let extra = avcc(&sps, &pps, level);
         Ok(Self {
             width: params.width,
             height: params.height,
@@ -129,13 +208,95 @@ impl H264Encoder {
             held: None,
             sps,
             pps,
-            qp: initial_qp(params.bitrate, params.width, params.height),
+            qp: initial_qp(params.bitrate, params.width, params.height, (30, 1)),
             bitrate: params.bitrate,
             spent: 0,
             budget: 0,
             constant: params.constant_rate,
             window: 0,
+            signal,
+            level,
+            settled: false,
+            keyframe_ms: KEYFRAME_MS,
+            scene_cut: true,
+            gop_ticks: 0,
+            gop_timescale: 0,
+            gop_frames: 0,
+            glance: None,
         })
+    }
+
+    /// The longest time from one IDR picture to the next, in milliseconds.
+    /// It starts at two seconds. Zero codes no IDR picture for time alone:
+    /// the first picture, a scene cut and `force_keyframe` still code one.
+    pub fn set_keyframe_interval(&mut self, milliseconds: u32) {
+        self.keyframe_ms = milliseconds;
+    }
+
+    /// Whether a scene cut is coded as an IDR picture. It starts on.
+    pub fn set_scene_cut(&mut self, on: bool) {
+        self.scene_cut = on;
+        if !on {
+            self.glance = None;
+        }
+    }
+
+    /// Set the level and the starting QP from the first picture's frame
+    /// rate. A level that differs from the one guessed at the open rewrites
+    /// the SPS and the `avcC` record before any packet carries them.
+    fn settle(&mut self, duration: i64, timescale: u32) {
+        if self.settled {
+            return;
+        }
+        self.settled = true;
+        let rate = match u64::try_from(duration) {
+            Ok(ticks) if ticks > 0 && timescale > 0 => (u64::from(timescale), ticks),
+            _ => (30, 1),
+        };
+        self.qp = initial_qp(self.bitrate, self.width, self.height, rate);
+        let level = level_for(self.mb_w, self.mb_h, rate, self.bitrate);
+        if level != self.level {
+            self.level = level;
+            self.sps = sequence(
+                self.mb_w,
+                self.mb_h,
+                self.width,
+                self.height,
+                level,
+                self.signal,
+            );
+            self.extra = avcc(&self.sps, &self.pps, level);
+        }
+    }
+
+    /// Whether `ticks` in `timescale` since the last IDR picture is at least
+    /// `milliseconds`, or the pictures since then are that long at the
+    /// fastest frame rate.
+    fn group_is(&self, milliseconds: u32, timescale: u32) -> bool {
+        let ticks = if self.gop_timescale == timescale || self.gop_timescale == 0 {
+            i128::from(self.gop_ticks)
+        } else {
+            i128::from(self.gop_ticks) * i128::from(timescale) / i128::from(self.gop_timescale)
+        };
+        let by_time = ticks * 1000 >= i128::from(milliseconds) * i128::from(timescale);
+        let by_count = u64::from(self.gop_frames) * 1000 >= u64::from(milliseconds) * FASTEST_FPS;
+        by_time || by_count
+    }
+
+    /// Count one coded picture toward the group since the last IDR picture.
+    fn count(&mut self, duration: i64, timescale: u32, idr: bool) {
+        if idr {
+            self.gop_ticks = 0;
+            self.gop_frames = 0;
+            self.gop_timescale = timescale;
+        } else if self.gop_timescale != timescale && self.gop_timescale != 0 {
+            let scaled =
+                i128::from(self.gop_ticks) * i128::from(timescale) / i128::from(self.gop_timescale);
+            self.gop_ticks = i64::try_from(scaled).unwrap_or(i64::MAX);
+            self.gop_timescale = timescale;
+        }
+        self.gop_ticks = self.gop_ticks.saturating_add(duration.max(0));
+        self.gop_frames = self.gop_frames.saturating_add(1);
     }
 
     fn hold(&mut self, input: &VideoInput, duration: i64) -> Held {
@@ -173,7 +334,7 @@ impl H264Encoder {
         self.next_fn = 1;
         self.display = 1;
         let unit = self.unit(3, 5, &slice);
-        self.absorb(&unit, frame.pts, true)?;
+        self.absorb(&unit, frame.pts)?;
         self.note(unit.len(), frame.duration, frame.timescale);
         Ok(Packet::video(
             unit,
@@ -218,7 +379,7 @@ impl H264Encoder {
         };
         self.next_fn = (self.next_fn + 1) & 15;
         let unit = self.unit(3, 1, &slice);
-        self.absorb(&unit, frame.pts, true)?;
+        self.absorb(&unit, frame.pts)?;
         self.note(unit.len(), frame.duration, frame.timescale);
         Ok(Packet::video(
             unit,
@@ -252,8 +413,9 @@ impl H264Encoder {
             future,
             self.qp,
         );
+        // No picture predicts from a B picture, so the mirror decoder is not
+        // given it.
         let unit = self.unit(0, 1, &slice);
-        self.absorb(&unit, frame.pts, false)?;
         self.note(unit.len(), frame.duration, frame.timescale);
         Ok(Packet::video(
             unit,
@@ -277,10 +439,14 @@ impl H264Encoder {
             && same(&plane.v, &frame.v, w / 2, h / 2, cw / 2)
     }
 
+    /// One access unit. An IDR picture carries the parameter sets, so a
+    /// decoder can start at any of them. No other picture repeats them.
     fn unit(&self, ref_idc: u8, kind: u8, slice: &[u8]) -> Vec<u8> {
         let mut unit = Vec::new();
-        unit.extend(self.wrap(3, 7, &self.sps));
-        unit.extend(self.wrap(3, 8, &self.pps));
+        if kind == 5 {
+            unit.extend(self.wrap(3, 7, &self.sps));
+            unit.extend(self.wrap(3, 8, &self.pps));
+        }
         unit.extend(self.wrap(ref_idc, kind, slice));
         unit
     }
@@ -314,23 +480,25 @@ impl H264Encoder {
         }
     }
 
-    fn absorb(&mut self, unit: &[u8], pts: i64, keep: bool) -> Result<(), CodecError> {
+    /// Decode a reference picture as every decoder will, and keep it to
+    /// predict from.
+    fn absorb(&mut self, unit: &[u8], pts: i64) -> Result<(), CodecError> {
         let packet = Packet::video(unit.to_vec(), pts, 1, 1, true);
         self.mirror.push(&packet)?;
-        if keep {
-            let coded = self.coded_w as usize * self.coded_h as usize;
-            let Some((y, u, v)) = self.mirror.coded_picture_at(pts).filter(|(y, u, v)| {
-                y.len() == coded && u.len() == coded / 4 && v.len() == coded / 4
-            }) else {
-                return Err(CodecError::Malformed {
-                    at_bit: 0,
-                    what: "reference picture",
-                });
-            };
-            // The planes are the whole macroblocks, as decoders predict from.
-            let sub = Arc::new(Subpel::new(&y, self.coded_w, self.coded_h));
-            self.anchor = Some(Planes { y, u, v, sub });
-        }
+        let coded = self.coded_w as usize * self.coded_h as usize;
+        let Some((y, u, v)) = self
+            .mirror
+            .coded_picture_at(pts)
+            .filter(|(y, u, v)| y.len() == coded && u.len() == coded / 4 && v.len() == coded / 4)
+        else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "reference picture",
+            });
+        };
+        // The planes are the whole macroblocks, as decoders predict from.
+        let sub = Arc::new(Subpel::new(&y, self.coded_w, self.coded_h));
+        self.anchor = Some(Planes { y, u, v, sub });
         Ok(())
     }
 }
@@ -358,16 +526,36 @@ impl VideoEncoder for H264Encoder {
         } else {
             input.duration
         };
-        if input.force_keyframe || self.anchor.is_none() {
+        self.settle(input.duration, input.timescale);
+        let arrival = self.hold(input, duration);
+        let mut key = input.force_keyframe
+            || self.anchor.is_none()
+            || (self.keyframe_ms != 0 && self.group_is(self.keyframe_ms, input.timescale));
+        if self.scene_cut {
+            let glance = Glance::of(&arrival.y, self.coded_w as usize, self.coded_h as usize);
+            // A cut right after an IDR picture stays a P picture: a burst of
+            // cuts must not become a burst of intra pictures.
+            let apart = match self.keyframe_ms {
+                0 => KEYFRAME_MS / 10,
+                interval => interval / 10,
+            };
+            key = key
+                || (self.group_is(apart, input.timescale)
+                    && self
+                        .glance
+                        .as_ref()
+                        .is_some_and(|last| glance.cuts_from(last)));
+            self.glance = Some(glance);
+        }
+        self.count(duration, input.timescale, key);
+        if key {
             let mut packets = Vec::new();
             if let Some(held) = self.held.take() {
                 packets.push(self.encode_p(held)?);
             }
-            let frame = self.hold(input, duration);
-            packets.push(self.encode_idr(frame)?);
+            packets.push(self.encode_idr(arrival)?);
             return Ok(packets);
         }
-        let arrival = self.hold(input, duration);
         let Some(held) = self.held.take() else {
             self.held = Some(arrival);
             return Ok(Vec::new());
@@ -405,10 +593,15 @@ impl VideoEncoder for H264Encoder {
         self.display = 0;
         self.anchor = None;
         self.held = None;
-        self.qp = initial_qp(self.bitrate, self.width, self.height);
+        self.qp = initial_qp(self.bitrate, self.width, self.height, (30, 1));
         self.spent = 0;
         self.budget = 0;
         self.window = 0;
+        self.settled = false;
+        self.gop_ticks = 0;
+        self.gop_timescale = 0;
+        self.gop_frames = 0;
+        self.glance = None;
         self.mirror.reset();
         self.cancel.store(false, Ordering::Relaxed);
     }
@@ -442,17 +635,171 @@ fn pad_plane(src: &[u8], size: (usize, usize), coded: (usize, usize)) -> Vec<u8>
     out
 }
 
-fn initial_qp(bitrate: u32, width: u32, height: u32) -> i32 {
+/// A luma plane reduced by box averaging, small enough that comparing two
+/// costs little next to coding one picture.
+struct Glance {
+    width: usize,
+    height: usize,
+    samples: Vec<u8>,
+}
+
+/// Side of the blocks a [`Glance`] is compared in.
+const GLANCE_BLOCK: usize = 8;
+
+/// How far, in reduced samples, a block looks for itself in the last picture.
+const GLANCE_REACH: isize = 4;
+
+/// The largest reduced plane, in samples.
+const GLANCE_AREA: usize = 65_536;
+
+impl Glance {
+    /// `luma` is `width` × `height`, both multiples of 16. Each sample here
+    /// is the mean of a square of 4, 8 or 16 luma samples a side.
+    fn of(luma: &[u8], width: usize, height: usize) -> Self {
+        let mut scale = 4;
+        while scale < 16 && (width / scale) * (height / scale) > GLANCE_AREA {
+            scale *= 2;
+        }
+        let (small_w, small_h) = (width / scale, height / scale);
+        let mut samples = Vec::with_capacity(small_w * small_h);
+        let mut sums = vec![0u32; small_w];
+        let area = (scale * scale) as u32;
+        for rows in luma.chunks_exact(width * scale).take(small_h) {
+            sums.fill(0);
+            for row in rows.chunks_exact(width) {
+                for (sum, cells) in sums.iter_mut().zip(row.chunks_exact(scale)) {
+                    *sum += cells.iter().map(|cell| u32::from(*cell)).sum::<u32>();
+                }
+            }
+            samples.extend(
+                sums.iter()
+                    .map(|sum| u8::try_from((sum + area / 2) / area).unwrap_or(u8::MAX)),
+            );
+        }
+        Self {
+            width: small_w,
+            height: small_h,
+            samples,
+        }
+    }
+
+    /// Sum of the block's samples and of each one's distance from the
+    /// block's mean, the distance scaled by the sample count.
+    fn block(&self, x: usize, y: usize, w: usize, h: usize) -> (i32, i32) {
+        let rows = || (y..y + h).map(|row| &self.samples[row * self.width + x..][..w]);
+        let sum: i32 = rows().flatten().map(|cell| i32::from(*cell)).sum();
+        let count = (w * h) as i32;
+        let spread = rows()
+            .flatten()
+            .map(|cell| (i32::from(*cell) * count - sum).abs())
+            .sum();
+        (sum, spread)
+    }
+
+    /// Whether this picture starts a new scene after `last`.
+    ///
+    /// Each block is matched against `last` within [`GLANCE_REACH`], with
+    /// both blocks' means taken out, so a pan, a fade or a flash still
+    /// matches. The picture is a cut when what is left after the best match
+    /// is at least [`CUT_SHARE`] of what the block holds on its own, summed
+    /// over the picture: predicting from `last` then saves too little over
+    /// coding the picture intra. A picture that differs from `last` by less
+    /// than [`CUT_FLOOR`] a sample is never a cut.
+    fn cuts_from(&self, last: &Self) -> bool {
+        let Some((inter, intra)) = self.costs_from(last) else {
+            return false;
+        };
+        let samples = self.samples.len() as u64;
+        inter >= samples * CUT_FLOOR && inter * 100 >= intra * CUT_SHARE
+    }
+
+    /// What predicting this picture from `last` leaves, and what the picture
+    /// holds on its own, both as sums of sample differences. `None` when the
+    /// two are not the same size.
+    fn costs_from(&self, last: &Self) -> Option<(u64, u64)> {
+        if (self.width, self.height) != (last.width, last.height) || self.samples.is_empty() {
+            return None;
+        }
+        let (mut inter, mut intra) = (0u64, 0u64);
+        for y in (0..self.height).step_by(GLANCE_BLOCK) {
+            let h = GLANCE_BLOCK.min(self.height - y);
+            for x in (0..self.width).step_by(GLANCE_BLOCK) {
+                let w = GLANCE_BLOCK.min(self.width - x);
+                let count = (w * h) as u64;
+                let (sum, spread) = self.block(x, y, w, h);
+                let left = self.best_match(last, (x, y, w, h), sum);
+                inter += u64::from(left.unsigned_abs()) / count;
+                intra += u64::from(spread.unsigned_abs()) / count;
+            }
+        }
+        Some((inter, intra))
+    }
+
+    /// The least scaled difference between the block at `area` and a block
+    /// of `last` within reach, means taken out.
+    fn best_match(&self, last: &Self, area: (usize, usize, usize, usize), sum: i32) -> i32 {
+        let (x, y, w, h) = area;
+        let count = (w * h) as i32;
+        let mut best = i32::MAX;
+        for dy in -GLANCE_REACH..=GLANCE_REACH {
+            let Some(top) = y
+                .checked_add_signed(dy)
+                .filter(|top| top + h <= last.height)
+            else {
+                continue;
+            };
+            for dx in -GLANCE_REACH..=GLANCE_REACH {
+                let Some(left) = x
+                    .checked_add_signed(dx)
+                    .filter(|left| left + w <= last.width)
+                else {
+                    continue;
+                };
+                let theirs = |row: usize| &last.samples[(top + row) * last.width + left..][..w];
+                let their_sum: i32 = (0..h).flat_map(theirs).map(|cell| i32::from(*cell)).sum();
+                let offset = sum - their_sum;
+                let mut cost = 0i32;
+                for row in 0..h {
+                    let ours = &self.samples[(y + row) * self.width + x..][..w];
+                    cost += ours
+                        .iter()
+                        .zip(theirs(row))
+                        .map(|(a, b)| ((i32::from(*a) - i32::from(*b)) * count - offset).abs())
+                        .sum::<i32>();
+                    if cost >= best {
+                        break;
+                    }
+                }
+                best = best.min(cost);
+            }
+        }
+        best
+    }
+}
+
+/// A cut leaves at least this many hundredths of the picture's own detail
+/// unpredicted.
+const CUT_SHARE: u64 = 75;
+
+/// A cut changes the reduced picture by at least this much a sample.
+const CUT_FLOOR: u64 = 2;
+
+/// The QP to start from: `bitrate` over the luma samples in a second at
+/// `rate`, frames per second as a fraction.
+fn initial_qp(bitrate: u32, width: u32, height: u32, rate: (u64, u64)) -> i32 {
     if bitrate == 0 || width == 0 || height == 0 {
         return 26;
     }
     let pixels = u64::from(width)
         .saturating_mul(u64::from(height))
-        .saturating_mul(30);
+        .saturating_mul(rate.0);
     if pixels == 0 {
         return 26;
     }
-    let bpp_milli = u64::from(bitrate).saturating_mul(1000) / pixels;
+    let bpp_milli = u64::from(bitrate)
+        .saturating_mul(1000)
+        .saturating_mul(rate.1)
+        / pixels;
     if bpp_milli == 0 {
         return 40;
     }
@@ -500,11 +847,73 @@ fn next_qp(qp: i32, spent: u64, budget: u64) -> i32 {
     stepped.clamp(10, 42)
 }
 
-fn sequence(mb_w: u32, mb_h: u32, width: u32, height: u32) -> Vec<u8> {
+/// One row of Table A-1. `max_br` is in units of 1250 bit/s, the High
+/// profile's factor.
+struct LevelLimit {
+    idc: u8,
+    max_mbps: u64,
+    max_fs: u32,
+    max_dpb_mbs: u32,
+    max_br: u64,
+}
+
+const fn limit(idc: u8, max_mbps: u64, max_fs: u32, max_dpb_mbs: u32, max_br: u64) -> LevelLimit {
+    LevelLimit {
+        idc,
+        max_mbps,
+        max_fs,
+        max_dpb_mbs,
+        max_br,
+    }
+}
+
+/// Table A-1, without level 1b: the High profile names it with `level_idc`
+/// 9, and level 1.1 holds everything it does.
+const LEVEL_LIMITS: [LevelLimit; 19] = [
+    limit(10, 1_485, 99, 396, 64),
+    limit(11, 3_000, 396, 900, 192),
+    limit(12, 6_000, 396, 2_376, 384),
+    limit(13, 11_880, 396, 2_376, 768),
+    limit(20, 11_880, 396, 2_376, 2_000),
+    limit(21, 19_800, 792, 4_752, 4_000),
+    limit(22, 20_250, 1_620, 8_100, 4_000),
+    limit(30, 40_500, 1_620, 8_100, 10_000),
+    limit(31, 108_000, 3_600, 18_000, 14_000),
+    limit(32, 216_000, 5_120, 20_480, 20_000),
+    limit(40, 245_760, 8_192, 32_768, 20_000),
+    limit(41, 245_760, 8_192, 32_768, 50_000),
+    limit(42, 522_240, 8_704, 34_816, 50_000),
+    limit(50, 589_824, 22_080, 110_400, 135_000),
+    limit(51, 983_040, 36_864, 184_320, 240_000),
+    limit(52, 2_073_600, 36_864, 184_320, 240_000),
+    limit(60, 4_177_920, 139_264, 696_320, 240_000),
+    limit(61, 8_355_840, 139_264, 696_320, 480_000),
+    limit(62, 16_711_680, 139_264, 696_320, 800_000),
+];
+
+/// The lowest `level_idc` of Table A-1 that holds the picture size, the
+/// macroblock rate at `rate` frames per second (a fraction), the decoded
+/// picture buffer the VUI asks for, and `bitrate` when it is not zero.
+/// Level 6.2 when none does.
+fn level_for(mb_w: u32, mb_h: u32, rate: (u64, u64), bitrate: u32) -> u8 {
+    let frame = u64::from(mb_w) * u64::from(mb_h);
+    let fits = |level: &&LevelLimit| {
+        let widest = u64::from(level.max_fs) * 8;
+        frame <= u64::from(level.max_fs)
+            && u64::from(mb_w) * u64::from(mb_w) <= widest
+            && u64::from(mb_h) * u64::from(mb_h) <= widest
+            && frame * u64::from(DPB_FRAMES) <= u64::from(level.max_dpb_mbs)
+            && frame.saturating_mul(rate.0) <= level.max_mbps.saturating_mul(rate.1)
+            && u64::from(bitrate) <= level.max_br * 1250
+    };
+    LEVEL_LIMITS.iter().find(fits).map_or(62, |level| level.idc)
+}
+
+fn sequence(mb_w: u32, mb_h: u32, width: u32, height: u32, level: u8, signal: Signal) -> Vec<u8> {
     let mut bits = Writer::new();
     bits.u(8, 100);
     bits.u(8, 0);
-    bits.u(8, 31);
+    bits.u(8, u32::from(level));
     bits.ue(0);
     bits.ue(1);
     bits.ue(0);
@@ -514,7 +923,7 @@ fn sequence(mb_w: u32, mb_h: u32, width: u32, height: u32) -> Vec<u8> {
     bits.ue(0);
     bits.ue(0);
     bits.ue(0);
-    bits.ue(2);
+    bits.ue(DPB_FRAMES);
     bits.bit(false);
     bits.ue(mb_w.saturating_sub(1));
     bits.ue(mb_h.saturating_sub(1));
@@ -534,15 +943,35 @@ fn sequence(mb_w: u32, mb_h: u32, width: u32, height: u32) -> Vec<u8> {
         bits.ue(crop_b);
     }
     bits.bit(true);
-    write_vui(&mut bits);
+    write_vui(&mut bits, signal);
     bits.trailing();
     bits.bytes
 }
 
-fn write_vui(bits: &mut Writer) {
-    for _ in 0..5 {
-        bits.bit(false);
+/// The VUI: the video signal type when the caller named a range or a
+/// colour, then the bitstream restrictions. No aspect ratio, overscan,
+/// chroma location, timing or HRD.
+fn write_vui(bits: &mut Writer, signal: Signal) {
+    // aspect_ratio_info_present_flag, overscan_info_present_flag.
+    bits.bit(false);
+    bits.bit(false);
+    bits.bit(signal.present());
+    if signal.present() {
+        // video_format 5 is "unspecified".
+        bits.u(3, 5);
+        bits.bit(signal.full_range.unwrap_or(false));
+        bits.bit(signal.described());
+        if signal.described() {
+            bits.u(8, u32::from(signal.primaries));
+            bits.u(8, u32::from(signal.transfer));
+            bits.u(8, u32::from(signal.matrix));
+        }
     }
+    // chroma_loc_info_present_flag, timing_info_present_flag.
+    bits.bit(false);
+    bits.bit(false);
+    // nal_hrd_parameters_present_flag, vcl_hrd_parameters_present_flag,
+    // pic_struct_present_flag.
     bits.bit(false);
     bits.bit(false);
     bits.bit(false);
@@ -553,7 +982,7 @@ fn write_vui(bits: &mut Writer) {
     bits.ue(16);
     bits.ue(16);
     bits.ue(1);
-    bits.ue(2);
+    bits.ue(DPB_FRAMES);
 }
 
 fn picture() -> Vec<u8> {
@@ -2946,11 +3375,14 @@ fn dc_inc(mx: u32, my: u32, dc_coded: &[bool], mb_w: u32, missing: usize) -> usi
     left + 2 * above
 }
 
-fn avcc(sps: &[u8], pps: &[u8]) -> Vec<u8> {
-    let mut out = vec![1, 100, 0, 31, 0xff, 0xe1];
+/// The `avcC` record. A High profile record ends with the chroma format,
+/// the two bit depths and a count of SPS extensions: 4:2:0, 8-bit, none.
+fn avcc(sps: &[u8], pps: &[u8], level: u8) -> Vec<u8> {
+    let mut out = vec![1, 100, 0, level, 0xff, 0xe1];
     push_avcc_nal(&mut out, &raw_nal(3, 7, sps));
     out.push(1);
     push_avcc_nal(&mut out, &raw_nal(3, 8, pps));
+    out.extend_from_slice(&[0xfc | 1, 0xf8, 0xf8, 0]);
     out
 }
 
@@ -3241,7 +3673,14 @@ mod tests {
 
     #[test]
     fn redundant_picture_is_discarded() {
-        let sps = super::sequence(1, 1, 16, 16);
+        let sps = super::sequence(
+            1,
+            1,
+            16,
+            16,
+            31,
+            super::Signal::of(&CodecParams::video(CodecId::H264, 16, 16)),
+        );
         let mut pps = super::Writer::new();
         pps.ue(0);
         pps.ue(0);
@@ -5048,5 +5487,691 @@ mod tests {
                 .is_ok()
         })
         .map(str::to_string)
+    }
+
+    /// Encode `frames` at `duration` over `timescale` a frame, Annex B.
+    fn encode_frames(
+        encoder: &mut H264Encoder,
+        frames: &[Yuv420p],
+        duration: i64,
+        timescale: u32,
+    ) -> Vec<Packet> {
+        let mut packets = Vec::new();
+        for (index, picture) in frames.iter().enumerate() {
+            let input = VideoInput {
+                picture: picture.clone(),
+                pts: index as i64 * duration.max(1),
+                duration,
+                timescale,
+                force_keyframe: false,
+            };
+            packets.extend(encoder.push(&input).unwrap());
+        }
+        packets.extend(encoder.drain().unwrap());
+        packets
+    }
+
+    fn annex_b(width: u32, height: u32) -> CodecParams {
+        let mut params = CodecParams::video(CodecId::H264, width, height);
+        params.nal_length_size = 0;
+        params
+    }
+
+    /// The display index of each keyframe, in order.
+    fn keyframes(packets: &[Packet], duration: i64) -> Vec<i64> {
+        let mut keys: Vec<i64> = packets
+            .iter()
+            .filter(|packet| packet.keyframe)
+            .map(|packet| packet.pts / duration.max(1))
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    fn nal_kinds(packet: &Packet) -> Vec<u8> {
+        crate::nal::access_unit(&packet.data, 0)
+            .unwrap()
+            .iter()
+            .map(|nal| nal.kind)
+            .collect()
+    }
+
+    fn decode_all(params: &CodecParams, packets: &[Packet]) -> Vec<cutlass_decode::VideoOutput> {
+        let mut decoder = H264Decoder::open(params).unwrap();
+        let mut shown = Vec::new();
+        for packet in packets {
+            shown.extend(decoder.push(packet).unwrap());
+        }
+        shown.extend(decoder.drain().unwrap());
+        shown
+    }
+
+    /// A second scene: drifting blocks, nothing like [`scrolling_frames`].
+    fn block_frames(width: u32, height: u32, frames: u32) -> Vec<Yuv420p> {
+        let cell = |x: u32, y: u32, t: u32, size: u32| {
+            let (bx, by) = ((x + t) / size, (y + 2 * t) / size);
+            let mut state = bx.wrapping_mul(2_654_435_761) ^ by.wrapping_mul(40_503);
+            (next_u32(&mut state) >> 24).clamp(16, 235) as u8
+        };
+        (0..frames)
+            .map(|t| {
+                let y = (0..height)
+                    .flat_map(|row| (0..width).map(move |col| cell(col, row, t, 12)))
+                    .collect();
+                let chroma = |salt: u32| -> Vec<u8> {
+                    (0..height / 2)
+                        .flat_map(|row| (0..width / 2).map(move |col| cell(col + salt, row, t, 6)))
+                        .collect()
+                };
+                Yuv420p::try_new(width, height, y, chroma(31), chroma(77)).unwrap()
+            })
+            .collect()
+    }
+
+    /// Two seconds at 30 frames a second is 60 pictures. Each keyframe
+    /// carries the parameter sets and no other picture does, and a decoder
+    /// that starts at a keyframe shows what one that read the whole stream
+    /// shows from there on.
+    #[test]
+    fn keyframes_come_at_the_interval() {
+        let frames = scrolling_frames(96, 80, 125);
+        let params = annex_b(96, 80);
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let packets = encode_frames(&mut encoder, &frames, 1, 30);
+        assert_eq!(packets.len(), 125);
+        assert_eq!(keyframes(&packets, 1), [0, 60, 120]);
+        for packet in &packets {
+            let kinds = nal_kinds(packet);
+            if packet.keyframe {
+                assert_eq!(kinds, [7, 8, 5], "pts {}", packet.pts);
+            } else {
+                assert_eq!(kinds, [1], "pts {}", packet.pts);
+            }
+        }
+        let whole = decode_all(&params, &packets);
+        assert_eq!(whole.len(), 125);
+        for (index, shown) in whole.iter().enumerate() {
+            assert_eq!(shown.pts, index as i64);
+            let quality = psnr(frames[index].y(), shown.picture.y());
+            assert!(quality >= 30.0, "picture {index}: {quality:.2} dB");
+        }
+        for start in [60usize, 120] {
+            let at = packets
+                .iter()
+                .position(|packet| packet.pts == start as i64)
+                .unwrap();
+            assert!(
+                packets[at..]
+                    .iter()
+                    .all(|packet| packet.pts >= start as i64)
+            );
+            let tail = decode_all(&params, &packets[at..]);
+            assert_eq!(tail.len(), 125 - start);
+            for (seeked, read) in tail.iter().zip(&whole[start..]) {
+                assert_eq!(seeked.pts, read.pts);
+                assert_eq!(seeked.picture, read.picture, "pts {}", read.pts);
+            }
+        }
+    }
+
+    /// The interval is time, not a picture count: half a second of
+    /// 29.97 frames a second is 15 pictures. Zero turns the interval off.
+    #[test]
+    fn the_interval_follows_the_timescale_and_can_be_set() {
+        let frames = scrolling_frames(96, 80, 50);
+        let params = annex_b(96, 80);
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        encoder.set_keyframe_interval(500);
+        let packets = encode_frames(&mut encoder, &frames, 1001, 30_000);
+        assert_eq!(keyframes(&packets, 1001), [0, 15, 30, 45]);
+
+        encoder.reset();
+        encoder.set_keyframe_interval(0);
+        let packets = encode_frames(&mut encoder, &frames, 1001, 30_000);
+        assert_eq!(keyframes(&packets, 1001), [0]);
+        assert_eq!(decode_all(&params, &packets).len(), 50);
+    }
+
+    /// `force_keyframe` still codes an IDR picture, and the interval is
+    /// counted from it.
+    #[test]
+    fn a_forced_keyframe_restarts_the_interval() {
+        let frames = scrolling_frames(96, 80, 40);
+        let params = annex_b(96, 80);
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        encoder.set_keyframe_interval(500);
+        let mut packets = Vec::new();
+        for (index, picture) in frames.iter().enumerate() {
+            let input = VideoInput {
+                picture: picture.clone(),
+                pts: index as i64,
+                duration: 1,
+                timescale: 30,
+                force_keyframe: index == 7,
+            };
+            packets.extend(encoder.push(&input).unwrap());
+        }
+        packets.extend(encoder.drain().unwrap());
+        assert_eq!(keyframes(&packets, 1), [0, 7, 22, 37]);
+        assert_eq!(decode_all(&params, &packets).len(), 40);
+    }
+
+    /// A picture with no usable duration cannot be timed, so the interval
+    /// falls back to a picture count: two seconds at 150 frames a second.
+    #[test]
+    fn a_zero_duration_still_gets_keyframes() {
+        let params = annex_b(16, 16);
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let frames: Vec<Yuv420p> = (0..305u32)
+            .map(|index| Yuv420p::solid(16, 16, 60 + (index % 2) as u8, 128, 128).unwrap())
+            .collect();
+        let mut packets = Vec::new();
+        for (index, picture) in frames.iter().enumerate() {
+            let input = VideoInput {
+                picture: picture.clone(),
+                pts: index as i64,
+                duration: if index % 2 == 0 { 0 } else { -3 },
+                timescale: 90_000,
+                force_keyframe: false,
+            };
+            packets.extend(encoder.push(&input).unwrap());
+        }
+        packets.extend(encoder.drain().unwrap());
+        assert_eq!(keyframes(&packets, 1), [0, 300]);
+        // No frame rate to read: the level and the QP stay at the 30 guess.
+        assert_eq!(encoder.extradata()[3], 10);
+    }
+
+    /// A cut is an IDR picture, whether the picture before it was held for
+    /// a B picture (cut at an even index) or not (odd). Both scenes decode
+    /// cleanly on each side of it.
+    #[test]
+    fn a_scene_cut_is_a_keyframe() {
+        for cut in [20usize, 21] {
+            let mut frames = scrolling_frames(96, 80, cut as u32);
+            frames.extend(block_frames(96, 80, 20));
+            let params = annex_b(96, 80);
+            let mut encoder = H264Encoder::open(&params).unwrap();
+            let packets = encode_frames(&mut encoder, &frames, 1, 30);
+            assert_eq!(keyframes(&packets, 1), [0, cut as i64], "cut at {cut}");
+            let at = packets
+                .iter()
+                .position(|packet| packet.pts == cut as i64)
+                .unwrap();
+            assert!(packets[at..].iter().all(|packet| packet.pts >= cut as i64));
+            let shown = decode_all(&params, &packets);
+            assert_eq!(shown.len(), frames.len());
+            for (index, picture) in shown.iter().enumerate() {
+                let quality = psnr(frames[index].y(), picture.picture.y());
+                assert!(
+                    quality >= 30.0,
+                    "cut {cut} picture {index}: {quality:.2} dB"
+                );
+            }
+
+            let mut plain = H264Encoder::open(&params).unwrap();
+            plain.set_scene_cut(false);
+            let packets = encode_frames(&mut plain, &frames, 1, 30);
+            assert_eq!(keyframes(&packets, 1), [0], "scene cut off");
+        }
+    }
+
+    /// Motion, a flash and a fade are not cuts, and neither is a cut that
+    /// comes a tenth of the interval or less after the last IDR picture.
+    #[test]
+    fn motion_a_flash_and_an_early_cut_are_not_keyframes() {
+        let params = annex_b(96, 80);
+        let brighter = |picture: &Yuv420p, by: i32| {
+            let y = picture
+                .y()
+                .iter()
+                .map(|sample| (i32::from(*sample) + by).clamp(0, 255) as u8)
+                .collect();
+            Yuv420p::try_new(96, 80, y, picture.u().to_vec(), picture.v().to_vec()).unwrap()
+        };
+        let mut frames = scrolling_frames(96, 80, 40);
+        frames[20] = brighter(&frames[20], 40);
+        for (index, frame) in frames.iter_mut().enumerate().skip(30) {
+            *frame = brighter(frame, -8 * (index as i32 - 29));
+        }
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let packets = encode_frames(&mut encoder, &frames, 1, 30);
+        assert_eq!(keyframes(&packets, 1), [0]);
+
+        let mut frames = scrolling_frames(96, 80, 3);
+        frames.extend(block_frames(96, 80, 20));
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let packets = encode_frames(&mut encoder, &frames, 1, 30);
+        assert_eq!(keyframes(&packets, 1), [0]);
+    }
+
+    #[test]
+    fn the_glance_tells_a_cut_from_a_pan() {
+        let reduce = |picture: &Yuv420p| super::Glance::of(picture.y(), 96, 80);
+        let scroll = scrolling_frames(96, 80, 2);
+        let blocks = block_frames(96, 80, 2);
+        assert!(!reduce(&scroll[1]).cuts_from(&reduce(&scroll[0])));
+        assert!(!reduce(&blocks[1]).cuts_from(&reduce(&blocks[0])));
+        assert!(reduce(&blocks[0]).cuts_from(&reduce(&scroll[1])));
+        assert!(reduce(&scroll[0]).cuts_from(&reduce(&blocks[1])));
+        // To and from a flat picture.
+        let flat = Yuv420p::solid(96, 80, 16, 128, 128).unwrap();
+        assert!(reduce(&flat).cuts_from(&reduce(&scroll[0])));
+        assert!(reduce(&scroll[0]).cuts_from(&reduce(&flat)));
+        assert!(!reduce(&flat).cuts_from(&reduce(&flat)));
+        let other = Yuv420p::solid(96, 80, 200, 128, 128).unwrap();
+        assert!(!reduce(&other).cuts_from(&reduce(&flat)));
+        // A picture of another size is never compared.
+        let wide = super::Glance::of(&vec![90; 112 * 80], 112, 80);
+        assert!(!wide.cuts_from(&reduce(&scroll[0])));
+        // Every size reduces to at most the glance area.
+        for (width, height) in [(16usize, 16usize), (1280, 720), (1920, 1088), (4096, 2048)] {
+            let glance = super::Glance::of(&vec![77; width * height], width, height);
+            assert!(glance.width * glance.height <= super::GLANCE_AREA);
+            assert_eq!(glance.samples.len(), glance.width * glance.height);
+            assert!(glance.samples.iter().all(|sample| *sample == 77));
+        }
+    }
+
+    /// Table A-1 for the High profile, with the two-frame buffer the VUI
+    /// asks for.
+    #[test]
+    fn the_level_is_the_lowest_table_a_1_row_that_fits() {
+        let level = |width: u32, height: u32, fps: u64, bitrate: u32| {
+            super::level_for(width.div_ceil(16), height.div_ceil(16), (fps, 1), bitrate)
+        };
+        assert_eq!(level(1280, 720, 30, 0), 31);
+        assert_eq!(level(1920, 1080, 30, 0), 40);
+        assert_eq!(level(1920, 1080, 60, 0), 42);
+        assert_eq!(level(3840, 2160, 30, 0), 51);
+        assert_eq!(level(3840, 2160, 60, 0), 52);
+        assert_eq!(level(1280, 720, 60, 0), 32);
+        assert_eq!(level(64, 64, 30, 0), 10);
+        assert_eq!(level(176, 144, 15, 0), 10);
+        assert_eq!(level(176, 144, 30, 0), 11);
+        assert_eq!(level(352, 288, 30, 0), 13);
+        assert_eq!(level(720, 576, 25, 0), 30);
+        assert_eq!(level(4096, 2048, 30, 0), 51);
+        // 29.97 frames a second is under the level 4 macroblock rate.
+        assert_eq!(super::level_for(120, 68, (30_000, 1001), 0), 40);
+        // The bitrate alone can raise it: level 4 carries 25 Mbit/s in High.
+        assert_eq!(level(1920, 1080, 30, 25_000_000), 40);
+        assert_eq!(level(1920, 1080, 30, 25_000_001), 41);
+        assert_eq!(level(1280, 720, 30, 80_000_000), 50);
+        // A strip too wide for its area's level: a side squared is at most
+        // 8 * MaxFS, and 256 macroblocks squared is level 4's 8 * 8192.
+        assert_eq!(level(4096, 16, 30, 0), 40);
+        assert_eq!(level(16, 4096, 30, 0), 40);
+        assert_eq!(level(2048, 16, 30, 0), 31);
+        // Nothing holds this; the highest level is named.
+        assert_eq!(level(4096, 2048, 100_000, 0), 62);
+    }
+
+    /// The SPS a stream opens with and the `avcC` record name the level of
+    /// the frame rate the first picture shows, not the guess from the open.
+    #[test]
+    fn the_sps_and_the_avcc_carry_the_level() {
+        for (width, height, fps, want) in [
+            (1280u32, 720u32, 30u32, 31u8),
+            (1920, 1080, 30, 40),
+            (1920, 1080, 60, 42),
+            (3840, 2160, 30, 51),
+        ] {
+            let params = annex_b(width, height);
+            let mut encoder = H264Encoder::open(&params).unwrap();
+            let packets = encoder
+                .push(&VideoInput {
+                    picture: Yuv420p::solid(width, height, 90, 128, 128).unwrap(),
+                    pts: 0,
+                    duration: 1,
+                    timescale: fps,
+                    force_keyframe: false,
+                })
+                .unwrap();
+            assert_eq!(packets.len(), 1);
+            let nals = crate::nal::access_unit(&packets[0].data, 0).unwrap();
+            assert_eq!(nals[0].kind, 7);
+            let sps = crate::set::parse_sps(&nals[0].rbsp).unwrap();
+            assert_eq!(sps.level_idc, want, "{width}x{height} at {fps}");
+            let extra = encoder.extradata();
+            assert_eq!(&extra[..6], [1, 100, 0, want, 0xff, 0xe1]);
+            assert_eq!(&extra[extra.len() - 4..], [0xfd, 0xf8, 0xf8, 0]);
+            let (length_size, sets) = crate::nal::avcc(extra).unwrap();
+            assert_eq!(length_size, 4);
+            assert_eq!(sets.len(), 2);
+            assert_eq!(sets[0].rbsp, nals[0].rbsp);
+            assert_eq!(sets[1].rbsp, nals[1].rbsp);
+            let shown = decode_all(&params, &packets);
+            assert_eq!(
+                (shown[0].picture.width(), shown[0].picture.height()),
+                (width, height)
+            );
+        }
+    }
+
+    /// The level is set once: a reset reads the frame rate again.
+    #[test]
+    fn a_reset_settles_the_level_and_the_qp_again() {
+        let mut params = annex_b(1280, 720);
+        params.bitrate = 2_000_000;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        assert_eq!(encoder.extradata()[3], 31);
+        encoder.settle(1, 60);
+        assert_eq!(encoder.extradata()[3], 32);
+        assert_eq!(encoder.qp, super::initial_qp(2_000_000, 1280, 720, (60, 1)));
+        encoder.settle(1, 30);
+        assert_eq!(encoder.extradata()[3], 32, "set once a stream");
+        encoder.reset();
+        encoder.settle(1001, 30_000);
+        assert_eq!(encoder.extradata()[3], 31);
+        assert_eq!(
+            encoder.qp,
+            super::initial_qp(2_000_000, 1280, 720, (30_000, 1001))
+        );
+    }
+
+    /// The same bitrate over twice the pictures is half the bits a sample,
+    /// one doubling of the quantizer step: six QP.
+    #[test]
+    fn the_first_qp_follows_the_frame_rate() {
+        let at = |fps: u64| super::initial_qp(2_000_000, 1280, 720, (fps, 1));
+        assert_eq!(at(60), at(30) + 6);
+        assert_eq!(at(15), at(30) - 6);
+        assert_eq!(
+            super::initial_qp(2_000_000, 1280, 720, (30_000, 1001)),
+            at(30)
+        );
+        assert_eq!(super::initial_qp(0, 1280, 720, (60, 1)), 26);
+        assert_eq!(super::initial_qp(2_000_000, 1280, 720, (0, 1)), 26);
+    }
+
+    #[test]
+    fn the_colour_description_round_trips() {
+        use cutlass_decode::{
+            ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients, Transfer,
+        };
+        let coded = |range, primaries, transfer, matrix| {
+            let mut params = annex_b(32, 32);
+            params.range = range;
+            params.primaries = primaries;
+            params.transfer = transfer;
+            params.matrix = matrix;
+            let mut encoder = H264Encoder::open(&params).unwrap();
+            let frames = vec![Yuv420p::solid(32, 32, 100, 90, 160).unwrap(); 3];
+            let packets = encode_frames(&mut encoder, &frames, 1, 30);
+            let shown = decode_all(&params, &packets);
+            assert_eq!(shown.len(), 3);
+            for picture in &shown[1..] {
+                assert_eq!(
+                    (
+                        picture.range,
+                        picture.primaries,
+                        picture.transfer,
+                        picture.matrix
+                    ),
+                    (
+                        shown[0].range,
+                        shown[0].primaries,
+                        shown[0].transfer,
+                        shown[0].matrix
+                    )
+                );
+            }
+            // The record a container stores says the same as the stream.
+            let (_, sets) = crate::nal::avcc(encoder.extradata()).unwrap();
+            let sps = crate::set::parse_sps(&sets[0].rbsp).unwrap();
+            assert_eq!(
+                (sps.range, sps.primaries, sps.transfer, sps.matrix),
+                (
+                    shown[0].range,
+                    shown[0].primaries,
+                    shown[0].transfer,
+                    shown[0].matrix
+                )
+            );
+            (
+                shown[0].range,
+                shown[0].primaries,
+                shown[0].transfer,
+                shown[0].matrix,
+            )
+        };
+        assert_eq!(
+            coded(
+                ColorRange::Full,
+                ColorPrimaries::Bt2020,
+                Transfer::Hlg,
+                MatrixCoefficients::Bt2020
+            ),
+            (
+                ColorRange::Full,
+                ColorPrimaries::Bt2020,
+                Transfer::Hlg,
+                ColorMatrix::Bt2020
+            )
+        );
+        assert_eq!(
+            coded(
+                ColorRange::Limited,
+                ColorPrimaries::Bt709,
+                Transfer::Bt709,
+                MatrixCoefficients::Bt709
+            ),
+            (
+                ColorRange::Limited,
+                ColorPrimaries::Bt709,
+                Transfer::Bt709,
+                ColorMatrix::Bt709
+            )
+        );
+        assert_eq!(
+            coded(
+                ColorRange::Unspecified,
+                ColorPrimaries::Smpte432,
+                Transfer::Srgb,
+                MatrixCoefficients::Bt601
+            ),
+            (
+                ColorRange::Limited,
+                ColorPrimaries::Smpte432,
+                Transfer::Srgb,
+                ColorMatrix::Bt601
+            )
+        );
+        // A range alone: the three colour bytes are not written.
+        assert_eq!(
+            coded(
+                ColorRange::Full,
+                ColorPrimaries::Unspecified,
+                Transfer::Unspecified,
+                MatrixCoefficients::Unspecified
+            ),
+            (
+                ColorRange::Full,
+                ColorPrimaries::Unspecified,
+                Transfer::Unspecified,
+                ColorMatrix::Unspecified
+            )
+        );
+        // Identity needs 4:4:4, so a 4:2:0 stream leaves the matrix unnamed.
+        assert_eq!(
+            coded(
+                ColorRange::Full,
+                ColorPrimaries::Bt709,
+                Transfer::Srgb,
+                MatrixCoefficients::Rgb
+            ),
+            (
+                ColorRange::Full,
+                ColorPrimaries::Bt709,
+                Transfer::Srgb,
+                ColorMatrix::Unspecified
+            )
+        );
+    }
+
+    /// With nothing named, the VUI has no video signal type: the SPS is the
+    /// bytes it was before the encoder wrote one.
+    #[test]
+    fn an_unnamed_colour_writes_no_signal_type() {
+        let plain = super::Signal::of(&annex_b(16, 16));
+        assert!(!plain.present());
+        let before = super::sequence(1, 1, 16, 16, 31, plain);
+        assert_eq!(before, [100, 0, 31, 172, 237, 232, 7, 132, 66, 41, 192]);
+        let mut named = annex_b(16, 16);
+        named.range = cutlass_decode::ColorRange::Full;
+        let full = super::sequence(1, 1, 16, 16, 31, super::Signal::of(&named));
+        assert_ne!(full, before);
+        let sps = crate::set::parse_sps(&full).unwrap();
+        assert_eq!(sps.range, cutlass_decode::ColorRange::Full);
+        assert_eq!((sps.max_reorder, sps.max_num_ref_frames), (1, 2));
+    }
+
+    fn ffprobe() -> Option<String> {
+        let probe = ffmpeg()?.replace("ffmpeg", "ffprobe");
+        std::process::Command::new(&probe)
+            .arg("-version")
+            .output()
+            .is_ok()
+            .then_some(probe)
+    }
+
+    /// FFmpeg reads the level, the colour and the keyframes this encoder
+    /// wrote, and decodes every picture to the samples this crate's decoder
+    /// does, which for a reference picture is the encoder's reconstruction.
+    #[test]
+    fn ffprobe_reads_the_level_colour_and_keyframes() {
+        use cutlass_decode::{ColorPrimaries, ColorRange, MatrixCoefficients, Transfer};
+        let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
+            return;
+        };
+        let mut frames = scrolling_frames(96, 80, 21);
+        frames.extend(block_frames(96, 80, 64));
+        let mut params = annex_b(96, 80);
+        params.range = ColorRange::Full;
+        params.primaries = ColorPrimaries::Bt2020;
+        params.transfer = Transfer::Hlg;
+        params.matrix = MatrixCoefficients::Bt2020;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let packets = encode_frames(&mut encoder, &frames, 1, 30);
+        assert_eq!(keyframes(&packets, 1), [0, 21, 81]);
+        let shown = decode_all(&params, &packets);
+        assert_eq!(shown.len(), frames.len());
+
+        let dir = std::env::temp_dir().join("cutlass-h264-enc-headers");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("gop.h264");
+        let yuv = dir.join("gop.yuv");
+        let bytes: Vec<u8> = packets
+            .iter()
+            .flat_map(|packet| packet.data.clone())
+            .collect();
+        std::fs::write(&coded, &bytes).unwrap();
+        let probe = |args: &[&str]| {
+            let out = std::process::Command::new(&ffprobe)
+                .args(["-v", "error"])
+                .args(args)
+                .arg(&coded)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "ffprobe rejected the stream");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let streams = probe(&["-show_streams"]);
+        for line in [
+            "profile=High",
+            "level=10",
+            "color_range=pc",
+            "color_space=bt2020nc",
+            "color_transfer=arib-std-b67",
+            "color_primaries=bt2020",
+            "has_b_frames=1",
+        ] {
+            assert!(
+                streams.lines().any(|have| have == line),
+                "no {line} in {streams}"
+            );
+        }
+        let kinds = probe(&[
+            "-show_frames",
+            "-show_entries",
+            "frame=key_frame,pict_type",
+            "-of",
+            "csv=p=0",
+        ]);
+        let kinds: Vec<&str> = kinds.lines().collect();
+        assert_eq!(kinds.len(), frames.len());
+        for (index, kind) in kinds.iter().enumerate() {
+            let key = [0, 21, 81].contains(&index);
+            assert_eq!(kind.starts_with("1,I"), key, "picture {index}: {kind}");
+        }
+
+        let decoded = std::process::Command::new(ffmpeg)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuvj420p"])
+            .arg(&yuv)
+            .output()
+            .unwrap();
+        assert!(decoded.status.success(), "ffmpeg rejected the stream");
+        let raw = std::fs::read(&yuv).unwrap();
+        let frame = 96 * 80 * 3 / 2;
+        assert_eq!(raw.len(), frame * frames.len());
+        for (index, picture) in shown.iter().enumerate() {
+            let got = &raw[index * frame..(index + 1) * frame];
+            let (y, chroma) = got.split_at(96 * 80);
+            let (u, v) = chroma.split_at(48 * 40);
+            assert_eq!(y, picture.picture.y(), "luma {index}");
+            assert_eq!(u, picture.picture.u(), "cb {index}");
+            assert_eq!(v, picture.picture.v(), "cr {index}");
+        }
+    }
+
+    /// FFmpeg names the Table A-1 level of the four sizes export uses most.
+    #[test]
+    fn ffprobe_reads_the_level_of_hd_and_uhd() {
+        let Some(ffprobe) = ffprobe() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join("cutlass-h264-enc-levels");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height, fps, want) in [
+            (1280u32, 720u32, 30u32, 31u8),
+            (1920, 1080, 30, 40),
+            (1920, 1080, 60, 42),
+            (3840, 2160, 30, 51),
+        ] {
+            let mut encoder = H264Encoder::open(&annex_b(width, height)).unwrap();
+            let packets = encoder
+                .push(&VideoInput {
+                    picture: Yuv420p::solid(width, height, 90, 128, 128).unwrap(),
+                    pts: 0,
+                    duration: 1,
+                    timescale: fps,
+                    force_keyframe: false,
+                })
+                .unwrap();
+            let coded = dir.join(format!("{width}x{height}at{fps}.h264"));
+            std::fs::write(&coded, &packets[0].data).unwrap();
+            let out = std::process::Command::new(&ffprobe)
+                .args(["-v", "error", "-show_streams"])
+                .arg(&coded)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "ffprobe rejected {width}x{height}");
+            let streams = String::from_utf8_lossy(&out.stdout);
+            for line in [
+                format!("level={want}"),
+                format!("width={width}"),
+                format!("height={height}"),
+            ] {
+                assert!(
+                    streams.lines().any(|have| have == line),
+                    "no {line} at {width}x{height} {fps} fps"
+                );
+            }
+        }
     }
 }

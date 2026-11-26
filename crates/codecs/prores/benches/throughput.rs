@@ -153,9 +153,11 @@ fn measure(
         let mut decoder = open_decoder(threads)?;
         let start = Instant::now();
         for bytes in &stream {
-            decoder
+            let decoded = decoder
                 .decode(bytes)
                 .map_err(|error| format!("decode: {error}"))?;
+            // Hand the planes back, as a player does once it has shown them.
+            decoder.recycle(decoded.frame);
         }
         Ok(count as f64 / start.elapsed().as_secs_f64())
     };
@@ -356,10 +358,25 @@ fn machine() -> String {
             .filter(|out| out.status.success())
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
+    // Linux names the processor in /proc/cpuinfo and has no such sysctl keys.
+    let cpuinfo = || {
+        let text = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+        let line = text.lines().find(|line| line.starts_with("model name"))?;
+        Some(line.split_once(':')?.1.trim().to_string())
+    };
+    let cores = || {
+        std::thread::available_parallelism()
+            .ok()
+            .map(|count| count.to_string())
+    };
     format!(
         "machine: {}, {} cores; bench profile",
-        read("machdep.cpu.brand_string").unwrap_or_else(|| "unknown cpu".to_string()),
-        read("hw.ncpu").unwrap_or_else(|| "?".to_string())
+        read("machdep.cpu.brand_string")
+            .or_else(cpuinfo)
+            .unwrap_or_else(|| "unknown cpu".to_string()),
+        read("hw.ncpu")
+            .or_else(cores)
+            .unwrap_or_else(|| "?".to_string())
     )
 }
 

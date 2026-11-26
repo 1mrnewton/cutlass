@@ -3,6 +3,8 @@
 //!
 //! Usage: av1bench <in.ivf> [threads] [out.yuv]
 //! `threads` sets `Av1Core::threads` (default: available parallelism).
+//! With `CUTLASS_AV1_SCALAR` set in the environment, the kernels chosen at
+//! run time are forced off: the decoder as a CPU without AVX2 runs it.
 //! Frames go through `Av1Core::decode_delayed` and `Av1Core::drain`.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -21,6 +23,9 @@ fn main() -> Result<(), String> {
     let data = std::fs::read(&args[1]).map_err(|e| e.to_string())?;
     if data.len() < 32 || &data[0..4] != b"DKIF" {
         return Err("not an IVF file".into());
+    }
+    if std::env::var_os("CUTLASS_AV1_SCALAR").is_some() {
+        cutlass_simd::av1::cpu::force_scalar(true);
     }
     let mut core = Av1Core::new();
     if let Some(t) = args.get(2) {

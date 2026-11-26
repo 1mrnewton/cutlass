@@ -52,12 +52,17 @@ fn round_trip(dir: &Path, raw_format: &str, codec: &str, raw: &[u8], extra: [u8;
         theirs.to_str().expect("path"),
     ]);
     let packets = read_packets(&theirs);
+    // A PCM packet is a run of whole frames; the durations add up to them.
     let mut got = Vec::<u8>::new();
+    let mut frames = 0;
     for packet in &packets {
         got.extend(packet.bytes());
-        assert_eq!(packet.timestamp().duration(), Some(1));
+        assert_eq!(packet.timestamp().presentation(), Some(frames));
+        frames += packet.timestamp().duration().expect("duration");
     }
     assert_eq!(got, raw);
+    let width = if extra[0] == 4 { 4 } else { 2 };
+    assert_eq!(usize::try_from(frames).expect("frames"), raw.len() / width);
     assert_eq!(packets[0].timescale().ticks_per_second(), 16_000);
     let demux = open_file(&theirs);
     assert_eq!(demux.streams()[0].params().extradata(), extra);

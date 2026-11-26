@@ -1,12 +1,98 @@
 //! Wide 4:2:2 or 4:4:4 to the 8-bit 4:2:0 the app shows.
+//!
+//! The row functions here are the whole conversion. The decoder calls them
+//! from each slice job on the rows that job has just decoded, and
+//! [`to_yuv420p`] calls them on a finished frame; both give the same bytes.
 
-use cutlass_decode::{CodecError, PixelFormat, Plane, VideoFrame};
+use cutlass_decode::{CodecError, PixelFormat, VideoFrame};
 
-fn sample(plane: &Plane, x: usize, y: usize) -> u32 {
-    let at = y * plane.stride + x * 2;
-    match plane.samples.get(at..at + 2) {
-        Some(pair) => u32::from(u16::from_le_bytes([pair[0], pair[1]])),
-        None => 0,
+/// How `depth`-bit samples round to 8 bits.
+#[derive(Clone, Copy)]
+pub(crate) struct Narrow {
+    half: u16,
+    shift: u32,
+}
+
+impl Narrow {
+    /// `depth` is 10 or 12.
+    pub(crate) fn new(depth: u8) -> Self {
+        let shift = u32::from(depth.clamp(9, 12)) - 8;
+        Self {
+            half: 1 << (shift - 1),
+            shift,
+        }
+    }
+}
+
+/// One luma row. `dst` is `src` or one sample longer; the extra sample
+/// repeats the last. The sums saturate, which only matters for samples far
+/// above the depth: those come out 255 either way.
+#[inline(always)]
+pub(crate) fn luma_row(src: &[u16], dst: &mut [u8], narrow: Narrow) {
+    for (out, &sample) in dst.iter_mut().zip(src) {
+        *out = (sample.saturating_add(narrow.half) >> narrow.shift).min(255) as u8;
+    }
+    repeat_last(dst, src.len());
+}
+
+/// One 4:2:0 chroma row from two 4:2:2 rows.
+#[inline(always)]
+pub(crate) fn chroma_row_422(top: &[u16], bottom: &[u16], dst: &mut [u8], narrow: Narrow) {
+    let round = 2 * narrow.half;
+    for ((out, &a), &b) in dst.iter_mut().zip(top).zip(bottom) {
+        let sum = a.saturating_add(b).saturating_add(round);
+        *out = (sum >> (narrow.shift + 1)).min(255) as u8;
+    }
+}
+
+/// One 4:2:0 chroma row from two 4:4:4 rows. An odd last column counts twice.
+#[inline(always)]
+pub(crate) fn chroma_row_444(top: &[u16], bottom: &[u16], dst: &mut [u8], narrow: Narrow) {
+    let round = 4 * narrow.half;
+    let (top_pairs, top_last) = top.as_chunks::<2>();
+    let (bottom_pairs, bottom_last) = bottom.as_chunks::<2>();
+    for ((out, a), b) in dst.iter_mut().zip(top_pairs).zip(bottom_pairs) {
+        let sum = a[0]
+            .saturating_add(a[1])
+            .saturating_add(b[0])
+            .saturating_add(b[1])
+            .saturating_add(round);
+        *out = (sum >> (narrow.shift + 2)).min(255) as u8;
+    }
+    if let (Some(out), Some(&a), Some(&b)) = (
+        dst.get_mut(top_pairs.len()),
+        top_last.first(),
+        bottom_last.first(),
+    ) {
+        let sum = a
+            .saturating_add(a)
+            .saturating_add(b)
+            .saturating_add(b)
+            .saturating_add(round);
+        *out = (sum >> (narrow.shift + 2)).min(255) as u8;
+    }
+}
+
+/// Fills `row[filled..]` with the sample before it.
+#[inline(always)]
+fn repeat_last(row: &mut [u8], filled: usize) {
+    if filled == 0 || filled >= row.len() {
+        return;
+    }
+    let last = row[filled - 1];
+    row[filled..].fill(last);
+}
+
+/// Reads row `y` of a 16-bit little-endian plane into `out`.
+fn wide_row(samples: &[u8], stride: usize, y: usize, out: &mut [u16]) {
+    let start = y * stride;
+    let bytes = samples
+        .get(start..start + out.len() * 2)
+        .unwrap_or_default();
+    let (pairs, _) = bytes.as_chunks::<2>();
+    out.fill(0);
+    for (value, pair) in out.iter_mut().zip(pairs) {
+        *value = u16::from_le_bytes(*pair);
     }
 }
 
@@ -26,37 +112,40 @@ pub fn to_yuv420p(frame: &VideoFrame) -> Result<(u32, u32, Vec<u8>), CodecError>
     };
     let width = frame.width as usize;
     let height = frame.height as usize;
+    if width == 0 || height == 0 {
+        return Err(CodecError::InvalidApi {
+            what: "empty picture",
+        });
+    }
     let out_w = width.div_ceil(2) * 2;
     let out_h = height.div_ceil(2) * 2;
-    let shift = depth - 8;
-    let half = 1u32 << (shift - 1);
-    let mut bytes = Vec::with_capacity(out_w * out_h * 3 / 2);
-    for y in 0..out_h {
-        let sy = y.min(height - 1);
-        for x in 0..out_w {
-            let value = (sample(&frame.y, x.min(width - 1), sy) + half) >> shift;
-            bytes.push(value.min(255) as u8);
-        }
+    let narrow = Narrow::new(depth);
+    let mut bytes = vec![0u8; out_w * out_h * 3 / 2];
+    let (luma, chroma) = bytes.split_at_mut(out_w * out_h);
+    let mut row = vec![0u16; width];
+    let samples: &[u8] = &frame.y.samples;
+    for (y, out) in luma.chunks_exact_mut(out_w).enumerate() {
+        wide_row(samples, frame.y.stride, y.min(height - 1), &mut row);
+        luma_row(&row, out, narrow);
     }
-    let chroma_w = frame.u.width as usize;
-    for plane in [&frame.u, &frame.v] {
-        for cy in 0..out_h / 2 {
-            let r0 = (2 * cy).min(height - 1);
-            let r1 = (2 * cy + 1).min(height - 1);
-            for cx in 0..out_w / 2 {
-                let value = if horizontal {
-                    let c = cx.min(chroma_w - 1);
-                    (sample(plane, c, r0) + sample(plane, c, r1) + 2 * half) >> (shift + 1)
-                } else {
-                    let c0 = (2 * cx).min(width - 1);
-                    let c1 = (2 * cx + 1).min(width - 1);
-                    let sum = sample(plane, c0, r0)
-                        + sample(plane, c1, r0)
-                        + sample(plane, c0, r1)
-                        + sample(plane, c1, r1);
-                    (sum + 4 * half) >> (shift + 2)
-                };
-                bytes.push(value.min(255) as u8);
+    let chroma_w = if horizontal { width.div_ceil(2) } else { width };
+    let mut top = vec![0u16; chroma_w];
+    let mut bottom = vec![0u16; chroma_w];
+    let (u, v) = chroma.split_at_mut(out_w / 2 * (out_h / 2));
+    for (plane, out) in [(&frame.u, u), (&frame.v, v)] {
+        let samples: &[u8] = &plane.samples;
+        for (cy, out) in out.chunks_exact_mut(out_w / 2).enumerate() {
+            wide_row(samples, plane.stride, (2 * cy).min(height - 1), &mut top);
+            wide_row(
+                samples,
+                plane.stride,
+                (2 * cy + 1).min(height - 1),
+                &mut bottom,
+            );
+            if horizontal {
+                chroma_row_422(&top, &bottom, out, narrow);
+            } else {
+                chroma_row_444(&top, &bottom, out, narrow);
             }
         }
     }

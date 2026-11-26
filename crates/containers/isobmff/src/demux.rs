@@ -4,7 +4,7 @@
 use crate::brand::{self, parse_ftyp};
 use crate::fragment::{self, SidxRef, Tfra};
 use crate::heif;
-use crate::index::Sample;
+use crate::index::{Grouped, Samples};
 use crate::legacy::{Demux, Error, Packet, SeekAt, Source, Stream, Timescale};
 use crate::limits::{MAX_ATOMS, MAX_METADATA_BYTES, MAX_SAMPLES};
 use crate::movie::{self, BuiltTrack, Trex};
@@ -12,7 +12,7 @@ use crate::parse::{self, file_header};
 use std::io::{Read, Seek, SeekFrom};
 
 struct Runtime {
-    samples: Vec<Sample>,
+    samples: Samples,
     cursor: usize,
     no_sync: bool,
     next_dts: i64,
@@ -130,6 +130,7 @@ impl IsoBmff {
                 Timescale(built.timescale),
                 brands,
                 built.tracks,
+                built.grouped,
                 media,
                 fragments,
                 file_len,
@@ -154,6 +155,7 @@ impl IsoBmff {
                     Timescale(1),
                     brands,
                     tracks,
+                    Vec::new(),
                     media,
                     None,
                     file_len,
@@ -179,22 +181,27 @@ fn from_tracks(
     movie_timescale: Timescale,
     brands: Vec<[u8; 4]>,
     built: Vec<BuiltTrack>,
+    grouped: Vec<Option<Grouped>>,
     media: Vec<(u64, u64)>,
     fragments: Option<Fragments>,
     file_len: u64,
 ) -> IsoBmff {
     let mut streams = Vec::new();
     let mut tracks = Vec::new();
+    let mut grouped = grouped.into_iter();
     for track in built {
         let timescale = track.stream.params.timescale.get();
-        let next_dts = track
-            .samples
+        let samples = match grouped.next().flatten() {
+            Some(grouped) => Samples::Grouped(grouped),
+            None => Samples::Table(track.samples),
+        };
+        let next_dts = samples
             .last()
             .map(|sample| sample.dts.saturating_add(i64::from(sample.duration)))
             .unwrap_or(0);
         streams.push(track.stream);
         tracks.push(Runtime {
-            samples: track.samples,
+            samples,
             cursor: 0,
             no_sync: track.no_sync,
             next_dts,
@@ -441,7 +448,7 @@ impl IsoBmff {
             let Some(track) = self.tracks.get(track_index) else {
                 return Err(Error::Missing { what: "track" });
             };
-            let Some(sample) = track.samples.get(sample_index).cloned() else {
+            let Some(sample) = track.samples.get(sample_index) else {
                 return Err(Error::Missing { what: "sample" });
             };
             let Some(stream) = self.streams.get(track_index) else {
@@ -488,12 +495,7 @@ impl IsoBmff {
             .streams
             .iter()
             .position(|stream| stream.params.track_id == track_id)?;
-        self.tracks
-            .get(index)?
-            .samples
-            .iter()
-            .map(|sample| sample.pts.saturating_add(i64::from(sample.duration)))
-            .max()
+        self.tracks.get(index)?.samples.presentation_end()
     }
 
     fn span_contains(&self, index: usize, ticks: i64) -> bool {
@@ -886,7 +888,7 @@ impl IsoBmff {
         }
         if !append {
             for track in &mut self.tracks {
-                track.samples.clear();
+                track.samples = Samples::default();
                 track.cursor = 0;
             }
         }
@@ -913,9 +915,9 @@ impl IsoBmff {
                         value: next,
                     });
                 }
-                track.samples.extend(group.samples);
+                track.samples.table_mut()?.extend(group.samples);
             } else {
-                track.samples = group.samples;
+                track.samples = Samples::Table(group.samples);
             }
         }
         if let Some(fragments) = &mut self.fragments {
@@ -926,7 +928,7 @@ impl IsoBmff {
 }
 
 struct Snapshot {
-    tracks: Vec<(Vec<Sample>, usize, i64)>,
+    tracks: Vec<(Samples, usize, i64)>,
     next: Option<(u64, bool)>,
 }
 
@@ -966,7 +968,7 @@ fn covering_offset<T>(
 /// past the deepest reorder any picture codec allows.
 const REORDER_TAIL: usize = 32;
 
-fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
+fn locate(samples: Option<&Samples>, ticks: i64) -> Result<Landing, Error> {
     let Some(samples) = samples else {
         return Err(Error::SeekLimited {
             reason: "track has no sample index",
@@ -986,10 +988,8 @@ fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
     // `ticks` is a presentation time, and with reordered pictures the last
     // ones display after the last decode time ends. The track ends where
     // the latest of its last pictures stops showing.
-    let end = samples
-        .iter()
-        .rev()
-        .take(REORDER_TAIL)
+    let end = (samples.len().saturating_sub(REORDER_TAIL)..samples.len())
+        .filter_map(|index| samples.get(index))
         .map(|sample| sample.pts.saturating_add(i64::from(sample.duration)))
         .fold(last.dts.saturating_add(i64::from(last.duration)), i64::max);
     if ticks >= end {
@@ -1028,7 +1028,10 @@ fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
     // decodes before it displays, so the one found by decode time can still
     // display after `ticks`. Step back to a sync sample that does not.
     while cursor > 0 && samples.get(cursor).is_some_and(|sample| sample.pts > ticks) {
-        let Some(earlier) = samples[..cursor].iter().rposition(|sample| sample.keyframe) else {
+        let Some(earlier) = (0..cursor)
+            .rev()
+            .find(|index| samples.get(*index).is_some_and(|sample| sample.keyframe))
+        else {
             break;
         };
         visited = visited.saturating_add(u32::try_from(cursor - earlier).unwrap_or(u32::MAX));
@@ -1052,7 +1055,7 @@ fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
     })
 }
 
-fn locate_any(samples: &[Sample], ticks: i64) -> usize {
+fn locate_any(samples: &Samples, ticks: i64) -> usize {
     if samples.is_empty() {
         return 0;
     }
@@ -1097,6 +1100,9 @@ fn scale_ticks(ticks: i64, from: u32, to: u32) -> i64 {
     let value = i64::try_from(scaled).unwrap_or(i64::MAX);
     if negative { -value } else { value }
 }
+
+#[cfg(test)]
+mod grouped_audio;
 
 #[cfg(test)]
 mod tests {

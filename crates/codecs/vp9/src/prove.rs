@@ -1914,16 +1914,16 @@ fn decode_shown(stream: &Ivf, pixel: PixelFormat) -> (Vec<u8>, u32) {
             .push(&packet)
             .unwrap_or_else(|err| panic!("frame {index} {err}"));
         for output in outputs {
-            packed.extend_from_slice(&vis(&output.frame.y));
-            packed.extend_from_slice(&vis(&output.frame.u));
-            packed.extend_from_slice(&vis(&output.frame.v));
+            packed.extend_from_slice(&vis(&output.frame, &output.frame.y));
+            packed.extend_from_slice(&vis(&output.frame, &output.frame.u));
+            packed.extend_from_slice(&vis(&output.frame, &output.frame.v));
         }
     }
     // Frame threads hold the last frames until the drain.
     for output in decoder.drain().expect("drain") {
-        packed.extend_from_slice(&vis(&output.frame.y));
-        packed.extend_from_slice(&vis(&output.frame.u));
-        packed.extend_from_slice(&vis(&output.frame.v));
+        packed.extend_from_slice(&vis(&output.frame, &output.frame.y));
+        packed.extend_from_slice(&vis(&output.frame, &output.frame.u));
+        packed.extend_from_slice(&vis(&output.frame, &output.frame.v));
     }
     (packed, decoder.temporal_frames())
 }
@@ -2346,12 +2346,28 @@ fn parse_ivf(data: &[u8]) -> Ivf {
     }
 }
 
-/// A plane's visible rows: a shared (8-bit) plane is packed out of its
-/// padded stride; a copied plane is already tight.
-fn vis(p: &cutlass_decode::Plane) -> Vec<u8> {
-    if p.samples.is_shared() {
-        p.packed(1)
-    } else {
-        p.samples.to_vec()
-    }
+/// A plane's visible rows, packed out of its padded stride as FFmpeg's
+/// rawvideo writes them: one byte a sample at 8 bits, two little-endian
+/// bytes at 10 and 12 bits (shared high-depth planes keep their padded
+/// stride too).
+fn vis(frame: &cutlass_decode::VideoFrame, p: &cutlass_decode::Plane) -> Vec<u8> {
+    let sample_bytes = match frame.format {
+        PixelFormat::Yuv420p
+        | PixelFormat::Yuv422p
+        | PixelFormat::Yuv440p
+        | PixelFormat::Yuv444p
+        | PixelFormat::Gbrp => 1,
+        PixelFormat::Yuv420p10
+        | PixelFormat::Yuv420p12
+        | PixelFormat::Yuv422p10
+        | PixelFormat::Yuv422p12
+        | PixelFormat::Yuv440p10
+        | PixelFormat::Yuv440p12
+        | PixelFormat::Yuv444p10
+        | PixelFormat::Yuv444p12
+        | PixelFormat::Gbrp10
+        | PixelFormat::Gbrp12 => 2,
+        other => panic!("vp9 gave {other:?}"),
+    };
+    p.packed(sample_bytes)
 }

@@ -1,0 +1,45 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+  --> apps/cutlass-desktop/src/agent/approval.rs:60:10
+   |
+60 |         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+   |          ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+60 -         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+60 +         .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+   |
+
+warning: `cutlass-desktop` (bin "cutlass-desktop") generated 1 warning (run `cargo fix --bin "cutlass-desktop" -p cutlass-desktop` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.74s
+     Running `target/release/cutlass-desktop`
+2026-10-20T10:53:56.929928Z  WARN cutlass_desktop::audio: audio output unavailable, playback clock falls back to wall time: no f32 output config at 48000 Hz
+2026-10-20T10:53:56.962116Z  INFO cutlass_desktop::wire_engine: download cache project inventory complete drafts=1 protected_media=0
+2026-10-20T10:53:57.802745Z  INFO cutlass_desktop::updates: update check skipped: server returned 404: {"code":"not_found","message":"no release information configured"}
+2026-10-20T10:53:58.722960Z  INFO cutlass_desktop::preview_worker::project: new session
+2026-10-20T10:53:58.739415Z  WARN usvg::parser::svgtree: Failed to parse color value: 'currentColor'.
+2026-10-20T10:53:58.751147Z  WARN usvg::parser::svgtree: Failed to parse color value: 'currentColor'.
+2026-10-20T10:54:09.908741Z  INFO cutlass_desktop::preview_worker::import_drop: imported media into pool media=MediaId(2) path=/Users/eurika/Downloads/hf_20261020_092711_cc2af0c6-13fb-4fe8-a27f-8d37502d2713.png pool=1
+2026-10-20T10:54:09.908843Z  INFO cutlass_desktop::strips: strip worker registered media media_id=2 path=/Users/eurika/Downloads/hf_20261020_092711_cc2af0c6-13fb-4fe8-a27f-8d37502d2713.png
+2026-10-20T10:54:09.989455Z  INFO cutlass_desktop::thumbnails: thumbnail ready media_id=2 width=256 height=144 kind=Image
+2026-10-20T10:54:14.513991Z  INFO cutlass_desktop::preview_worker::clip_place: ripple-inserted clip from library drop clip=ClipId#4 lane=TrackId#2 media_id=MediaId#2 at=0
+2026-10-20T10:54:23.038984Z  WARN usvg::parser::svgtree: Failed to parse color value: 'currentColor'.
+2026-10-20T10:54:23.039057Z  WARN usvg::parser::svgtree: Failed to parse color value: 'currentColor'.
+2026-10-20T10:55:09.270244Z  INFO cutlass_desktop::preview_worker::project: removed media and its referencing clips media_id=MediaId#2 clips=1
+2026-10-20T10:55:34.513492Z  INFO cutlass_desktop::preview_worker::import_drop: imported media into pool media=MediaId(5) path=/Users/eurika/Downloads/hf_20261020_094115_d4f511a5-e007-42ef-b3fc-2db6d0863322.mp4 pool=1
+2026-10-20T10:55:34.513569Z  INFO cutlass_desktop::strips: strip worker registered media media_id=5 path=/Users/eurika/Downloads/hf_20261020_094115_d4f511a5-e007-42ef-b3fc-2db6d0863322.mp4
+2026-10-20T10:55:34.590778Z  INFO cutlass_desktop::thumbnails: thumbnail ready media_id=5 width=144 height=256 kind=Video
+2026-10-20T10:55:36.771759Z  INFO cutlass_desktop::preview_worker::clip_place: ripple-inserted clip from library drop clip=ClipId#7 lane=TrackId#2 media_id=MediaId#5 at=0
+2026-10-20T10:55:37.448741Z  INFO cutlass_desktop::strips: computed audio peak file media_id=5 peaks=1505 per_second=100.0
+2026-10-20T10:56:32.917954Z  INFO cutlass_desktop::preview_worker::import_drop: imported media into pool media=MediaId(5) path=/Users/eurika/Downloads/hf_20261020_094115_d4f511a5-e007-42ef-b3fc-2db6d0863322.mp4 pool=1
+2026-10-20T10:56:32.918077Z  INFO cutlass_desktop::strips: strip worker registered media media_id=5 path=/Users/eurika/Downloads/hf_20261020_094115_d4f511a5-e007-42ef-b3fc-2db6d0863322.mp4
+2026-10-20T10:56:32.953440Z  INFO cutlass_desktop::thumbnails: thumbnail ready media_id=5 width=144 height=256 kind=Video
+2026-10-20T10:56:37.451907Z  INFO cutlass_desktop::preview_worker::project: removed media and its referencing clips media_id=MediaId#5 clips=1
+2026-10-20T10:56:44.402314Z  INFO cutlass_desktop::preview_worker::import_drop: imported media into pool media=MediaId(9) path=/Users/eurika/Downloads/hf_20261020_094115_d4f511a5-e007-42ef-b3fc-2db6d0863322.mp4 pool=1
+2026-10-20T10:56:44.402383Z  INFO cutlass_desktop::strips: strip worker registered media media_id=9 path=/Users/eurika/Downloads/hf_20261020_094115_d4f511a5-e007-42ef-b3fc-2db6d0863322.mp4
+2026-10-20T10:56:44.433881Z  INFO cutlass_desktop::thumbnails: thumbnail ready media_id=9 width=144 height=256 kind=Video
+2026-10-20T10:56:46.426631Z  INFO cutlass_desktop::preview_worker::clip_place: ripple-inserted clip from library drop clip=ClipId#11 lane=TrackId#2 media_id=MediaId#9 at=0
+2026-10-20T10:56:47.091077Z  INFO cutlass_desktop::strips: computed audio peak file media_id=9 peaks=1505 per_second=100.0
+
+

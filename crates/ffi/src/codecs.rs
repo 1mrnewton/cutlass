@@ -41,7 +41,7 @@ pub fn readers() -> ReaderFactory {
 
 /// FLAC, ALAC, MP3, AC-3, E-AC-3, Opus, Vorbis, WebP and Motion JPEG, the
 /// platform decoders for this OS, then PNG, GIF, JPEG, AAC, AV1, H.264, VP8,
-/// HEVC, MPEG-2, MPEG-4 Visual, PCM and ProRes, in the desktop's order.
+/// VP9, HEVC, MPEG-2, MPEG-4 Visual, PCM and ProRes, in the desktop's order.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
@@ -70,6 +70,9 @@ pub fn decoders() -> DecodeFactory {
     cutlass_av1::register_decoders(&mut decoders);
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_vp8::register_engine_decoders(&mut decoders);
+    // VP9 beside VP8, after the platform decoders: VideoToolbox and
+    // MediaCodec decode what they accept, and the Rust decoder the rest.
+    cutlass_vp9::register_engine_decoders(&mut decoders);
     // HEVC, MPEG-2 and MPEG-4 Visual in Rust, after the platform decoders.
     // On Apple the platform claims MPEG-4 Visual. Its opener here decodes
     // that codec when the platform opener is absent.
@@ -698,6 +701,51 @@ mod tests {
             }
         }
         assert_eq!(times, (0..8).collect::<Vec<i64>>());
+    }
+
+    /// The phone plays VP9: the platform decoder where it takes the stream,
+    /// else the Rust one, gives every picture of a libvpx stream once, in
+    /// order. Where no platform decoder is registered the pictures are the
+    /// ones FFmpeg decoded.
+    #[test]
+    fn the_phone_decodes_vp9() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../codecs/vp9/fixtures");
+        let mut phone = super::decoders()
+            .open(&CodecParams::video(CodecId::Vp9, 64, 64))
+            .expect("phone");
+        assert_eq!(phone.codec(), CodecId::Vp9);
+        let mut pictures = Vec::new();
+        for index in 0..8 {
+            let frame =
+                std::fs::read(root.join(format!("vp9_altref64_{index}.bin"))).expect("fixture");
+            let packet = cutlass_decode::Packet::video(frame, index, 1, 30, index == 0);
+            pictures.extend(phone.push(&packet).expect("push"));
+        }
+        pictures.extend(phone.drain().expect("drain"));
+        let pictures: Vec<_> = pictures
+            .iter()
+            .filter_map(|output| match output {
+                Output::Picture(picture) => Some(picture),
+                Output::Audio(_) => None,
+            })
+            .collect();
+        let times: Vec<i64> = pictures.iter().map(|picture| picture.pts()).collect();
+        assert_eq!(times, (0..8).collect::<Vec<i64>>());
+        for picture in &pictures {
+            assert_eq!((picture.info().width, picture.info().height), (64, 64));
+        }
+        #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
+        {
+            let want = std::fs::read(root.join("vp9_altref64.yuv")).expect("reference");
+            let mut got = Vec::new();
+            for picture in &pictures {
+                let cutlass_decode::PictureSamples::Cpu(samples) = picture.samples() else {
+                    panic!("the rust decoder returns cpu samples");
+                };
+                got.extend_from_slice(samples);
+            }
+            assert_eq!(got, want);
+        }
     }
 
     /// A lossless 1x1 WebP of one opaque red pixel, as `cwebp -lossless` 1.6.0

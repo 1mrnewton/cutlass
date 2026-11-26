@@ -21,6 +21,11 @@ pub const MAX_DS64_ROWS: u32 = 64;
 /// Bytes scanned for an MPEG sync inside a compressed WAV payload.
 pub const MAX_MPEG_RESYNC: u64 = 64 * 1024;
 
+/// PCM, A-law, and μ-law are returned in packets of whole sample frames up
+/// to this many bytes: 16,384 frames of 16-bit stereo. A frame is at most
+/// 65,535 bytes, so a packet always holds one.
+pub const PCM_PACKET_BYTES: u64 = 64 * 1024;
+
 /// Header bytes that accept or refuse this family: `RIFF`/`RF64`, size, `WAVE`.
 pub const PROBE_BYTES: usize = 12;
 

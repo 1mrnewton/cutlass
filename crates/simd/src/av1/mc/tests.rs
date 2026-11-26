@@ -399,3 +399,129 @@ fn one_pass_final_samples_are_clipped_and_odd_vertical_taps_are_refused() {
     assert!(!put_v_u8(&mut [0u8; 256], 16, &b));
     assert!(!prep_v_u8(&mut [0i16; 256], 16, &b));
 }
+
+#[test]
+fn every_entry_matches_on_the_shortest_source_it_takes() {
+    // The source ends one sample past the last one the filters read, so a
+    // kernel that loaded any further would stop short of the block. Six
+    // and eight taps each way, every width, even and odd heights.
+    let mut rng = Rng(0x5EED_0007);
+    for (w, h) in [
+        (8, 1),
+        (8, 2),
+        (8, 7),
+        (16, 1),
+        (16, 5),
+        (16, 16),
+        (32, 2),
+        (32, 9),
+        (64, 3),
+        (64, 16),
+        (128, 2),
+        (128, 5),
+    ] {
+        let stride = w + 9 + h % 3;
+        let len = (h + 6) * stride + w + 8;
+        let src: Vec<u8> = (0..len)
+            .map(|i| match i % 7 {
+                0 => 255,
+                1 => 0,
+                _ => (rng.next() % 256) as u8,
+            })
+            .collect();
+        for (a, fh) in FILTERS.iter().enumerate() {
+            let fv = &FILTERS[(a * 3 + w / 8 + h) % 8];
+            let b = Block {
+                src: &src,
+                start: 0,
+                src_stride: stride,
+                w,
+                h,
+                fh,
+                fv,
+            };
+            let ds = w + a % 2;
+            macro_rules! same {
+                ($entry:ident, $twin:ident, $fill:expr) => {{
+                    let mut got = vec![$fill; ds * h];
+                    let mut want = got.clone();
+                    assert!($entry(&mut got, ds, &b));
+                    scalar::$twin(&mut want, ds, &b);
+                    assert_eq!(got, want, "{} {w}x{h} {fh:?} {fv:?}", stringify!($entry));
+                }};
+            }
+            same!(prep_hv_u8, prep_hv, 5i16);
+            same!(put_hv_u8, put_hv, 5u8);
+            same!(prep_h_u8, prep_h, 5i16);
+            same!(put_h_u8, put_h, 5u8);
+            same!(prep_v_u8, prep_v, 5i16);
+            same!(put_v_u8, put_v, 5u8);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn the_avx2_kernel_takes_the_filters_whose_sums_fit_16_bits() {
+    use super::avx2::exact;
+    for f in &FILTERS {
+        assert!(exact(f), "{f:?}");
+    }
+    // An odd tap, positive halves past 128, negative halves past 128.
+    assert!(!exact(&[0, 0, 1, 127, 0, 0, 0, 0]));
+    assert!(!exact(&[0, 126, 126, 6, 0, 0, 0, 0]));
+    assert!(exact(&[0, 126, 126, 4, 0, 0, 0, 0]));
+    assert!(!exact(&[-128, -128, -2, 0, 0, 0, 0, 0]));
+    assert!(exact(&[-128, -128, 0, 126, 126, 4, 0, 0]));
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn filters_past_16_bits_run_the_scalar_twin_and_the_widest_exact_ones_the_kernel() {
+    let mut rng = Rng(77);
+    let src = source(&mut rng);
+    // The widest sums the kernel takes, and filters it must hand on.
+    let rows: [[i8; 8]; 4] = [
+        [-128, -128, 0, 126, 126, 4, 0, 0],
+        [126, 4, -128, 126, -128, 0, 0, 0],
+        [126, 126, 126, 126, 126, 126, 126, 126],
+        [-128, -128, -128, -128, 126, 126, 126, 126],
+    ];
+    for (w, h) in [(8, 8), (16, 5), (32, 4), (64, 2)] {
+        for fh in &rows {
+            for fv in &rows {
+                let b = Block {
+                    src: &src,
+                    start: 17,
+                    src_stride: STRIDE,
+                    w,
+                    h,
+                    fh,
+                    fv,
+                };
+                let mut got = vec![0i16; w * h];
+                let mut want = got.clone();
+                assert!(prep_hv_u8(&mut got, w, &b));
+                scalar::prep_hv(&mut want, w, &b);
+                assert_eq!(got, want, "prep hv {w}x{h} {fh:?} {fv:?}");
+                assert!(prep_h_u8(&mut got, w, &b));
+                scalar::prep_h(&mut want, w, &b);
+                assert_eq!(got, want, "prep h {w}x{h} {fh:?}");
+                assert!(prep_v_u8(&mut got, w, &b));
+                scalar::prep_v(&mut want, w, &b);
+                assert_eq!(got, want, "prep v {w}x{h} {fv:?}");
+                let mut got = vec![0u8; w * h];
+                let mut want = got.clone();
+                assert!(put_hv_u8(&mut got, w, &b));
+                scalar::put_hv(&mut want, w, &b);
+                assert_eq!(got, want, "put hv {w}x{h} {fh:?} {fv:?}");
+                assert!(put_h_u8(&mut got, w, &b));
+                scalar::put_h(&mut want, w, &b);
+                assert_eq!(got, want, "put h {w}x{h} {fh:?}");
+                assert!(put_v_u8(&mut got, w, &b));
+                scalar::put_v(&mut want, w, &b);
+                assert_eq!(got, want, "put v {w}x{h} {fv:?}");
+            }
+        }
+    }
+}

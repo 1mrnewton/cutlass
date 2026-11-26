@@ -387,6 +387,220 @@ fn encode_round_trips_the_original_samples() {
     }
 }
 
+fn encode_f32(spec: Layout, channels: ChannelLayout, samples: Vec<f32>) -> Vec<u8> {
+    let source = Pcm::from_f32(48_000, channels.clone(), samples).expect("pcm");
+    let mut encoder = open_encoder(spec, channels);
+    let mut packets = encoder.push(&AudioInput { pcm: source }).expect("encode");
+    assert_eq!(packets.len(), 1);
+    packets.remove(0).data
+}
+
+/// The expected bytes are written out here. Half of full scale is a tie,
+/// 4,194,303.5 and 1,073,741,823.5, and goes to the even code.
+#[test]
+fn s24_and_s32_encode_the_nearest_code_and_stop_at_full_scale() {
+    let samples = vec![0.0, 1.0, -1.0, 0.5, 2.0, -2.0];
+    let codes24: [i32; 6] = [0, 8_388_607, -8_388_607, 4_194_304, 8_388_607, -8_388_608];
+    let codes32: [i32; 6] = [0, i32::MAX, -i32::MAX, 1_073_741_824, i32::MAX, i32::MIN];
+    let mut little24 = Vec::new();
+    let mut big24 = Vec::new();
+    for code in codes24 {
+        let bytes = code.to_le_bytes();
+        little24.extend_from_slice(&bytes[..3]);
+        big24.extend_from_slice(&[bytes[2], bytes[1], bytes[0]]);
+    }
+    let mono = ChannelLayout::mono();
+    let got = encode_f32(
+        layout(Coding::S24, Endian::Little, Arrangement::Interleaved),
+        mono.clone(),
+        samples.clone(),
+    );
+    assert_eq!(got, little24);
+    let got = encode_f32(
+        layout(Coding::S24, Endian::Big, Arrangement::Interleaved),
+        mono.clone(),
+        samples.clone(),
+    );
+    assert_eq!(got, big24);
+    let mut little32 = Vec::new();
+    let mut big32 = Vec::new();
+    for code in codes32 {
+        little32.extend_from_slice(&code.to_le_bytes());
+        big32.extend_from_slice(&code.to_be_bytes());
+    }
+    let got = encode_f32(
+        layout(Coding::S32, Endian::Little, Arrangement::Interleaved),
+        mono.clone(),
+        samples.clone(),
+    );
+    assert_eq!(got, little32);
+    let got = encode_f32(
+        layout(Coding::S32, Endian::Big, Arrangement::Interleaved),
+        mono,
+        samples.clone(),
+    );
+    assert_eq!(got, big32);
+
+    // Planar stereo: frames (0, 1), (-1, 0.5), (2, -2) become the left
+    // plane 0, -1, 2 and then the right plane 1, 0.5, -2.
+    let got = encode_f32(
+        layout(Coding::S24, Endian::Little, Arrangement::Planar),
+        ChannelLayout::stereo(),
+        samples,
+    );
+    let mut planes = Vec::new();
+    for index in [0, 2, 4, 1, 3, 5] {
+        planes.extend_from_slice(&little24[index * 3..index * 3 + 3]);
+    }
+    assert_eq!(got, planes);
+}
+
+/// The encoder's rounding is the nearest integer with ties to even, the
+/// same value `f64::round_ties_even` gives, over ties, their neighbours
+/// and random values on both sides of zero.
+#[test]
+fn integer_encode_rounds_ties_to_even() {
+    let spec = layout(Coding::S32, Endian::Little, Arrangement::Interleaved);
+    let mut samples = Vec::new();
+    // k / 2^31 * (2^31 - 1) is not a tie in general; these are picked by
+    // the code they should give, from the exact product in f64.
+    let mut rng = Rng(0x7e57_ab1e);
+    for _ in 0..20_000 {
+        #[allow(clippy::cast_precision_loss)]
+        let unit = (rng.next() >> 40) as f32 / (1_u64 << 23) as f32 - 1.0;
+        samples.push(unit);
+        samples.push(unit / 4096.0);
+        samples.push(unit / 16_777_216.0);
+    }
+    samples.extend([0.0, -0.0, 0.5, -0.5, 0.25, -0.25, 1.0, -1.0, 1.5, -1.5]);
+    let bytes = encode_f32(spec, ChannelLayout::mono(), samples.clone());
+    for (chunk, sample) in bytes.as_chunks::<4>().0.iter().zip(&samples) {
+        let exact = (f64::from(*sample) * limit::S32_FULL)
+            .round_ties_even()
+            .clamp(-2_147_483_648.0, limit::S32_FULL);
+        #[allow(clippy::cast_possible_truncation)]
+        let want = exact as i32;
+        assert_eq!(i32::from_le_bytes(*chunk), want, "{sample}");
+    }
+    // Ties, which a 24-bit code times a half makes: 0.5 and 1.5 go to the
+    // even neighbour, 0 and 2, not up.
+    let spec = layout(Coding::S24, Endian::Little, Arrangement::Interleaved);
+    let tie = |code: f64| -> f32 {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            (code / limit::S24_FULL) as f32
+        }
+    };
+    // 4194303.5 is exact in f32 terms only at 0.5: the one float tie.
+    let bytes = encode_f32(spec, ChannelLayout::mono(), vec![0.5, -0.5, tie(3.0)]);
+    let codes: Vec<i32> = bytes
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|three| i32::from_le_bytes([0, three[0], three[1], three[2]]) >> 8)
+        .collect();
+    assert_eq!(codes, [4_194_304, -4_194_304, 3]);
+}
+
+/// All 2^24 codes: decoded to float and encoded again, each is itself.
+#[test]
+fn every_s24_code_survives_a_decode_and_an_encode() {
+    for endian in [Endian::Little, Endian::Big] {
+        let spec = layout(Coding::S24, endian, Arrangement::Interleaved);
+        let mut decoder = open_decoder(spec, ChannelLayout::mono());
+        let mut encoder = open_encoder(spec, ChannelLayout::mono());
+        // The low byte is stepped by 7 for the big-endian pass, which
+        // still meets every high and middle byte and both end codes.
+        let step = if endian == Endian::Little { 1 } else { 7 };
+        for block in 0..16_i32 {
+            let first = -8_388_608 + block * 1_048_576;
+            let mut bytes = Vec::with_capacity(3 * 1_048_576);
+            for code in (first..first + 1_048_576).step_by(step) {
+                let le = code.to_le_bytes();
+                match endian {
+                    Endian::Little => bytes.extend_from_slice(&le[..3]),
+                    Endian::Big => bytes.extend_from_slice(&[le[2], le[1], le[0]]),
+                }
+            }
+            let pcm = audio(&mut decoder, bytes.clone()).expect("decode");
+            let packets = encoder.push(&AudioInput { pcm }).expect("encode");
+            assert!(packets[0].data == bytes, "block {block} {endian:?}");
+        }
+    }
+}
+
+/// An s32 code is wider than a float's 24 bits, so the round trip is to
+/// the nearest float and back: within 128 codes, and exact for codes that
+/// a float holds.
+#[test]
+fn s32_round_trips_to_the_nearest_float() {
+    let spec = layout(Coding::S32, Endian::Little, Arrangement::Interleaved);
+    let mut decoder = open_decoder(spec, ChannelLayout::mono());
+    let mut encoder = open_encoder(spec, ChannelLayout::mono());
+    let mut codes = vec![0, 1, -1, 255, -256, i32::MAX, -i32::MAX, i32::MIN];
+    let mut rng = Rng(0x5eed_1234);
+    for _ in 0..4096 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        codes.push(rng.next() as u32 as i32);
+    }
+    let mut bytes = Vec::new();
+    for code in &codes {
+        bytes.extend_from_slice(&code.to_le_bytes());
+    }
+    let pcm = audio(&mut decoder, bytes).expect("decode");
+    let packets = encoder.push(&AudioInput { pcm }).expect("encode");
+    for (chunk, code) in packets[0].data.as_chunks::<4>().0.iter().zip(&codes) {
+        let back = i32::from_le_bytes(*chunk);
+        let apart = (i64::from(back) - i64::from(*code)).abs();
+        assert!(apart <= 128, "{code} came back {back}");
+        if code.unsigned_abs() < 1 << 24 {
+            assert_eq!(back, *code);
+        }
+    }
+}
+
+#[test]
+fn an_integer_encode_refuses_a_non_finite_or_misshapen_input() {
+    for coding in [Coding::S24, Coding::S32] {
+        let spec = layout(coding, Endian::Little, Arrangement::Interleaved);
+        let mut encoder = open_encoder(spec, ChannelLayout::stereo());
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let pcm = Pcm::from_f32(48_000, ChannelLayout::stereo(), vec![0.0, bad]).expect("pcm");
+            let err = encoder.push(&AudioInput { pcm }).expect_err("non-finite");
+            assert_eq!(err, CodecError::NonFinite);
+        }
+        // The mix sample of an integer coding wider than 16 bits is f32.
+        let ints = Pcm::from_i16(48_000, ChannelLayout::stereo(), vec![1, 2]).expect("pcm");
+        let err = encoder.push(&AudioInput { pcm: ints }).expect_err("i16");
+        assert_eq!(
+            err,
+            CodecError::InvalidApi {
+                what: "sample format"
+            }
+        );
+        let mono = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.0]).expect("pcm");
+        let err = encoder.push(&AudioInput { pcm: mono }).expect_err("layout");
+        assert_eq!(
+            err,
+            CodecError::InvalidApi {
+                what: "audio format"
+            }
+        );
+        // The failures left the clock alone.
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::stereo(), vec![0.25, -0.25]).expect("pcm");
+        let packets = encoder.push(&AudioInput { pcm }).expect("good");
+        assert_eq!(packets[0].pts, 0);
+        assert_eq!(packets[0].data.len(), 2 * coding_bytes(coding));
+    }
+}
+
+fn coding_bytes(coding: Coding) -> usize {
+    match coding {
+        Coding::S24 => 3,
+        _ => 4,
+    }
+}
+
 #[test]
 fn export_selects_the_encoder_by_codec_id() {
     let mut factory = EncodeFactory::new();
@@ -396,20 +610,15 @@ fn export_selects_the_encoder_by_codec_id() {
         .open(&params(spec, 48_000, ChannelLayout::mono()))
         .expect("pcm encoder");
     assert_eq!(Encoder::codec(opened.as_ref()), CodecId::Pcm);
-    let err = PcmEncoder::open(&params(
-        layout(Coding::S24, Endian::Little, Arrangement::Interleaved),
-        48_000,
-        ChannelLayout::mono(),
-    ))
-    .expect_err("s24");
-    assert_eq!(err, CodecError::Unsupported { what: "s24 encode" });
-    let err = PcmEncoder::open(&params(
-        layout(Coding::S32, Endian::Little, Arrangement::Interleaved),
-        48_000,
-        ChannelLayout::mono(),
-    ))
-    .expect_err("s32");
-    assert_eq!(err, CodecError::Unsupported { what: "s32 encode" });
+    for coding in [Coding::S24, Coding::S32] {
+        let encoder = PcmEncoder::open(&params(
+            layout(coding, Endian::Little, Arrangement::Interleaved),
+            48_000,
+            ChannelLayout::mono(),
+        ))
+        .expect("integer encoder");
+        assert_eq!(encoder.layout().coding(), coding);
+    }
     for (coding, what) in [
         (Coding::S8, "s8 encode"),
         (Coding::U8, "u8 encode"),
@@ -743,6 +952,59 @@ fn ffmpeg_reads_an_independent_bitstream() {
     assert_eq!(got.len(), ints.len());
     for (got, integer) in got.iter().zip(ints) {
         assert_eq!(*got, unit(integer, limit::S24_FULL));
+    }
+}
+
+/// FFmpeg reads the s24 and s32 bytes this encoder writes as the codes
+/// that were meant, and its own encode of the same floats is within two
+/// codes. It is not the same code everywhere: FFmpeg scales a float by
+/// 2^31 and, for s24, drops the low byte, where this crate takes positive
+/// full scale as the largest code and rounds.
+#[test]
+fn ffmpeg_reads_the_integer_codes_this_encoder_writes() {
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        if !require_or_skip("ffmpeg") {
+            return;
+        }
+        return;
+    };
+    let mut rng = Rng(0x0dd_ba11);
+    let mut samples = vec![0.0_f32, 1.0, -1.0, 0.5, -0.5, 1.0e-7];
+    for _ in 0..4096 {
+        #[allow(clippy::cast_precision_loss)]
+        let unit = (rng.next() >> 40) as f32 / (1_u64 << 23) as f32 - 1.0;
+        samples.push(unit);
+    }
+    let mut floats = Vec::new();
+    for sample in &samples {
+        floats.extend_from_slice(&sample.to_le_bytes());
+    }
+    for (coding, format, shift) in [(Coding::S24, "s24le", 8), (Coding::S32, "s32le", 0)] {
+        let spec = layout(coding, Endian::Little, Arrangement::Interleaved);
+        let ours = encode_f32(spec, ChannelLayout::mono(), samples.clone());
+        // What FFmpeg makes of our bytes, widened to s32.
+        let read = ffmpeg_convert(&ffmpeg, format, "s32le", 1, &ours);
+        // FFmpeg's own encode of the floats, read back the same way.
+        let theirs = ffmpeg_convert(&ffmpeg, "f32le", format, 1, &floats);
+        let theirs = ffmpeg_convert(&ffmpeg, format, "s32le", 1, &theirs);
+        assert_eq!(read.len(), samples.len() * 4, "{format}");
+        assert_eq!(theirs.len(), read.len(), "{format}");
+        let width = coding_bytes(coding);
+        let mut worst = 0;
+        for (index, sample) in samples.iter().enumerate() {
+            let mut stored = [0_u8; 4];
+            stored[4 - width..].copy_from_slice(&ours[index * width..(index + 1) * width]);
+            let wrote = i32::from_le_bytes(stored) >> shift;
+            let at = index * 4;
+            let seen = i32::from_le_bytes([read[at], read[at + 1], read[at + 2], read[at + 3]]);
+            assert_eq!(seen >> shift, wrote, "{format} sample {index}");
+            let rival =
+                i32::from_le_bytes([theirs[at], theirs[at + 1], theirs[at + 2], theirs[at + 3]]);
+            let apart = (i64::from(rival >> shift) - i64::from(wrote)).abs();
+            assert!(apart <= 2, "{format} {sample}: {wrote} against {rival}");
+            worst = worst.max(apart);
+        }
+        eprintln!("{format}: at most {worst} codes from ffmpeg's encode");
     }
 }
 

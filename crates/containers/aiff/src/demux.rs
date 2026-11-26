@@ -1,8 +1,11 @@
 //! AIFF demuxer.
 //!
 //! Open records where the sound starts and does not read it. Each read
-//! returns one packet. A seek uses the constant frame size and does not
-//! scan payloads. Timestamps are sample-rate ticks.
+//! returns one packet: a run of whole sample frames up to
+//! [`PCM_PACKET_BYTES`] for linear, A-law and mu-law sound, and one codec
+//! block otherwise. A seek uses the constant frame size and does not scan
+//! payloads; on PCM it lands on the asked frame itself, and the next
+//! packet starts there. Timestamps are sample-rate ticks.
 
 use std::io::{Read, Seek};
 
@@ -13,6 +16,7 @@ use cutlass_container::{
 };
 
 use crate::format::Sound;
+use crate::limits::PCM_PACKET_BYTES;
 use crate::walk::{self, Scanned};
 
 /// One opened AIFF or AIFF-C file.
@@ -22,10 +26,16 @@ pub struct AiffDemux<R> {
     streams: Vec<Stream>,
     sound: Sound,
     data_start: u64,
-    packets: u32,
+    /// Sample frames, or codec blocks, in the sound.
+    units: u64,
+    /// Units in one packet. One, except for PCM.
+    group: u64,
     next: u64,
     skipped: u32,
     aifc: bool,
+    cut: bool,
+    /// The input ended before the header said it would.
+    ended: bool,
     cancelled: bool,
 }
 
@@ -58,17 +68,31 @@ impl<R: Read + Seek> AiffDemux<R> {
     }
 
     fn assemble(input: Input<R>, scanned: Scanned) -> Result<Self, OpenError> {
-        let packets = scanned.sound.packet_count()?;
         let stream = stream_of(&scanned.sound)?;
+        let frame = u64::from(scanned.sound.frame_bytes()).max(1);
+        let group = if scanned.sound.is_pcm() {
+            (PCM_PACKET_BYTES.min(input.limits().max_packet_bytes) / frame).max(1)
+        } else {
+            1
+        };
+        let total = scanned
+            .units
+            .checked_mul(u64::from(scanned.sound.samples_per_packet()));
+        if total.is_none_or(|total| i64::try_from(total).is_err()) {
+            return Err(crate::format::open_source("sample count does not fit"));
+        }
         Ok(Self {
             input,
             streams: vec![stream],
             sound: scanned.sound,
             data_start: scanned.data_start,
-            packets,
+            units: scanned.units,
+            group,
             next: 0,
             skipped: scanned.skipped,
             aifc: scanned.aifc,
+            cut: scanned.cut,
+            ended: false,
             cancelled: false,
         })
     }
@@ -83,10 +107,21 @@ impl<R: Read + Seek> AiffDemux<R> {
         self.sound.channels()
     }
 
-    /// Sample frames from `COMM`, including zero.
+    /// Sample frames in the sound: the count `COMM` states, or the whole
+    /// frames `SSND` holds when `COMM` states zero or more than is there.
     #[must_use]
     pub fn duration_samples(&self) -> u64 {
-        u64::from(self.sound.sample_frames())
+        self.units
+            .saturating_mul(u64::from(self.sound.samples_per_packet()))
+    }
+
+    /// True when the file holds less sound than its header states: `SSND`
+    /// or the form runs past the end of the file, `COMM` counts more
+    /// frames than `SSND` holds, or the sound ends inside a frame. What is
+    /// there plays. A forward reader learns this only when the input ends.
+    #[must_use]
+    pub const fn is_cut(&self) -> bool {
+        self.cut
     }
 
     #[must_use]
@@ -103,40 +138,64 @@ impl<R: Read + Seek> AiffDemux<R> {
         if self.cancelled {
             return Err(ReadError::Cancelled);
         }
-        if self.next >= u64::from(self.packets) {
+        if self.ended || self.next >= self.units {
             return Ok(None);
         }
-        let size = usize::from(self.sound.frame_bytes());
+        let frame = u64::from(self.sound.frame_bytes());
+        let asked = self.group.min(self.units - self.next);
+        let mut bytes = self.take(asked.saturating_mul(frame))?;
+        let held = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let taken = held.checked_div(frame).unwrap_or(0);
+        if taken < asked {
+            // The input ended first. Whole frames that arrived are sound.
+            self.ended = true;
+            self.cut = true;
+            let keep = usize::try_from(taken.saturating_mul(frame)).unwrap_or(0);
+            bytes.truncate(keep);
+        }
+        if taken == 0 {
+            return Ok(None);
+        }
+        let step = u64::from(self.sound.samples_per_packet());
+        let pts = ticks(self.next.saturating_mul(step))?;
+        let duration = ticks(taken.saturating_mul(step))?;
+        let timestamp = Timestamp::try_new(Some(pts), Some(pts), Some(duration))
+            .map_err(|_| source("packet timestamp was refused"))?;
+        self.next += taken;
+        let packet = Packet::try_new(0, bytes, timestamp, Timescale::new(self.sound.rate()), true)
+            .map_err(|_| source("packet was refused"))?;
+        Ok(Some(packet))
+    }
+
+    /// Up to `want` bytes from the read position: fewer when the input
+    /// ends first. The size is refused before it is allocated.
+    fn take(&mut self, want: u64) -> Result<Vec<u8>, ReadError> {
+        let limit = self.input.limits().max_packet_bytes;
+        if want > limit {
+            return Err(ReadError::HostileSize {
+                declared: want,
+                limit,
+            });
+        }
+        let len = usize::try_from(want).map_err(|_| source("packet size does not fit"))?;
         let mut bytes = Vec::new();
         bytes
-            .try_reserve_exact(size)
-            .map_err(|_| ReadError::Source {
-                message: "out of memory".to_owned(),
-            })?;
-        bytes.resize(size, 0);
-        self.input
-            .read_exact(&mut bytes)
-            .map_err(ReadError::from_packet)?;
-        let index = u32::try_from(self.next).map_err(|_| ReadError::Source {
-            message: "packet index does not fit".to_owned(),
-        })?;
-        let step = i64::from(self.sound.samples_per_packet());
-        let pts = i64::from(index)
-            .checked_mul(step)
-            .ok_or_else(|| ReadError::Source {
-                message: "packet time overflowed".to_owned(),
-            })?;
-        let timestamp = Timestamp::try_new(Some(pts), Some(pts), Some(step)).map_err(|_| {
-            ReadError::Source {
-                message: "packet timestamp was refused".to_owned(),
+            .try_reserve_exact(len)
+            .map_err(|_| source("out of memory"))?;
+        bytes.resize(len, 0);
+        let mut filled = 0;
+        while filled < len {
+            let got = self
+                .input
+                .read(&mut bytes[filled..])
+                .map_err(ReadError::from_packet)?;
+            if got == 0 {
+                break;
             }
-        })?;
-        self.next += 1;
-        let packet = Packet::try_new(0, bytes, timestamp, Timescale::new(self.sound.rate()), true)
-            .map_err(|_| ReadError::Source {
-                message: "packet was refused".to_owned(),
-            })?;
-        Ok(Some(packet))
+            filled += got;
+        }
+        bytes.truncate(filled);
+        Ok(bytes)
     }
 
     fn seek_to(&mut self, to: SeekTo) -> Result<SeekLanding, ReadError> {
@@ -149,35 +208,29 @@ impl<R: Read + Seek> AiffDemux<R> {
         if self.input.access() == Access::Forward {
             return Err(ReadError::Seek(SeekError::ForwardOnly));
         }
-        if self.packets == 0 {
+        if self.units == 0 {
             return Err(ReadError::Seek(SeekError::Empty));
         }
-        let total = i64::from(self.sound.sample_frames());
+        let total = ticks(self.duration_samples())?;
         if to.end.is_some_and(|end| to.time >= end) || to.time >= total {
-            return self.land(u64::from(self.packets), true);
+            return self.land(self.units, true);
         }
-        let time = to.time.max(0);
-        let step = i64::from(self.sound.samples_per_packet());
-        let index = u64::try_from(time / step).map_err(|_| ReadError::Source {
-            message: "seek index does not fit".to_owned(),
-        })?;
-        self.land(index, false)
+        let time = u64::try_from(to.time.max(0)).unwrap_or(0);
+        let step = u64::from(self.sound.samples_per_packet()).max(1);
+        self.land(time / step, false)
     }
 
     fn land(&mut self, index: u64, end: bool) -> Result<SeekLanding, ReadError> {
         let bytes = index
             .checked_mul(u64::from(self.sound.frame_bytes()))
-            .ok_or_else(|| ReadError::Source {
-                message: "seek offset overflowed".to_owned(),
-            })?;
+            .ok_or_else(|| source("seek offset overflowed"))?;
         let at = self
             .data_start
             .checked_add(bytes)
-            .ok_or_else(|| ReadError::Source {
-                message: "seek offset overflowed".to_owned(),
-            })?;
+            .ok_or_else(|| source("seek offset overflowed"))?;
         self.input.seek(at).map_err(ReadError::from_packet)?;
         self.next = index;
+        self.ended = false;
         if end {
             return Ok(SeekLanding {
                 landing: Landing::End,
@@ -186,15 +239,11 @@ impl<R: Read + Seek> AiffDemux<R> {
                 entries_visited: 0,
             });
         }
-        let ordinal = u32::try_from(index).map_err(|_| ReadError::Source {
-            message: "packet ordinal does not fit".to_owned(),
-        })?;
-        let step = i64::from(self.sound.samples_per_packet());
-        let pts = i64::from(ordinal)
-            .checked_mul(step)
-            .ok_or_else(|| ReadError::Source {
-                message: "seek time overflowed".to_owned(),
-            })?;
+        // The landing is a frame, not a packet that was read before: the
+        // next packet starts on it.
+        let ordinal = u32::try_from(index).unwrap_or(u32::MAX);
+        let step = u64::from(self.sound.samples_per_packet());
+        let pts = ticks(index.saturating_mul(step))?;
         Ok(SeekLanding {
             landing: Landing::Packet {
                 ordinal,
@@ -208,6 +257,16 @@ impl<R: Read + Seek> AiffDemux<R> {
             entries_visited: 0,
         })
     }
+}
+
+fn source(message: &str) -> ReadError {
+    ReadError::Source {
+        message: message.to_owned(),
+    }
+}
+
+fn ticks(value: u64) -> Result<i64, ReadError> {
+    i64::try_from(value).map_err(|_| source("timestamp does not fit"))
 }
 
 fn stream_of(sound: &Sound) -> Result<Stream, OpenError> {
@@ -255,5 +314,12 @@ impl<R: Read + Seek + Send> Demux for AiffDemux<R> {
 
     fn consumed(&self) -> u64 {
         self.input.consumed()
+    }
+
+    fn indexed_end(&self, track: TrackId) -> Option<i64> {
+        if track.get() != 0 || self.units == 0 {
+            return None;
+        }
+        i64::try_from(self.duration_samples()).ok()
     }
 }

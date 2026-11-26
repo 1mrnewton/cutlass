@@ -893,7 +893,7 @@ fn on_kernel<P: Pixel>(
     nz_cols: usize,
 ) -> bool {
     use cutlass_simd::av1::itx as kernel;
-    if !kernel::ACCELERATED {
+    if !kernel::accelerated() {
         return false;
     }
     let of = |k: Kind| match k {
@@ -1058,7 +1058,7 @@ pub fn inv_txfm_add<P: Pixel>(
         let v = rnd12(v.wrapping_mul(2896)).wrapping_add(8) >> 4;
         // 8-bit samples take the flat residual on the vector kernel.
         if bd == 8
-            && cutlass_simd::av1::itx::ACCELERATED
+            && cutlass_simd::av1::itx::accelerated()
             && let Some(bytes) = P::bytes_mut(dst)
             && cutlass_simd::av1::itx::add_flat(bytes, dst_stride, w, h, v)
         {

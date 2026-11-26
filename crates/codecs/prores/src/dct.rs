@@ -23,35 +23,53 @@ static BASIS: LazyLock<[[f32; 8]; 8]> = LazyLock::new(|| {
     basis
 });
 
-/// Inverse DCT of `block`, coefficients `[v * 8 + u]`, in place to samples `[y * 8 + x]`.
-pub(crate) fn idct(block: &mut [f32; 64]) {
-    let basis = &*BASIS;
-    // Transpose so each coefficient column is contiguous: t[u * 8 + v].
-    let mut t = [0f32; 64];
-    for v in 0..8 {
-        for u in 0..8 {
-            t[u * 8 + v] = block[v * 8 + u];
-        }
-    }
-    // Rows: r[v][x] = sum_u F[v][u] * B[x][u], eight rows at once.
-    let mut r = [0f32; 64];
+/// The basis table, for a caller that transforms many blocks.
+pub(crate) fn basis() -> &'static [[f32; 8]; 8] {
+    &BASIS
+}
+
+/// Index of raster coefficient `[v * 8 + u]` in the layout
+/// [`idct_columns`] reads: `[u * 8 + v]`.
+#[inline]
+pub(crate) const fn transposed(raster: u8) -> u8 {
+    ((raster & 7) << 3) | (raster >> 3)
+}
+
+/// Inverse DCT of coefficients stored by column, `t[u * 8 + v]`, to sample
+/// rows `[y][x]`.
+///
+/// Each pass is eight lanes wide: the first over the eight coefficient
+/// rows, the second over the eight sample columns. The sums are taken in
+/// one fixed order, so every build gives the same samples.
+#[inline(always)]
+pub(crate) fn idct_columns(t: &[f32; 64], basis: &[[f32; 8]; 8]) -> [[f32; 8]; 8] {
+    // Rows: r[v][x] = sum_u F[v][u] * B[x][u], kept as columns c[x][v].
+    let mut c = [[0f32; 8]; 8];
     for x in 0..4 {
         let mut even = [0f32; 8];
         let mut odd = [0f32; 8];
         for u in (0..8).step_by(2) {
             let be = basis[x][u];
             let bo = basis[x][u + 1];
+            let (te, to) = (lane(t, u), lane(t, u + 1));
             for v in 0..8 {
-                even[v] += t[u * 8 + v] * be;
-                odd[v] += t[(u + 1) * 8 + v] * bo;
+                even[v] += te[v] * be;
+                odd[v] += to[v] * bo;
             }
         }
         for v in 0..8 {
-            r[v * 8 + x] = even[v] + odd[v];
-            r[v * 8 + 7 - x] = even[v] - odd[v];
+            c[x][v] = even[v] + odd[v];
+            c[7 - x][v] = even[v] - odd[v];
+        }
+    }
+    let mut r = [[0f32; 8]; 8];
+    for v in 0..8 {
+        for x in 0..8 {
+            r[v][x] = c[x][v];
         }
     }
     // Columns: f[y][x] = sum_v B[y][v] * r[v][x], eight columns at once.
+    let mut out = [[0f32; 8]; 8];
     for y in 0..4 {
         let mut even = [0f32; 8];
         let mut odd = [0f32; 8];
@@ -59,20 +77,42 @@ pub(crate) fn idct(block: &mut [f32; 64]) {
             let be = basis[y][v];
             let bo = basis[y][v + 1];
             for x in 0..8 {
-                even[x] += r[v * 8 + x] * be;
-                odd[x] += r[(v + 1) * 8 + x] * bo;
+                even[x] += r[v][x] * be;
+                odd[x] += r[v + 1][x] * bo;
             }
         }
         for x in 0..8 {
-            block[y * 8 + x] = even[x] + odd[x];
-            block[(7 - y) * 8 + x] = even[x] - odd[x];
+            out[y][x] = even[x] + odd[x];
+            out[7 - y][x] = even[x] - odd[x];
         }
+    }
+    out
+}
+
+/// Eight values of `t` from `index * 8`.
+#[inline(always)]
+fn lane(t: &[f32; 64], index: usize) -> [f32; 8] {
+    let mut out = [0f32; 8];
+    out.copy_from_slice(&t[index * 8..index * 8 + 8]);
+    out
+}
+
+/// Inverse DCT of `block`, coefficients `[v * 8 + u]`, in place to samples `[y * 8 + x]`.
+#[cfg(test)]
+pub(crate) fn idct(block: &mut [f32; 64]) {
+    let mut t = [0f32; 64];
+    for (raster, &value) in block.iter().enumerate() {
+        t[usize::from(transposed(raster as u8))] = value;
+    }
+    let rows = idct_columns(&t, basis());
+    for (y, row) in rows.iter().enumerate() {
+        block[y * 8..y * 8 + 8].copy_from_slice(row);
     }
 }
 
 /// Forward DCT of samples `[y * 8 + x]`, in place to coefficients `[v * 8 + u]`.
-pub(crate) fn fdct(block: &mut [f32; 64]) {
-    let basis = &*BASIS;
+#[inline(always)]
+pub(crate) fn fdct(block: &mut [f32; 64], basis: &[[f32; 8]; 8]) {
     // Columns: c[v][x] = sum_y B[y][v] * f[y][x].
     let mut c = [0f32; 64];
     for v in 0..8 {
@@ -228,7 +268,7 @@ mod tests {
                 *p = rng.next(256, 255) as f32;
             }
             let original = block;
-            fdct(&mut block);
+            fdct(&mut block, super::basis());
             idct(&mut block);
             for (a, b) in block.iter().zip(original) {
                 assert!((a - b).abs() < 1e-3, "{a} vs {b}");

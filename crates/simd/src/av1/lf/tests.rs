@@ -252,3 +252,197 @@ fn in_place_kernels_match_their_scalar_twins() {
     }
     assert!(moved > 300, "the edges filter some lines: {moved}");
 }
+
+/// The limits of level `lvl` and sharpness `sharp` (7.14.4).
+fn limits_of(lvl: i32, sharp: i32) -> Limits {
+    let shift = if sharp > 4 { 2 } else { i32::from(sharp > 0) };
+    let limit = if sharp > 0 {
+        (lvl >> shift).clamp(1, 9 - sharp)
+    } else {
+        (lvl >> shift).max(1)
+    };
+    Limits {
+        limit: limit as u8,
+        blimit: (2 * (lvl + 2) + limit) as u8,
+        thresh: (lvl >> 4) as u8,
+    }
+}
+
+/// Sixteen lines of every kind in one call: idle lines, lines flat all
+/// along, lines flat near the edge only, lines at the ends of the sample
+/// range (where the signed steps saturate), and the lines of [`line`].
+fn mixed(rng: &mut Rng, turn: usize) -> [[u8; 14]; 16] {
+    core::array::from_fn(|l| match (l + turn) % 8 {
+        0 => core::array::from_fn(|k| if k < 7 { IDLE.0 } else { IDLE.1 }),
+        1 => {
+            let b = rng.below(254) as u8;
+            core::array::from_fn(|k| b + u8::from(k >= 7) + u8::from(rng.below(8) == 0))
+        }
+        2 => {
+            let b = 2 + rng.below(250) as u8;
+            core::array::from_fn(|k| match k {
+                0..3 => b.wrapping_add(rng.below(64) as u8),
+                11.. => b.wrapping_sub(rng.below(64) as u8),
+                _ => b + rng.below(2) as u8,
+            })
+        }
+        3 => {
+            let top = rng.below(2) == 0;
+            core::array::from_fn(|_| {
+                let n = rng.below(4) as u8;
+                if top { 255 - n } else { n }
+            })
+        }
+        _ => line(rng),
+    })
+}
+
+#[test]
+fn every_level_and_sharpness_matches_with_all_kinds_of_line_in_one_call() {
+    // Each lane must take its own filter, whatever its neighbours take.
+    let mut rng = Rng(0x00F1_A7ED);
+    // Calls with a narrow line beside a wide one, and with a line flat
+    // near the edge beside one flat all along.
+    let (mut narrow_and_wide, mut both_wide) = (0, 0);
+    for lvl in 0..=63 {
+        for sharp in 0..8 {
+            let lim = limits_of(lvl, sharp);
+            for &size in &SIZES {
+                let lines = mixed(&mut rng, lvl as usize);
+                let want: Vec<_> = lines.iter().map(|l| expect(l, size, lim)).collect();
+                let is_wide = |l: &[u8; 14], w: &[u8; 14]| l[4] != w[4] || l[9] != w[9];
+                let is_widest = |l: &[u8; 14], w: &[u8; 14]| l[1] != w[1] || l[12] != w[12];
+                let pairs = || lines.iter().zip(&want);
+                let narrow = pairs().any(|(l, w)| w.1 && !is_wide(l, &w.0));
+                let wide = pairs().any(|(l, w)| is_wide(l, &w.0));
+                let wide_only = pairs().any(|(l, w)| is_wide(l, &w.0) && !is_widest(l, &w.0));
+                let widest = pairs().any(|(l, w)| is_widest(l, &w.0));
+                narrow_and_wide += usize::from(narrow && wide);
+                both_wide += usize::from(wide_only && widest);
+                let any = want.iter().any(|w| w.1);
+                let mut taps = [[0u8; 16]; 14];
+                for (l, line) in lines.iter().enumerate() {
+                    for (row, &v) in taps.iter_mut().zip(line) {
+                        row[l] = v;
+                    }
+                }
+                assert_eq!(by_sample(&mut taps, size, lim), any);
+                for (l, w) in want.iter().enumerate() {
+                    for (k, row) in taps.iter().enumerate() {
+                        assert_eq!(
+                            row[l], w.0[k],
+                            "by sample {size:?} level {lvl} sharpness {sharp} line {l} tap {k}"
+                        );
+                    }
+                }
+                if size == Size::Sixteen {
+                    let mut all: [[u8; 16]; 16] = core::array::from_fn(|l| {
+                        core::array::from_fn(|k| match k {
+                            0 => 200,
+                            15 => 3,
+                            _ => lines[l][k - 1],
+                        })
+                    });
+                    assert_eq!(by_line_16(&mut all, lim), any);
+                    for (l, w) in want.iter().enumerate() {
+                        assert_eq!(all[l][1..15], w.0, "by line 16, level {lvl} line {l}");
+                        assert_eq!((all[l][0], all[l][15]), (200, 3));
+                    }
+                } else {
+                    let mut short: [[u8; 8]; 16] =
+                        core::array::from_fn(|l| core::array::from_fn(|k| lines[l][3 + k]));
+                    assert_eq!(by_line(&mut short, size, lim), any);
+                    for (l, w) in want.iter().enumerate() {
+                        assert_eq!(
+                            short[l],
+                            w.0[3..11],
+                            "by line {size:?} level {lvl} line {l}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(narrow_and_wide > 200, "{narrow_and_wide}");
+    assert!(both_wide > 20, "{both_wide}");
+}
+
+#[test]
+fn in_place_kernels_take_a_buffer_that_ends_with_their_last_sample() {
+    // The slices hold exactly the samples the kernels are documented to
+    // read: nothing before the first, nothing after the last.
+    let mut rng = Rng(0x7167_0001);
+    for round in 0..400 {
+        let size = SIZES[round % 4];
+        let lim = limits(&mut rng);
+        let stride = 16 + round % 5;
+        // Rows: the first row read starts the buffer, the last ends it.
+        let (lo, hi) = size.reads();
+        let mut a: Vec<u8> = vec![0; (hi - lo - 1) * stride + 16];
+        for x in 0..16 {
+            let l = line(&mut rng);
+            for k in lo..hi {
+                a[(k - lo) * stride + x] = l[k];
+            }
+        }
+        let mut b = a.clone();
+        // `q0` is row 7 of the line, row `7 - lo` of the buffer.
+        let at = (7 - lo) * stride;
+        assert_eq!(
+            rows_in_place(&mut a, stride, at, size, lim),
+            scalar::rows_in_place(&mut b, stride, at, size, lim)
+        );
+        assert_eq!(a, b, "rows {size:?}, round {round}");
+        // Columns: sixteen rows of 8 (or 16) samples.
+        let n = if size == Size::Sixteen { 16 } else { 8 };
+        let mut a: Vec<u8> = vec![0; 15 * stride + n];
+        for y in 0..16 {
+            let l = line(&mut rng);
+            for k in 0..n {
+                a[y * stride + k] = if n == 16 { l[(k + 13) % 14] } else { l[3 + k] };
+            }
+        }
+        let mut b = a.clone();
+        if size == Size::Sixteen {
+            assert_eq!(
+                cols_16_in_place(&mut a, stride, 8, lim),
+                scalar::cols_16_in_place(&mut b, stride, 8, lim)
+            );
+        } else {
+            assert_eq!(
+                cols_in_place(&mut a, stride, 4, size, lim),
+                scalar::cols_in_place(&mut b, stride, 4, size, lim)
+            );
+        }
+        assert_eq!(a, b, "columns {size:?}, round {round}");
+    }
+}
+
+#[test]
+fn a_call_with_no_line_inside_the_limits_changes_nothing() {
+    let mut rng = Rng(9);
+    let lim = Limits {
+        limit: 1,
+        blimit: 5,
+        thresh: 0,
+    };
+    for &size in &SIZES {
+        // A step of at least 100 across every edge.
+        let mut pic: Vec<u8> = (0..24 * 40).map(|_| rng.below(50) as u8).collect();
+        for y in 0..24 {
+            for x in 0..40 {
+                if (y >= 8) != (x >= 20) {
+                    pic[y * 40 + x] += 150;
+                }
+            }
+        }
+        let was = pic.clone();
+        assert!(!rows_in_place(&mut pic, 40, 8 * 40 + 2, size, lim));
+        if size == Size::Sixteen {
+            assert!(!cols_16_in_place(&mut pic, 40, 40 + 20, lim));
+        } else {
+            assert!(!cols_in_place(&mut pic, 40, 40 + 20, size, lim));
+        }
+        assert_eq!(pic, was);
+    }
+}

@@ -290,6 +290,18 @@ pub(crate) fn corner_at<const N: usize>(len: usize, at: usize, down: usize) -> O
 mod tests {
     use crate::scalar;
 
+    /// Each test below, on every vector version of the kernels this CPU
+    /// can run.
+    mod on_each_tier {
+        tests_on_each_tier!(
+            the_16x16_predictions_match_the_plain_ones,
+            the_chroma_predictions_match_the_plain_ones,
+            the_4x4_predictions_match_the_plain_ones,
+            the_8x8_predictions_match_the_plain_ones,
+            a_flat_edge_predicts_a_flat_block,
+        );
+    }
+
     struct Lcg(u64);
 
     impl Lcg {
@@ -316,7 +328,6 @@ mod tests {
             .collect()
     }
 
-    #[test]
     fn the_16x16_predictions_match_the_plain_ones() {
         let mut rng = Lcg(41);
         let mut done = 0;
@@ -343,7 +354,6 @@ mod tests {
         assert!(done > 10_000, "{done}");
     }
 
-    #[test]
     fn the_chroma_predictions_match_the_plain_ones() {
         let mut rng = Lcg(43);
         let mut done = 0;
@@ -370,7 +380,6 @@ mod tests {
         assert!(done > 10_000, "{done}");
     }
 
-    #[test]
     fn the_4x4_predictions_match_the_plain_ones() {
         let mut rng = Lcg(53);
         let mut done = [0u32; 10];
@@ -402,7 +411,6 @@ mod tests {
         assert!(done.iter().all(|&count| count > 2_000), "{done:?}");
     }
 
-    #[test]
     fn the_8x8_predictions_match_the_plain_ones() {
         let mut rng = Lcg(47);
         let mut done = [0u32; 10];
@@ -435,7 +443,6 @@ mod tests {
         assert!(done.iter().all(|&count| count > 2_000), "{done:?}");
     }
 
-    #[test]
     fn a_flat_edge_predicts_a_flat_block() {
         let down = 20;
         for mode in 0..4 {

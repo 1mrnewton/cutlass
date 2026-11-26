@@ -1,11 +1,11 @@
-//! Twelve-byte recognition of RIFF WAVE and RF64.
+//! Twelve-byte recognition of RIFF WAVE, RF64, and BW64.
 
 use cutlass_codec::ContainerId;
 use cutlass_container::{HeaderVerdict, Probe, ProbeResult};
 
 use crate::limits::PROBE_BYTES;
 
-/// The WAV family. Big-endian `RIFX` and `BW64` are this family and are not opened.
+/// The WAV family. Big-endian `RIFX` is this family and is not opened.
 #[derive(Clone, Copy, Debug)]
 pub struct WavFamily;
 
@@ -33,8 +33,8 @@ pub(crate) fn verdict(header: &[u8]) -> HeaderVerdict {
         return HeaderVerdict::Unrecognized;
     }
     match header.get(..4) {
-        Some(b"RIFF" | b"RF64") => HeaderVerdict::Match,
-        Some(b"RIFX" | b"BW64") => HeaderVerdict::UnsupportedBrand,
+        Some(b"RIFF" | b"RF64" | b"BW64") => HeaderVerdict::Match,
+        Some(b"RIFX") => HeaderVerdict::UnsupportedBrand,
         _ => HeaderVerdict::Unrecognized,
     }
 }

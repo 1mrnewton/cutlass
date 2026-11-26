@@ -2,6 +2,8 @@
 //! of 8-bit samples: the horizontal filter over fifteen rows, then the
 //! vertical one, each output sample with a filter of its own.
 
+#[cfg(target_arch = "x86_64")]
+mod avx2;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod neon;
 mod scalar;
@@ -53,7 +55,16 @@ pub fn put8x8(rows: [&[u8; 16]; 15], f: &Filters<'_>) -> [[u8; 8]; 8] {
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::put8x8(rows, f)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if super::cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            return unsafe { avx2::put8x8(rows, f) };
+        }
+        scalar::put8x8(rows, f)
+    }
 }
 
 /// [`put8x8`] for a compound prediction: the intermediate
@@ -70,5 +81,13 @@ pub fn prep8x8(rows: [&[u8; 16]; 15], f: &Filters<'_>) -> [[i16; 8]; 8] {
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::prep8x8(rows, f)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if super::cpu::avx2() {
+            // SAFETY: as in `put8x8`.
+            #[allow(unsafe_code)]
+            return unsafe { avx2::prep8x8(rows, f) };
+        }
+        scalar::prep8x8(rows, f)
+    }
 }

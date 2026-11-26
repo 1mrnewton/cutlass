@@ -6,14 +6,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use cutlass_decode::video::{VideoDecoder, VideoOutput};
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, Decoder, Output, Packet, PictureInfo, PictureOutput,
-    PixelFormat,
+    PixelFormat, VideoFrame,
 };
 use cutlass_pool::Pool;
 
-use crate::convert::to_yuv420p;
-use crate::decode::{DecodedFrame, decode_frame};
+use crate::color;
+
+use crate::decode::{
+    DecodedFrame, Picture420, Reuse, decode_wide, decode_yuv420, decode_yuv420_owned,
+};
 use crate::header::{AlphaBits, Chroma};
 use crate::profile::Profile;
+
+/// The most workers the picture path starts threads for on each frame.
+///
+/// Up to here the jobs borrow the packet and write the picture in place,
+/// on threads started for the frame. Past it, starting the threads costs
+/// more than a copy of the packet and of the picture, so the jobs own
+/// their data and run on the pool's kept workers. Measured 24 November
+/// 2026 on a 4-core Xeon at 1080p: the two ways are level from 2 to 8
+/// workers, and the kept workers are 4 % faster at 16.
+const SCOPED_WORKERS: usize = 8;
 
 /// Where slice jobs run.
 enum Workers {
@@ -28,6 +41,7 @@ pub struct ProresDecoder {
     depth: Option<u8>,
     workers: Workers,
     cancel: Arc<AtomicBool>,
+    reuse: Arc<Reuse>,
 }
 
 impl ProresDecoder {
@@ -45,6 +59,7 @@ impl ProresDecoder {
             depth: None,
             workers: Workers::Shared,
             cancel: Arc::new(AtomicBool::new(false)),
+            reuse: Arc::new(Reuse::default()),
         })
     }
 
@@ -74,6 +89,39 @@ impl ProresDecoder {
 
     /// Decodes one frame.
     pub fn decode(&mut self, data: &[u8]) -> Result<DecodedFrame, CodecError> {
+        let depth = self.depth_for(data)?;
+        decode_wide(data, depth, self.pool(), &self.cancel, &self.reuse)
+    }
+
+    /// Hands a frame's planes back, so a later frame of the same size is
+    /// decoded into them and nothing is allocated for it.
+    pub fn recycle(&mut self, frame: VideoFrame) {
+        let VideoFrame { y, u, v, alpha, .. } = frame;
+        let alpha = alpha.map(|alpha| alpha.plane);
+        for plane in [Some(y), Some(u), Some(v), alpha].into_iter().flatten() {
+            self.reuse.keep_plane(plane.samples.into_vec());
+        }
+    }
+
+    /// Decodes one frame as 8-bit 4:2:0, without alpha.
+    pub(crate) fn decode_yuv420(&mut self, data: &[u8]) -> Result<Picture420, CodecError> {
+        let depth = self.depth_for(data)?;
+        let pool = self.pool();
+        if pool.workers() > SCOPED_WORKERS {
+            decode_yuv420_owned(data, depth, pool, &self.cancel, &self.reuse)
+        } else {
+            decode_yuv420(data, depth, pool, &self.cancel, &self.reuse)
+        }
+    }
+
+    fn pool(&self) -> &Pool {
+        match &self.workers {
+            Workers::Shared => Pool::shared(),
+            Workers::Own(pool) => pool,
+        }
+    }
+
+    fn depth_for(&self, data: &[u8]) -> Result<u8, CodecError> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(CodecError::Cancelled);
         }
@@ -82,7 +130,7 @@ impl ProresDecoder {
                 what: "empty packet",
             });
         }
-        let depth = match (self.depth, self.profile) {
+        Ok(match (self.depth, self.profile) {
             (Some(depth), _) => depth,
             (None, Some(profile)) => profile.depth(),
             (None, None) => {
@@ -93,12 +141,7 @@ impl ProresDecoder {
                     10
                 }
             }
-        };
-        let pool = match &self.workers {
-            Workers::Shared => Pool::shared(),
-            Workers::Own(pool) => pool,
-        };
-        decode_frame(data, depth, pool, &self.cancel)
+        })
     }
 }
 
@@ -144,24 +187,31 @@ impl ProresPictureDecoder {
     }
 }
 
+/// The picture decoder over a wide decoder already set up, with its own
+/// threads say.
+impl From<ProresDecoder> for ProresPictureDecoder {
+    fn from(inner: ProresDecoder) -> Self {
+        Self { inner }
+    }
+}
+
 impl Decoder for ProresPictureDecoder {
     fn codec(&self) -> CodecId {
         CodecId::Prores
     }
 
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
-        let decoded = self.inner.decode(&packet.data)?;
-        let (width, height, bytes) = to_yuv420p(&decoded.frame)?;
+        let picture = self.inner.decode_yuv420(&packet.data)?;
         let info = PictureInfo::new(
-            width,
-            height,
+            picture.width,
+            picture.height,
             PixelFormat::Yuv420p,
-            decoded.frame.primaries,
-            decoded.frame.transfer,
+            color::primaries(picture.header.primaries),
+            color::transfer(picture.header.transfer),
         );
         Ok(vec![Output::Picture(PictureOutput::cpu(
             info,
-            bytes,
+            picture.bytes,
             packet.pts,
             packet.timescale,
         )?)])

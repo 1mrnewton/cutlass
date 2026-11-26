@@ -15,7 +15,7 @@ threads, and one-pass rate control. The crate is safe Rust
 
 ## What it supports
 
-Decoder (`Vp9Decoder`, over `Decoder`):
+Decoder (`Vp9Decoder`, over `Decoder`; `EngineDecoder` for playback):
 
 | Profile | Pictures |
 | --- | --- |
@@ -36,6 +36,17 @@ Decoder (`Vp9Decoder`, over `Decoder`):
 - Alpha (WebM's BlockAdditional 1, FFmpeg's `libvpx-vp9` `yuva420p`): a
   packet's alpha packet (`SideData::BlockAdditional` id 1) is decoded by a
   second decoder into the frame's alpha plane (`Vp9AlphaDecoder` alone).
+- Playback (`register_engine_decoders`, `EngineDecoder`, added 24 Nov
+  2026): `Vp9Decoder` on the engine's `DecodeFactory`, which the desktop
+  app and the phone library register after their platform decoders, beside
+  VP8. Each shown frame is one packed picture in the stream's own format
+  (8-bit planes, or little-endian 16-bit ones for 10 and 12 bits; an
+  odd-sized 4:2:0 picture repeats its last column or row to an even
+  size). Matrix and range are the frame header's; primaries and transfer
+  are the container's when it names them (the parameters' fields, or a
+  `vpcC` payload), since a VP9 header has no transfer curve. `reset`
+  drops the references and the pictures not yet out, as a seek needs;
+  `drain` gives the pictures still being made.
 
 Encoder (`Vp9Encoder`, `EngineEncoder`):
 
@@ -485,6 +496,17 @@ cargo test -p cutlass-vp9
   inter and golden frames, odd sizes, lossless, four tile columns on four
   threads, two columns past 4096 samples); FFmpeg decodes the same streams
   to the same pictures.
+- Playback and export: `src/engine_tests.rs` decodes the fixtures and
+  this encoder's streams of each profile through `EngineDecoder` (from
+  the factory, on one thread and on three) to what `Decoder` gives, and
+  cuts and flips packets. `tests/webm_engine.rs` (skipped without
+  `ffmpeg`) decodes FFmpeg's two-pass `libvpx-vp9` WebM (8-bit and 10-bit
+  4:2:0, 8-bit 4:4:4, 10-bit 4:2:2; with alt-refs in superframes) through
+  `cutlass-matroska` and the adapter to the pictures FFmpeg decodes, and
+  writes a WebM with the export encoder and `cutlass-matroska` that
+  FFmpeg's `vp9` and `libvpx-vp9` decode to the pictures the adapter
+  gives. Run on 24 Nov 2026 at c3650afb, on a 4-core x86-64 VM (AVX2,
+  Linux 6.18) with FFmpeg 6.1.1.
 - Alpha: `tests/alpha_interop.rs` writes a WebM with alpha through
   `cutlass-matroska` that FFmpeg's `libvpx-vp9` decodes to the pictures
   and alpha this decoder gives, and decodes FFmpeg's `yuva420p` WebM to
@@ -3710,9 +3732,15 @@ carries the colour space, range and render size.
 
 ## Limits and gaps
 
-- Not registered in the desktop app (the app has no VP9 opener yet). The
-  crate registers on the video factories and offers `register_engine_encoders`
-  for the engine's `EncodeFactory`.
+- The engine's picture has no alpha plane: `EngineDecoder` decodes a
+  WebM alpha stream and does not pass it on (`Vp9Decoder` does, on the
+  video contract).
+- The desktop app exports VP9 into WebM only, with Opus or Vorbis sound,
+  when the file is named `.webm`: `cutlass-isobmff`'s file muxer refuses
+  VP9 (it writes `vp08`, not `vp09`). `cutlass-matroska`'s demuxer does
+  not read a track's Colour element, so a WebM's primaries and transfer
+  (PQ or HLG of an HDR file) do not reach the decoder; an MP4's `vpcC`
+  does.
 - Interpolation filters switch per block (EIGHTTAP, SMOOTH, SHARP, by
   trial) at speeds 0–2; faster speeds keep EIGHTTAP.
 - The encoder signals any colour space and range, and sRGB in 4:4:4,

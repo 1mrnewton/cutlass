@@ -7,18 +7,12 @@
 //! An entry returns `false`, having written nothing, for a block it does
 //! not take: the caller then filters the block its own way.
 
-#[cfg(all(
-    target_arch = "aarch64",
-    target_feature = "neon",
-    target_feature = "dotprod"
-))]
+#[cfg(target_arch = "x86_64")]
+mod avx2;
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[macro_use]
 mod neon;
-#[cfg(all(
-    target_arch = "aarch64",
-    target_feature = "neon",
-    target_feature = "dotprod"
-))]
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod neon16;
 mod scalar;
 mod scalar16;
@@ -27,12 +21,24 @@ mod tests;
 #[cfg(test)]
 mod tests16;
 
-/// Whether this build has the kernels of this module.
-pub const ACCELERATED: bool = cfg!(all(
-    target_arch = "aarch64",
-    target_feature = "neon",
-    target_feature = "dotprod"
-));
+use super::cpu;
+
+/// Whether the 8-bit entries run a kernel on this CPU: NEON with the dot
+/// product extension, or AVX2. Without one they run the scalar twin, and a
+/// caller with its own loops does better to use those.
+#[must_use]
+#[inline]
+pub fn accelerated() -> bool {
+    cpu::dotprod() || cpu::avx2()
+}
+
+/// Whether the 10-bit and 12-bit entries run a kernel on this CPU: NEON
+/// with the dot product extension.
+#[must_use]
+#[inline]
+pub fn accelerated16() -> bool {
+    cpu::dotprod()
+}
 
 /// A block to predict and what it is predicted from.
 #[derive(Clone, Copy, Debug)]
@@ -70,179 +76,114 @@ impl Block<'_> {
     }
 }
 
-/// The compound intermediate of a block (`isCompound = 1`): `Round2` of
-/// the horizontal sums by 3, then of the vertical sums by 7, rows of `w`
-/// values `dst_stride` apart.
-#[inline]
-pub fn prep_hv_u8(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) -> bool {
-    if !b.taken(dst.len(), dst_stride) {
-        return false;
-    }
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    ))]
-    {
-        // SAFETY: the `cfg` above proves NEON and the dot product
-        // extension are enabled for this build, and the kernel names
-        // AES only where the build has it too.
-        #[allow(unsafe_code)]
-        unsafe {
-            neon::hv(neon::Out::Prep(dst), dst_stride, b);
+/// One 8-bit entry: the NEON kernel where the CPU has the dot product
+/// extension, the AVX2 kernel where it has AVX2 and the kernel is exact
+/// for the filters `$f` names, and the scalar twin elsewhere.
+macro_rules! entry8 {
+    (
+        $(#[$doc:meta])* $name:ident, $dst:ty, $out:ident, $pass:ident, $twin:ident,
+        [$($f:ident),*] $(, $even:ident)?
+    ) => {
+        $(#[$doc])*
+        #[inline]
+        pub fn $name(dst: &mut [$dst], dst_stride: usize, b: &Block<'_>) -> bool {
+            if !b.taken(dst.len(), dst_stride) $(|| b.$even.iter().any(|&f| f & 1 != 0))? {
+                return false;
+            }
+            #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+            if cpu::dotprod() {
+                // SAFETY: `cpu::dotprod` is the build's or the CPU's word
+                // that NEON and the dot product extension are there, and
+                // the kernel names AES only where the build has it too.
+                #[allow(unsafe_code)]
+                unsafe {
+                    neon::$pass(neon::Out::$out(dst), dst_stride, b);
+                }
+                return true;
+            }
+            #[cfg(target_arch = "x86_64")]
+            if cpu::avx2() $(&& avx2::exact(b.$f))* {
+                // SAFETY: `cpu::avx2` checked at run time that the CPU
+                // has AVX2.
+                #[allow(unsafe_code)]
+                unsafe {
+                    avx2::$pass(avx2::Out::$out(dst), dst_stride, b);
+                }
+                return true;
+            }
+            scalar::$twin(dst, dst_stride, b);
+            true
         }
-    }
-    #[cfg(not(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    )))]
-    scalar::prep_hv(dst, dst_stride, b);
-    true
+    };
 }
 
-/// The final samples of a block (`isCompound = 0`): `Round2` of the
-/// horizontal sums by 3, then of the vertical sums by 11, clipped to 8
-/// bits.
-#[inline]
-pub fn put_hv_u8(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) -> bool {
-    if !b.taken(dst.len(), dst_stride) {
-        return false;
-    }
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    ))]
-    {
-        // SAFETY: as in `prep_hv_u8`.
-        #[allow(unsafe_code)]
-        unsafe {
-            neon::hv(neon::Out::Put(dst), dst_stride, b);
-        }
-    }
-    #[cfg(not(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    )))]
-    scalar::put_hv(dst, dst_stride, b);
-    true
-}
-
-/// The compound intermediate of a block whose vertical fraction is 0:
-/// `Round2` of the horizontal sums by 3. `b.fv` is not read.
-#[inline]
-pub fn prep_h_u8(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) -> bool {
-    if !b.taken(dst.len(), dst_stride) {
-        return false;
-    }
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    ))]
-    {
-        // SAFETY: as in `prep_hv_u8`.
-        #[allow(unsafe_code)]
-        unsafe {
-            neon::h(neon::Out::Prep(dst), dst_stride, b);
-        }
-    }
-    #[cfg(not(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    )))]
-    scalar::prep_h(dst, dst_stride, b);
-    true
-}
-
-/// The final samples of a block whose vertical fraction is 0: `Round2`
-/// of the horizontal sums by 7, clipped to 8 bits. `b.fv` is not read.
-#[inline]
-pub fn put_h_u8(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) -> bool {
-    if !b.taken(dst.len(), dst_stride) {
-        return false;
-    }
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    ))]
-    {
-        // SAFETY: as in `prep_hv_u8`.
-        #[allow(unsafe_code)]
-        unsafe {
-            neon::h(neon::Out::Put(dst), dst_stride, b);
-        }
-    }
-    #[cfg(not(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    )))]
-    scalar::put_h(dst, dst_stride, b);
-    true
-}
-
-/// The compound intermediate of a block whose horizontal fraction is 0:
-/// `Round2` of the vertical sums of the samples by 3. `b.fh` is not read,
-/// and the taps of `b.fv` must be even (as every AV1 filter's are).
-#[inline]
-pub fn prep_v_u8(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) -> bool {
-    if !b.taken(dst.len(), dst_stride) || b.fv.iter().any(|&f| f & 1 != 0) {
-        return false;
-    }
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    ))]
-    {
-        // SAFETY: as in `prep_hv_u8`.
-        #[allow(unsafe_code)]
-        unsafe {
-            neon::v(neon::Out::Prep(dst), dst_stride, b);
-        }
-    }
-    #[cfg(not(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    )))]
-    scalar::prep_v(dst, dst_stride, b);
-    true
-}
-
-/// The final samples of a block whose horizontal fraction is 0: `Round2`
-/// of the vertical sums of the samples by 7, clipped to 8 bits. `b.fh` is
-/// not read, and the taps of `b.fv` must be even.
-#[inline]
-pub fn put_v_u8(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) -> bool {
-    if !b.taken(dst.len(), dst_stride) || b.fv.iter().any(|&f| f & 1 != 0) {
-        return false;
-    }
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    ))]
-    {
-        // SAFETY: as in `prep_hv_u8`.
-        #[allow(unsafe_code)]
-        unsafe {
-            neon::v(neon::Out::Put(dst), dst_stride, b);
-        }
-    }
-    #[cfg(not(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod"
-    )))]
-    scalar::put_v(dst, dst_stride, b);
-    true
-}
+entry8!(
+    /// The compound intermediate of a block (`isCompound = 1`): `Round2`
+    /// of the horizontal sums by 3, then of the vertical sums by 7, rows
+    /// of `w` values `dst_stride` apart.
+    prep_hv_u8,
+    i16,
+    Prep,
+    hv,
+    prep_hv,
+    [fh, fv]
+);
+entry8!(
+    /// The final samples of a block (`isCompound = 0`): `Round2` of the
+    /// horizontal sums by 3, then of the vertical sums by 11, clipped to 8
+    /// bits.
+    put_hv_u8,
+    u8,
+    Put,
+    hv,
+    put_hv,
+    [fh, fv]
+);
+entry8!(
+    /// The compound intermediate of a block whose vertical fraction is 0:
+    /// `Round2` of the horizontal sums by 3. `b.fv` is not read.
+    prep_h_u8,
+    i16,
+    Prep,
+    h,
+    prep_h,
+    [fh]
+);
+entry8!(
+    /// The final samples of a block whose vertical fraction is 0: `Round2`
+    /// of the horizontal sums by 7, clipped to 8 bits. `b.fv` is not read.
+    put_h_u8,
+    u8,
+    Put,
+    h,
+    put_h,
+    [fh]
+);
+entry8!(
+    /// The compound intermediate of a block whose horizontal fraction is
+    /// 0: `Round2` of the vertical sums of the samples by 3. `b.fh` is not
+    /// read, and the taps of `b.fv` must be even (as every AV1 filter's
+    /// are).
+    prep_v_u8,
+    i16,
+    Prep,
+    v,
+    prep_v,
+    [fv],
+    fv
+);
+entry8!(
+    /// The final samples of a block whose horizontal fraction is 0:
+    /// `Round2` of the vertical sums of the samples by 7, clipped to 8
+    /// bits. `b.fh` is not read, and the taps of `b.fv` must be even.
+    put_v_u8,
+    u8,
+    Put,
+    v,
+    put_v,
+    [fv],
+    fv
+);
 
 /// A block of 10-bit or 12-bit samples to predict and what it is
 /// predicted from.
@@ -300,8 +241,8 @@ impl Block16<'_> {
     }
 }
 
-/// One entry for samples past 8 bits: the NEON kernel where the build has
-/// it, the scalar twin elsewhere.
+/// One entry for samples past 8 bits: the NEON kernel where the CPU has
+/// the dot product extension, the scalar twin elsewhere.
 macro_rules! entry16 {
     ($(#[$doc:meta])* $name:ident, $dst:ty, $out:ident, $pass:ident, $twin:ident) => {
         $(#[$doc])*
@@ -310,25 +251,17 @@ macro_rules! entry16 {
             if !b.taken(dst.len(), dst_stride) {
                 return false;
             }
-            #[cfg(all(
-                target_arch = "aarch64",
-                target_feature = "neon",
-                target_feature = "dotprod"
-            ))]
-            {
-                // SAFETY: the `cfg` above proves NEON and the dot product
-                // extension are enabled for this build, and the kernel
-                // names AES only where the build has it too.
+            #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+            if cpu::dotprod() {
+                // SAFETY: `cpu::dotprod` is the build's or the CPU's word
+                // that NEON and the dot product extension are there, and
+                // the kernel names AES only where the build has it too.
                 #[allow(unsafe_code)]
                 unsafe {
                     neon16::$pass(neon16::Out::$out(dst), dst_stride, b);
                 }
+                return true;
             }
-            #[cfg(not(all(
-                target_arch = "aarch64",
-                target_feature = "neon",
-                target_feature = "dotprod"
-            )))]
             scalar16::$twin(dst, dst_stride, b);
             true
         }

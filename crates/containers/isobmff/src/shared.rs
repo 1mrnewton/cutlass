@@ -19,11 +19,17 @@ use std::io::{Read, Seek};
 pub(crate) struct RandomSource<R> {
     input: Input<R>,
     length: u64,
+    /// A read failed, so the reader may not be where `input` says it is.
+    lost: bool,
 }
 
 impl<R> RandomSource<R> {
     pub(crate) fn new(input: Input<R>, length: u64) -> Self {
-        Self { input, length }
+        Self {
+            input,
+            length,
+            lost: false,
+        }
     }
 }
 
@@ -39,8 +45,16 @@ impl<R: Read + Seek> Source for RandomSource<R> {
     }
 
     fn read_exact_at(&mut self, at: u64, buf: &mut [u8]) -> Result<(), Error> {
-        self.input.seek(at).map_err(source_error)?;
-        self.input.read_exact(buf).map_err(source_error)?;
+        // Samples of one chunk follow each other, so most reads start
+        // where the last one ended and need no seek.
+        if self.lost || self.input.position() != at {
+            self.input.seek(at).map_err(source_error)?;
+            self.lost = false;
+        }
+        if let Err(error) = self.input.read_exact(buf) {
+            self.lost = true;
+            return Err(source_error(error));
+        }
         Ok(())
     }
 }
@@ -257,4 +271,95 @@ pub(crate) const fn pcm_layout(format: crate::legacy::SampleFormat) -> Option<[u
         F::F64Be => [5, 1, 0],
         F::Unknown => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RandomSource;
+    use crate::legacy::Source;
+    use cutlass_container::{Input, Limits};
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Counts seeks, and fails the read that crosses `fail_at` once.
+    struct Counting {
+        inner: Cursor<Vec<u8>>,
+        seeks: Arc<AtomicU32>,
+        fail_at: Option<u64>,
+    }
+
+    impl Read for Counting {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(at) = self.fail_at
+                && self.inner.position() >= at
+            {
+                self.fail_at = None;
+                // The reader moved before it failed.
+                self.inner.set_position(self.inner.position() + 1);
+                return Err(std::io::Error::other("lost"));
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for Counting {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.seeks.fetch_add(1, Ordering::Relaxed);
+            self.inner.seek(pos)
+        }
+    }
+
+    fn source(fail_at: Option<u64>) -> (RandomSource<Counting>, Arc<AtomicU32>, Vec<u8>) {
+        let data: Vec<u8> = (0..=255).collect();
+        let seeks = Arc::new(AtomicU32::new(0));
+        let reader = Counting {
+            inner: Cursor::new(data.clone()),
+            seeks: Arc::clone(&seeks),
+            fail_at,
+        };
+        let length = u64::try_from(data.len()).unwrap();
+        let input = Input::random(reader, length, Limits::standard());
+        (RandomSource::new(input, length), seeks, data)
+    }
+
+    #[test]
+    fn a_read_that_follows_the_last_one_does_not_seek() {
+        let (mut source, seeks, data) = source(None);
+        let mut buf = [0u8; 16];
+        source.read_exact_at(32, &mut buf).unwrap();
+        assert_eq!(buf, data[32..48]);
+        assert_eq!(seeks.load(Ordering::Relaxed), 1);
+        // The next samples of the chunk start where that read ended.
+        source.read_exact_at(48, &mut buf).unwrap();
+        source.read_exact_at(64, &mut buf).unwrap();
+        assert_eq!(buf, data[64..80]);
+        assert_eq!(seeks.load(Ordering::Relaxed), 1);
+        // Anywhere else seeks, backwards included.
+        source.read_exact_at(8, &mut buf).unwrap();
+        assert_eq!(buf, data[8..24]);
+        assert_eq!(seeks.load(Ordering::Relaxed), 2);
+        // A read at the first byte of a fresh source needs none.
+        let (mut fresh, seeks, data) = self::source(None);
+        fresh.read_exact_at(0, &mut buf).unwrap();
+        assert_eq!(buf, data[..16]);
+        assert_eq!(seeks.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_failed_read_makes_the_next_read_seek() {
+        let (mut source, seeks, data) = source(Some(16));
+        let mut buf = [0u8; 16];
+        source.read_exact_at(0, &mut buf).unwrap();
+        assert!(source.read_exact_at(16, &mut buf).is_err());
+        let before = seeks.load(Ordering::Relaxed);
+        // The reader is no longer at 16, whatever the count of bytes says.
+        source.read_exact_at(16, &mut buf).unwrap();
+        assert_eq!(buf, data[16..32]);
+        assert_eq!(seeks.load(Ordering::Relaxed), before + 1);
+        // Past the end is refused and the source still reads.
+        assert!(source.read_exact_at(250, &mut buf).is_err());
+        source.read_exact_at(100, &mut buf).unwrap();
+        assert_eq!(buf, data[100..116]);
+    }
 }

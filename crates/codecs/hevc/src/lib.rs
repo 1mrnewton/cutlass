@@ -20,8 +20,15 @@
 //! (level 6.2), 16 pictures in the buffer, 4096 NAL units per access unit.
 //! Larger pictures return `CodecError::Limit`.
 //!
-//! A high-bit-depth stream returns the 8-bit picture (each sample shifted
-//! down) plus `yuv420p10` for 10 bits or `yuv420_high` for 9, 11 and 12.
+//! [`HevcDecoder::push_pictures`], and the decoder [`register_decoders`]
+//! gives the engine, return each picture as one buffer at the depth of the
+//! stream (`Yuv420p`, `Yuv420p10`, `Yuv420p12`) with the range, colour and
+//! timing of the VUI and the mastering display, light level, preferred
+//! transfer and T.35 messages (HDR10+) of its SEI.
+//!
+//! As a [`cutlass_decode::VideoDecoder`], a high-bit-depth stream returns
+//! the 8-bit picture (each sample shifted down) plus `yuv420p10` for 10
+//! bits or `yuv420_high` for 9, 11 and 12.
 //!
 //! The vector kernels of 8-bit pictures (interpolation, inverse transforms,
 //! deblocking, SAO) are in `cutlass-simd`; this crate has no `unsafe`.
@@ -42,7 +49,9 @@ mod nal;
 mod picture;
 mod pixel;
 mod ps;
+mod sei;
 mod slice;
 mod transform;
 
-pub use dec::{HevcDecoder, register_decoders};
+pub use dec::{HevcDecoder, HevcPicture, register_decoders};
+pub use sei::PicTiming;

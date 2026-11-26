@@ -8,6 +8,8 @@
 //! above and below it, clamped to the plane) and applies the Wiener (7.17.4)
 //! or self-guided (7.17.2 / 7.17.3) filter.
 
+use cutlass_simd::av1::cpu::wide;
+
 use super::{Pixel, round2};
 use crate::spec::tables::{
     RESTORE_SGRPROJ, RESTORE_WIENER, SGR_PARAMS, SGRPROJ_MTABLE_BITS, SGRPROJ_PRJ_BITS,
@@ -445,9 +447,14 @@ fn lr_stripes<P: Pixel>(
             let out = &mut scratch.src[r * sw..(r + 1) * sw];
             let (first, last) = (row[0].to_i32() as i16, row[plane_w - 1].to_i32() as i16);
             out[..PAD].fill(first);
-            for (o, s) in out[PAD..PAD + plane_w].iter_mut().zip(row) {
-                *o = s.to_i32() as i16;
-            }
+            wide(
+                #[inline(always)]
+                || {
+                    for (o, s) in out[PAD..PAD + plane_w].iter_mut().zip(row) {
+                        *o = s.to_i32() as i16;
+                    }
+                },
+            );
             out[PAD + plane_w..].fill(last);
         }
         for (uc, unit) in row_units.iter().enumerate() {
@@ -467,11 +474,16 @@ fn lr_stripes<P: Pixel>(
                 h,
                 dst_row0,
             };
-            match unit.kind as i32 {
-                RESTORE_WIENER => wiener(dst, stride, &mut *scratch, sw, rect, unit, bd),
-                RESTORE_SGRPROJ => sgr(dst, stride, &mut *scratch, sw, rect, unit, bd),
-                _ => {}
-            }
+            // The filters' loops run on 16-bit and 32-bit lanes: twice as
+            // many to a vector where the CPU has AVX2.
+            wide(
+                #[inline(always)]
+                || match unit.kind as i32 {
+                    RESTORE_WIENER => wiener(dst, stride, &mut *scratch, sw, rect, unit, bd),
+                    RESTORE_SGRPROJ => sgr(dst, stride, &mut *scratch, sw, rect, unit, bd),
+                    _ => {}
+                },
+            );
         }
     }
 }
@@ -500,6 +512,7 @@ fn wiener_taps(c: [i32; 3]) -> [i32; 7] {
 }
 
 /// Wiener filter process (7.17.4) on one rectangle of a stripe.
+#[inline(always)]
 fn wiener<P: Pixel>(
     dst: &mut [P],
     stride: usize,
@@ -560,6 +573,7 @@ fn wiener<P: Pixel>(
 /// each pass at a time, for a rectangle at least eight samples wide.
 /// Returns whether it filtered the rectangle; when it did not, the stripe
 /// source is as it was.
+#[inline(always)]
 fn wiener_kernel<P: Pixel>(
     dst: &mut [P],
     stride: usize,
@@ -611,6 +625,7 @@ fn wiener_kernel<P: Pixel>(
 /// * horizontal: `x` in 0..=255, `k = 16`, `n = 3`: `2 A + ((B + 4) >> 3)`;
 /// * vertical: `x` in -2048..=6143, `k = 64`, `n = 11`:
 ///   `(A + ((B + 1024) >> 6)) >> 5`, with `|A| <= 128 * 95 + 127 * 90`.
+#[inline(always)]
 fn wiener8<P: Pixel>(
     dst: &mut [P],
     stride: usize,
@@ -689,6 +704,7 @@ const A2_TABLE: [i32; 256] = {
 
 /// Box filter process (7.17.3) for one pass on one rectangle; writes
 /// `w x h` values to `flt`.
+#[inline(always)]
 fn box_filter(
     src: &[i16],
     sw: usize,
@@ -841,6 +857,7 @@ fn box_filter(
 }
 
 /// Self guided filter process (7.17.2) on one rectangle of a stripe.
+#[inline(always)]
 fn sgr<P: Pixel>(
     dst: &mut [P],
     stride: usize,

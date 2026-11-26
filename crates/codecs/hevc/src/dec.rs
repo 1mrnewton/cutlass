@@ -14,17 +14,18 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use cutlass_decode::{
-    CodecError, CodecId, CodecParams, DecodeFactory, Decoder, Output, Packet, PictureInfo,
-    PictureOutput, PixelFormat, SequenceTiming, VideoDecoder, VideoOutput, Yuv420High, Yuv420p,
-    Yuv420p10,
+    ChromaSamplePosition, CodecError, CodecId, CodecParams, DecodeFactory, Decoder, ItuT35, Output,
+    Packet, PictureInfo, PictureOutput, SequenceTiming, Transfer, VideoDecoder, VideoOutput,
+    Yuv420High, Yuv420p, Yuv420p10,
 };
 
 use crate::frame::{Frame, OutSamples, Spares};
-use crate::job::{Job, Leftovers, OutForm, OutRows, SliceData};
+use crate::job::{Job, Leftovers, OutForm, OutRows, SliceData, packed_format};
 use crate::nal::{self, Nal};
 use crate::picture::{Picture, RefPic, SliceCtx, Work, lock};
 use crate::pixel::{AnyRows, Pixel};
 use crate::ps::{self, Layout, Pps, Sps};
+use crate::sei::{Hdr, MAX_T35, PicTiming, Sei};
 use crate::slice::{self, SliceHeader, SliceType};
 
 const MAX_SPS: usize = 16;
@@ -47,6 +48,28 @@ struct Meta {
     timescale: u32,
     keyframe: bool,
     sps: Arc<Sps>,
+    /// The mastering display, light level and preferred transfer in
+    /// effect at this picture.
+    hdr: Hdr,
+    /// The T.35 messages of this picture's access unit.
+    t35: Vec<ItuT35>,
+    /// `pic_struct` of this picture's timing message.
+    timing: Option<PicTiming>,
+}
+
+impl Meta {
+    /// The transfer characteristics code in effect: the one an alternative
+    /// transfer characteristics message prefers, else the VUI's.
+    fn transfer_code(&self) -> u8 {
+        self.hdr.transfer.unwrap_or(self.sps.vui.cicp[1])
+    }
+
+    fn transfer(&self) -> Transfer {
+        match self.hdr.transfer {
+            Some(code) => ps::transfer_of(u32::from(code)),
+            None => self.sps.vui.transfer,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -78,6 +101,11 @@ struct State {
     next_uid: u64,
     /// The layout of the last parameter sets a picture used.
     layout: Option<(Arc<Sps>, Arc<Pps>, Arc<Layout>)>,
+    /// What the SEI messages of the coded video sequence have said so far.
+    hdr: Hdr,
+    /// What the SEI messages of the extradata say, for every sequence
+    /// that does not say otherwise.
+    extra_hdr: Hdr,
 }
 
 /// A picture chosen for output, in output order.
@@ -95,6 +123,8 @@ impl State {
             after_eos: false,
             next_uid: 1,
             layout: None,
+            hdr: Hdr::default(),
+            extra_hdr: Hdr::default(),
         }
     }
 
@@ -170,7 +200,7 @@ struct Pending {
     /// Whether a later picture may reference this one: not when it is a
     /// sub-layer non-reference picture of the highest sub-layer.
     reference: bool,
-    meta: Arc<Meta>,
+    meta: Meta,
     /// The last independent slice segment header, for dependent ones.
     independent: Option<SliceHeader>,
     slice_addr: u32,
@@ -414,9 +444,20 @@ impl HevcDecoder {
         } else {
             nal::access_unit(&self.extra, 0)?
         };
+        let mut sei = Sei::default();
         for nal in &nals {
-            self.state.store_param(nal)?;
+            // As for the units of a sample: a parameter set of another
+            // layer has its own syntax and is not this decoder's.
+            if nal.layer != 0 {
+                continue;
+            }
+            if nal.kind == nal::PREFIX_SEI {
+                sei.read(&nal.rbsp, false);
+            } else {
+                self.state.store_param(nal)?;
+            }
         }
+        self.state.extra_hdr.update(&sei);
         Ok(())
     }
 
@@ -432,12 +473,23 @@ impl HevcDecoder {
         let mut out = Vec::new();
         let mut current: Option<Pending> = None;
         let mut skipping = false;
+        // The messages before the slices of the next picture.
+        let mut sei = Sei::default();
         for nal in nals {
             if nal.layer != 0 {
                 continue;
             }
             match nal.kind {
                 nal::SPS | nal::PPS => state.store_param(&nal)?,
+                nal::PREFIX_SEI => sei.read(&nal.rbsp, false),
+                nal::SUFFIX_SEI => {
+                    if let Some(pending) = current.as_mut() {
+                        let mut after = Sei::default();
+                        after.read(&nal.rbsp, true);
+                        let room = MAX_T35.saturating_sub(pending.meta.t35.len());
+                        pending.meta.t35.extend(after.t35.into_iter().take(room));
+                    }
+                }
                 nal::EOS | nal::EOB => {
                     if let Some(done) = current.take() {
                         ready.push(self.finish(state, done, &mut out));
@@ -451,7 +503,9 @@ impl HevcDecoder {
                             ready.push(self.finish(state, done, &mut out));
                         }
                         let header = parse(state, &nal, None)?;
-                        current = self.start_picture(state, &nal, &header, packet, &mut out)?;
+                        let before = std::mem::take(&mut sei);
+                        current =
+                            self.start_picture(state, &nal, &header, (packet, before), &mut out)?;
                         skipping = current.is_none();
                         if let Some(pending) = current.as_mut() {
                             add_slice(pending, Arc::new(nal), header)?;
@@ -478,7 +532,7 @@ impl HevcDecoder {
         state: &mut State,
         nal: &Nal,
         header: &SliceHeader,
-        packet: &Packet,
+        (packet, sei): (&Packet, Sei),
         out: &mut Vec<Bumped>,
     ) -> Result<Option<Pending>, CodecError> {
         let Some((sps, pps)) = state.sets(header.pps_id) else {
@@ -499,6 +553,11 @@ impl HevcDecoder {
             return Ok(None);
         }
         let new_sequence = irap && state.no_rasl_output;
+        // The HDR description lasts for one coded video sequence.
+        if new_sequence {
+            state.hdr = Hdr::default();
+        }
+        state.hdr.update(&sei);
         let flushed_by_eos = state.after_eos;
         state.after_eos = false;
 
@@ -647,13 +706,16 @@ impl HevcDecoder {
             sps: sps.clone(),
             output,
             reference,
-            meta: Arc::new(Meta {
+            meta: Meta {
                 pts: packet.pts,
                 duration: packet.duration,
                 timescale: packet.timescale,
                 keyframe: irap,
+                hdr: state.hdr.or(state.extra_hdr),
+                timing: sei.timing(&sps),
+                t35: sei.t35,
                 sps,
-            }),
+            },
             independent: None,
             slice_addr: 0,
             st_before,
@@ -707,7 +769,7 @@ impl HevcDecoder {
             marking: Marking::Short,
             output,
             uid,
-            meta: Some(meta),
+            meta: Some(Arc::new(meta)),
         });
         let top = usize::from(sps.max_sub_layers.saturating_sub(1)).min(7);
         let reorder = usize::from(sps.max_num_reorder[top]);
@@ -842,6 +904,48 @@ impl HevcDecoder {
         let out = self.collect(true)?;
         self.running.retain(|f| !f.is_done());
         Ok(out)
+    }
+
+    /// Decode one access unit into the pictures the engine takes: each is
+    /// one buffer, luma then Cb then Cr with no gap, cropped by the
+    /// conformance window, at the depth of the stream. 8-bit samples are
+    /// one byte ([`cutlass_decode::PixelFormat::Yuv420p`]); 10-bit and
+    /// 12-bit samples are two bytes, low byte first (`Yuv420p10`,
+    /// `Yuv420p12`); 9-bit and 11-bit samples are doubled into those
+    /// two. The buffer is shared with the decoder, which fills it again
+    /// for a later picture once the caller has let it go.
+    ///
+    /// [`PictureInfo`] holds the range, primaries, transfer, matrix and
+    /// their code points, the chroma position and the timing of the VUI,
+    /// and the mastering display and light level of the SEI messages in
+    /// effect. An alternative transfer characteristics message replaces
+    /// the VUI's transfer and its code point. T.35 messages (HDR10+) are
+    /// in [`PictureOutput::t35`].
+    ///
+    /// The same rules as [`VideoDecoder::push`] hold. A decoder is used
+    /// through these two methods or through [`VideoDecoder`], not both:
+    /// pictures still waiting in the other form are dropped.
+    pub fn push_pictures(&mut self, packet: &Packet) -> Result<Vec<HevcPicture>, CodecError> {
+        self.form = OutForm::Packed;
+        let out = self.push_unit(packet)?;
+        self.packed(out)
+    }
+
+    /// The pictures still waiting for output, as [`Self::push_pictures`]
+    /// returns them.
+    pub fn drain_pictures(&mut self) -> Result<Vec<HevcPicture>, CodecError> {
+        let out = self.drain_all()?;
+        self.packed(out)
+    }
+
+    fn packed(&self, out: Vec<(OutSamples, Arc<Meta>)>) -> Result<Vec<HevcPicture>, CodecError> {
+        let mut pictures = Vec::with_capacity(out.len());
+        for (samples, meta) in out {
+            if let Some(picture) = packed_output(samples, &meta, &self.shared)? {
+                pictures.push(picture);
+            }
+        }
+        Ok(pictures)
     }
 
     fn reset_all(&mut self) {
@@ -1106,7 +1210,7 @@ fn video_output(samples: OutSamples, meta: &Meta) -> Option<VideoOutput> {
         keyframe: meta.keyframe,
         range: vui.range,
         primaries: vui.primaries,
-        transfer: vui.transfer,
+        transfer: meta.transfer(),
         matrix: vui.matrix,
         sample_aspect: vui.sample_aspect,
         timing: SequenceTiming {
@@ -1117,12 +1221,47 @@ fn video_output(samples: OutSamples, meta: &Meta) -> Option<VideoOutput> {
     })
 }
 
+/// A picture as the engine takes it, with what the stream says about
+/// fields, which [`PictureOutput`] has no place for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HevcPicture {
+    /// The samples at the stream's own depth and their description: see
+    /// [`HevcDecoder::push_pictures`].
+    pub picture: PictureOutput,
+    /// `pic_struct` and its neighbours from the picture timing SEI message
+    /// of this picture, when the stream sends them.
+    pub timing: Option<PicTiming>,
+}
+
+/// What the stream says about a picture of `width` by `height` samples:
+/// range, colour and timing from the VUI, the HDR description from SEI.
+fn picture_info(meta: &Meta, width: u32, height: u32) -> PictureInfo {
+    let vui = &meta.sps.vui;
+    let (pixel, _) = packed_format(meta.sps.bit_depth);
+    let mut info = PictureInfo::new(width, height, pixel, vui.primaries, meta.transfer());
+    info.matrix = vui.matrix;
+    info.range = vui.range;
+    info.chroma_position = match vui.chroma_loc {
+        0 => ChromaSamplePosition::Vertical,
+        2 => ChromaSamplePosition::Colocated,
+        _ => ChromaSamplePosition::Unknown,
+    };
+    info.cicp_primaries = vui.cicp[0];
+    info.cicp_transfer = meta.transfer_code();
+    info.cicp_matrix = vui.cicp[2];
+    info.num_units_in_display_tick = vui.num_units;
+    info.time_scale = vui.time_scale;
+    info.content_light = meta.hdr.light;
+    info.mastering_display = meta.hdr.mastering;
+    info
+}
+
 /// The engine's packed picture.
 fn packed_output(
     samples: OutSamples,
     meta: &Meta,
     shared: &Shared,
-) -> Result<Option<Output>, CodecError> {
+) -> Result<Option<HevcPicture>, CodecError> {
     let bytes = match samples {
         OutSamples::Packed(bytes) => {
             let bytes = Arc::new(bytes);
@@ -1136,20 +1275,21 @@ fn packed_output(
     let [left, right, top, bottom] = sps.crop.map(|v| v as usize);
     let w = (sps.width as usize).saturating_sub(left + right);
     let h = (sps.height as usize).saturating_sub(top + bottom);
-    let vui = &sps.vui;
     let picture = PictureOutput::cpu_shared(
-        PictureInfo::new(
-            w as u32,
-            h as u32,
-            PixelFormat::Yuv420p,
-            vui.primaries,
-            vui.transfer,
-        ),
+        picture_info(meta, w as u32, h as u32),
         bytes,
         meta.pts,
         meta.timescale,
     )?;
-    Ok(Some(Output::Picture(picture)))
+    let picture = if meta.t35.is_empty() {
+        picture
+    } else {
+        picture.with_t35(meta.t35.clone())
+    };
+    Ok(Some(HevcPicture {
+        picture,
+        timing: meta.timing,
+    }))
 }
 
 impl VideoDecoder for HevcDecoder {
@@ -1189,12 +1329,12 @@ fn open_decoder(params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecErro
 }
 
 fn open_registered(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
-    let mut inner = HevcDecoder::open(params)?;
-    inner.form = OutForm::Packed;
+    let inner = HevcDecoder::open(params)?;
     Ok(Box::new(AccessDecoder { inner }))
 }
 
-/// The engine's decoder. It returns one packed picture per displayed frame.
+/// The engine's decoder. It returns one packed picture per displayed
+/// frame, as [`HevcDecoder::push_pictures`] makes it.
 struct AccessDecoder {
     inner: HevcDecoder,
 }
@@ -1205,25 +1345,19 @@ impl Decoder for AccessDecoder {
     }
 
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
-        let out = self.inner.push_unit(packet)?;
-        let mut pictures = Vec::with_capacity(out.len());
-        for (s, m) in out {
-            if let Some(p) = packed_output(s, &m, &self.inner.shared)? {
-                pictures.push(p);
-            }
-        }
-        Ok(pictures)
+        let pictures = self.inner.push_pictures(packet)?;
+        Ok(pictures
+            .into_iter()
+            .map(|p| Output::Picture(p.picture))
+            .collect())
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
-        let out = self.inner.drain_all()?;
-        let mut pictures = Vec::with_capacity(out.len());
-        for (s, m) in out {
-            if let Some(p) = packed_output(s, &m, &self.inner.shared)? {
-                pictures.push(p);
-            }
-        }
-        Ok(pictures)
+        let pictures = self.inner.drain_pictures()?;
+        Ok(pictures
+            .into_iter()
+            .map(|p| Output::Picture(p.picture))
+            .collect())
     }
 
     fn reset(&mut self) {

@@ -6,11 +6,11 @@ use cutlass_codec::{
     CodecId, ContainerId, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
 };
 use cutlass_container::{
-    Demux, FailedMux, IndexPlace, Landing, Mux, MuxError, MuxMode, NewStream, OpenError, ReadError,
-    SeekError, SeekTo, TrackDuration, TrackId,
+    Demux, FailedMux, IndexPlace, Landing, Limits, Mux, MuxError, MuxMode, NewStream, OpenError,
+    ReadError, SeekError, SeekTo, TrackDuration, TrackId,
 };
 
-use crate::{CHANNEL_MASK_OFFSET, MAX_KEPT_CHUNK, WavDemux, WavMux};
+use crate::{CHANNEL_MASK_OFFSET, MAX_KEPT_CHUNK, PCM_PACKET_BYTES, WavDemux, WavMux};
 
 fn pcm_fmt(channels: u16, rate: u32, bits: u16) -> Vec<u8> {
     let align = (bits / 8) * channels;
@@ -117,29 +117,69 @@ fn packet_at(landing: Landing) -> (u32, i64) {
 }
 
 #[test]
-fn a_stereo_pcm_file_is_one_frame_per_packet_at_the_sample_rate() {
+fn a_stereo_pcm_file_is_runs_of_whole_frames_at_the_sample_rate() {
     let (file, data) = stereo_file(4);
     let mut demux = must_open(&file);
     assert_eq!(demux.family(), ContainerId::Riff);
     assert_eq!(demux.format().tag(), 1);
     assert_eq!(demux.format().sample_rate(), 44_100);
     assert_ne!(demux.streams()[0].timescale().ticks_per_second(), 1_000_000);
+    assert_eq!(demux.indexed_end(TrackId::new(0)), Some(4));
+    assert_eq!(demux.indexed_end(TrackId::new(1)), None);
     let packets = read_all(&mut demux);
-    assert_eq!(packets.len(), 4);
-    let mut gathered = Vec::new();
-    for (index, packet) in packets.iter().enumerate() {
-        assert_eq!(packet.bytes().len(), 4);
-        assert_eq!(
-            packet.timestamp().presentation(),
-            Some(i64::try_from(index).expect("i"))
-        );
-        assert_eq!(packet.timestamp().duration(), Some(1));
-        assert_eq!(packet.timescale().ticks_per_second(), 44_100);
-        assert!(packet.keyframe());
-        gathered.extend_from_slice(packet.bytes());
-    }
-    assert_eq!(gathered, data);
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0].bytes(), data.as_slice());
+    assert_eq!(packets[0].timestamp().presentation(), Some(0));
+    assert_eq!(packets[0].timestamp().duration(), Some(4));
+    assert_eq!(packets[0].timescale().ticks_per_second(), 44_100);
+    assert!(packets[0].keyframe());
     assert_eq!(demux.duration_samples(), Some(4));
+    assert!(!demux.is_cut());
+    assert!(!demux.is_open_ended());
+}
+
+/// 40,000 stereo 16-bit frames are two full runs of 16,384 frames, which
+/// is [`PCM_PACKET_BYTES`], and the 7,232 that are left.
+#[test]
+fn a_long_pcm_file_is_packets_of_whole_frames_up_to_the_packet_bytes() {
+    let (file, data) = stereo_file(40_000);
+    let mut demux = must_open(&file);
+    assert_eq!(demux.indexed_end(TrackId::new(0)), Some(40_000));
+    let packets = read_all(&mut demux);
+    let runs: Vec<(Option<i64>, Option<i64>, usize)> = packets
+        .iter()
+        .map(|packet| {
+            (
+                packet.timestamp().presentation(),
+                packet.timestamp().duration(),
+                packet.bytes().len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            (Some(0), Some(16_384), 65_536),
+            (Some(16_384), Some(16_384), 65_536),
+            (Some(32_768), Some(7_232), 28_928),
+        ]
+    );
+    assert_eq!(u64::try_from(runs[0].2).expect("bytes"), PCM_PACKET_BYTES);
+    let gathered: Vec<u8> = packets
+        .iter()
+        .flat_map(|packet| packet.bytes().to_vec())
+        .collect();
+    assert!(gathered == data);
+
+    // A packet limit below the packet bytes shortens the run to the whole
+    // frames the limit holds.
+    let mut limits = Limits::standard();
+    limits.max_packet_bytes = 10;
+    let len = u64::try_from(file.len()).expect("len");
+    let mut small = WavDemux::open_limited(Cursor::new(file), len, limits).expect("limited");
+    let first = small.read_packet().expect("read").expect("packet");
+    assert_eq!(first.bytes().len(), 8);
+    assert_eq!(first.timestamp().duration(), Some(2));
 }
 
 #[test]
@@ -156,9 +196,9 @@ fn alaw_and_mulaw_are_pcm_sample_frames_and_remux() {
         // Field 12 says compressed: these bytes are not linear samples.
         assert_eq!(&extra[12..14], &[2, 0]);
         let packets = read_all(&mut demux);
-        assert_eq!(packets.len(), 2);
-        assert_eq!(packets[0].bytes(), &[0xD5]);
-        assert_eq!(packets[0].timestamp().duration(), Some(1));
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].bytes(), &[0xD5, 0x2A]);
+        assert_eq!(packets[0].timestamp().duration(), Some(2));
 
         let written = remux(&file, false);
         let mut again = must_open(&written);
@@ -200,8 +240,14 @@ fn an_extensible_alaw_or_mulaw_subformat_is_pcm() {
 fn one_frame_and_many_frames_both_open() {
     let (short, _) = stereo_file(1);
     let (longer, _) = stereo_file(4);
-    assert_eq!(read_all(&mut must_open(&short)).len(), 1);
-    assert_eq!(read_all(&mut must_open(&longer)).len(), 4);
+    let frames = |file: &[u8]| -> i64 {
+        read_all(&mut must_open(file))
+            .iter()
+            .map(|packet| packet.timestamp().duration().expect("duration"))
+            .sum()
+    };
+    assert_eq!(frames(&short), 1);
+    assert_eq!(frames(&longer), 4);
 }
 
 #[test]
@@ -282,13 +328,16 @@ fn rf64_uses_ds64_and_rejects_a_disagreement() {
     );
     assert!(!error.streams_published());
 
-    let bad_samples = rf64_pcm(&[0u8; 8], 8, 8, 9);
-    let error = must_err(&bad_samples);
-    assert!(
-        error
-            .to_string()
-            .contains("ds64 sample count disagrees with the data chunk")
-    );
+    // For PCM the bytes are the length. A `ds64` sample count that is
+    // wrong, or zero, is not read.
+    for count in [9, 0] {
+        let mut demux = must_open(&rf64_pcm(&[0u8; 8], 8, 8, count));
+        assert_eq!(demux.duration_samples(), Some(2));
+        assert!(!demux.is_cut());
+        let packets = read_all(&mut demux);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].timestamp().duration(), Some(2));
+    }
 }
 
 fn rf64_pcm(data: &[u8], data_field: u32, ds_data: u64, ds_samples: u64) -> Vec<u8> {
@@ -344,8 +393,10 @@ fn hostile_files_fail_closed() {
     assert!(matches!(short, OpenError::Truncated { .. }));
     assert!(!short.streams_published());
 
-    let mut body = chunk(b"fmt ", &pcm_fmt(1, 8_000, 8));
-    body.extend(chunk_sized(b"data", 100, &[0; 4]));
+    // A header chunk that runs past the file is refused. The sound chunk
+    // is the one size that is clamped: see the tests of a cut file.
+    let mut body = chunk_sized(b"fmt ", 100, &pcm_fmt(1, 8_000, 8));
+    body.extend(chunk(b"data", &[0; 4]));
     let overrun = must_err(&riff(&body));
     assert!(matches!(overrun, OpenError::HostileSize { .. }));
 
@@ -422,7 +473,9 @@ fn pcm_seek_lands_on_the_frame_without_reading_the_payload() {
 fn a_forward_reader_plays_and_refuses_seek() {
     let (file, _) = stereo_file(2);
     let mut demux = WavDemux::open_forward(Cursor::new(file)).expect("forward");
-    assert_eq!(read_all(&mut demux).len(), 2);
+    let packets = read_all(&mut demux);
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0].timestamp().duration(), Some(2));
     let error = demux.seek(seek_at(0, None)).expect_err("seek");
     assert!(matches!(error, ReadError::Seek(SeekError::ForwardOnly)));
 }

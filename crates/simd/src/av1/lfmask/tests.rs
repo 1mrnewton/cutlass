@@ -102,3 +102,108 @@ fn levels_pick_their_byte() {
         );
     }
 }
+
+#[test]
+fn every_column_row_and_size_gives_the_code_of_the_specification() {
+    // Every first column (the count wraps at 256), every count of zero
+    // bits, every pair of sizes, with levels on one side, the other, both
+    // and neither, and bytes whose unused high bits are set.
+    for luma in [true, false] {
+        for first in 0..=255u8 {
+            for round in 0..4u8 {
+                let u = EdgeUnits {
+                    dims: core::array::from_fn(|l| {
+                        ((l as u8).wrapping_add(first) % 6)
+                            | ((l as u8 + round) % 6) << 3
+                            | round << 6
+                    }),
+                    across: core::array::from_fn(|l| {
+                        ((l as u8 * 5 + round) % 6)
+                            | ((l as u8 * 3).wrapping_add(first) % 6) << 3
+                            | 0xC0
+                    }),
+                    lvl: core::array::from_fn(|l| {
+                        if (l as u8 + round).is_multiple_of(3) {
+                            0
+                        } else {
+                            1 + (first.wrapping_mul(7).wrapping_add(l as u8) % 63)
+                        }
+                    }),
+                    lvl_across: core::array::from_fn(|l| {
+                        if (l as u8).wrapping_add(first).is_multiple_of(4) {
+                            0
+                        } else {
+                            63 - (l as u8 + round) % 5
+                        }
+                    }),
+                };
+                for edges in [Edges::Left { first }, Edges::Top { zeros: first % 9 }] {
+                    let (got, mask) = edge_codes(&u, edges, luma);
+                    let want: [u16; 16] =
+                        core::array::from_fn(|l| scalar::edge_code(&u, l, edges, luma));
+                    assert_eq!(got, want, "{u:?} {edges:?} luma {luma}");
+                    assert_eq!(mask, scalar::edge_codes(&u, edges, luma).1);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn units_without_an_edge_or_a_level_give_no_code_and_no_bit() {
+    let none = EdgeUnits {
+        dims: [4 | 4 << 3; 16],
+        across: [4 | 4 << 3; 16],
+        lvl: [40; 16],
+        lvl_across: [40; 16],
+    };
+    // Columns 1 to 16 and row 1 are inside 64x64 transforms, but for
+    // the unit at column 16.
+    let (codes, mask) = edge_codes(&none, Edges::Left { first: 1 }, true);
+    assert_eq!(mask, 1 << 15);
+    assert!(codes[..15].iter().all(|&c| c == 0) && codes[15] == 16 << 8 | 40);
+    assert_eq!(
+        edge_codes(&none, Edges::Top { zeros: 0 }, true),
+        ([0; 16], 0)
+    );
+    let level = EdgeUnits {
+        dims: [0; 16],
+        across: [0; 16],
+        lvl: [0; 16],
+        lvl_across: [0; 16],
+    };
+    assert_eq!(
+        edge_codes(&level, Edges::Left { first: 0 }, false),
+        ([0; 16], 0)
+    );
+    assert_eq!(
+        edge_codes(&level, Edges::Top { zeros: 7 }, true),
+        ([0; 16], 0)
+    );
+    // Every unit an edge.
+    let all = EdgeUnits {
+        lvl: [63; 16],
+        ..level
+    };
+    assert_eq!(
+        edge_codes(&all, Edges::Top { zeros: 0 }, true),
+        ([4 << 8 | 63; 16], 0xFFFF)
+    );
+}
+
+#[test]
+fn levels_take_any_byte_index_by_its_low_two_bits() {
+    let r: [[u8; 4]; 32] = core::array::from_fn(|k| {
+        core::array::from_fn(|i| {
+            (k as u8)
+                .wrapping_mul(37)
+                .wrapping_add((i as u8).wrapping_mul(101))
+                | 0x80
+        })
+    });
+    let first: [[u8; 4]; 16] = core::array::from_fn(|k| r[k]);
+    for i in 0..12 {
+        assert_eq!(levels(&first, i), scalar::levels(&first, i & 3));
+        assert_eq!(levels_odd(&r, i), scalar::levels_odd(&r, i & 3));
+    }
+}

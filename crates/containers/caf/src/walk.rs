@@ -5,7 +5,10 @@
 //! access input walks every chunk, seeking over `data`. A forward input
 //! stops at `data`, so a packet table after the sound cannot be read there.
 //!
-//! A chunk whose declared size runs past the file is
+//! A `data` chunk that states more bytes than the file holds is a
+//! recording or a download that stopped: the sound is the bytes that are
+//! there, and the walk ends. Any other chunk whose declared size runs past
+//! the file is
 //! [`OpenError::HostileSize`], with one tolerance: once `data` has been
 //! found, a chunk that is not `desc`, `kuki`, `pakt` or `chan` and that
 //! claims more bytes than remain, or a negative size, ends the walk. Some
@@ -50,6 +53,8 @@ pub(crate) struct DataChunk {
     pub len: Option<u64>,
     pub edit_count: u32,
     pub open_ended: bool,
+    /// The chunk stated more bytes than the file holds.
+    pub cut: bool,
 }
 
 #[derive(Debug)]
@@ -249,6 +254,7 @@ impl Walk {
                 len: input.remaining(),
                 edit_count,
                 open_ended: true,
+                cut: false,
             });
             return Ok(true);
         }
@@ -257,12 +263,10 @@ impl Walk {
         if size < 4 {
             return Err(malformed("data is shorter than its edit count"));
         }
-        let len = size - 4;
-        if let Some(left) = input.remaining()
-            && len > left
-        {
-            return Err(hostile(len, left));
-        }
+        let stated = size - 4;
+        let left = input.remaining();
+        let cut = left.is_some_and(|left| stated > left);
+        let len = left.map_or(stated, |left| stated.min(left));
         self.chunks.push(Chunk {
             kind: *b"data",
             offset,
@@ -273,7 +277,12 @@ impl Walk {
             len: Some(len),
             edit_count,
             open_ended: false,
+            cut,
         });
+        if cut {
+            // Nothing follows a chunk the file ends inside.
+            return Ok(true);
+        }
         if input.access() == Access::Random {
             let end = start
                 .checked_add(len)

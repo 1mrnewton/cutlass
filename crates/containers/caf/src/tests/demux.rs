@@ -17,8 +17,8 @@ fn seek(time: i64) -> SeekTo {
 }
 
 #[test]
-fn pcm_is_returned_in_whole_frames_of_up_to_4096_bytes() {
-    let (bytes, payload) = pcm_file(2_500);
+fn pcm_is_returned_in_whole_frames_of_up_to_64_kib() {
+    let (bytes, payload) = pcm_file(40_000);
     let mut demux = open(&bytes).expect("open");
     let stream = demux.streams()[0].clone();
     assert_eq!(stream.params().codec(), &StreamCodec::Known(CodecId::Pcm));
@@ -28,7 +28,13 @@ fn pcm_is_returned_in_whole_frames_of_up_to_4096_bytes() {
     assert_eq!(stream.timescale().ticks_per_second(), 48_000);
     assert!(stream.edits().is_empty());
     assert_eq!(stream.trim().encoder_delay(), None);
-    assert_eq!(demux.packet_count(), Some(2_500));
+    assert_eq!(demux.packet_count(), Some(40_000));
+    assert_eq!(
+        demux.indexed_end(cutlass_container::TrackId::new(0)),
+        Some(40_000)
+    );
+    assert_eq!(demux.indexed_end(cutlass_container::TrackId::new(1)), None);
+    assert!(!demux.is_cut());
     let mut joined: Vec<u8> = Vec::new();
     let mut expect_pts = 0;
     let mut sizes = Vec::new();
@@ -45,9 +51,9 @@ fn pcm_is_returned_in_whole_frames_of_up_to_4096_bytes() {
         sizes.push(packet.bytes().len());
         joined.extend(packet.bytes());
     }
-    assert_eq!(sizes, [4096, 4096, 1808]);
-    assert_eq!(joined, payload);
-    assert_eq!(expect_pts, 2_500);
+    assert_eq!(sizes, [65_536, 65_536, 28_928]);
+    assert!(joined == payload);
+    assert_eq!(expect_pts, 40_000);
     assert!(demux.read_packet().expect("end").is_none());
 }
 

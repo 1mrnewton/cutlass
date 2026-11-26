@@ -21,54 +21,84 @@ pub(crate) fn decode(layout: Layout, channels: usize, data: &[u8]) -> Result<Dec
     let width = layout.coding().sample_bytes();
     let frame = limit::frame_bytes(channels, width)?;
     let frames = limit::whole_frames(data.len(), frame)?;
+    let shape = Shape {
+        layout,
+        channels,
+        frames,
+    };
     match layout.coding() {
-        Coding::S16 => Ok(Decoded::I16(read(layout, channels, frames, data, i16_of)?)),
-        Coding::S24 => Ok(Decoded::F32(read(
-            layout,
-            channels,
-            frames,
+        Coding::S16 => Ok(Decoded::I16(read(
+            shape,
             data,
-            |bytes, endian| Ok(unit(i24_of(bytes, endian)?, S24_FULL)),
+            i16::from_le_bytes,
+            i16::from_be_bytes,
+        )?)),
+        Coding::S24 => Ok(Decoded::F32(read(
+            shape,
+            data,
+            |bytes: [u8; 3]| {
+                unit(
+                    i32::from_le_bytes([0, bytes[0], bytes[1], bytes[2]]) >> 8,
+                    S24_FULL,
+                )
+            },
+            |bytes: [u8; 3]| {
+                unit(
+                    i32::from_be_bytes([bytes[0], bytes[1], bytes[2], 0]) >> 8,
+                    S24_FULL,
+                )
+            },
         )?)),
         Coding::S32 => Ok(Decoded::F32(read(
-            layout,
-            channels,
-            frames,
+            shape,
             data,
-            |bytes, endian| Ok(unit(i32_of(bytes, endian)?, S32_FULL)),
+            |bytes| unit(i32::from_le_bytes(bytes), S32_FULL),
+            |bytes| unit(i32::from_be_bytes(bytes), S32_FULL),
         )?)),
-        Coding::F32 => Ok(Decoded::F32(read(layout, channels, frames, data, f32_of)?)),
-        Coding::F64 => Ok(Decoded::F32(read(layout, channels, frames, data, f64_of)?)),
-        Coding::S64 => Ok(Decoded::F32(read(layout, channels, frames, data, s64_of)?)),
-        Coding::S8 => Ok(Decoded::I16(read(
-            layout,
-            channels,
-            frames,
+        Coding::F32 => finite(read(shape, data, f32::from_le_bytes, f32::from_be_bytes)?),
+        Coding::F64 => finite(read(
+            shape,
             data,
-            |bytes, _| Ok(i16::from(i8::from_ne_bytes([byte_of(bytes)?])) << 8),
-        )?)),
-        Coding::U8 => Ok(Decoded::I16(read(
-            layout,
-            channels,
-            frames,
+            |bytes| narrow_f64(f64::from_le_bytes(bytes)),
+            |bytes| narrow_f64(f64::from_be_bytes(bytes)),
+        )?),
+        Coding::S64 => Ok(Decoded::F32(read(
+            shape,
             data,
-            |bytes, _| Ok((i16::from(byte_of(bytes)?) - 128) << 8),
+            |bytes| s64_unit(i64::from_le_bytes(bytes)),
+            |bytes| s64_unit(i64::from_be_bytes(bytes)),
         )?)),
-        Coding::ALaw => Ok(Decoded::I16(read(
-            layout,
-            channels,
-            frames,
-            data,
-            |bytes, _| Ok(ALAW[usize::from(byte_of(bytes)?)]),
-        )?)),
-        Coding::MuLaw => Ok(Decoded::I16(read(
-            layout,
-            channels,
-            frames,
-            data,
-            |bytes, _| Ok(MULAW[usize::from(byte_of(bytes)?)]),
-        )?)),
+        Coding::S8 => Ok(Decoded::I16(read_bytes(shape, data, |byte| {
+            i16::from(i8::from_ne_bytes([byte])) << 8
+        })?)),
+        Coding::U8 => Ok(Decoded::I16(read_bytes(shape, data, |byte| {
+            (i16::from(byte) - 128) << 8
+        })?)),
+        Coding::ALaw => Ok(Decoded::I16(read_bytes(shape, data, |byte| {
+            ALAW[usize::from(byte)]
+        })?)),
+        Coding::MuLaw => Ok(Decoded::I16(read_bytes(shape, data, |byte| {
+            MULAW[usize::from(byte)]
+        })?)),
     }
+}
+
+/// A non-finite sample is an error. A binary64 past the binary32 range
+/// narrows to an infinity, so one pass over the narrowed samples finds a
+/// non-finite source and an overflow alike. The pass has no early exit, so
+/// it is a vector compare.
+fn finite(samples: Vec<f32>) -> Result<Decoded, CodecError> {
+    if all_finite(&samples) {
+        Ok(Decoded::F32(samples))
+    } else {
+        Err(CodecError::NonFinite)
+    }
+}
+
+fn all_finite(samples: &[f32]) -> bool {
+    samples
+        .iter()
+        .fold(true, |every, sample| every & sample.is_finite())
 }
 
 /// G.711 A-law to 16-bit linear, every code. ITU-T G.711 A-law: the even
@@ -131,202 +161,138 @@ const fn mulaw_table() -> [i16; 256] {
     table
 }
 
-fn byte_of(bytes: &[u8]) -> Result<u8, CodecError> {
-    match bytes {
-        [byte] => Ok(*byte),
-        _ => Err(CodecError::Truncated {
-            at_bit: 0,
-            what: "pcm sample",
-        }),
-    }
-}
-
 pub(crate) fn encode(
     layout: Layout,
     channels: usize,
     pcm_i16: Option<&[i16]>,
     pcm_f32: Option<&[f32]>,
 ) -> Result<Vec<u8>, CodecError> {
+    layout.coding().encode()?;
+    let wrong = CodecError::InvalidApi {
+        what: "sample format",
+    };
     match layout.coding() {
-        Coding::S16 => {
-            let samples = pcm_i16.ok_or(CodecError::InvalidApi {
-                what: "sample format",
-            })?;
-            write_i16(layout, channels, samples)
-        }
-        Coding::F32 => {
-            let samples = pcm_f32.ok_or(CodecError::InvalidApi {
-                what: "sample format",
-            })?;
-            write_f32(layout, channels, samples)
-        }
-        Coding::F64 => {
-            let samples = pcm_f32.ok_or(CodecError::InvalidApi {
-                what: "sample format",
-            })?;
-            write_f64(layout, channels, samples)
-        }
-        Coding::S24
-        | Coding::S32
-        | Coding::S8
-        | Coding::U8
-        | Coding::ALaw
-        | Coding::MuLaw
-        | Coding::S64 => {
-            layout.coding().encode()?;
+        Coding::S16 => write(
+            layout,
+            channels,
+            pcm_i16.ok_or(wrong)?,
+            i16::to_le_bytes,
+            i16::to_be_bytes,
+        ),
+        Coding::F32 => write(
+            layout,
+            channels,
+            every_finite(pcm_f32.ok_or(wrong)?)?,
+            f32::to_le_bytes,
+            f32::to_be_bytes,
+        ),
+        Coding::F64 => write(
+            layout,
+            channels,
+            every_finite(pcm_f32.ok_or(wrong)?)?,
+            |sample| f64::from(sample).to_le_bytes(),
+            |sample| f64::from(sample).to_be_bytes(),
+        ),
+        Coding::S24 => write(
+            layout,
+            channels,
+            every_finite(pcm_f32.ok_or(wrong)?)?,
+            |sample| {
+                let [low, mid, high, _] = code24(sample).to_le_bytes();
+                [low, mid, high]
+            },
+            |sample| {
+                let [_, high, mid, low] = code24(sample).to_be_bytes();
+                [high, mid, low]
+            },
+        ),
+        Coding::S32 => write(
+            layout,
+            channels,
+            every_finite(pcm_f32.ok_or(wrong)?)?,
+            |sample| code32(sample).to_le_bytes(),
+            |sample| code32(sample).to_be_bytes(),
+        ),
+        Coding::S8 | Coding::U8 | Coding::ALaw | Coding::MuLaw | Coding::S64 => {
             Err(CodecError::Unsupported { what: "pcm encode" })
         }
     }
 }
 
-fn read<T, F>(
+/// What one packet holds.
+#[derive(Clone, Copy)]
+struct Shape {
     layout: Layout,
     channels: usize,
     frames: usize,
+}
+
+/// Samples of `W` bytes, in frame order whatever the packet's arrangement.
+/// The byte order is chosen once, outside the loop over the samples.
+fn read<T, const W: usize>(
+    shape: Shape,
     data: &[u8],
-    mut sample: F,
+    little: impl Fn([u8; W]) -> T,
+    big: impl Fn([u8; W]) -> T,
 ) -> Result<Vec<T>, CodecError>
 where
-    F: FnMut(&[u8], Endian) -> Result<T, CodecError>,
+    T: Copy + Default,
 {
-    let width = layout.coding().sample_bytes();
-    if width == 0 {
-        return Err(CodecError::InvalidApi { what: "pcm sample" });
+    match shape.layout.endian() {
+        Endian::Little => read_with(shape, data, little),
+        Endian::Big => read_with(shape, data, big),
     }
-    let count = limit::sample_count(frames, channels)?;
-    let mut out = limit::reserve(count)?;
-    let endian = layout.endian();
-    match layout.arrangement() {
-        Arrangement::Interleaved => {
-            for chunk in data.chunks_exact(width) {
-                out.push(sample(chunk, endian)?);
-            }
-        }
-        Arrangement::Planar => {
-            for frame in 0..frames {
-                for channel in 0..channels {
-                    let start = plane_at(channel, frames, frame, width)?;
-                    let end = start
-                        .checked_add(width)
-                        .ok_or(CodecError::Limit { what: "offset" })?;
-                    let chunk = data.get(start..end).ok_or(CodecError::Truncated {
-                        at_bit: 0,
-                        what: "pcm frame",
-                    })?;
-                    out.push(sample(chunk, endian)?);
-                }
-            }
-        }
-    }
-    if out.len() != count {
+}
+
+fn read_bytes<T>(shape: Shape, data: &[u8], sample: impl Fn(u8) -> T) -> Result<Vec<T>, CodecError>
+where
+    T: Copy + Default,
+{
+    read_with(shape, data, |[byte]: [u8; 1]| sample(byte))
+}
+
+fn read_with<T, const W: usize>(
+    shape: Shape,
+    data: &[u8],
+    sample: impl Fn([u8; W]) -> T,
+) -> Result<Vec<T>, CodecError>
+where
+    T: Copy + Default,
+{
+    let count = limit::sample_count(shape.frames, shape.channels)?;
+    let (stored, tail) = data.as_chunks::<W>();
+    if stored.len() != count || !tail.is_empty() {
         return Err(CodecError::Malformed {
             at_bit: 0,
             what: "pcm frame",
         });
     }
+    let mut out = limit::reserve(count)?;
+    match shape.layout.arrangement() {
+        Arrangement::Interleaved => out.extend(stored.iter().map(|bytes| sample(*bytes))),
+        Arrangement::Planar => {
+            out.resize(count, T::default());
+            // One pass per channel: the plane is read in order and written
+            // every `channels` samples.
+            for (channel, plane) in stored.chunks_exact(shape.frames.max(1)).enumerate() {
+                let slots = out.iter_mut().skip(channel).step_by(shape.channels.max(1));
+                for (slot, bytes) in slots.zip(plane) {
+                    *slot = sample(*bytes);
+                }
+            }
+        }
+    }
     Ok(out)
-}
-
-fn plane_at(
-    channel: usize,
-    frames: usize,
-    frame: usize,
-    width: usize,
-) -> Result<usize, CodecError> {
-    channel
-        .checked_mul(frames)
-        .and_then(|plane| plane.checked_add(frame))
-        .and_then(|index| index.checked_mul(width))
-        .ok_or(CodecError::Limit { what: "offset" })
-}
-
-fn i16_of(bytes: &[u8], endian: Endian) -> Result<i16, CodecError> {
-    let bytes: [u8; 2] = bytes.try_into().map_err(|_| CodecError::Truncated {
-        at_bit: 0,
-        what: "pcm sample",
-    })?;
-    Ok(match endian {
-        Endian::Little => i16::from_le_bytes(bytes),
-        Endian::Big => i16::from_be_bytes(bytes),
-    })
-}
-
-fn i24_of(bytes: &[u8], endian: Endian) -> Result<i32, CodecError> {
-    let bytes: [u8; 3] = bytes.try_into().map_err(|_| CodecError::Truncated {
-        at_bit: 0,
-        what: "pcm sample",
-    })?;
-    let le = match endian {
-        Endian::Little => bytes,
-        Endian::Big => [bytes[2], bytes[1], bytes[0]],
-    };
-    let sign = if le[2] & 0x80 == 0 { 0 } else { 0xFF };
-    Ok(i32::from_le_bytes([le[0], le[1], le[2], sign]))
-}
-
-fn i32_of(bytes: &[u8], endian: Endian) -> Result<i32, CodecError> {
-    let bytes: [u8; 4] = bytes.try_into().map_err(|_| CodecError::Truncated {
-        at_bit: 0,
-        what: "pcm sample",
-    })?;
-    Ok(match endian {
-        Endian::Little => i32::from_le_bytes(bytes),
-        Endian::Big => i32::from_be_bytes(bytes),
-    })
-}
-
-fn f32_of(bytes: &[u8], endian: Endian) -> Result<f32, CodecError> {
-    let bytes: [u8; 4] = bytes.try_into().map_err(|_| CodecError::Truncated {
-        at_bit: 0,
-        what: "pcm sample",
-    })?;
-    let sample = match endian {
-        Endian::Little => f32::from_le_bytes(bytes),
-        Endian::Big => f32::from_be_bytes(bytes),
-    };
-    if sample.is_finite() {
-        Ok(sample)
-    } else {
-        Err(CodecError::NonFinite)
-    }
-}
-
-fn f64_of(bytes: &[u8], endian: Endian) -> Result<f32, CodecError> {
-    let bytes: [u8; 8] = bytes.try_into().map_err(|_| CodecError::Truncated {
-        at_bit: 0,
-        what: "pcm sample",
-    })?;
-    let wide = match endian {
-        Endian::Little => f64::from_le_bytes(bytes),
-        Endian::Big => f64::from_be_bytes(bytes),
-    };
-    if !wide.is_finite() {
-        return Err(CodecError::NonFinite);
-    }
-    let narrow = narrow_f64(wide);
-    if narrow.is_finite() {
-        Ok(narrow)
-    } else {
-        Err(CodecError::NonFinite)
-    }
 }
 
 /// Full scale is 2^63: `i64::MAX` is not a binary64 value and rounds to
 /// 2^63, so this is the same rule as the narrower widths. Rounded once,
 /// straight from the integer to `f32`, then scaled by a power of two,
 /// which is exact.
-fn s64_of(bytes: &[u8], endian: Endian) -> Result<f32, CodecError> {
-    let bytes: [u8; 8] = bytes.try_into().map_err(|_| CodecError::Truncated {
-        at_bit: 0,
-        what: "pcm sample",
-    })?;
-    let value = match endian {
-        Endian::Little => i64::from_le_bytes(bytes),
-        Endian::Big => i64::from_be_bytes(bytes),
-    };
+fn s64_unit(value: i64) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     let rounded = value as f32;
-    Ok(rounded * S64_SCALE)
+    rounded * S64_SCALE
 }
 
 fn unit(value: i32, full: f64) -> f32 {
@@ -340,103 +306,98 @@ fn narrow_f64(value: f64) -> f32 {
     }
 }
 
-fn write_i16(layout: Layout, channels: usize, samples: &[i16]) -> Result<Vec<u8>, CodecError> {
-    write(layout, channels, samples, |sample, endian, slot| {
-        let bytes = match endian {
-            Endian::Little => sample.to_le_bytes(),
-            Endian::Big => sample.to_be_bytes(),
-        };
-        copy_sample(slot, &bytes)
-    })
-}
-
-fn write_f32(layout: Layout, channels: usize, samples: &[f32]) -> Result<Vec<u8>, CodecError> {
-    for sample in samples {
-        if !sample.is_finite() {
-            return Err(CodecError::NonFinite);
-        }
+/// The integer code of a full-scale float: `full` is positive full scale,
+/// the inverse of [`unit`]. Rounded to nearest, ties to even, and kept
+/// inside `low..=high`, so a sample past full scale is the end code and
+/// not a wrapped one.
+fn code(sample: f32, full: f64, low: f64, high: f64) -> i32 {
+    // `max` then `min`, not `clamp`: the same value for a finite sample,
+    // and two instructions the vector loop keeps.
+    let scaled = nearest_even((f64::from(sample) * full).max(low).min(high));
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        scaled as i32
     }
-    write(layout, channels, samples, |sample, endian, slot| {
-        let bytes = match endian {
-            Endian::Little => sample.to_le_bytes(),
-            Endian::Big => sample.to_be_bytes(),
-        };
-        copy_sample(slot, &bytes)
-    })
 }
 
-fn write_f64(layout: Layout, channels: usize, samples: &[f32]) -> Result<Vec<u8>, CodecError> {
-    for sample in samples {
-        if !sample.is_finite() {
-            return Err(CodecError::NonFinite);
-        }
+/// `value` rounded to the nearest integer, ties to even, for a magnitude
+/// below 2^51. Adding 1.5 * 2^52 leaves no fraction bits, so the sum is
+/// rounded by the addition itself, in the default rounding mode, and the
+/// subtraction is exact. It is two additions, where `round_ties_even` is a
+/// library call on a baseline x86-64 target, so the loop over the samples
+/// stays a vector loop.
+fn nearest_even(value: f64) -> f64 {
+    const SHIFT: f64 = 6_755_399_441_055_744.0;
+    (value + SHIFT) - SHIFT
+}
+
+fn code24(sample: f32) -> i32 {
+    code(sample, S24_FULL, -8_388_608.0, S24_FULL)
+}
+
+fn code32(sample: f32) -> i32 {
+    code(sample, S32_FULL, -2_147_483_648.0, S32_FULL)
+}
+
+fn every_finite(samples: &[f32]) -> Result<&[f32], CodecError> {
+    if all_finite(samples) {
+        Ok(samples)
+    } else {
+        Err(CodecError::NonFinite)
     }
-    write(layout, channels, samples, |sample, endian, slot| {
-        let wide = f64::from(*sample);
-        let bytes = match endian {
-            Endian::Little => wide.to_le_bytes(),
-            Endian::Big => wide.to_be_bytes(),
-        };
-        copy_sample(slot, &bytes)
-    })
 }
 
-fn copy_sample(slot: &mut [u8], bytes: &[u8]) -> Result<(), CodecError> {
-    if slot.len() != bytes.len() {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "pcm sample",
-        });
-    }
-    slot.copy_from_slice(bytes);
-    Ok(())
-}
-
-fn write<T, F>(
+/// Bytes of `samples`, which are in frame order, in the packet's
+/// arrangement and byte order.
+fn write<T, const W: usize>(
     layout: Layout,
     channels: usize,
     samples: &[T],
-    mut encode: F,
+    little: impl Fn(T) -> [u8; W],
+    big: impl Fn(T) -> [u8; W],
 ) -> Result<Vec<u8>, CodecError>
 where
-    F: FnMut(&T, Endian, &mut [u8]) -> Result<(), CodecError>,
+    T: Copy,
+{
+    match layout.endian() {
+        Endian::Little => write_with(layout, channels, samples, little),
+        Endian::Big => write_with(layout, channels, samples, big),
+    }
+}
+
+fn write_with<T, const W: usize>(
+    layout: Layout,
+    channels: usize,
+    samples: &[T],
+    bytes_of: impl Fn(T) -> [u8; W],
+) -> Result<Vec<u8>, CodecError>
+where
+    T: Copy,
 {
     if channels == 0 || !samples.len().is_multiple_of(channels) {
         return Err(CodecError::UnevenChannels);
     }
     let frames = samples.len() / channels;
-    let width = layout.coding().sample_bytes();
     let bytes = samples
         .len()
-        .checked_mul(width)
+        .checked_mul(W)
         .ok_or(CodecError::Limit { what: "allocation" })?;
     let mut out = limit::reserve_bytes(bytes)?;
     out.resize(bytes, 0);
-    let endian = layout.endian();
-    for frame in 0..frames {
-        for channel in 0..channels {
-            let src = frame
-                .checked_mul(channels)
-                .and_then(|base| base.checked_add(channel))
-                .ok_or(CodecError::Limit { what: "offset" })?;
-            let sample = samples.get(src).ok_or(CodecError::Malformed {
-                at_bit: 0,
-                what: "pcm frame",
-            })?;
-            let start = match layout.arrangement() {
-                Arrangement::Interleaved => src
-                    .checked_mul(width)
-                    .ok_or(CodecError::Limit { what: "offset" })?,
-                Arrangement::Planar => plane_at(channel, frames, frame, width)?,
-            };
-            let end = start
-                .checked_add(width)
-                .ok_or(CodecError::Limit { what: "offset" })?;
-            let slot = out.get_mut(start..end).ok_or(CodecError::Malformed {
-                at_bit: 0,
-                what: "pcm frame",
-            })?;
-            encode(sample, endian, slot)?;
+    let (stored, _) = out.as_chunks_mut::<W>();
+    match layout.arrangement() {
+        Arrangement::Interleaved => {
+            for (slot, sample) in stored.iter_mut().zip(samples) {
+                *slot = bytes_of(*sample);
+            }
+        }
+        Arrangement::Planar => {
+            for (channel, plane) in stored.chunks_exact_mut(frames.max(1)).enumerate() {
+                let source = samples.iter().skip(channel).step_by(channels);
+                for (slot, sample) in plane.iter_mut().zip(source) {
+                    *slot = bytes_of(*sample);
+                }
+            }
         }
     }
     Ok(out)

@@ -370,3 +370,172 @@ fn a_flat_residual_is_added_to_every_sample_and_clamped() {
     assert!(!add_flat(&mut dst, 8, 8, 0, 5));
     assert_eq!(dst, [9u8; 64]);
 }
+
+#[test]
+fn the_kernel_matches_on_extreme_coefficients_in_every_row_and_on_exact_slices() {
+    // Coefficients at the ends of 16 bits and past them (their low 16
+    // bits count) in every row and column, so that the clamps of the
+    // steps, the rounding shifts and the halves of a wide vector that
+    // hold rows eight and up all take part; the samples are exactly
+    // those of the block.
+    let mut rng = Rng(0x17C5);
+    let sizes = [4usize, 8, 16, 32, 64];
+    let kinds = [Kind::Dct, Kind::Adst, Kind::Identity];
+    let ends = [32767, -32768, 32766, -32767, 65535, 0x1_8000, -0x1_8001];
+    let mut blocks = 0;
+    for &w in &sizes {
+        for &h in &sizes {
+            for row in kinds {
+                for col in kinds {
+                    if !supports(w, h, row, col) {
+                        continue;
+                    }
+                    let (tw, th) = (w.min(32), h.min(32));
+                    for round in 0..8u32 {
+                        let nz = match round % 4 {
+                            0 => (th, tw),
+                            1 => (th.min(9), tw.min(9)),
+                            2 => (1, tw),
+                            _ => (th, 1),
+                        };
+                        let mut coefs = vec![0i32; tw * th];
+                        for r in 0..nz.0 {
+                            for c in 0..nz.1 {
+                                coefs[r * tw + c] = match rng.below(4) {
+                                    0 => rng.signed(300),
+                                    1 => 0,
+                                    _ => ends[rng.below(ends.len() as u32) as usize],
+                                };
+                            }
+                        }
+                        let stride = w + (round as usize % 3);
+                        let c = Case {
+                            w,
+                            h,
+                            stride,
+                            coefs,
+                            dst: (0..(h - 1) * stride + w)
+                                .map(|i| [0, 255, rng.below(256) as u8][i % 3])
+                                .collect(),
+                            nz,
+                            shift: round % 3,
+                            flips: (round & 1 == 1, round & 2 == 2),
+                        };
+                        let mut want = c.dst.clone();
+                        scalar::add(&mut block(&c, &mut want, row, col));
+                        let mut got = c.dst.clone();
+                        assert!(add(&mut block(&c, &mut got, row, col)));
+                        assert_eq!(got, want, "{w}x{h} {row:?} {col:?} round {round}");
+                        blocks += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(blocks >= (16 + 4 + 9) * 8);
+}
+
+#[test]
+fn one_coefficient_and_one_row_or_column_match_at_every_size() {
+    let mut rng = Rng(41);
+    let sizes = [4usize, 8, 16, 32, 64];
+    let kinds = [Kind::Dct, Kind::Adst, Kind::Identity];
+    for &w in &sizes {
+        for &h in &sizes {
+            for row in kinds {
+                for col in kinds {
+                    if !supports(w, h, row, col) {
+                        continue;
+                    }
+                    let (tw, th) = (w.min(32), h.min(32));
+                    for (nz, dc) in [
+                        ((1, 1), 700),
+                        ((1, 1), -32768),
+                        ((1, tw), 90),
+                        ((th, 1), -90),
+                    ] {
+                        let mut coefs = vec![0i32; tw * th];
+                        coefs[0] = dc;
+                        for r in 1..nz.0 {
+                            coefs[r * tw] = rng.signed(2000);
+                        }
+                        for c in coefs.iter_mut().take(nz.1).skip(1) {
+                            *c = rng.signed(2000);
+                        }
+                        for flips in [(false, false), (true, true), (false, true)] {
+                            let c = Case {
+                                w,
+                                h,
+                                stride: w,
+                                coefs: coefs.clone(),
+                                dst: (0..w * h).map(|_| rng.below(256) as u8).collect(),
+                                nz,
+                                shift: rng.below(3),
+                                flips,
+                            };
+                            let mut want = c.dst.clone();
+                            scalar::add(&mut block(&c, &mut want, row, col));
+                            let mut got = c.dst.clone();
+                            assert!(add(&mut block(&c, &mut got, row, col)));
+                            assert_eq!(got, want, "{w}x{h} {row:?} {col:?} nz {nz:?} {flips:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn the_avx2_transforms_match_the_scalar_ones_on_all_sixteen_lanes() {
+    let mut rng = Rng(0xA5A5);
+    let lengths = [
+        (Kind::Dct, 4),
+        (Kind::Dct, 8),
+        (Kind::Dct, 16),
+        (Kind::Dct, 32),
+        (Kind::Dct, 64),
+        (Kind::Adst, 4),
+        (Kind::Adst, 8),
+        (Kind::Adst, 16),
+    ];
+    for (kind, n) in lengths {
+        for nz in [1, 2, 4, 5, 8, 9, 16, 17, 32] {
+            if nz > n.min(32) {
+                continue;
+            }
+            for round in 0..24 {
+                let mag = [300, 5000, 32767][round % 3];
+                let mut wide = [[0i16; 16]; 64];
+                for v in wide.iter_mut().take(nz) {
+                    *v = std::array::from_fn(|l| match (round + l) % 5 {
+                        0 => 32767,
+                        1 => -32768,
+                        _ => rng.signed(mag) as i16,
+                    });
+                }
+                let mut halves = [[[0i16; 8]; 64]; 2];
+                for (k, v) in wide.iter().enumerate() {
+                    halves[0][k].copy_from_slice(&v[..8]);
+                    halves[1][k].copy_from_slice(&v[8..]);
+                }
+                let Some(ok) = super::one_dimension_avx2(kind, n, nz, &mut wide) else {
+                    // A CPU without AVX2.
+                    return;
+                };
+                assert!(ok);
+                for (g, half) in halves.iter_mut().enumerate() {
+                    assert!(scalar::one_dimension(kind, n, nz, half));
+                    for (k, v) in half.iter().enumerate().take(n) {
+                        assert_eq!(
+                            wide[k][8 * g..8 * g + 8],
+                            v[..],
+                            "{kind:?} {n} nz {nz} output {k}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

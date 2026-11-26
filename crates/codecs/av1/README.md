@@ -187,9 +187,11 @@ cargo test --release -p cutlass-av1
   check the pictures the engine makes of them; they export RGBA through the
   Rust encoder into MP4 and WebM, read both back, and, where FFmpeg is
   installed, compare its libdav1d decode byte for byte and its ffprobe tags.
-- Every NEON kernel in `cutlass-simd` has a scalar twin written from the
-  specification and a test comparing the two on random and edge inputs
-  (`cargo test --release -p cutlass-simd`).
+- Every NEON and AVX2 kernel in `cutlass-simd` has a scalar twin written from
+  the specification and a test comparing the two on random and edge inputs
+  (`cargo test --release -p cutlass-simd`). `tests/fixtures.rs` checks the
+  digests twice where the kernels are chosen at run time: with them, and
+  with `cutlass_simd::av1::cpu::force_scalar` turning them off.
 - Unit tests compare the transform, CDEF and arithmetic coder kernels with
   direct transcriptions of the specification, round-trip the sequence and
   frame headers through the writer and the parser, and check that the encoder
@@ -293,11 +295,115 @@ same day, where libdav1d took 2.893G and 3.584G. The fixtures the profile is
 made from decode about 44 million luma samples of 8-bit 4:2:0 and 0.1 million of
 10-bit 4:2:0, which is the likely reason; that has not been tested.
 
-**Decode, x86-64.** Not measured on x86-64 hardware. The same 8-bit clip
-decoded by the `x86_64-apple-darwin` build under Rosetta 2 took 2.1 to 2.4 s
-on one thread, where the native build took 0.87 s; Rosetta's translation is
-part of that. An SSE4.1 motion compensation kernel written and tested there
-was no faster than the loops it replaced, and was not kept.
+**Decode, x86-64.** Measured on 24 November 2026 at commit `0cd9f876`
+against `development` at `bcab8681`, on 4 virtual cores of an Intel Xeon
+(family 6 model 207, Emerald Rapids; AVX2 and AVX-512; 2.10 GHz nominal)
+in a KVM guest with 15 GB, Ubuntu 24.04, rustc 1.100.0,
+`cargo build --release` with no profile. The other side is the `dav1d` 1.4.1
+command of Ubuntu (libdav1d's hand-written assembly), which picks AVX-512 on
+this CPU; `--cpumask avx2` holds it to AVX2. Each run is a whole process:
+`av1bench <clip> <threads>` against
+`dav1d -i <clip> --threads <n> --muxer null`. No real footage could be
+fetched on the machine, so the clips are synthetic: 60 frames of a rotating
+Mandelbrot zoom, then 60 of a sub-sample pan over an upscaled still with
+light temporal noise (half as many frames at 4K), 8-bit 4:2:0, written by
+FFmpeg 6.1.1 with `-c:v libsvtav1 -preset 6|8|10 -crf 35 -g 60` (SVT-AV1
+1.7.0) and once with `-c:v libaom-av1 -cpu-used 6 -crf 35`. Both decoders
+produce the same bytes on all seven, with Cutlass on 1 thread, on 4, and with
+its run-time kernels forced off.
+
+Until this commit the x86-64 build had no kernel of its own: `Before` is the
+decoder's loops as the compiler vectorizes them for the SSE2 baseline. `After`
+picks AVX2 kernels at run time (motion compensation, warp, inverse transform,
+CDEF, deblocking and its edge masks) and runs the remaining lane loops
+(compound averages, loop restoration) compiled a second time for AVX2.
+
+The guest exposes no hardware counters, so `perf stat` cannot count there.
+Instructions are counted by `valgrind --tool=callgrind` 3.22 on one thread,
+where both decoders see a CPU with AVX2 and no AVX-512:
+
+| Clip | Before | After | libdav1d | Before ÷ libdav1d | After ÷ libdav1d |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1080p, SVT-AV1 preset 6 | 12.37G | 7.79G | 4.17G | 2.97 | 1.87 |
+| 1080p, SVT-AV1 preset 8 | 10.35G | 6.16G | 3.55G | 2.91 | 1.73 |
+| 1080p, SVT-AV1 preset 10 | 7.36G | 4.71G | 2.95G | 2.49 | 1.60 |
+| 1080p, libaom cpu-used 6 | 11.79G | 7.13G | 3.82G | 3.08 | 1.86 |
+| 4K, SVT-AV1 preset 6 | 22.32G | 12.53G | 6.00G | 3.72 | 2.09 |
+| 4K, SVT-AV1 preset 8 | 18.63G | 9.83G | 5.20G | 3.58 | 1.89 |
+| 4K, SVT-AV1 preset 10 | 12.73G | 7.20G | 4.28G | 2.97 | 1.68 |
+| 58 IVF fixtures, one pass | 7.48G | 3.62G | 1.88G | 3.97 | 1.92 |
+
+With the kernels forced off (`CUTLASS_AV1_SCALAR=1 av1bench`) the counts are
+within 0.6% of `Before` on every clip.
+
+One thread, wall time (median of 9 runs, the sides interleaved; the machine
+is shared, and single runs vary by about 10%):
+
+| Clip | Before | After | libdav1d, AVX2 | libdav1d, AVX-512 | After ÷ AVX2 | After ÷ AVX-512 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1080p, preset 6 | 1.29 s | 1.10 s | 0.62 s | 0.62 s | 1.78 | 1.77 |
+| 1080p, preset 8 | 1.00 s | 0.84 s | 0.48 s | 0.48 s | 1.75 | 1.74 |
+| 1080p, preset 10 | 0.85 s | 0.73 s | 0.45 s | 0.39 s | 1.61 | 1.87 |
+| 1080p, libaom | 1.20 s | 0.98 s | 0.57 s | 0.57 s | 1.71 | 1.72 |
+| 4K, preset 6 | 2.44 s | 1.94 s | 1.26 s | 1.13 s | 1.54 | 1.71 |
+| 4K, preset 8 | 2.00 s | 1.54 s | 1.02 s | 1.00 s | 1.52 | 1.54 |
+| 4K, preset 10 | 1.46 s | 1.22 s | 0.78 s | 0.85 s | 1.55 | 1.44 |
+| 58 IVF fixtures | 0.82 s | 0.60 s | — | 0.43 s | — | 1.39 |
+
+Four threads, wall time and (processor time), median of 9:
+
+| Clip | Before | After | libdav1d, AVX2 | libdav1d, AVX-512 | After ÷ AVX-512 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1080p, preset 6 | 0.45 s (1.46) | 0.38 s (1.20) | 0.36 s (0.83) | 0.34 s (0.82) | 1.12 |
+| 1080p, preset 8 | 0.39 s (1.21) | 0.32 s (0.98) | 0.29 s (0.69) | 0.28 s (0.66) | 1.14 |
+| 1080p, preset 10 | 0.33 s (0.97) | 0.28 s (0.83) | 0.28 s (0.63) | 0.28 s (0.60) | 1.03 |
+| 1080p, libaom | 0.44 s (1.38) | 0.36 s (1.09) | 0.29 s (0.74) | 0.28 s (0.72) | 1.30 |
+| 4K, preset 6 | 0.77 s (2.63) | 0.60 s (2.01) | 0.62 s (1.45) | 0.58 s (1.38) | 1.03 |
+| 4K, preset 8 | 0.68 s (2.23) | 0.53 s (1.71) | 0.58 s (1.26) | 0.55 s (1.19) | 0.96 |
+| 4K, preset 10 | 0.52 s (1.65) | 0.45 s (1.42) | 0.52 s (1.09) | 0.49 s (1.01) | 0.92 |
+
+The instructions fell by 36 to 47% and one thread's time by 14 to 23%:
+Cutlass is still **1.4 to 1.9× slower** than libdav1d on one thread here,
+where it was 1.7 to 2.2× slower. On four threads it finishes within 4% of
+libdav1d or ahead of it on the 4K clips and 3 to 30% behind at 1080p, on
+about 40 to 50% more processor time. The fixtures are 58 short processes a
+pass, so their times include each one's start.
+
+Where the instructions of two clips are, by area (the same builds with debug
+info; `other decoding` is block and mode parsing, motion vector prediction
+and the control around prediction):
+
+| Area | 1080p preset 8, before | after | 4K preset 8, before | after |
+| --- | ---: | ---: | ---: | ---: |
+| Motion compensation | 3.03G | 1.46G | 3.16G | 1.60G |
+| CDEF | 2.01G | 0.80G | 8.57G | 3.28G |
+| Deblocking | 1.29G | 0.33G | 1.09G | 0.33G |
+| Inverse transform | 0.57G | 0.25G | 1.40G | 0.42G |
+| Loop restoration | 0.34G | 0.22G | 0.40G | 0.25G |
+| Intra prediction | 0.06G | 0.06G | 0.17G | 0.17G |
+| Coefficient and symbol decoding | 1.14G | 1.14G | 1.58G | 1.58G |
+| Other decoding | 1.90G | 1.90G | 2.26G | 2.21G |
+| All | 10.35G | 6.16G | 18.63G | 9.83G |
+
+What is left of the gap: symbol decoding and the other decoding, which no
+kernel touches, are 3.0G of the 6.2G at 1080p, against 3.6G for the whole of
+libdav1d; CDEF is still a third of the 4K clip (the byte filter 1.7G, the
+rows and padding around it 0.9G, the direction search 0.6G); motion
+compensation of blocks four wide, the whole-sample copies and the edge
+emulation stay on the decoder's loops; intra prediction, the self-guided
+filter, film grain and everything at 10 and 12 bits have no AVX2 kernel.
+libdav1d's own split is not known: the packaged library has no symbols.
+
+Tried and not kept: an AVX2 Wiener kernel on `pmaddwd` took 248M instructions
+on the 1080p preset 8 clip where the decoder's 16-bit lanes compiled for AVX2
+take 220M (342M before). Earlier, under Rosetta 2, an SSE4.1 motion
+compensation kernel was no faster than the loops it replaced.
+
+The Arm side of the same change (the motion compensation kernel chosen by
+the CPU's dot product flag where the build does not enable it, so that
+Android, Linux and Windows on Arm run it) was compiled and linted for
+`aarch64-unknown-linux-gnu` and `aarch64-apple-darwin` on this machine and
+not run.
 
 **Encode, av1.** Measured on 10 November 2026 at commit `ed0743d2`, same machine, FFmpeg 8.1.1, rustc 1.99.1. Input: 300 raw frames of 1920×1080 at 30 frames a second, asked for 4 Mbit/s.
 
@@ -329,9 +435,18 @@ Decoder:
 - Scalability and timecode metadata OBUs are not read.
 - `Av1Decoder` copies every shown picture into packed bytes, a row at a time,
   on the thread that calls `push`.
-- The vector kernels are NEON only. Other targets run the decoder's loops
-  over small arrays, which the compiler vectorizes; their speed on x86-64
-  hardware is not measured.
+- The vector kernels are NEON on aarch64 and AVX2 on x86-64, the AVX2 ones
+  chosen at run time. An x86-64 CPU without AVX2, and any other target, runs
+  the decoder's loops over small arrays, which the compiler vectorizes. On
+  aarch64 the motion compensation kernels need the dot product extension
+  (every Armv8.4 core, and most since the Cortex-A75 and A55); without it
+  those blocks run the loops too.
+- On x86-64 the 8-bit kernels are motion compensation of blocks eight wide
+  and up, warp, the inverse transform, CDEF, deblocking and its edge masks.
+  Intra prediction, loop restoration, the compound averages and everything
+  at 10 and 12 bits run the decoder's loops, compiled for AVX2 where they
+  are lanes. One thread is 1.4 to 1.9× slower than libdav1d there (see
+  above).
 - At 10 and 12 bits the motion compensation of blocks eight wide and up has
   a kernel; CDEF runs on the 16-bit kernel or on lanes; the inverse
   transform, loop restoration, film grain and super resolution run on the

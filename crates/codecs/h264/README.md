@@ -6,7 +6,7 @@ An H.264 (AVC) decoder and encoder in safe Rust. The crate has `#![forbid(unsafe
 
 | | Decoder | Encoder |
 | --- | --- | --- |
-| Profiles | `profile_idc` 66, 77, 88, 100, 110, 122, 244 (Baseline, Main, Extended, High, High 10, High 4:2:2, High 4:4:4 Predictive). The constraint flags are not checked. | High (`profile_idc` 100), `level_idc` 31 |
+| Profiles | `profile_idc` 66, 77, 88, 100, 110, 122, 244 (Baseline, Main, Extended, High, High 10, High 4:2:2, High 4:4:4 Predictive). The constraint flags are not checked. | High (`profile_idc` 100). `level_idc` is the lowest level of Table A-1 that holds the picture size, the macroblock rate at the first picture's frame rate, a two-frame picture buffer, and `bitrate` when it is not 0. |
 | Chroma and depth | 4:2:0, 4:2:2, 4:4:4 at 8 to 14 bits, luma and chroma depth equal. Separate color planes. | 8-bit 4:2:0, even width and height |
 | Entropy coding | CAVLC and CABAC | CABAC |
 | Slices | I, P, B, SP, SI. Several slices per picture, slice groups with map types 0 to 6, data partitions. SP and SI only at 8-bit 4:2:0. | One slice per picture. I, P, and one B between two references. |
@@ -14,8 +14,8 @@ An H.264 (AVC) decoder and encoder in safe Rust. The crate has `#![forbid(unsafe
 | Prediction | Skip, direct, partitions down to 4×4, explicit and implicit weighted prediction | Intra 4×4 DC. P: skip, 16×16, 16×8, 8×16, four 8×8. B: 16×16 on list 0, list 1, or both. |
 | Transform | 4×4 and 8×8, scaling lists, transform bypass, deblocking, frame crop | 4×4, and 8×8 for inter luma when its residual is closer |
 | Ordering | Picture order count types 0, 1, 2. Reference marking, list modification, `frame_num` gaps. | Type 0, sliding window, two reference frames |
-| SEI and VUI | Picture timing changes the output time. Film grain is applied to the shown picture, not to the reference. Other SEI is skipped. Sample aspect, timing, and color tags are returned with the picture. | No SEI. A VUI with bitstream restrictions. |
-| Framing | Annex B, length prefixes of 1, 2, or 4 bytes, `avcC` extradata | Annex B when `nal_length_size` is 0, else 4-byte lengths. `extradata()` is the `avcC` record. |
+| SEI and VUI | Picture timing changes the output time. Film grain is applied to the shown picture, not to the reference. Other SEI is skipped. Sample aspect, timing, and color tags are returned with the picture. | No SEI. A VUI with bitstream restrictions, and with the video signal type (range, primaries, transfer, matrix) when `CodecParams` names a range or a colour. No timing information. |
+| Framing | Annex B, length prefixes of 1, 2, or 4 bytes, `avcC` extradata | Annex B when `nal_length_size` is 0, else 4-byte lengths. `extradata()` is the `avcC` record. The SPS and PPS ride in the access unit of each IDR picture and of no other. |
 
 The decoder returns every picture as 8-bit 4:2:0 in `VideoOutput::picture`. A deeper or wider stream also fills `yuv420p10`, `yuv420_high`, `yuv422`, `yuv422_high`, `yuv444`, or `yuv444_high` with the full samples. The opener the engine uses (`Decoder`) returns only the packed 8-bit 4:2:0 picture.
 
@@ -38,7 +38,18 @@ Refused:
 
 One `push` to the decoder is one access unit. It returns the pictures that are ready in display order, which may be none. `drain` returns the pictures still held for reordering. A `push` that fails leaves the decoder as it was. `nal_length_size` 0 means Annex B; an `avcC` record in `CodecParams::extra` sets the length size itself.
 
-The encoder holds one picture back so it can code a B picture, so a `push` may return no packet and `drain` returns the last one. A picture is intra only when it is the first one or `force_keyframe` is set. With `bitrate` set, the frame QP follows the bit budget; `constant_rate` resets that budget each second. With `bitrate` 0 the QP stays at 26.
+The encoder holds one picture back so it can code a B picture, so a `push` may return no packet and `drain` returns the last one. With `bitrate` set, the frame QP follows the bit budget, starting from the bits a sample at the first picture's frame rate; `constant_rate` resets that budget each second. With `bitrate` 0 the QP stays at 26.
+
+A picture is an IDR picture, a keyframe a player can seek to, when:
+
+- it is the first one;
+- the keyframe interval has passed since the last one. The interval is two seconds, counted from the `duration` and `timescale` of the pictures pushed; `set_keyframe_interval` changes it, and 0 turns it off. When the durations are zero or negative the interval is counted in pictures at 150 a second, 300 pictures for two seconds;
+- it is a scene cut (`set_scene_cut(false)` turns this off). The luma plane is reduced by 4, 8 or 16 on a side and each 8×8 block of it is matched within ±4 reduced samples in the picture before, with both blocks' means taken out. The picture is a cut when the match leaves at least 75% of the picture's own detail and at least 2 levels a sample. A cut a tenth of the interval or less after the last IDR picture stays a P picture;
+- `force_keyframe` is set.
+
+The picture held back before an IDR picture is coded as a P picture, so no B picture predicts across a keyframe.
+
+The level and the first QP need the frame rate, which `CodecParams` does not carry. They are set from the first picture's `duration` and `timescale` after an open or a reset, and 30 pictures a second is assumed when that duration is not positive. `extradata()` read before the first `push` therefore names the level for 30 pictures a second; read it after the first packet, as the export adapter does. The level is not raised if the frame rate rises later in the stream.
 
 ```rust
 use cutlass_decode::{CodecId, CodecParams, VideoDecoder, Yuv420p};
@@ -82,7 +93,7 @@ cargo test -p cutlass-h264 --release -- --ignored
 
 - **Decoder against FFmpeg.** Streams written by libx264 are decoded here and by `ffmpeg`, and every sample inside the cropped rectangle must be equal. This covers Baseline, Main, and High with CAVLC and CABAC, B pictures and temporal direct, weighted prediction, several slices, crop, scaling lists (`src/mb.rs`, `src/dec.rs`), High 10 (`src/high10.rs`), 4:2:2 and 4:4:4 at 8 and 10 bits, clean and noisy, on one thread and on four (`src/chroma.rs`), an intra field pair and macroblock-adaptive frames with I, P, and B under CABAC and CAVLC at 4:2:0 and at 8-bit and 10-bit 4:2:2 (`src/fields.rs`, `src/chroma.rs`; 4:4:4 interlaced is not checked), lossless, including noisy pictures libx264 writes partly as I_PCM inside CABAC slices (`src/lossless.rs`), and picture sizes up to the level limits (`src/annex_a.rs`).
 - **Decoder against the specification.** Tools FFmpeg does not decode are checked against sample values worked out from the specification on small hand-built streams: slice groups (`src/fmo.rs`), data partitions, SP and SI (`src/part.rs`, `src/sp.rs`), separate color planes (`src/planes.rs`), depths of 11 and 13 bits (`src/depth.rs`, which compares 9, 12, and 14 bits with FFmpeg), picture timing and film grain (`src/sei_pic.rs`), and the scalable, multiview, and 3D cases (`src/annex_g.rs`).
-- **Encoder.** The encoder's output is decoded by this decoder and by FFmpeg, and both must give the same samples (the `*_matches_ffmpeg` tests in `src/enc.rs`). `testsrc2_meets_the_luma_and_rate_gates` requires a luma PSNR of at least 30 dB and a size within 0.75 to 1.25 times `bitrate * duration`. `natural_clip_meets_the_luma_gate` requires 28 dB on a camera clip. `bottom_rows_survive_a_partial_macroblock_row` encodes scrolling pictures at 96×72, 96×80 and 88×72 and requires the bottom 24 rows to reach 35 dB luma and 28 dB chroma in every picture, with FFmpeg decoding the same samples: the encoder codes whole macroblocks, with the picture's last row and column repeated into the padding, and predicts from the uncropped reconstruction, as every decoder does.
+- **Encoder.** The encoder's output is decoded by this decoder and by FFmpeg, and both must give the same samples (the `*_matches_ffmpeg` tests in `src/enc.rs`). Keyframes are checked at the interval, at a cut, and not at a pan, a flash, a fade or a cut right after a keyframe, and a decoder started at each keyframe must show the same pictures as one that read the whole stream (`keyframes_come_at_the_interval`, `a_scene_cut_is_a_keyframe`, `motion_a_flash_and_an_early_cut_are_not_keyframes`). The level is checked against Table A-1 for 1280×720 at 30, 1920×1080 at 30 and 60 and 3840×2160 at 30, and the colour description is read back by this decoder (`the_sps_and_the_avcc_carry_the_level`, `the_colour_description_round_trips`). With FFmpeg installed, `ffprobe -show_streams` must report that level and colour and `ffprobe -show_frames` those keyframes (`ffprobe_reads_the_level_colour_and_keyframes`, `ffprobe_reads_the_level_of_hd_and_uhd`); last run on 24 November 2026 at commit `35319808` with FFmpeg 6.1.1 on a 4-core Intel Xeon at 2.1 GHz running Linux 6.18. `testsrc2_meets_the_luma_and_rate_gates` requires a luma PSNR of at least 30 dB and a size within 0.75 to 1.25 times `bitrate * duration`. `natural_clip_meets_the_luma_gate` requires 28 dB on a camera clip. `bottom_rows_survive_a_partial_macroblock_row` encodes scrolling pictures at 96×72, 96×80 and 88×72 and requires the bottom 24 rows to reach 35 dB luma and 28 dB chroma in every picture, with FFmpeg decoding the same samples: the encoder codes whole macroblocks, with the picture's last row and column repeated into the padding, and predicts from the uncropped reconstruction, as every decoder does.
 - **Bad input.** Truncated units, bad lengths, bad parameter sets, and 64 random packets must return an error, and a known picture must still decode afterward (`hostile_framing_is_rejected_and_the_decoder_stays_usable`, `hostile_parameter_sets_are_rejected`, `random_packets_fail_closed`).
 - Five films from 576×1024 to 3840×2160 decode to the same bytes as FFmpeg's decoder, on 1 thread and on 18 (see the speed section). The films are not in the repository, so no test repeats this.
 
@@ -166,12 +177,14 @@ Decoder gaps:
 
 Encoder gaps:
 
-- Intra macroblocks use only 4×4 DC prediction, and P and B pictures hold no intra macroblocks. A scene change inside a group of pictures is coded with inter prediction unless the caller sets `force_keyframe`.
+- Intra macroblocks use only 4×4 DC prediction, and P and B pictures hold no intra macroblocks. A scene change the cut check misses, or one a tenth of the keyframe interval or less after an IDR picture, is coded with inter prediction. So is a new object that covers part of a picture.
+- The cut check compares pictures at a quarter of their size or less. A picture under about 64 samples on a side has too few blocks for it to be reliable, and content with no likeness from one picture to the next (noise, a strobe) is a cut every tenth of the interval.
+- The keyframe interval and the cut check are set on `H264Encoder` itself. `CodecParams` has no field for them, so export always gets the defaults.
 - B pictures are 16×16 only, with no skip or direct macroblocks, and are never references.
 - The motion search is a four-point diamond of at most 16 steps and ±16 samples, then half and quarter sample steps.
 - No weighted prediction, 4×4 sub-macroblock partitions, CAVLC, interlace, several slices, or depths above 8 bits.
-- The stream always says level 3.1, also for a picture larger than that level allows.
-- The first QP is chosen as if the clip ran at 30 pictures a second.
+- The level is the Table A-1 row for the size, frame rate and requested bitrate. The rate control does not hold the stream to that level's buffer (no HRD), and the VUI carries no timing information, so a raw Annex B file does not say its frame rate.
+- `MatrixCoefficients::Rgb` is written as unspecified, because identity coefficients are for 4:4:4 only.
 - No presets and no multithreading.
 
 ## Specifications

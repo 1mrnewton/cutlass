@@ -119,6 +119,27 @@ mod tests {
     use super::{Lines, Rows};
     use crate::scalar;
 
+    /// Each test below, on every vector version of the kernels this CPU
+    /// can run.
+    mod on_each_tier {
+        tests_on_each_tier!(
+            the_normal_filter_matches_the_plain_one,
+            the_strong_filter_matches_the_plain_one,
+            the_chroma_filters_match_the_plain_ones,
+            whole_edges_match_the_plain_ones,
+            boundaries_alone_match_the_plain_ones,
+            chroma_boundaries_alone_match_the_plain_ones,
+            whole_macroblocks_match_the_plain_ones,
+            three_planes_match_the_plain_ones_and_all_or_none,
+            twin_chroma_planes_match_the_plain_ones,
+            a_macroblock_outside_the_plane_is_left_alone,
+            a_whole_edge_is_the_row_filter_on_its_rows,
+            the_extremes_match_the_plain_filters,
+            a_filter_leaves_the_outer_samples_alone,
+            thresholds_past_the_8_bit_range_match_the_plain_ones,
+        );
+    }
+
     /// A small generator, so the samples are the same on every run.
     struct Lcg(u64);
 
@@ -175,7 +196,6 @@ mod tests {
         (alpha, beta, tc0)
     }
 
-    #[test]
     fn the_normal_filter_matches_the_plain_one() {
         let mut rng = Lcg(1);
         let mut changed = 0;
@@ -200,7 +220,6 @@ mod tests {
         assert!(changed > 5_000, "only {changed} blocks were filtered");
     }
 
-    #[test]
     fn the_strong_filter_matches_the_plain_one() {
         let mut rng = Lcg(2);
         for round in 0..40_000 {
@@ -219,7 +238,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn the_chroma_filters_match_the_plain_ones() {
         let mut rng = Lcg(4);
         let mut changed = 0;
@@ -251,7 +269,6 @@ mod tests {
         assert!(changed > 5_000, "only {changed} blocks were filtered");
     }
 
-    #[test]
     fn whole_edges_match_the_plain_ones() {
         let mut rng = Lcg(5);
         let stride = 24usize;
@@ -330,7 +347,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn boundaries_alone_match_the_plain_ones() {
         // Most macroblocks filter only their left and top edges, which the
         // vector version does on its own path.
@@ -359,7 +375,6 @@ mod tests {
         assert!(changed > 5_000, "only {changed} macroblocks were filtered");
     }
 
-    #[test]
     fn chroma_boundaries_alone_match_the_plain_ones() {
         let mut rng = Lcg(9);
         let mut changed = 0;
@@ -388,7 +403,6 @@ mod tests {
         assert!(changed > 5_000, "only {changed} macroblocks were filtered");
     }
 
-    #[test]
     fn whole_macroblocks_match_the_plain_ones() {
         let mut rng = Lcg(7);
         let mut changed = 0;
@@ -426,7 +440,6 @@ mod tests {
         assert!(changed > 4_000, "only {changed} macroblocks were filtered");
     }
 
-    #[test]
     fn three_planes_match_the_plain_ones_and_all_or_none() {
         let mut rng = Lcg(12);
         let mut changed = 0;
@@ -478,7 +491,6 @@ mod tests {
         assert!(refused > 300, "only {refused} were refused");
     }
 
-    #[test]
     fn twin_chroma_planes_match_the_plain_ones() {
         let mut rng = Lcg(13);
         let mut changed = 0;
@@ -544,7 +556,6 @@ mod tests {
         assert!(refused > 500, "only {refused} were refused");
     }
 
-    #[test]
     fn a_macroblock_outside_the_plane_is_left_alone() {
         let down = 32;
         let before = vec![90u8; down * 20];
@@ -566,7 +577,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_whole_edge_is_the_row_filter_on_its_rows() {
         // Ties the plane functions to the row filters the other tests check.
         let mut rng = Lcg(6);
@@ -591,7 +601,6 @@ mod tests {
         assert_ne!(filtered, plane);
     }
 
-    #[test]
     fn the_extremes_match_the_plain_filters() {
         for fill in [0u8, 1, 127, 128, 254, 255] {
             for other in [0u8, 255, 128] {
@@ -615,7 +624,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_filter_leaves_the_outer_samples_alone() {
         let mut rng = Lcg(3);
         for _ in 0..2_000 {
@@ -628,5 +636,127 @@ mod tests {
             super::luma_strong_rows(&mut after, 255, 18);
             assert_eq!((after[0], after[7]), (before[0], before[7]));
         }
+    }
+
+    fn thresholds_past_the_8_bit_range_match_the_plain_ones() {
+        // Thresholds no table gives, which the vector filters cannot hold
+        // in a byte: a clipping value above 125, or an alpha or beta above
+        // 255. Each kernel hands such an edge to the plain filter.
+        let mut rng = Lcg(21);
+        let mut changed = 0;
+        for round in 0..6_000 {
+            let spread = [1, 3, 8, 30][round % 4];
+            let alpha = [40, 255, 256, 300][(rng.next() % 4) as usize];
+            let beta = [6, 18, 256][(rng.next() % 3) as usize];
+            let mut tc0 = [0i8; 4];
+            for group in &mut tc0 {
+                *group = [-1, 3, 125, 126, 127][(rng.next() % 5) as usize];
+            }
+            let mut fast = rows(&mut rng, spread);
+            let mut plain = fast;
+            super::luma_normal_rows(&mut fast, alpha, beta, tc0);
+            scalar::luma_normal_rows(&mut plain, alpha, beta, tc0);
+            assert_eq!(fast, plain, "rows, alpha {alpha} beta {beta} tc0 {tc0:?}");
+            let mut fast = rows(&mut rng, spread);
+            let mut plain = fast;
+            super::luma_strong_rows(&mut fast, alpha, beta);
+            scalar::luma_strong_rows(&mut plain, alpha, beta);
+            assert_eq!(fast, plain, "strong rows, alpha {alpha} beta {beta}");
+            let mut fast = lines(&mut rng, spread);
+            let mut plain = fast;
+            super::luma_normal_lines(&mut fast, alpha, beta, tc0);
+            scalar::luma_normal_lines(&mut plain, alpha, beta, tc0);
+            assert_eq!(fast, plain, "lines, alpha {alpha} beta {beta} tc0 {tc0:?}");
+            let mut fast = lines(&mut rng, spread);
+            let mut plain = fast;
+            super::luma_strong_lines(&mut fast, alpha, beta);
+            scalar::luma_strong_lines(&mut plain, alpha, beta);
+            assert_eq!(fast, plain, "strong lines, alpha {alpha} beta {beta}");
+            let mut chroma = [[0u8; 8]; 4];
+            for column in 0..8 {
+                let base = rng.next() as u8;
+                for row in &mut chroma {
+                    row[column] = rng.sample(base, spread);
+                }
+            }
+            let (mut fast, mut plain) = (chroma, chroma);
+            super::chroma_normal(&mut fast, alpha, beta, tc0);
+            scalar::chroma_normal(&mut plain, alpha, beta, tc0);
+            assert_eq!(fast, plain, "chroma, alpha {alpha} beta {beta} tc0 {tc0:?}");
+            let (mut fast, mut plain) = (chroma, chroma);
+            super::chroma_strong(&mut fast, alpha, beta);
+            scalar::chroma_strong(&mut plain, alpha, beta);
+            assert_eq!(fast, plain, "strong chroma, alpha {alpha} beta {beta}");
+            // Whole edges and whole macroblocks, whose filters hold alpha
+            // and beta in a byte but any clipping value.
+            let down = 40usize;
+            let base = rng.next() as u8;
+            let before: Vec<u8> = (0..down * 44).map(|_| rng.sample(base, spread)).collect();
+            let edge = super::Edge {
+                at: 8 * down + 8,
+                down,
+                vertical: round % 2 == 0,
+                alpha,
+                beta,
+                tc0: (round % 3 != 0).then_some(tc0),
+            };
+            let (mut fast, mut plain) = (before.clone(), before.clone());
+            assert!(super::luma_edge(&mut fast, edge));
+            assert!(scalar::luma_edge(&mut plain, edge));
+            assert_eq!(fast, plain, "luma edge {round}");
+            let (mut fast, mut plain) = (before.clone(), before.clone());
+            assert!(super::chroma_edge(&mut fast, edge));
+            assert!(scalar::chroma_edge(&mut plain, edge));
+            assert_eq!(fast, plain, "chroma edge {round}");
+            let filter = Some(super::Filter {
+                alpha: alpha.min(255) as u8,
+                beta: beta.min(255) as u8,
+                tc0: (round % 3 != 0).then_some(tc0),
+            });
+            let tame = Some(super::Filter {
+                alpha: 40,
+                beta: 10,
+                tc0: Some([3, -1, 25, 0]),
+            });
+            let edges = super::MbEdges {
+                at: 8 * down + 8,
+                down,
+                vertical: [filter, None, tame, None],
+                horizontal: [tame, None, filter, None],
+            };
+            let planes = || [before.clone(), before.clone(), before.clone()];
+            let [mut fast_y, mut fast_u, mut fast_v] = planes();
+            let [mut plain_y, mut plain_u, mut plain_v] = planes();
+            assert!(super::mb_twin(
+                (&mut fast_y, &mut fast_u, &mut fast_v),
+                &edges,
+                &edges,
+                [true, true]
+            ));
+            assert!(scalar::mb_twin(
+                (&mut plain_y, &mut plain_u, &mut plain_v),
+                &edges,
+                &edges,
+                [true, true]
+            ));
+            assert_eq!(
+                [&fast_y, &fast_u, &fast_v],
+                [&plain_y, &plain_u, &plain_v],
+                "twin {round}: {edges:?}"
+            );
+            let [mut fast_y, mut fast_u, mut fast_v] = planes();
+            assert!(super::mb(
+                (&mut fast_y, &mut fast_u, &mut fast_v),
+                &[edges, edges, edges],
+                [true, true, true]
+            ));
+            assert_eq!(
+                [&fast_y, &fast_u, &fast_v],
+                [&plain_y, &plain_u, &plain_v],
+                "three planes {round}: {edges:?}"
+            );
+            changed += usize::from(fast_y != before);
+        }
+        assert!(changed > 3_000, "only {changed} macroblocks were filtered");
     }
 }

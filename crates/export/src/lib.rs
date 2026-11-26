@@ -25,7 +25,8 @@ pub use config::{
     SidecarKind, SidecarRequest, VIDEO_SHORT_SIDES, coded_size, output_size, validate,
 };
 pub use movie::{
-    MOVIE_SOUND, MovieSources, part_path, video_bitrate, write_animation, write_movie, write_sound,
+    MOVIE_SOUND, MovieLayout, MovieSources, part_path, video_bitrate, write_animation, write_movie,
+    write_movie_with, write_sound,
 };
 pub use pictures::{PictureMovie, write_pictures, write_pictures_at};
 pub use prerender::{

@@ -58,9 +58,22 @@ Writing, with `IsoBmffMux`:
 | `M4v` | `M4V ` | `M4V `, `mp42`, `isom` |
 | `ThreeGp` | `3gp4` | `3gp4`, `isom` |
 
-The default layout is `ftyp`, `mdat`, `moov`. `moov_at_end: false` puts `moov` first and holds the payloads in memory until `finish`. `fragmented: true` writes `moov` with `mvex`, then `moof`/`mdat` pairs, then `mfra`, under the brands `iso5`, `iso6`, `mp41`. Decode times on a track must start at 0 and continue by each packet's duration. `set_edits` writes an `elst`.
+`MuxOptions` picks one of four layouts:
 
-`Mp4Mux` is the export muxer. It accepts H.264, HEVC, MPEG-4 Visual, MPEG-2, ProRes, VP8, AV1, and Motion JPEG pictures, and AAC, ALAC, Opus, AC-3, E-AC-3, and 16-bit PCM sound. Motion JPEG is written only to a QuickTime movie. An AV1 track is an `av01` entry with its `av1C` record in a file that lists the `av01` brand; each sample is the temporal unit without its temporal delimiter, padding and redundant frame headers, every OBU with a size (AV1 Codec ISO Media File Format Binding 2.1 and 2.4).
+| Layout | Options | File | While it is written |
+| --- | --- | --- | --- |
+| Progressive (default) | none | `ftyp`, `mdat`, `moov` | Packets go straight to the output. No index until `finish`. |
+| Fast start | `moov_at_end: false` | `ftyp`, `moov`, `mdat` | As progressive; `finish` moves the payload behind `moov` in 4 MiB blocks. This needs an output that can be read back (`IsoBmffMux::with_reader`, for example over `MovieFile`). On an output that cannot, the payload waits in memory, up to 256 MiB. |
+| Recoverable | `recoverable: true` | `ftyp`, `mdat`, `moov`, or `moov` first with `moov_at_end: false` | A fragmented file: `ftyp`, 16 free bytes, `moov` with `mvex`, then `moof`/`mdat` pairs. `finish` writes the full `moov` and turns the free bytes into the header of one `mdat` over everything after them, so the fragments' payload becomes the movie's and the boxes written on the way stay inside it as unreferenced bytes. A process that dies before `finish` leaves a fragmented file that plays up to its last whole fragment. One fragment is held in memory at a time. |
+| Fragmented | `fragmented: true` | `ftyp`, `moov` with `mvex`, then `sidx`/`moof`/`mdat` groups, then `mfra`; brands `iso5`, `iso6`, `mp41` | Each fragment is written when it is cut. |
+
+A fragment is cut before a video keyframe once it holds `fragment_millis` (default 1000) of video, or once a track holds that much in a file without video. It is also cut when it would pass `fragment_bytes` (default 16 MiB) or `samples_per_fragment` (default no bound), and when no keyframe has come for ten times the target (twice in a recoverable file, whose fragments are only read after a crash). Each track has one `traf` in a fragment. Fragmented output keeps the caller's interleave, with one `trun` for each run of a track's samples; a recoverable file lays each track's samples together under one `trun`, which gives the finished movie one chunk for a track in a fragment. A duration, size or flags value all samples share is stated once in `tfhd`. `sidx` has one reference, the fragment that follows it, timed on the first video track. `tfra` has one row for each track in each fragment: the first sync sample by presentation time, with its `traf`, `trun` and sample numbers.
+
+In a movie, samples that lie one after another in the file share a chunk of up to 1 MiB, and chunk offsets are `stco` unless one needs 64 bits (`co64`). The movie timescale is `movie_timescale` when set. Otherwise it is the least common multiple of the track timescales when that is at most 1,000,000, the first video track's timescale when it is not, and 1000 as the last resort; durations that do not divide round up. `mvhd`, `tkhd`, `mdhd` and `elst` are written as version 1, with 64-bit times, when a value does not fit 32 bits. `creation_time` sets the creation and modification time of the movie and its tracks.
+
+Decode times on a track must start at 0 and continue by each packet's duration. `set_edits` writes an `elst`.
+
+`Mp4Mux` is the export muxer. `Mp4Mux::with_options` takes `Mp4Options` (`fast_start`, `recoverable`, both on by default, and `creation_time`) over an output that can be read back; `Mp4Mux::new` and `with_brand` write a progressive file to any seekable output. An AAC, AC-3 or E-AC-3 track whose encoder reports its delay and padding gets an edit that starts after the delay and lasts to the padding, and its last sample's duration ends where the padding starts, which is how FFmpeg marks the end. It accepts H.264, HEVC, MPEG-4 Visual, MPEG-2, ProRes, VP8, AV1, and Motion JPEG pictures, and AAC, ALAC, Opus, AC-3, E-AC-3, and 16-bit PCM sound. Motion JPEG is written only to a QuickTime movie. An AV1 track is an `av01` entry with its `av1C` record in a file that lists the `av01` brand; each sample is the temporal unit without its temporal delimiter, padding and redundant frame headers, every OBU with a size (AV1 Codec ISO Media File Format Binding 2.1 and 2.4).
 
 `set_cover_art` (on `Mp4Mux` and `IsoBmffMux`) gives the file a JPEG cover, written as iTunes metadata the way FFmpeg's movenc.c writes it: `moov/udta/meta` (a full box with an `hdlr` of handler `mdir`, manufacturer `appl`), then `ilst/covr/data`, the `data` atom of type 13 (JPEG). FFmpeg reads it as an attached picture. Bytes that do not start with a JPEG marker, or a picture over 16 MiB (`MAX_COVER_BYTES`), are refused and the file is written without one. The demuxer skips `udta`.
 
@@ -104,7 +117,7 @@ mux.write_packet(&packet)?;
 mux.finish()?;
 ```
 
-`seek` moves to the sync sample at or before a decode time on the named track. A failed seek leaves the read position where it was. `finish` writes the index; a muxer dropped before `finish` leaves a file with no `moov`, and `open` refuses it.
+`seek` moves to the sync sample at or before a decode time on the named track. A failed seek leaves the read position where it was. `finish` writes the index; a progressive muxer dropped before `finish` leaves a file with no `moov`, and `open` refuses it. A recoverable muxer dropped before `finish` leaves a fragmented file.
 
 `cargo run --release -p cutlass-isobmff --example demux` asks FFmpeg for a short MP4, opens it, and prints the stream count, the packet count, and the first timestamp. It looks for FFmpeg only in the Homebrew location on macOS and prints `skip: ffmpeg is not installed` when it is not there.
 
@@ -116,6 +129,7 @@ cargo test -p cutlass-isobmff
 
 - Unit tests in `src/behavior.rs` build files by hand and through the muxer. They cover both index places, the sample tables, negative composition offsets, edit lists, the display matrix, seek, fragments, a HEIF item, an unknown codec, and hostile input (short header, wrong family, size past the parent, 40 nested boxes, external reference).
 - `src/demux/grouped_audio.rs` covers constant-size audio with files built byte by byte: `sowt` entries of version 0 and 1 with `stsz` sample size 1, a version 2 `lpcm` entry, a version 1 compressed block, entries with rate 0 at 96 and 88.2 kHz, seek to a frame inside a packet, tables that do not describe the payload, and a PCM movie longer than the samples limit written by this muxer and opened again. `ffmpeg_pcm_files_give_the_packets_ffprobe_lists` asks FFmpeg for `pcm_s16le`, `pcm_s24be`, and `pcm_f32le` in `.mov` and `.mp4` and compares every packet's times and size with `ffprobe -show_packets` and the bytes with FFmpeg's stream copy; it prints `not available` and passes without FFmpeg. `src/index.rs` checks the grouped packets against the row-per-frame table on 200 generated chunk layouts.
+- `src/mux_tests.rs` covers the writer's layouts. A 500 s movie at 59.94 fps with 44.1 kHz sound, and tracks and edits past 2^32 ticks, read back with exact durations. Fast start and the recoverable layout hold the packets the progressive layout holds. An unfinished recoverable file cut at every seventh byte still has every fragment that ends before the cut, and this crate's demuxer reads it when it is cut at a fragment's end. Fragments start on video keyframes with one `traf` a track, and `sidx` and `tfra` point at them. With FFmpeg installed, `ffprobe -show_format -show_streams -show_packets` reports the packets and durations of FFmpeg's own H.264 and AAC file for each layout, `ffmpeg -v error -i <file> -f null -` prints nothing, and an unfinished recoverable file cut at and between fragment ends gives FFmpeg every whole fragment.
 - `src/oracle.rs` compares against FFmpeg. `ffmpeg_and_gstreamer_see_the_same_packets` reads FFmpeg's progressive MP4, fragmented MP4, and QuickTime files and compares packet count, payload hash, size, duration, keyframe flag, and composition offset with `ffmpeg -c copy -f framehash`. `ffmpeg_reads_files_this_muxer_wrote` does the reverse for files this muxer wrote. `ffmpeg_motion_jpeg_files_demux_and_remux` covers Motion JPEG. These tests print `not available` and pass when `ffmpeg` or `ffprobe` is not on the `PATH`. GStreamer's `gst-discoverer-1.0` is asked for the codec and width when it is installed.
 - Two fuzz loops run only when asked: `ISOBMFF_FUZZ_SECS=<seconds>` for probe, open, read, and seek on mutated input, and `ISOBMFF_MUX_FUZZ_SECS=<seconds>` for a mux round trip. Without the variable they print `not run` and pass.
 - Four tests read real media from a folder kept outside the repository, and one of them rewrites the files only when `ISOBMFF_LOCAL_WRITE=1`. They pass without checking anything when the folder or the named file is absent.
@@ -137,7 +151,37 @@ Measured on 10 November 2026 at commit `ed0743d2`, on an Apple M5 Pro (18 cores,
 
 Cutlass is **1.1× faster** than FFmpeg here.
 
-Writing files was not measured.
+Writing files was not measured on that machine. The two measurements below were made on another one.
+
+### Writing, 24 November 2026
+
+Measured at commit `a79d870a` on a 4-vCPU Intel Xeon (2.10 GHz) cloud VM with 15 GB of memory, Linux 6.18, an ext4 virtio disk, rustc 1.97.0, against FFmpeg 6.1.1. The disk's write-back makes wall time swing by a factor of two between identical runs on this machine, so CPU time and instruction counts are the steadier columns. `perf stat` has no hardware counters in this VM; the instruction counts are user-space instructions from `valgrind --tool=cachegrind`, which leaves out the kernel's share of the work.
+
+**What each layout costs.** `mux_cost write <layout> <file> 900` writes a synthetic 900 s movie, 4.59 GB: 53,946 video packets at about 40 Mbit/s and 38,759 sound packets, then syncs the file. Three runs in turn; the median and the range. All four files hold the same packets (`mux_cost hash` digests agree, and `ffprobe` counts the same packets and durations).
+
+| Layout | Total wall | In `finish` | Peak memory | File size |
+| --- | ---: | ---: | ---: | ---: |
+| Progressive | 6.4 s (4.3 to 6.9) | 0.008 s | 9.8 MB | 4,591,303,730 |
+| Fast start | 8.1 s (6.3 to 8.9) | 2.1 s (1.5 to 2.3) | 15.2 MB | 4,591,303,730 |
+| Recoverable | 6.4 s (6.2 to 6.9) | 0.004 s | 12.5 MB | 4,590,942,646 |
+| Recoverable, fast start | 8.8 s (7.2 to 9.0) | 1.7 s (1.6 to 2.2) | 16.9 MB | 4,590,942,646 |
+
+Fast start costs one more read and write of the file at the end, about 2 s for 4.6 GB here, and 5 MB of memory. Recoverable costs nothing measurable in time and 3 MB of memory, and on this file is 361 KB smaller, because one chunk for a track in a fragment needs a smaller index than one chunk for a frame.
+
+**Copying a file's packets into a new file, against `ffmpeg -c copy`.** Input: one 1.69 GB file FFmpeg encoded, 400 s of 1920×1080 H.264 with B-frames (23,976 packets) and AAC (17,228 packets). Each side reads it and writes a new MP4, one thread, no sync; five runs in turn, the median. Every output, FFmpeg's too, has the same `mux_cost hash` digests and the same `ffprobe` packet counts and durations as the input.
+
+|  | Wall | CPU (user + system) | User-space instructions | Peak memory |
+| --- | ---: | ---: | ---: | ---: |
+| Cutlass, progressive | 3.0 s | 1.0 s | 1.76 billion | 7.5 MB |
+| FFmpeg, default | 3.0 s | 2.5 s | 5.22 billion | 62 MB |
+| Cutlass, fast start | 3.5 s | 1.6 s | 1.78 billion | 12.2 MB |
+| FFmpeg, `-movflags +faststart` | 3.8 s | 2.9 s | 6.98 billion | 62 MB |
+| Cutlass, recoverable | 3.1 s | 1.2 s | 3.46 billion | 11.0 MB |
+| Cutlass, recoverable and fast start | 4.3 s | 2.0 s | 3.47 billion | 15.1 MB |
+
+Wall time is the disk's and is the same for both within the noise. Cutlass uses 0.4 of FFmpeg's CPU time for the plain copy and 0.6 for the fast-start one. The recoverable layout doubles the user-space instructions, because each payload is copied into the fragment before it is written; FFmpeg 6.1.1 has no such mode to compare with.
+
+To run it again: `cargo build --release -p cutlass-isobmff --example mux_cost`, then `mux_cost write <layout> <out.mp4> <seconds>`, `mux_cost remux <layout> <in.mp4> <out.mp4>` (set `MUX_COST_NO_SYNC=1` to leave out the sync, as FFmpeg does), and `mux_cost hash <file>`.
 
 How it was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
 
@@ -171,7 +215,7 @@ Limits, from `src/limits.rs`:
 | Boxes visited at open | 2,000,000 |
 | Edits per track | 4,096 |
 | Sample descriptions per track | 16 |
-| Payload held when `moov` is written first | 256 MiB |
+| Payload held when `moov` is written first on an output that cannot be read back | 256 MiB |
 
 Gaps:
 
@@ -183,8 +227,12 @@ Gaps:
 - An AAC entry with a nonzero rate keeps that rate even when the `AudioSpecificConfig` states another.
 - A `trun` version 0 composition offset is read as unsigned. `ctts` is read as signed in both versions.
 - HEIF: a grid item is returned as its own packet and the picture is not assembled. The muxer does not write HEIF items. AVIF items go through the same code as HEIC items but have no test file.
-- `sidx` is parsed and tested on its own; no test seeks a whole file through it. The muxer does not write `sidx`.
-- The muxer always writes `co64` with one sample per chunk. `mvhd`, `tkhd`, `mdhd`, and `elst` are version 0, so a duration above `u32::MAX` is stored as `u32::MAX`.
+- `sidx` is written one to a fragment, never as one index of the whole file at its start.
+- A chunk is a run of one track's samples as the caller wrote them. Packets interleaved a frame at a time give a chunk a frame (4 bytes of `stco` each); only a recoverable file regroups them, one chunk for a track in a fragment.
+- An unfinished recoverable file is read back by this crate's demuxer only when it is cut exactly at the end of a fragment. Cut anywhere else, the last box runs past the end of the file and `open` refuses the file (`HostileSize` or `Truncated`), where FFmpeg reads every whole fragment.
+- While fast start moves the payload at `finish`, the file is not readable; a recoverable file is readable up to that step and after it.
+- A recoverable file's first `moov` is written with its first fragment. A codec configuration or color that changes after that is in the finished movie and not in a file recovered from a crash.
+- The muxer has no input for a pixel aspect ratio (`pasp`), mastering display or light level (`mdcv`, `clli`), or a rotation, and writes none.
 - If a write fails in the middle of a fragment after its `moof` went out, that `moof` is not taken back.
 - The FFmpeg comparison in this crate uses H.264, AAC, and Motion JPEG files. Most other sample entries are tested with hand-built entries. The AV1, VP9, FLAC, and MP3 entries have no test in this crate.
 - FFmpeg (`ffmpeg` and `ffprobe` share one library) is the only tool the packet comparison uses. GStreamer confirms codec and width only.

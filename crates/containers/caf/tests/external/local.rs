@@ -222,21 +222,39 @@ fn compare(file: &Path) -> bool {
         return false;
     };
     let mut demux = open(file);
+    let description = demux.description();
+    let runs = description.is_constant() && description.frames_per_packet == 1;
     let mut index = 0;
+    let mut frames = 0;
     let mut payload: Vec<u8> = Vec::new();
     while let Some(packet) = demux.read_packet().expect("read") {
-        let (pts, _, size) = probed.packets[index];
-        assert_eq!(
-            pts,
-            packet.timestamp().presentation().expect("pts") - priming,
-            "{name}"
-        );
-        assert_eq!(size, packet.bytes().len(), "{name}");
+        let pts = packet.timestamp().presentation().expect("pts") - priming;
+        if runs {
+            // One frame a packet comes in runs: up to 64 KiB here, 4,096
+            // bytes in libavformat. The runs joined are the same sound over
+            // the same time, as in the oracle tests.
+            if index == 0 {
+                assert_eq!(probed.packets[0].0, pts, "{name}: first pts");
+            }
+            frames += packet.timestamp().duration().expect("duration");
+        } else {
+            let (probed_pts, _, size) = probed.packets[index];
+            assert_eq!(probed_pts, pts, "{name}");
+            assert_eq!(size, packet.bytes().len(), "{name}");
+        }
         payload.extend(packet.bytes());
         index += 1;
     }
-    assert_eq!(index, probed.packets.len(), "{name}");
+    if runs {
+        let theirs: i64 = probed
+            .packets
+            .iter()
+            .map(|(_, duration, _)| *duration)
+            .sum();
+        assert_eq!(theirs, frames - remainder, "{name}: frames");
+    } else {
+        assert_eq!(index, probed.packets.len(), "{name}");
+    }
     assert!(payload == probed.payload, "{name}: payload");
-    let _ = remainder;
     true
 }

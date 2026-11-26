@@ -14,6 +14,8 @@ mod encode;
 mod filterbank;
 mod huff_tables;
 mod huffman;
+#[cfg(test)]
+mod oracle;
 mod quant;
 mod tns;
 

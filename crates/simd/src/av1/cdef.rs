@@ -1,10 +1,23 @@
 //! The constrained directional enhancement filter (AV1 specification 7.15).
 
+#[cfg(target_arch = "x86_64")]
+mod avx2;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod neon;
 mod scalar;
 #[cfg(test)]
 mod tests;
+
+use super::cpu;
+
+/// Whether the entries run a kernel on this CPU: NEON where the build
+/// has it, or AVX2. Without one they run the scalar twin, and a caller
+/// with its own loops does better to use those.
+#[must_use]
+#[inline]
+pub fn accelerated() -> bool {
+    cpu::vector()
+}
 
 /// Direction search on an 8x8 block of 8-bit luma (7.15.2). Returns
 /// `(yDir, var)`.
@@ -21,7 +34,16 @@ pub fn direction_u8(px: &[[u8; 8]; 8]) -> (u8, i32) {
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::direction(&px.map(|r| r.map(u16::from)), 8)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: `cpu::avx2` checked at run time that the CPU has
+            // AVX2.
+            #[allow(unsafe_code)]
+            return unsafe { avx2::direction_u8(px) };
+        }
+        scalar::direction(&px.map(|r| r.map(u16::from)), 8)
+    }
 }
 
 /// Direction search on an 8x8 block of luma of `bd` bits, 8 to 12
@@ -40,7 +62,15 @@ pub fn direction_u16(px: &[[u16; 8]; 8], bd: u32) -> (u8, i32) {
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::direction(px, bd)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: as in `direction_u8`.
+            #[allow(unsafe_code)]
+            return unsafe { avx2::direction_u16(px, bd) };
+        }
+        scalar::direction(px, bd)
+    }
 }
 
 /// Stride of the padded source [`filter_u8`] and [`filter_u16`] read.
@@ -111,7 +141,15 @@ pub fn filter_u16(win: &[u16; WINDOW], f: &Filter, rows: usize) -> [[u16; 8]; 8]
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    scalar::filter(win, f, rows)
+    {
+        #[cfg(target_arch = "x86_64")]
+        if cpu::avx2() {
+            // SAFETY: as in `direction_u8`.
+            #[allow(unsafe_code)]
+            return unsafe { avx2::filter(win, f, rows) };
+        }
+        scalar::filter(win, f, rows)
+    }
 }
 
 /// [`filter_inner_u8`] on a padded source of bytes: the same layout, for
@@ -131,6 +169,16 @@ pub fn filter_inner_bytes(
     let w = if wide { 8 } else { 4 };
     if rows == 0 || (rows - 1) * dst_stride + w > dst.len() {
         return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if cpu::avx2() {
+        // SAFETY: as in `direction_u8`. The kernel holds the shifts and
+        // the taps' places within reach itself.
+        #[allow(unsafe_code)]
+        unsafe {
+            avx2::filter_inner(dst, dst_stride, win, f, wide, rows);
+        }
+        return true;
     }
     let f = &Filter {
         pri_shift: f.pri_shift.min(15),
@@ -188,6 +236,16 @@ pub fn filter_inner_u8(
     if rows == 0 || (rows - 1) * dst_stride + w > dst.len() {
         return false;
     }
+    #[cfg(target_arch = "x86_64")]
+    if cpu::avx2() {
+        // SAFETY: as in `direction_u8`. The kernel holds the shifts and
+        // the taps' places within reach itself.
+        #[allow(unsafe_code)]
+        unsafe {
+            avx2::filter_inner(dst, dst_stride, win, f, wide, rows);
+        }
+        return true;
+    }
     let f = &Filter {
         pri_shift: f.pri_shift.min(15),
         sec_shift: f.sec_shift.min(15),
@@ -205,9 +263,11 @@ pub fn filter_inner_u8(
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    for (r, row) in scalar::filter(win, f, rows).iter().enumerate().take(rows) {
-        for (d, &v) in dst[r * dst_stride..r * dst_stride + w].iter_mut().zip(row) {
-            *d = v as u8;
+    {
+        for (r, row) in scalar::filter(win, f, rows).iter().enumerate().take(rows) {
+            for (d, &v) in dst[r * dst_stride..r * dst_stride + w].iter_mut().zip(row) {
+                *d = v as u8;
+            }
         }
     }
     true

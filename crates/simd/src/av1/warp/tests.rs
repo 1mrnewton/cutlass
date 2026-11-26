@@ -61,3 +61,40 @@ fn the_warp_matches_its_twin() {
         );
     }
 }
+
+#[test]
+fn flat_extreme_rows_under_the_widest_filters_match() {
+    // Filters at the bound of the table's contract (taps summing to 128,
+    // their absolute values to 255), over rows of all 0, all 255 and the
+    // two alternating: the largest sums either pass can reach.
+    let widest: [[i8; 8]; 4] = [
+        [-63, 0, 0, 127, 64, 0, 0, 0],
+        [0, 0, -63, 64, 127, 0, 0, 0],
+        [-32, -31, 96, 95, 0, 0, 0, 0],
+        [0, 0, 0, 0, 127, 64, -32, -31],
+    ];
+    let table: [[i8; 8]; 193] = core::array::from_fn(|i| widest[i % 4]);
+    let mut rng = Rng(9);
+    for round in 0..64 {
+        let rows: [[u8; 16]; 15] = core::array::from_fn(|r| {
+            core::array::from_fn(|c| match round % 4 {
+                0 => 0,
+                1 => 255,
+                2 => 255 * ((r + c) % 2) as u8,
+                _ => 255 * ((r / 2 + c / 3) % 2) as u8,
+            })
+        });
+        let rows = core::array::from_fn(|r| &rows[r]);
+        let f = Filters {
+            table: &table,
+            h: [rng.signed(32_768), rng.signed(2_048), rng.signed(2_048)],
+            v: [rng.signed(32_768), rng.signed(4_096), rng.signed(4_096)],
+        };
+        assert_eq!(put8x8(rows, &f), scalar::put8x8(rows, &f), "round {round}");
+        assert_eq!(
+            prep8x8(rows, &f),
+            scalar::prep8x8(rows, &f),
+            "round {round}"
+        );
+    }
+}

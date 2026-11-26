@@ -81,7 +81,7 @@ fn weighted_squares(v: &[Lanes; 2], w: &[i32; 16]) -> i32 {
 ///
 /// A build with vector kernels runs the one in `cutlass-simd`.
 pub fn cdef_direction<P: Pixel>(src: &[P], stride: usize, bd: u32) -> (u8, i32) {
-    if !cutlass_simd::ACCELERATED {
+    if !kernel::accelerated() {
         return direction_lanes(src, stride, bd);
     }
     let row = |i: usize| &src[i * stride..i * stride + 8];
@@ -357,8 +357,7 @@ fn filter_block<P: Pixel>(
     let p = Params::new(src_stride, pri, sec, dir, damping, bd);
     // The byte kernel takes 8-bit blocks inside the picture.
     let bytes = inner && !P::HBD && bd == 8;
-    if cutlass_simd::ACCELERATED && filter_kernel(dst, dst_stride, src, src_stride, w, h, &p, bytes)
-    {
+    if kernel::accelerated() && filter_kernel(dst, dst_stride, src, src_stride, w, h, &p, bytes) {
         return;
     }
     filter_lanes(dst, dst_stride, src, src_stride, w, h, &p);
@@ -426,7 +425,7 @@ pub fn cdef_filter_taps(
     h: usize,
     taps: &CdefTaps,
 ) -> bool {
-    if !cutlass_simd::ACCELERATED || !matches!((w, h), (8, 8) | (4, 4) | (4, 8)) {
+    if !kernel::accelerated() || !matches!((w, h), (8, 8) | (4, 4) | (4, 8)) {
         return false;
     }
     let Some(win) = src.first_chunk::<{ kernel::WINDOW }>() else {
@@ -446,7 +445,7 @@ pub fn cdef_filter_taps_bytes(
     h: usize,
     taps: &CdefTaps,
 ) -> bool {
-    if !cutlass_simd::ACCELERATED || !matches!((w, h), (8, 8) | (4, 4) | (4, 8)) {
+    if !kernel::accelerated() || !matches!((w, h), (8, 8) | (4, 4) | (4, 8)) {
         return false;
     }
     let Some(win) = src.first_chunk::<{ kernel::WINDOW }>() else {
@@ -1127,7 +1126,7 @@ mod tests {
                             let got: Vec<i32> = bytes.iter().map(|&v| i32::from(v)).collect();
                             assert_eq!(got, expect, "ready taps iter {iter}");
                         } else {
-                            assert!(!cutlass_simd::ACCELERATED || (bw, bh) == (8, 4));
+                            assert!(!super::kernel::accelerated() || (bw, bh) == (8, 4));
                         }
                     }
                 }

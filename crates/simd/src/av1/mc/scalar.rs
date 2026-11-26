@@ -32,15 +32,6 @@ fn vertical(b: &Block<'_>, mid: &[i16], r: usize, c: usize) -> i32 {
         .sum()
 }
 
-#[cfg_attr(
-    all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod",
-        not(test)
-    ),
-    allow(dead_code)
-)]
 pub(super) fn prep_hv(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) {
     let mid = horizontal(b);
     for r in 0..b.h {
@@ -50,15 +41,6 @@ pub(super) fn prep_hv(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) {
     }
 }
 
-#[cfg_attr(
-    all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod",
-        not(test)
-    ),
-    allow(dead_code)
-)]
 pub(super) fn put_hv(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) {
     let mid = horizontal(b);
     for r in 0..b.h {
@@ -75,15 +57,6 @@ fn vertical_samples(b: &Block<'_>, r: usize, c: usize) -> i32 {
         .sum()
 }
 
-#[cfg_attr(
-    all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod",
-        not(test)
-    ),
-    allow(dead_code)
-)]
 pub(super) fn prep_h(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) {
     let mid = horizontal(b);
     for r in 0..b.h {
@@ -94,15 +67,6 @@ pub(super) fn prep_h(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) {
     }
 }
 
-#[cfg_attr(
-    all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod",
-        not(test)
-    ),
-    allow(dead_code)
-)]
 pub(super) fn put_h(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) {
     let mid = horizontal(b);
     for r in 0..b.h {
@@ -113,15 +77,6 @@ pub(super) fn put_h(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) {
     }
 }
 
-#[cfg_attr(
-    all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod",
-        not(test)
-    ),
-    allow(dead_code)
-)]
 pub(super) fn prep_v(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) {
     for r in 0..b.h {
         for c in 0..b.w {
@@ -131,15 +86,6 @@ pub(super) fn prep_v(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) {
     }
 }
 
-#[cfg_attr(
-    all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_feature = "dotprod",
-        not(test)
-    ),
-    allow(dead_code)
-)]
 pub(super) fn put_v(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) {
     for r in 0..b.h {
         for c in 0..b.w {

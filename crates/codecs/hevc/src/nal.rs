@@ -17,6 +17,8 @@ pub const SPS: u8 = 33;
 pub const PPS: u8 = 34;
 pub const EOS: u8 = 36;
 pub const EOB: u8 = 37;
+pub const PREFIX_SEI: u8 = 39;
+pub const SUFFIX_SEI: u8 = 40;
 
 #[derive(Clone, Debug)]
 pub struct Nal {

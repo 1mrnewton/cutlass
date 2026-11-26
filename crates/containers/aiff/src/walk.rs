@@ -1,6 +1,12 @@
 //! FORM walk. Chunks are big-endian. An odd payload has one pad byte.
 //! The pad is inside the form and outside the chunk size. Sound bytes are
 //! not read during the walk.
+//!
+//! A header chunk that runs past the form is an error. The sound is not:
+//! a form or an `SSND` that states more bytes than the file holds, a last
+//! chunk with no pad byte, and a `COMM` frame count of zero are what a
+//! recording or a download that stopped leaves, and the sound that is
+//! there plays, as libavformat plays it.
 
 use std::io::{Read, Seek};
 
@@ -13,12 +19,18 @@ use crate::limits::{MAX_CHUNKS, MAX_COMM};
 struct Ssnd {
     start: u64,
     available: u64,
+    /// The chunk stated more bytes than the form or the file holds.
+    cut: bool,
 }
 
 pub(crate) struct Scanned {
     pub aifc: bool,
     pub sound: Sound,
     pub data_start: u64,
+    /// Sample frames, or codec blocks, to return.
+    pub units: u64,
+    /// The file holds less sound than its header states.
+    pub cut: bool,
     pub skipped: u32,
 }
 
@@ -36,6 +48,10 @@ pub(crate) fn scan<R: Read + Seek>(input: &mut Input<R>) -> Result<Scanned, Open
             });
         }
         chunks += 1;
+        if form_end - input.position() < 8 && comm.is_some() && ssnd.is_some() {
+            // The file stops inside a chunk header after the sound.
+            break;
+        }
         if take_chunk(input, form_end, aifc, &mut comm, &mut ssnd, &mut skipped)? {
             break;
         }
@@ -67,15 +83,9 @@ fn read_form<R: Read>(input: &mut Input<R>) -> Result<(bool, u64), OpenError> {
             got: 8 + form_size,
         });
     }
-    let form_end = add(8, form_size)?;
-    if let Some(length) = input.length()
-        && form_end > length
-    {
-        return Err(OpenError::HostileSize {
-            declared: form_end,
-            limit: length,
-        });
-    }
+    // A form that states more than the file holds ends where the file does.
+    let stated = add(8, form_size)?;
+    let form_end = input.length().map_or(stated, |length| stated.min(length));
     Ok((aifc, form_end))
 }
 
@@ -104,19 +114,32 @@ fn take_chunk<R: Read + Seek>(
     input.read_exact(&mut id).map_err(OpenError::from_header)?;
     let size = u64::from(read_u32(input)?);
     let start = input.position();
-    let end = add(start, add(size, size & 1)?)?;
-    if end > form_end {
+    let stated_end = add(start, size)?;
+    if &id == b"SSND" {
+        return read_ssnd(input, size, start, form_end, comm.is_some(), ssnd);
+    }
+    if stated_end > form_end {
+        if comm.is_some() && ssnd.is_some() {
+            // A chunk after the sound that is not all there. The sound
+            // plays; the chunk is not read.
+            *skipped += 1;
+            return Ok(true);
+        }
         return Err(OpenError::HostileSize {
-            declared: end,
+            declared: stated_end,
             limit: form_end,
         });
     }
+    // The pad byte of an odd last chunk may be missing.
+    let end = add(stated_end, size & 1)?.min(form_end);
     match &id {
         b"COMM" => {
             read_comm(input, size, aifc, comm)?;
+            if input.position() < end {
+                jump(input, end)?;
+            }
             Ok(false)
         }
-        b"SSND" => read_ssnd(input, size, start, end, comm.is_some(), ssnd),
         _ => {
             jump(input, end)?;
             *skipped += 1;
@@ -144,25 +167,30 @@ fn read_comm<R: Read + Seek>(
     let payload = input
         .read_limited(size, limit)
         .map_err(OpenError::from_header)?;
-    if size & 1 == 1 {
-        let mut pad = [0u8; 1];
-        input.read_exact(&mut pad).map_err(OpenError::from_header)?;
-    }
     *comm = Some(format::parse_comm(&payload, aifc)?);
     Ok(())
 }
 
 fn read_ssnd<R: Read + Seek>(
     input: &mut Input<R>,
-    size: u64,
+    stated: u64,
     start: u64,
-    end: u64,
+    form_end: u64,
     have_comm: bool,
     ssnd: &mut Option<Ssnd>,
 ) -> Result<bool, OpenError> {
     if ssnd.is_some() {
         return Err(format::open_source("duplicate SSND chunk"));
     }
+    // The size is a claim. What the file holds of it is the sound, also
+    // when the form size is the smaller: a form header that was not
+    // rewritten does not unmake bytes that are there.
+    let bound = input.length().unwrap_or(form_end);
+    let room = bound.saturating_sub(start);
+    let form_end = bound;
+    let cut = stated > room;
+    let size = stated.min(room);
+    let end = add(start, add(size, size & 1)?)?.min(form_end);
     if size < 8 {
         return Err(OpenError::Truncated {
             expected: 8,
@@ -182,10 +210,11 @@ fn read_ssnd<R: Read + Seek>(
     *ssnd = Some(Ssnd {
         start: sound_at,
         available: after - offset,
+        cut,
     });
     if input.access() == Access::Random {
         jump(input, end)?;
-        return Ok(false);
+        return Ok(cut);
     }
     if !have_comm {
         return Err(format::open_source("forward AIFF has SSND before COMM"));
@@ -214,14 +243,23 @@ fn finish<R: Read + Seek>(
     let Some(ssnd) = ssnd else {
         return Err(format::open_source("AIFF has no SSND chunk"));
     };
-    let need = sound.data_bytes()?;
-    if ssnd.available < need {
-        return Err(OpenError::Truncated {
-            expected: need,
-            got: ssnd.available,
-        });
-    }
     let frame = u64::from(sound.frame_bytes());
+    if frame == 0 {
+        return Err(format::open_source("frame is empty"));
+    }
+    // `COMM` states the length when it states one and the sound is all
+    // there. Zero is a header that was not filled in, and a count past
+    // the bytes is a file that was cut: either way the bytes are the
+    // length, down to the last whole frame.
+    let held = ssnd.available / frame;
+    let stated = sound.stated_units()?;
+    let (units, cut) = if stated == 0 {
+        (held, ssnd.cut || !ssnd.available.is_multiple_of(frame))
+    } else if stated > held {
+        (held, true)
+    } else {
+        (stated, false)
+    };
     let limit = input.limits().max_packet_bytes;
     if frame > limit {
         return Err(OpenError::HostileSize {
@@ -236,6 +274,8 @@ fn finish<R: Read + Seek>(
         aifc,
         sound,
         data_start: ssnd.start,
+        units,
+        cut,
         skipped,
     })
 }

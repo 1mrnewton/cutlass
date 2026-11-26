@@ -10,6 +10,7 @@
     clippy::unwrap_used
 )]
 
+mod damaged;
 mod decode;
 mod fuzz;
 mod kept;

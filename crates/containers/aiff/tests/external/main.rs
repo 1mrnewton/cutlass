@@ -5,5 +5,6 @@
 
 #![allow(clippy::expect_used, clippy::panic, clippy::print_stderr)]
 
+mod damaged;
 mod local;
 mod oracle;

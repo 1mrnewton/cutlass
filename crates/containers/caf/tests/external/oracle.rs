@@ -40,8 +40,35 @@ fn matches_libavformat(file: &Path) -> bool {
         return false;
     };
     let ours = packets(file);
-    let (priming, remainder) = trim_of(&open(file));
+    let demux = open(file);
+    let (priming, remainder) = trim_of(&demux);
     let name = file.display();
+    let description = demux.description();
+    if description.is_constant() && description.frames_per_packet == 1 {
+        // One frame a packet is returned in runs: up to 64 KiB here, 4,096
+        // bytes in libavformat. The runs joined are the same sound over
+        // the same time.
+        let frames = |durations: &mut dyn Iterator<Item = i64>| -> i64 { durations.sum() };
+        let theirs = frames(&mut probed.packets.iter().map(|(_, duration, _)| *duration));
+        let mine = frames(
+            &mut ours
+                .iter()
+                .map(|packet| packet.timestamp().duration().expect("duration")),
+        );
+        assert_eq!(theirs, mine - remainder, "{name}: frames");
+        assert_eq!(
+            probed.packets.first().map(|(pts, _, _)| *pts),
+            ours.first()
+                .map(|packet| packet.timestamp().presentation().expect("pts") - priming),
+            "{name}: first pts"
+        );
+        let payload: Vec<u8> = ours
+            .iter()
+            .flat_map(|packet| packet.bytes().to_vec())
+            .collect();
+        assert!(payload == probed.payload, "{name}: payload differs");
+        return true;
+    }
     assert_eq!(probed.packets.len(), ours.len(), "{name}: packet count");
     for (index, (packet, (pts, duration, size))) in ours.iter().zip(&probed.packets).enumerate() {
         let time = packet.timestamp();

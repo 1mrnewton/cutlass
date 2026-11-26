@@ -136,7 +136,7 @@ fn finish_ok(mux: &mut AiffMux<Cursor<Vec<u8>>>, rate: u32, ticks: i64) {
 }
 
 #[test]
-fn a_pcm_file_returns_one_frame_per_packet_in_sample_ticks() {
+fn a_pcm_file_returns_whole_frames_in_sample_ticks() {
     let sound = [0x00, 0x01, 0xff, 0xfe];
     let mut demux = open(&pcm_file(&sound));
     assert_eq!(demux.family(), cutlass_codec::ContainerId::Aiff);
@@ -151,22 +151,94 @@ fn a_pcm_file_returns_one_frame_per_packet_in_sample_ticks() {
     assert_eq!(stream.params().codec(), &StreamCodec::Known(CodecId::Pcm));
     let before = demux.consumed();
     let packets = read_packets(&mut demux);
-    assert_eq!(packets.len(), 2);
-    assert_eq!(packets[0].bytes(), &[0x00, 0x01]);
-    assert_eq!(packets[1].bytes(), &[0xff, 0xfe]);
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0].bytes(), &sound);
     assert_eq!(packets[0].timestamp().presentation(), Some(0));
-    assert_eq!(packets[1].timestamp().presentation(), Some(1));
-    assert_eq!(packets[0].timestamp().duration(), Some(1));
+    assert_eq!(packets[0].timestamp().duration(), Some(2));
     assert!(packets[0].keyframe());
     assert_eq!(
         demux.consumed() - before,
         u64::try_from(sound.len()).expect("len")
     );
+    assert_eq!(demux.indexed_end(TrackId::new(0)), Some(2));
+    assert_eq!(demux.indexed_end(TrackId::new(1)), None);
+    assert!(!demux.is_cut());
+}
+
+/// 100,000 mono 16-bit frames are three full runs of 32,768 frames, which
+/// is 64 KiB, and the 1,696 that are left.
+#[test]
+fn a_long_pcm_file_is_packets_of_whole_frames() {
+    let mut sound = Vec::new();
+    for frame in 0..100_000_u32 {
+        sound.extend_from_slice(&frame.to_be_bytes()[2..]);
+    }
+    let mut demux = open(&pcm_file(&sound));
+    assert_eq!(demux.indexed_end(TrackId::new(0)), Some(100_000));
+    let packets = read_packets(&mut demux);
+    let runs: Vec<(Option<i64>, Option<i64>, usize)> = packets
+        .iter()
+        .map(|packet| {
+            (
+                packet.timestamp().presentation(),
+                packet.timestamp().duration(),
+                packet.bytes().len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            (Some(0), Some(32_768), 65_536),
+            (Some(32_768), Some(32_768), 65_536),
+            (Some(65_536), Some(32_768), 65_536),
+            (Some(98_304), Some(1_696), 3_392),
+        ]
+    );
+    let joined: Vec<u8> = packets
+        .iter()
+        .flat_map(|packet| packet.bytes().to_vec())
+        .collect();
+    assert!(joined == sound);
+
+    // A seek lands on the frame, and the next packet starts there.
+    let landing = demux
+        .seek(SeekTo {
+            track: 0,
+            time: 70_001,
+            end: None,
+        })
+        .expect("seek");
+    assert!(matches!(
+        landing.landing,
+        Landing::Packet {
+            ordinal: 70_001,
+            time: 70_001,
+            preroll: 0,
+            ..
+        }
+    ));
+    let packet = demux.read_packet().expect("read").expect("packet");
+    assert_eq!(packet.timestamp().presentation(), Some(70_001));
+    assert_eq!(packet.timestamp().duration(), Some(29_999));
+    assert_eq!(&packet.bytes()[..2], &70_001_u32.to_be_bytes()[2..]);
+    assert!(demux.read_packet().expect("end").is_none());
+
+    // A packet limit below 64 KiB shortens the run to the whole frames
+    // the limit holds.
+    let mut limits = Limits::standard();
+    limits.max_packet_bytes = 5;
+    let file = pcm_file(&sound);
+    let len = u64::try_from(file.len()).expect("len");
+    let mut small = AiffDemux::open_limited(Cursor::new(file), len, limits).expect("limited");
+    let first = small.read_packet().expect("read").expect("packet");
+    assert_eq!(first.bytes().len(), 4);
+    assert_eq!(first.timestamp().duration(), Some(2));
 }
 
 #[test]
 fn samples_are_not_read_until_a_packet_is_asked_for() {
-    let mut sound = vec![0u8; 256];
+    let mut sound = vec![0u8; 200_000];
     sound[0] = 1;
     sound[1] = 2;
     let file = pcm_file(&sound);
@@ -177,8 +249,9 @@ fn samples_are_not_read_until_a_packet_is_asked_for() {
             <= u64::try_from(file.len()).expect("file")
     );
     let packet = demux.read_packet().expect("read").expect("frame");
-    assert_eq!(packet.bytes(), &[1, 2]);
-    assert_eq!(demux.consumed() - before, 2);
+    assert_eq!(&packet.bytes()[..2], &[1, 2]);
+    assert_eq!(packet.bytes().len(), 65_536);
+    assert_eq!(demux.consumed() - before, 65_536);
 }
 
 #[test]
@@ -205,8 +278,8 @@ fn an_odd_name_chunk_is_skipped_and_the_samples_remain() {
     let mut demux = open(&file);
     assert_eq!(demux.skipped_chunks(), 1);
     let packets = read_packets(&mut demux);
-    assert_eq!(packets[0].bytes(), &[0x00, 0x10]);
-    assert_eq!(packets[1].bytes(), &[0x00, 0x20]);
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0].bytes(), &sound);
 }
 
 #[test]
@@ -218,9 +291,8 @@ fn ssnd_offset_is_skipped_and_block_size_is_not_a_frame() {
     );
     let mut demux = open(&file);
     let packets = read_packets(&mut demux);
-    assert_eq!(packets.len(), 2);
-    assert_eq!(packets[0].bytes(), &[0x00, 0x01]);
-    assert_eq!(packets[1].bytes(), &[0x00, 0x02]);
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0].bytes(), &sound);
     assert!(!packets[0].bytes().contains(&0x5a));
 }
 
@@ -254,7 +326,9 @@ fn seek_lands_on_the_sample_without_reading_the_payload() {
         Landing::End => panic!("middle landed past the end"),
     }
     let packet = demux.read_packet().expect("read").expect("packet");
-    assert_eq!(packet.bytes(), &[0, 2]);
+    assert_eq!(packet.bytes(), &[0, 2, 0, 3]);
+    assert_eq!(packet.timestamp().presentation(), Some(1));
+    assert_eq!(packet.timestamp().duration(), Some(2));
     let last = demux
         .seek(SeekTo {
             track: 0,
@@ -296,7 +370,10 @@ fn seek_lands_on_the_sample_without_reading_the_payload() {
 
 #[test]
 fn a_failed_seek_does_not_move_the_next_packet() {
-    let mut demux = open(&pcm_file(&[0, 1, 0, 2]));
+    // 35,000 frames: the first packet is 32,768 of them.
+    let mut sound = vec![0u8; 70_000];
+    sound[65_536] = 9;
+    let mut demux = open(&pcm_file(&sound));
     let _ = demux.read_packet().expect("first").expect("frame");
     let error = demux
         .seek(SeekTo {
@@ -307,7 +384,9 @@ fn a_failed_seek_does_not_move_the_next_packet() {
         .expect_err("track");
     assert!(matches!(error, ReadError::Seek(SeekError::UnknownTrack)));
     let next = demux.read_packet().expect("second").expect("frame");
-    assert_eq!(next.bytes(), &[0, 2]);
+    assert_eq!(next.timestamp().presentation(), Some(32_768));
+    assert_eq!(next.bytes().len(), 4_464);
+    assert_eq!(next.bytes()[0], 9);
 }
 
 #[test]
@@ -323,7 +402,8 @@ fn a_forward_reader_plays_in_order_and_refuses_seek() {
         .expect_err("seek");
     assert!(matches!(error, ReadError::Seek(SeekError::ForwardOnly)));
     let packet = demux.read_packet().expect("read").expect("frame");
-    assert_eq!(packet.bytes(), &[0, 1]);
+    assert_eq!(packet.bytes(), &[0, 1, 0, 2]);
+    assert_eq!(packet.timestamp().duration(), Some(2));
 }
 
 #[test]
@@ -367,23 +447,68 @@ fn a_large_skipped_chunk_is_seeked_on_random_and_refused_forward() {
     assert!(matches!(error, OpenError::HostileSize { .. }));
 }
 
+/// The sound is what the file holds. `COMM` counting more frames than
+/// `SSND` has, and a form size that is wrong either way, do not stop it.
 #[test]
-fn truncated_sound_and_a_form_past_the_file_fail_closed() {
+fn truncated_sound_and_a_wrong_form_size_play_what_is_there() {
     let short = form(b"AIFF", &[comm(1, 2, 16, 8_000, None), ssnd(0, 0, &[0, 1])]);
-    assert_eq!(
-        open_err(&short),
-        OpenError::Truncated {
-            expected: 4,
-            got: 2
-        }
-    );
+    let mut demux = open(&short);
+    assert!(demux.is_cut());
+    assert_eq!(demux.duration_samples(), 1);
+    let packets = read_packets(&mut demux);
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0].bytes(), &[0, 1]);
+
     let mut huge = pcm_file(&[0, 1]);
     huge[4..8].copy_from_slice(&u32::MAX.to_be_bytes());
-    assert!(matches!(open_err(&huge), OpenError::HostileSize { .. }));
+    let mut demux = open(&huge);
+    assert!(!demux.is_cut());
+    assert_eq!(read_packets(&mut demux)[0].bytes(), &[0, 1]);
+
     let mut past = pcm_file(&[0, 1, 0, 2]);
     let size = u32::from_be_bytes([past[4], past[5], past[6], past[7]]);
     past[4..8].copy_from_slice(&(size - 4).to_be_bytes());
-    assert!(matches!(open_err(&past), OpenError::HostileSize { .. }));
+    let mut demux = open(&past);
+    assert!(!demux.is_cut());
+    assert_eq!(demux.duration_samples(), 2);
+    assert_eq!(read_packets(&mut demux)[0].bytes(), &[0, 1, 0, 2]);
+
+    // More sound than `COMM` counts: the count is the length.
+    let extra = form(
+        b"AIFF",
+        &[comm(1, 1, 16, 8_000, None), ssnd(0, 0, &[0, 1, 0, 2])],
+    );
+    let mut demux = open(&extra);
+    assert!(!demux.is_cut());
+    assert_eq!(read_packets(&mut demux)[0].bytes(), &[0, 1]);
+}
+
+/// A header that is not all there is still refused, with no stream list.
+#[test]
+fn a_cut_header_fails_closed() {
+    // `COMM` states more bytes than the file has.
+    let mut long_comm = pcm_file(&[0, 1]);
+    long_comm[16..20].copy_from_slice(&400_u32.to_be_bytes());
+    let error = open_err(&long_comm);
+    assert!(matches!(error, OpenError::HostileSize { .. }));
+    assert!(!error.streams_published());
+    // The file stops inside the `SSND` offset and block size fields.
+    let whole = pcm_file(&[0, 1]);
+    let cut = &whole[..whole.len() - 6];
+    let error = open_err(cut);
+    assert!(matches!(error, OpenError::Truncated { .. }), "{error}");
+    // A chunk before the sound that runs past the end.
+    let mut name = form(
+        b"AIFF",
+        &[
+            comm(1, 1, 16, 8_000, None),
+            chunk(b"NAME", b"ab"),
+            ssnd(0, 0, &[0, 1]),
+        ],
+    );
+    name[42..46].copy_from_slice(&4_000_u32.to_be_bytes());
+    assert_eq!(&name[38..42], b"NAME");
+    assert!(matches!(open_err(&name), OpenError::HostileSize { .. }));
 }
 
 #[test]
@@ -442,8 +567,16 @@ fn duplicate_chunks_zero_channels_and_a_bad_width_are_refused() {
     assert!(open_err(&silent).to_string().contains("channel"));
     let wide = form(b"AIFF", &[comm(65, 0, 16, 8_000, None), ssnd(0, 0, &[])]);
     assert!(matches!(open_err(&wide), OpenError::HostileSize { .. }));
-    let bits = form(b"AIFF", &[comm(1, 1, 12, 8_000, None), ssnd(0, 0, &[0, 1])]);
-    assert!(open_err(&bits).to_string().contains("sample size"));
+    for bits in [0, 33, 64] {
+        let file = form(
+            b"AIFF",
+            &[comm(1, 1, bits, 8_000, None), ssnd(0, 0, &[0, 1, 2, 3])],
+        );
+        assert!(
+            open_err(&file).to_string().contains("sample size"),
+            "{bits}"
+        );
+    }
 }
 
 #[test]
@@ -497,6 +630,154 @@ fn aifc_pcm_widths_keep_their_layout_bytes() {
 
     let eight = form(b"AIFF", &[comm(1, 1, 8, 8_000, None), ssnd(0, 0, &[0x80])]);
     assert_eq!(open(&eight).streams()[0].params().extradata(), &[6, 1, 0]);
+
+    // QuickTime wrote the float tags in upper case as well.
+    let upper32 = form(
+        b"AIFC",
+        &[comm(1, 1, 32, 8_000, Some(*b"FL32")), ssnd(0, 0, &float)],
+    );
+    assert_eq!(open(&upper32).streams()[0].params().extradata(), &[4, 1, 0]);
+    let upper64 = form(
+        b"AIFC",
+        &[comm(1, 1, 64, 8_000, Some(*b"FL64")), ssnd(0, 0, &wide)],
+    );
+    assert_eq!(open(&upper64).streams()[0].params().extradata(), &[5, 1, 0]);
+}
+
+/// `raw ` is offset binary, 128 for silence: PCM coding 11, not the
+/// signed bytes of plain AIFF, coding 6.
+#[test]
+fn aifc_raw_is_unsigned_eight_bit() {
+    let raw = form(
+        b"AIFC",
+        &[
+            comm(2, 2, 8, 8_000, Some(*b"raw ")),
+            ssnd(0, 0, &[0x80, 0xFF, 0x00, 0x7F]),
+        ],
+    );
+    let mut demux = open(&raw);
+    assert_eq!(demux.streams()[0].params().extradata(), &[11, 1, 0]);
+    let packets = read_packets(&mut demux);
+    assert_eq!(packets[0].bytes(), &[0x80, 0xFF, 0x00, 0x7F]);
+    assert_eq!(packets[0].timestamp().duration(), Some(2));
+    let wide = form(
+        b"AIFC",
+        &[comm(1, 1, 16, 8_000, Some(*b"raw ")), ssnd(0, 0, &[0, 0])],
+    );
+    assert!(open_err(&wide).to_string().contains("sample size"));
+}
+
+/// A sample of 9 to 16 bits is two bytes and one of 17 to 24 is three,
+/// left-justified, so it is read at the width of its bytes.
+#[test]
+fn a_depth_between_byte_widths_is_read_at_the_width_of_its_bytes() {
+    for (bits, coding, width) in [
+        (4_u16, 6_u8, 1_usize),
+        (12, 1, 2),
+        (16, 1, 2),
+        (18, 2, 3),
+        (20, 2, 3),
+        (24, 2, 3),
+        (30, 3, 4),
+        (32, 3, 4),
+    ] {
+        let sound: Vec<u8> = (1..=u8::try_from(width * 4).expect("len")).collect();
+        let file = form(
+            b"AIFF",
+            &[comm(2, 2, bits, 8_000, None), ssnd(0, 0, &sound)],
+        );
+        let mut demux = open(&file);
+        assert_eq!(
+            demux.streams()[0].params().extradata(),
+            &[coding, 1, 0],
+            "{bits}"
+        );
+        assert_eq!(demux.duration_samples(), 2, "{bits}");
+        let packets = read_packets(&mut demux);
+        assert_eq!(packets[0].bytes(), sound.as_slice(), "{bits}");
+    }
+    // The little-endian tag follows the same widths.
+    let sowt = form(
+        b"AIFC",
+        &[
+            comm(1, 1, 20, 8_000, Some(*b"sowt")),
+            ssnd(0, 0, &[1, 2, 3]),
+        ],
+    );
+    assert_eq!(open(&sowt).streams()[0].params().extradata(), &[2, 0, 0]);
+}
+
+/// 244800 / 11 Hz, as early Macintosh sound is stored, opens at the
+/// nearest whole rate.
+#[test]
+fn a_fractional_rate_is_the_nearest_hertz() {
+    let mut file = pcm_file(&[0, 1, 0, 2]);
+    assert_eq!(&file[12..16], b"COMM");
+    file[28..38].copy_from_slice(&[0x40, 0x0D, 0xAD, 0xDD, 0x17, 0x45, 0xD1, 0x74, 0x5D, 0x17]);
+    let mut demux = open(&file);
+    assert_eq!(demux.sample_rate(), 22_255);
+    assert_eq!(demux.streams()[0].timescale().ticks_per_second(), 22_255);
+    let packets = read_packets(&mut demux);
+    assert_eq!(packets[0].timescale().ticks_per_second(), 22_255);
+}
+
+/// A `COMM` that counts no frames, as a writer that could not seek back
+/// leaves it, takes its length from `SSND`; a last chunk with no pad byte
+/// is whole.
+#[test]
+fn a_zero_frame_count_and_a_missing_pad_byte_play_the_sound() {
+    let sound = [0, 1, 0, 2, 0, 3];
+    let unset = form(b"AIFF", &[comm(1, 0, 16, 8_000, None), ssnd(0, 0, &sound)]);
+    let mut demux = open(&unset);
+    assert!(!demux.is_cut());
+    assert_eq!(demux.duration_samples(), 3);
+    assert_eq!(demux.indexed_end(TrackId::new(0)), Some(3));
+    assert_eq!(read_packets(&mut demux)[0].bytes(), &sound);
+
+    // Three 8-bit frames: `SSND` is 11 bytes, and its pad byte is absent.
+    let mut odd = form(
+        b"AIFF",
+        &[comm(1, 3, 8, 8_000, None), ssnd(0, 0, &[1, 2, 3])],
+    );
+    assert_eq!(odd.pop(), Some(0));
+    let mut demux = open(&odd);
+    assert!(!demux.is_cut());
+    assert_eq!(read_packets(&mut demux)[0].bytes(), &[1, 2, 3]);
+    // Also when a later chunk is the odd one.
+    let mut tail = form(
+        b"AIFF",
+        &[
+            comm(1, 1, 16, 8_000, None),
+            ssnd(0, 0, &[0, 1]),
+            chunk(b"NAME", b"A"),
+        ],
+    );
+    assert_eq!(tail.pop(), Some(0));
+    let mut demux = open(&tail);
+    assert_eq!(demux.skipped_chunks(), 1);
+    assert_eq!(read_packets(&mut demux)[0].bytes(), &[0, 1]);
+
+    // An empty sound under a zero count is an empty file, not an error.
+    let empty = form(b"AIFF", &[comm(1, 0, 16, 8_000, None), ssnd(0, 0, &[])]);
+    let mut demux = open(&empty);
+    assert_eq!(demux.duration_samples(), 0);
+    assert_eq!(demux.indexed_end(TrackId::new(0)), None);
+    assert!(demux.read_packet().expect("read").is_none());
+}
+
+/// A forward reader cannot know the file is short until the input ends:
+/// it returns the whole frames that arrive and then says it was cut.
+#[test]
+fn a_forward_reader_plays_a_cut_file_to_the_end_of_the_input() {
+    let whole = pcm_file(&[0, 1, 0, 2, 0, 3, 0, 4]);
+    let cut = whole[..whole.len() - 3].to_vec();
+    let mut demux = AiffDemux::open_forward(Cursor::new(cut)).expect("forward");
+    assert!(!demux.is_cut());
+    let packet = demux.read_packet().expect("read").expect("packet");
+    assert_eq!(packet.bytes(), &[0, 1, 0, 2]);
+    assert_eq!(packet.timestamp().duration(), Some(2));
+    assert!(demux.is_cut());
+    assert!(demux.read_packet().expect("end").is_none());
 }
 
 #[test]
@@ -514,11 +795,10 @@ fn alaw_and_ulaw_are_pcm_codings_in_either_case() {
         assert_eq!(params.codec(), &StreamCodec::Known(CodecId::Pcm));
         assert_eq!(params.extradata(), &[coding, 1, 0]);
         let packets = read_packets(&mut demux);
-        assert_eq!(packets.len(), 2);
-        assert_eq!(packets[0].bytes(), &[0x11, 0x22]);
-        assert_eq!(packets[1].bytes(), &[0x33, 0x44]);
-        assert_eq!(packets[1].timestamp().presentation(), Some(1));
-        assert_eq!(packets[0].timestamp().duration(), Some(1));
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].bytes(), &[0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(packets[0].timestamp().presentation(), Some(0));
+        assert_eq!(packets[0].timestamp().duration(), Some(2));
     }
     let wide = form(
         b"AIFC",
@@ -661,9 +941,9 @@ fn a_mux_round_trip_keeps_big_endian_pcm_as_aiff() {
     assert!(!demux.is_aifc());
     assert_eq!(demux.streams()[0].params().extradata(), &[1, 1, 0]);
     let packets = read_packets(&mut demux);
-    assert_eq!(packets[0].bytes(), frames[0]);
-    assert_eq!(packets[1].bytes(), frames[1]);
-    assert_eq!(packets[1].timestamp().presentation(), Some(1));
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0].bytes(), [frames[0], frames[1]].concat());
+    assert_eq!(packets[0].timestamp().duration(), Some(2));
 }
 
 #[test]

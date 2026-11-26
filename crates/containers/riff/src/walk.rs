@@ -13,6 +13,16 @@ use crate::limits::{MAX_CHUNKS, MAX_DEPTH, MAX_DS64_ROWS, MAX_KEPT_CHUNK};
 pub enum Brand {
     Riff,
     Rf64,
+    /// ITU-R BS.2088. The layout is RF64's: a `ds64` chunk carries the
+    /// sizes that do not fit in 32 bits.
+    Bw64,
+}
+
+impl Brand {
+    /// The brands whose first chunk is `ds64`.
+    const fn wide(self) -> bool {
+        matches!(self, Self::Rf64 | Self::Bw64)
+    }
 }
 
 pub struct KeptChunk {
@@ -59,8 +69,16 @@ impl DroppedChunk {
 
 pub(crate) struct DataSpan {
     pub start: u64,
-    pub len: u64,
+    /// Sound bytes that are in the file. `None` on a forward reader whose
+    /// `data` chunk states no size: the sound runs to the end of the input.
+    pub len: Option<u64>,
     pub declared: u32,
+    /// The chunk stated more bytes than the file holds.
+    pub cut: bool,
+    /// The chunk stated no size, as a writer that could not seek back
+    /// leaves it: `0xFFFFFFFF` with no `ds64`, or zero in a header whose
+    /// RIFF size was never filled in either.
+    pub open_ended: bool,
 }
 
 pub(crate) struct Scanned {
@@ -95,14 +113,18 @@ pub(crate) fn scan<R: Read + Seek>(
     let brand = brand_of(&header)?;
     let file_len = input.length();
     let mut ds64 = None;
-    let parent_end = if brand == Brand::Rf64 {
+    let mut unsized_form = false;
+    let parent_end = if brand.wide() {
         let parsed = read_ds64_chunk(input)?;
         let end = parent_end_from(8, parsed.riff_size, file_len)?;
         ds64 = Some(parsed.ds64);
         end
     } else {
         let declared = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
-        let payload = if declared == u32::MAX {
+        // A writer that cannot seek back leaves the form size at zero or
+        // at all ones. Either way the form is the rest of the input.
+        unsized_form = declared == u32::MAX || declared == 0;
+        let payload = if unsized_form {
             file_len.unwrap_or(u64::MAX).saturating_sub(8)
         } else {
             u64::from(declared)
@@ -127,6 +149,7 @@ pub(crate) fn scan<R: Read + Seek>(
         dropped: Vec::new(),
         kept_bytes: 0,
         stop: false,
+        unsized_form,
     };
     walker.walk()?;
     Ok(Scanned {
@@ -160,6 +183,8 @@ struct Walker<'a, R> {
     dropped: Vec<DroppedChunk>,
     kept_bytes: u64,
     stop: bool,
+    /// The form header stated no size.
+    unsized_form: bool,
 }
 
 impl<R: Read + Seek> Walker<'_, R> {
@@ -198,14 +223,23 @@ impl<R: Read + Seek> Walker<'_, R> {
         scope_end: u64,
         depth: u32,
     ) -> Result<(), OpenError> {
+        if id == *b"data" {
+            return self.take_data(declared);
+        }
         let size = self.resolve(&id, declared)?;
         let payload_at = self.input.position();
+        if self.past_the_sound(payload_at, size, scope_end) {
+            // The sound is already found and this chunk, after it, runs
+            // past the end: a download that stopped in the trailing
+            // metadata. The sound plays; the chunk is named and left.
+            self.dropped.push(DroppedChunk::new(id, size));
+            self.stop = true;
+            return Ok(());
+        }
         self.ensure_fits(payload_at, size, scope_end)?;
         let next = padded_end(payload_at, size, scope_end, self.file_len)?;
         if id == *b"fmt " {
             self.take_fmt(size, next)?;
-        } else if id == *b"data" {
-            self.take_data(declared, size, payload_at, next)?;
         } else if id == *b"fact" {
             self.take_fact(size, next)?;
         } else if id == *b"ds64" {
@@ -237,29 +271,72 @@ impl<R: Read + Seek> Walker<'_, R> {
         Ok(())
     }
 
-    fn take_data(
-        &mut self,
-        declared: u32,
-        size: u64,
-        start: u64,
-        next: u64,
-    ) -> Result<(), OpenError> {
+    /// Records where the sound is. The stated size is a claim: the span
+    /// is the part of it the file holds, as libavformat plays it.
+    fn take_data(&mut self, declared: u32) -> Result<(), OpenError> {
         if self.data.is_some() {
             return Err(OpenError::Source {
                 message: "duplicate data chunk".to_owned(),
             });
         }
+        let start = self.input.position();
+        let stated = self.stated_data(declared, start);
+        let open_ended = stated.is_none();
+        let left = self.file_len.map(|len| len.saturating_sub(start));
+        let (len, cut) = match (stated, left) {
+            (Some(size), Some(left)) => (Some(size.min(left)), size > left),
+            (Some(size), None) => (Some(size), false),
+            (None, left) => (left, false),
+        };
         self.data = Some(DataSpan {
             start,
-            len: size,
+            len,
             declared,
+            cut,
+            open_ended,
         });
-        if self.random {
-            self.skip_to(next)?;
-        } else {
-            self.stop = true;
+        let end = len.and_then(|len| start.checked_add(len));
+        match end {
+            Some(end) if self.random && !cut && !open_ended => {
+                let padded = end.saturating_add(end.saturating_sub(start) & 1);
+                let next = self.file_len.map_or(padded, |len| padded.min(len));
+                self.skip_to(next)?;
+            }
+            _ => self.stop = true,
         }
         Ok(())
+    }
+
+    /// The size the `data` header states, or `None` when it states none.
+    fn stated_data(&self, declared: u32, start: u64) -> Option<u64> {
+        if declared == u32::MAX {
+            // A `ds64` that was never filled in states nothing either.
+            return self
+                .ds64
+                .as_ref()
+                .map(|ds64| ds64.data_size)
+                .filter(|size| *size != 0);
+        }
+        if declared == 0 && self.ds64.is_none() {
+            // Zero is "no size" only when the form header was not filled
+            // in either: it states nothing, or ends before the sound
+            // starts. A finished file with an empty `data` is empty.
+            let form_end = self.scopes.first().map_or(0, |scope| scope.end);
+            let more = self.file_len.is_none_or(|len| len > start);
+            if more && (self.unsized_form || form_end <= start) {
+                return None;
+            }
+        }
+        Some(u64::from(declared))
+    }
+
+    /// True for a chunk after the sound that does not fit in the file.
+    fn past_the_sound(&self, at: u64, size: u64, scope_end: u64) -> bool {
+        if self.data.is_none() || self.format.is_none() {
+            return false;
+        }
+        at.checked_add(size)
+            .is_none_or(|end| end > scope_end || self.file_len.is_some_and(|len| end > len))
     }
 
     fn take_fact(&mut self, size: u64, next: u64) -> Result<(), OpenError> {
@@ -391,9 +468,6 @@ impl<R: Read + Seek> Walker<'_, R> {
                 limit: self.room(),
             });
         };
-        if id == b"data" {
-            return Ok(ds64.data_size);
-        }
         if let Some((_, size)) = ds64.table.iter().find(|(chunk, _)| chunk == id) {
             return Ok(*size);
         }
@@ -496,7 +570,8 @@ fn brand_of(header: &[u8; 12]) -> Result<Brand, OpenError> {
     match &header[..4] {
         b"RIFF" => Ok(Brand::Riff),
         b"RF64" => Ok(Brand::Rf64),
-        b"RIFX" | b"BW64" => Err(OpenError::UnsupportedBrand {
+        b"BW64" => Ok(Brand::Bw64),
+        b"RIFX" => Err(OpenError::UnsupportedBrand {
             family: cutlass_codec::ContainerId::Riff,
         }),
         _ => Err(OpenError::Unrecognized {

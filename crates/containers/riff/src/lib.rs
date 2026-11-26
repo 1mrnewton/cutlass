@@ -6,9 +6,11 @@
 //!
 //! Normative layout: Multimedia Programming Interface and Data Specifications
 //! 1.0 (IBM/Microsoft, 1991), Microsoft WAVEFORMATEX and WAVEFORMATEXTENSIBLE,
-//! and EBU Tech 3306 for RF64. A declared size that runs past its parent is
-//! an error. FFmpeg, GStreamer, and libsndfile sometimes clip that size;
-//! this crate follows the declared bound.
+//! EBU Tech 3306 for RF64, and ITU-R BS.2088 for the BW64 brand. A header
+//! chunk whose declared size runs past its parent is an error. The `data`
+//! size is the exception: sound that stops before its stated end, or
+//! states none, plays up to the last whole frame the file holds, as
+//! FFmpeg plays it, and the demuxer says the file was cut.
 
 #![forbid(unsafe_code)]
 
@@ -25,7 +27,7 @@ pub use demux::WavDemux;
 pub use format::{WavFormat, parse_wave_format};
 pub use limits::{
     CHANNEL_MASK_OFFSET, EXTRA_HEADER, MAX_CHUNKS, MAX_DEPTH, MAX_DS64_ROWS, MAX_KEPT_CHUNK,
-    MAX_MPEG_RESYNC, PROBE_BYTES,
+    MAX_MPEG_RESYNC, PCM_PACKET_BYTES, PROBE_BYTES,
 };
 pub use mux::WavMux;
 pub use probe::{WavFamily, probe};
@@ -121,7 +123,7 @@ pub const FEATURES: &[Feature] = &[
     },
     Feature {
         name: "bw64",
-        demux: false,
+        demux: true,
         mux: false,
     },
     Feature {
@@ -173,15 +175,8 @@ mod tests {
         assert!(feature("alaw-mulaw").mux);
         assert!(feature("unknown-chunk-kept").mux);
         assert!(!feature("unknown-chunk-dropped").mux);
-        for name in [
-            "rifx",
-            "bw64",
-            "aiff",
-            "wavl",
-            "smv",
-            "language",
-            "sample-decode",
-        ] {
+        assert!(feature("bw64").demux && !feature("bw64").mux);
+        for name in ["rifx", "aiff", "wavl", "smv", "language", "sample-decode"] {
             let row = feature(name);
             assert!(!row.demux && !row.mux, "{name}");
         }

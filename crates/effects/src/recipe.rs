@@ -158,6 +158,28 @@ pub enum Block {
     /// faint ring, and coloured ghosts on the line from the light through
     /// the middle of the frame.
     Flare,
+    /// Dust in the air: slow motes drifting at four depths, the near ones
+    /// big and out of focus, optionally lit only inside a slanting shaft of
+    /// light.
+    Motes,
+    /// Glowing bits rising from below, swaying and flickering in hot air,
+    /// thicker near the bottom of the frame.
+    Embers,
+    /// Snow falling at four depths, swaying as it falls, the near flakes big
+    /// and soft.
+    Snow,
+    /// Rain: thin slanting streaks at three depths, the near ones longer,
+    /// faster and fainter.
+    Rain,
+    /// A burst of sparks thrown from one point: each a short streak that
+    /// flies out, is pulled down, cools from white to red and dies.
+    Sparks,
+    /// Slow banks of mist that drift with the wind and fold into each
+    /// other, everywhere or lying along the bottom of the frame.
+    Fog,
+    /// A plume of smoke rising from one point, swaying, curling and
+    /// thinning out as it climbs.
+    Smoke,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -506,9 +528,125 @@ const FLARE: &[Param] = &[
     param("blue", 0.62, 0.0, 1.0),
 ];
 
+/// `count` is how many motes there are; `drift_x` and `drift_y` are the
+/// way the air moves, in shorter sides a second. `beam` 1 lights the
+/// dust only in a shaft `beam_width` wide at `beam_angle` radians.
+const MOTES: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("drift_x", 0.012, -0.5, 0.5),
+    param("drift_y", -0.006, -0.5, 0.5),
+    param("beam", 0.0, 0.0, 1.0),
+    param("beam_angle", 0.55, -3.2, 3.2),
+    param("beam_width", 0.35, 0.02, 2.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.93, 0.0, 1.0),
+    param("blue", 0.8, 0.0, 1.0),
+];
+
+/// `rise` is how fast they climb, in shorter sides a second; `sway` how
+/// much the air pushes them about; `height` how far up the frame they
+/// reach before thinning out.
+const EMBERS: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("rise", 0.16, 0.0, 1.0),
+    param("sway", 1.0, 0.0, 3.0),
+    param("height", 1.0, 0.0, 1.5),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.36, 0.0, 1.0),
+    param("blue", 0.07, 0.0, 1.0),
+];
+
+/// `fall` and `wind` are in shorter sides a second; a negative `wind`
+/// blows left.
+const SNOW: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("fall", 0.22, 0.0, 2.0),
+    param("wind", 0.06, -1.0, 1.0),
+    param("red", 0.93, 0.0, 1.0),
+    param("green", 0.96, 0.0, 1.0),
+    param("blue", 1.0, 0.0, 1.0),
+];
+
+/// `fall` is in shorter sides a second; `slant` leans the rain, 0
+/// straight down.
+const RAIN: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("fall", 2.2, 0.0, 6.0),
+    param("slant", 0.18, -1.0, 1.0),
+    param("red", 0.78, 0.0, 1.0),
+    param("green", 0.84, 0.0, 1.0),
+    param("blue", 0.92, 0.0, 1.0),
+];
+
+/// `x` and `y` are where they fly from, as shares of the frame from its
+/// top left. `aim` is the middle of the throw and `fan` its width, in
+/// turns (aim 0 right, -0.25 up). `every` above 0 throws a new burst
+/// that many seconds apart.
+const SPARKS: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("x", 0.5, -0.5, 1.5),
+    param("y", 0.6, -0.5, 1.5),
+    param("count", 70.0, 1.0, 120.0),
+    param("speed", 1.0, 0.0, 3.0),
+    param("gravity", 1.0, -2.0, 3.0),
+    param("life", 1.1, 0.1, 5.0),
+    param("aim", -0.25, -1.0, 1.0),
+    param("fan", 0.5, 0.0, 1.0),
+    param("every", 0.0, 0.0, 10.0),
+];
+
+/// `fill` is how much of the frame the fog covers, `scale` the size of
+/// its banks, `ground` 1 lays it along the bottom.
+const FOG: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("fill", 1.0, 0.0, 2.0),
+    param("scale", 1.0, 0.25, 4.0),
+    param("wind_x", 1.0, -3.0, 3.0),
+    param("wind_y", 0.0, -3.0, 3.0),
+    param("ground", 0.0, 0.0, 1.0),
+    param("red", 0.86, 0.0, 1.0),
+    param("green", 0.89, 0.0, 1.0),
+    param("blue", 0.93, 0.0, 1.0),
+];
+
+/// `x` and `y` are where it starts, as shares of the frame from its top
+/// left. `width` is the plume's width there and `spread` how fast it
+/// widens, `height` how far up it reaches, all in shorter sides.
+const SMOKE: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("x", 0.5, -0.5, 1.5),
+    param("y", 1.0, -0.5, 1.5),
+    param("width", 0.05, 0.005, 0.5),
+    param("spread", 0.3, 0.0, 2.0),
+    param("height", 1.0, 0.1, 3.0),
+    param("rise", 1.0, 0.0, 4.0),
+    param("curl", 1.0, 0.0, 3.0),
+    param("red", 0.82, 0.0, 1.0),
+    param("green", 0.82, 0.0, 1.0),
+    param("blue", 0.84, 0.0, 1.0),
+];
+
 impl Block {
     /// Every block, in the order of their codes.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 49] = [
         Self::Transform,
         Self::RgbSplit,
         Self::Slices,
@@ -551,6 +689,13 @@ impl Block {
         Self::Burn,
         Self::Bokeh,
         Self::Flare,
+        Self::Motes,
+        Self::Embers,
+        Self::Snow,
+        Self::Rain,
+        Self::Sparks,
+        Self::Fog,
+        Self::Smoke,
     ];
 
     /// The parameters in the order the shader reads them.
@@ -599,6 +744,13 @@ impl Block {
             Self::Burn => BURN,
             Self::Bokeh => BOKEH,
             Self::Flare => FLARE,
+            Self::Motes => MOTES,
+            Self::Embers => EMBERS,
+            Self::Snow => SNOW,
+            Self::Rain => RAIN,
+            Self::Sparks => SPARKS,
+            Self::Fog => FOG,
+            Self::Smoke => SMOKE,
         }
     }
 
@@ -648,6 +800,13 @@ impl Block {
             Self::Burn => 39,
             Self::Bokeh => 40,
             Self::Flare => 41,
+            Self::Motes => 42,
+            Self::Embers => 43,
+            Self::Snow => 44,
+            Self::Rain => 45,
+            Self::Sparks => 46,
+            Self::Fog => 47,
+            Self::Smoke => 48,
         }
     }
 }
@@ -998,7 +1157,15 @@ pub struct Recipe {
 
 /// The effects shelf's categories, in the order the shelf lists them.
 pub const EFFECT_CATEGORIES: &[&str] = &[
-    "Basic", "Motion", "Reveal", "Blur", "Glitch", "Retro", "Light", "Distort",
+    "Basic",
+    "Motion",
+    "Reveal",
+    "Blur",
+    "Glitch",
+    "Retro",
+    "Light",
+    "Atmosphere",
+    "Distort",
 ];
 
 /// One block with every value worked out for one moment.
@@ -1595,7 +1762,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 212] = [
+const BUNDLED_FILES: [&str; 223] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -1808,6 +1975,17 @@ const BUNDLED_FILES: [&str; 212] = [
     include_str!("../recipes/color-bokeh.json"),
     include_str!("../recipes/lens-flare.json"),
     include_str!("../recipes/streak-flare.json"),
+    include_str!("../recipes/dust.json"),
+    include_str!("../recipes/dust-beam.json"),
+    include_str!("../recipes/embers.json"),
+    include_str!("../recipes/snowfall.json"),
+    include_str!("../recipes/blizzard.json"),
+    include_str!("../recipes/rain.json"),
+    include_str!("../recipes/downpour.json"),
+    include_str!("../recipes/sparks.json"),
+    include_str!("../recipes/fog.json"),
+    include_str!("../recipes/ground-mist.json"),
+    include_str!("../recipes/smoke.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.

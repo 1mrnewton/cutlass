@@ -362,4 +362,304 @@ fn flare(uv: vec2<f32>) -> vec4<f32> {
     let flick = 0.93 + 0.07 * vnoise(vec2<f32>(time * 9.0, seed));
     return screened(c, sum * amount * flick);
 }
+
+// Specks without a simulation. The frame is cut into a grid of cells,
+// a cell may hold one speck, and the speck's place, size and flicker
+// come from the cell's own random numbers. The caller slides the whole
+// grid to make them travel, so any frame can be drawn alone.
+//
+// p: the pixel, in shorter sides. cells: cells a shorter side. sd: seed.
+// now: seconds. density: the share of cells holding a speck. size: its
+// radius as a share of a cell. soft: 0 a hard dot, 1 all blur. stretch:
+// squeezes it. wander: how far it strays. twinkle: how fast it flickers.
+fn specks_layer(
+    p: vec2<f32>,
+    cells: f32,
+    sd: f32,
+    now: f32,
+    density: f32,
+    size: f32,
+    soft: f32,
+    stretch: vec2<f32>,
+    wander: f32,
+    twinkle: f32,
+) -> f32 {
+    let g = p * cells;
+    let id = floor(g);
+    // One pixel, in cells. A speck smaller than a pixel is drawn a pixel
+    // wide and that much fainter, so a small frame shows the same light
+    // as a large one instead of losing the speck between pixels.
+    let pixel = cells / min(fx.size.x, fx.size.y);
+    var sum = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let cell = id + vec2<f32>(f32(dx), f32(dy));
+            if (hash12(cell * 1.7 + sd * 3.1) > density) {
+                continue;
+            }
+            let h = hash22(cell + sd * 17.3);
+            let h2 = hash22(cell * 2.3 + sd * 5.9 + 11.0);
+            let stray = vec2<f32>(
+                sin(now * (0.5 + h2.x) + h2.y * TAU),
+                cos(now * (0.4 + h2.y) + h2.x * TAU),
+            ) * 0.22 * wander;
+            let at = cell + 0.5 + (h - 0.5) * 0.5 + stray;
+            let true_r = size * (0.45 + 0.55 * h2.x);
+            let r = max(true_r, pixel * 0.8);
+            let fainter = (true_r * true_r) / (r * r);
+            let d = length((g - at) * stretch);
+            var dip = 0.0;
+            if (twinkle > 0.0) {
+                dip = 0.7;
+            }
+            let flick = 1.0 - dip * (0.5 + 0.5 * sin(now * twinkle * (0.5 + h.x) + h.y * TAU));
+            let inner = min(r * (1.0 - soft), r - pixel * 0.5);
+            sum = sum + (1.0 - smoothstep(inner, r, d)) * fainter * flick * (0.4 + 0.6 * h2.y);
+        }
+    }
+    return sum;
+}
+
+// amount, time, seed, count | drift_x, drift_y, beam, beam_angle |
+// beam_width, red, green, blue
+fn motes(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let t = fx.a.y;
+    let seed = fx.a.z;
+    let count = fx.a.w;
+    let drift = fx.b.xy;
+    let beam = fx.b.z;
+    let p = from_middle(uv);
+    let round = vec2<f32>(1.0);
+    // Far to near: small sharp slow motes, then bigger, softer, faster.
+    var v = specks_layer(p + drift * t * 0.5, 34.0, seed, t, 0.30 * count, 0.075, 0.6, round, 1.0, 1.3) * 1.5;
+    v = v + specks_layer(p + drift * t * 0.9, 21.0, seed + 7.0, t, 0.28 * count, 0.08, 0.7, round, 1.0, 1.1) * 1.8;
+    v = v + specks_layer(p + drift * t * 1.6, 11.0, seed + 13.0, t, 0.22 * count, 0.085, 0.85, round, 1.0, 0.8) * 1.4;
+    v = v + specks_layer(p + drift * t * 2.8, 4.5, seed + 23.0, t, 0.2 * count, 0.14, 1.0, round, 1.0, 0.5) * 0.4;
+    var lit = 1.0;
+    if (beam > 0.0) {
+        // Only the dust inside a slanting shaft of light shows.
+        let q = turn(p, fx.b.w);
+        let width = fx.c.x;
+        let shaft = (1.0 - smoothstep(width * 0.4, width, abs(q.x + 0.1)))
+            * (0.75 + 0.25 * fbm(vec2<f32>(q.x * 6.0, t * 0.1), 2));
+        lit = mix(1.0, shaft, beam);
+        v = v + shaft * beam * 0.08;
+    }
+    return screened(c, fx.c.yzw * v * lit * fx.a.x);
+}
+
+// amount, time, seed, count | rise, sway, height, red | green, blue
+fn embers(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let t = fx.a.y;
+    let seed = fx.a.z;
+    let count = fx.a.w;
+    let rise = fx.b.x;
+    let tint = vec3<f32>(fx.b.w, fx.c.x, fx.c.y);
+    let p = from_middle(uv);
+    // Hot air: the whole field is bent by slow rising clouds.
+    let push = (vec2<f32>(
+        fbm3(vec3<f32>(p * 1.6 + seed, t * 0.3), 3),
+        fbm3(vec3<f32>(p * 1.6 + seed + 30.0, t * 0.3), 3),
+    ) - 0.5) * 0.16 * fx.b.y;
+    let q = p + push;
+    var e = specks_layer(q + vec2<f32>(0.0, rise * 0.6) * t, 30.0, seed, t, 0.22 * count, 0.06, 0.6, vec2<f32>(1.0, 0.6), 1.2, 5.0) * 0.8;
+    e = e + specks_layer(q + vec2<f32>(0.02, rise) * t, 17.0, seed + 5.0, t, 0.2 * count, 0.07, 0.7, vec2<f32>(1.0, 0.55), 1.2, 4.0);
+    e = e + specks_layer(q + vec2<f32>(-0.02, rise * 1.7) * t, 8.0, seed + 11.0, t, 0.16 * count, 0.08, 0.9, vec2<f32>(1.0, 0.6), 1.0, 3.0) * 0.8;
+    // Thicker low down, gone by the top.
+    let height = fx.b.z;
+    e = e * smoothstep(0.5 - height, 0.5 - height + 0.9, uv.y) * 1.3;
+    // Faint ones are deep red, bright ones go orange, then yellow-white.
+    return screened(c, vec3<f32>(1.0) - exp(-e * fx.a.x * 3.2 * tint));
+}
+
+// amount, time, seed, count | fall, wind, red, green | blue
+fn snow(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let t = fx.a.y;
+    let seed = fx.a.z;
+    let count = fx.a.w;
+    let way = vec2<f32>(fx.b.y, fx.b.x) * t;
+    let p = from_middle(uv);
+    let round = vec2<f32>(1.0);
+    var v = specks_layer(p - way * 0.45, 40.0, seed, t, 0.5 * count, 0.09, 0.6, round, 1.0, 0.0) * 0.9;
+    v = v + specks_layer(p - way * 0.75, 24.0, seed + 3.0, t, 0.45 * count, 0.1, 0.65, round, 1.2, 0.0) * 1.1;
+    v = v + specks_layer(p - way * 1.3, 13.0, seed + 9.0, t, 0.4 * count, 0.11, 0.8, round, 1.4, 0.0) * 1.1;
+    v = v + specks_layer(p - way * 2.4, 5.0, seed + 17.0, t, 0.3 * count, 0.14, 1.0, round, 1.4, 0.0) * 0.5;
+    return screened(c, vec3<f32>(fx.b.z, fx.b.w, fx.c.x) * v * fx.a.x);
+}
+
+// One depth of rain: thin columns, drops repeating down each.
+fn rain_streaks(p: vec2<f32>, columns: f32, len: f32, sd: f32, speed: f32, density: f32) -> f32 {
+    let t = fx.a.y;
+    let q = vec2<f32>(p.x + p.y * fx.b.y, p.y);
+    let col = floor(q.x * columns);
+    let h = hash12(vec2<f32>(col, sd * 7.7));
+    if (h > density) {
+        return 0.0;
+    }
+    let h2 = hash12(vec2<f32>(col * 1.9 + 4.0, sd * 3.3));
+    // Across the column: a thin line at a random place in it.
+    // A line thinner than a pixel is drawn a pixel wide and fainter.
+    let x = fract(q.x * columns) - (0.2 + 0.6 * h2);
+    let wide = max(0.07, columns / min(fx.size.x, fx.size.y) * 0.8);
+    let line = (1.0 - smoothstep(0.0, wide, abs(x))) * 0.07 / wide;
+    // Down the column: each drop is bright at its head and fades up
+    // its tail.
+    let gap = len * (2.5 + 4.0 * h);
+    let y = fract((q.y - t * speed * (0.8 + 0.4 * h2)) / gap + h * 13.0) * gap;
+    let drop = smoothstep(0.0, len, y) * (1.0 - smoothstep(len, len * 1.08, y));
+    return line * drop * (0.5 + 0.5 * h2);
+}
+
+// amount, time, seed, count | fall, slant, red, green | blue
+fn rain(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let seed = fx.a.z;
+    let count = fx.a.w;
+    let fall = fx.b.x;
+    let p = from_middle(uv);
+    var v = rain_streaks(p, 150.0, 0.05, seed, fall * 0.6, 0.55 * count) * 0.35;
+    v = v + rain_streaks(p, 90.0, 0.09, seed + 5.0, fall, 0.5 * count) * 0.45;
+    v = v + rain_streaks(p, 45.0, 0.17, seed + 11.0, fall * 1.6, 0.4 * count) * 0.3;
+    return screened(c, vec3<f32>(fx.b.z, fx.b.w, fx.c.x) * v * fx.a.x);
+}
+
+// Where a spark thrown at `v0` is after `age` seconds: air slows it,
+// gravity pulls it.
+fn spark_flight(v0: vec2<f32>, age: f32, drag: f32, gravity: f32) -> vec2<f32> {
+    let k = (1.0 - exp(-drag * age)) / drag;
+    return v0 * k + vec2<f32>(0.0, 0.9 * gravity) * age * age * 0.5;
+}
+
+// amount, time, seed, x | y, count, speed, gravity | life, aim, fan, every
+fn sparks(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let t = fx.a.y;
+    let seed = fx.a.z;
+    let speed = fx.b.z;
+    let gravity = fx.b.w;
+    let life = fx.c.x;
+    let every = fx.c.w;
+    let p = (uv - vec2<f32>(fx.a.w, fx.b.x)) * frame_shape();
+    var burst = 0.0;
+    var since = t;
+    if (every > 0.0) {
+        burst = floor(t / every);
+        since = t - burst * every;
+    }
+    var light = vec3<f32>(0.0);
+    let n = i32(clamp(fx.b.y, 1.0, 120.0));
+    for (var i = 0; i < n; i = i + 1) {
+        let fi = f32(i);
+        let h = hash22(vec2<f32>(fi * 3.1 + 1.0, seed * 7.3 + burst * 13.0));
+        let h2 = hash22(vec2<f32>(fi * 5.7 + 9.0, seed * 2.9 + burst * 5.0));
+        let lives = life * (0.35 + 0.65 * h2.x);
+        let age = since - h2.y * 0.08;
+        if (age < 0.0 || age > lives) {
+            continue;
+        }
+        let a = (fx.c.y + (h.x - 0.5) * fx.c.z) * TAU;
+        let v0 = vec2<f32>(cos(a), sin(a)) * speed * (0.35 + 1.1 * h.y * h.y);
+        let drag = 0.9 + 1.2 * h2.x;
+        let head = spark_flight(v0, age, drag, gravity);
+        let tail = spark_flight(v0, max(age - 0.06, 0.0), drag, gravity);
+        // How far this pixel is from the streak between tail and head.
+        let seg = head - tail;
+        let along = clamp(dot(p - tail, seg) / max(dot(seg, seg), 0.000001), 0.0, 1.0);
+        let d = length(p - tail - seg * along);
+        let left = 1.0 - age / lives;
+        let glow = exp(-d * d / (0.0000035 + 0.000004 * h2.y)) * (0.35 + 0.65 * along);
+        // Hot at first, then cooling from white through yellow to red.
+        let heat = mix(vec3<f32>(1.0, 0.25, 0.04), vec3<f32>(1.0, 0.85, 0.6), smoothstep(0.15, 0.7, left));
+        light = light + heat * glow * smoothstep(0.0, 0.25, left) * 1.6;
+    }
+    // The flash at the point of the burst.
+    let flash = exp(-since * 14.0) * exp(-dot(p, p) / 0.0015);
+    light = light + vec3<f32>(1.0, 0.8, 0.5) * flash;
+    return screened(c, light * fx.a.x);
+}
+
+// One bank of fog: clouds bent by slower clouds.
+fn fog_bank(p: vec2<f32>, z: f32, sd: f32) -> f32 {
+    let w = vec2<f32>(
+        fbm3(vec3<f32>(p * 0.8 + sd, z), 3),
+        fbm3(vec3<f32>(p * 0.8 + sd + 31.0, z), 3),
+    ) - 0.5;
+    return fbm3(vec3<f32>(p + w * 1.1, z * 1.6 + sd), 5);
+}
+
+// amount, time, seed, fill | scale, wind_x, wind_y, ground | red, green, blue
+fn fog(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let t = fx.a.y;
+    let seed = fx.a.z;
+    let wind = fx.b.yz;
+    let p = uv * frame_shape() * 1.6 / max(fx.b.x, 0.01);
+    let z = t * 0.06;
+    // A far bank and a near one: the near one is bigger and faster.
+    let back = fog_bank(p * 1.5 - wind * t * 0.025, z, seed * 7.1);
+    let front = fog_bank(p * 0.8 - wind * t * 0.06 + 9.0, z * 1.3, seed * 3.3 + 50.0);
+    let edge = 0.62 - 0.3 * fx.a.w;
+    let v = smoothstep(edge, edge + 0.35, back) * 0.6 + smoothstep(edge, edge + 0.4, front) * 0.7;
+    let lie = mix(1.0, smoothstep(0.25, 1.0, uv.y + (front - 0.5) * 0.3), fx.b.w);
+    return screened(c, fx.c.xyz * clamp(v * lie * fx.a.x * 0.55, 0.0, 1.0));
+}
+
+// amount, time, seed, x | y, width, spread, height | rise, curl, red, green |
+// blue
+fn smoke(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let t = fx.a.y;
+    let width = fx.b.y;
+    let curl = fx.c.y;
+    let p = (uv - vec2<f32>(fx.a.w, fx.b.x)) * frame_shape();
+    // How far above the source this pixel is.
+    let h = -p.y;
+    let sd = fx.a.z * 11.3;
+    let up = t * 0.35 * fx.c.x;
+    // The whole plume sways, more the higher it gets.
+    let sway = (fbm3(vec3<f32>(h * 1.4 - up * 0.7, sd, t * 0.08), 3) - 0.5) * 0.9 * curl * h;
+    var q = vec2<f32>(p.x - sway, h);
+    // Curls: the smoke is pushed about by clouds that rise with it.
+    let push = vec2<f32>(
+        fbm3(vec3<f32>(q * 2.6 + vec2<f32>(0.0, -up * 2.0) + sd, t * 0.15), 4),
+        fbm3(vec3<f32>(q * 2.6 + vec2<f32>(40.0, -up * 2.0) + sd, t * 0.15), 4),
+    ) - 0.5;
+    q = q + push * 0.3 * curl * (0.3 + h);
+    let wide = width + fx.b.z * max(h, 0.0);
+    let across = q.x / wide;
+    let body = exp(-across * across * 2.2);
+    // Wisps: stretched upwards, streaming up.
+    let n = fbm3(vec3<f32>(q.x * 4.5 / (0.6 + h), q.y * 2.2 - up * 2.4, t * 0.1 + sd), 5);
+    let wisps = smoothstep(0.3, 0.72, n);
+    let height = fx.b.w;
+    let fade = smoothstep(0.0, 0.06, h) * (1.0 - smoothstep(height * 0.35, height, h));
+    // Thinner as it spreads.
+    let thin = width / wide * 2.2 + 0.25;
+    let tint = vec3<f32>(fx.c.z, fx.c.w, fx.d.x);
+    return screened(c, tint * clamp(body * wisps * fade * min(thin, 1.0) * fx.a.x * 1.28, 0.0, 1.0));
+}
 ";

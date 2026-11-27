@@ -1,0 +1,47 @@
+{
+  "version": 4,
+  "id": "embers",
+  "name": "Embers",
+  "category": "Atmosphere",
+  "preview": "concert",
+  "poster": 1.0,
+  "controls": [
+    {
+      "id": "speed",
+      "name": "Speed",
+      "default": 1,
+      "min": 0.25,
+      "max": 3,
+      "unit": "times",
+      "speed": true
+    },
+    {
+      "id": "intensity",
+      "name": "Intensity",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "amount"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "embers",
+      "params": {
+        "amount": 1.6,
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "count": 1.6
+      }
+    }
+  ]
+}

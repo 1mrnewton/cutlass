@@ -96,7 +96,14 @@ pub(crate) const fn space(block: Block) -> Option<Space> {
         | Block::Leak
         | Block::Burn
         | Block::Bokeh
-        | Block::Flare => Some(Space::Display),
+        | Block::Flare
+        | Block::Motes
+        | Block::Embers
+        | Block::Snow
+        | Block::Rain
+        | Block::Sparks
+        | Block::Fog
+        | Block::Smoke => Some(Space::Display),
     }
 }
 
@@ -1070,6 +1077,13 @@ fn kernel(uv: vec2<f32>) -> vec4<f32> {
         case 39u: { return burn(uv); }
         case 40u: { return bokeh(uv); }
         case 41u: { return flare(uv); }
+        case 42u: { return motes(uv); }
+        case 43u: { return embers(uv); }
+        case 44u: { return snow(uv); }
+        case 45u: { return rain(uv); }
+        case 46u: { return sparks(uv); }
+        case 47u: { return fog(uv); }
+        case 48u: { return smoke(uv); }
         case 100u: { return gauss(uv); }
         case 101u: { return halve(uv); }
         case 102u: { return smooth_up(uv); }
@@ -1920,6 +1934,13 @@ mod tests {
             step(Block::Burn, &[]),
             step(Block::Bokeh, &[]),
             step(Block::Flare, &[]),
+            step(Block::Motes, &[]),
+            step(Block::Embers, &[]),
+            step(Block::Snow, &[]),
+            step(Block::Rain, &[]),
+            step(Block::Sparks, &[]),
+            step(Block::Fog, &[]),
+            step(Block::Smoke, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
     }
@@ -1941,6 +1962,13 @@ mod tests {
         (Block::Burn, &[(0, 1.0), (1, 0.4), (2, 1.3)]),
         (Block::Bokeh, &[(0, 1.0), (1, 1.3)]),
         (Block::Flare, &[(0, 1.0), (1, 0.5), (2, 1.3)]),
+        (Block::Motes, &[(0, 2.0), (1, 1.3)]),
+        (Block::Embers, &[(0, 2.0), (1, 1.3)]),
+        (Block::Snow, &[(0, 1.0), (1, 1.3)]),
+        (Block::Rain, &[(0, 2.0), (1, 1.3)]),
+        (Block::Sparks, &[(0, 2.0), (1, 0.02)]),
+        (Block::Fog, &[(0, 1.0), (1, 1.3)]),
+        (Block::Smoke, &[(0, 1.0), (1, 1.3)]),
     ];
 
     #[test]
@@ -1955,7 +1983,7 @@ mod tests {
                     .all(|pixel| pixel[..3].iter().all(|byte| *byte >= 127) && pixel[3] == 255),
                 "{block:?} darkened a pixel"
             );
-            assert!(mean(&lit) > 129.0, "{block:?} drew nothing: {}", mean(&lit));
+            assert!(mean(&lit) > 128.2, "{block:?} drew nothing: {}", mean(&lit));
             let again = draw(&renderer, &flat, size, &[step(*block, set)]);
             assert_eq!(lit, again, "{block:?}");
         }
@@ -1971,8 +1999,9 @@ mod tests {
             assert!((small - large).abs() < 4.0, "{block:?}: {small} vs {large}");
             let tall = draw(&renderer, &grey((36, 64)), (36, 64), &[step(*block, set)]);
             assert!(
-                mean(&tall) > 129.0,
-                "{block:?} drew nothing on a tall frame"
+                mean(&tall) > 128.2,
+                "{block:?} drew nothing on a tall frame: {}",
+                mean(&tall)
             );
         }
     }

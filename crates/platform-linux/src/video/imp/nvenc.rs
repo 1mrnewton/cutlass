@@ -26,8 +26,9 @@ use cutlass_decode::{CodecError, Packet};
 use cutlass_decode::{CodecId, CodecParams, PixelFormat};
 use cutlass_encode::{AudioInput, Encoder, FrameInput, FrameTime, PictureInput};
 
+use super::blob::Blob;
 use super::cuda::{self, Device};
-use super::nvenc_abi::{self as abi, Bits};
+use super::nvenc_abi as abi;
 use crate::dl::Library;
 use crate::video::backend::{note_decline, note_open};
 use crate::video::kind::Kind;
@@ -44,11 +45,6 @@ const BUFFERS: usize = 4;
 
 /// Room for the parameter sets `nvEncGetSequenceParams` writes.
 const SEQUENCE_BYTES: usize = 1024;
-
-const _: () = assert!(
-    cfg!(target_endian = "little"),
-    "Blob writes fields little-endian"
-);
 
 type Status = c_int;
 type Handle = *mut c_void;
@@ -99,87 +95,6 @@ const _: () = {
     assert!(abi::sequence::SPSPPS_BUFFER.is_multiple_of(8));
     assert!(abi::sequence::OUT_SPSPPS_PAYLOAD_SIZE.is_multiple_of(8));
 };
-
-/// Zeroed, 8-byte aligned bytes standing in for one of the header's
-/// structs. Fields are written at the generated offsets; an offset past the
-/// end panics in a test and is a bug, never input.
-struct Blob {
-    words: Vec<u64>,
-}
-
-impl Blob {
-    fn new(size: usize) -> Self {
-        Self {
-            words: vec![0; size.div_ceil(8)],
-        }
-    }
-
-    /// The word holding `offset`. A generated offset is inside its struct,
-    /// which the layout tests check.
-    fn word(&mut self, offset: usize) -> &mut u64 {
-        &mut self.words[offset / 8]
-    }
-
-    fn put_u32(&mut self, offset: usize, value: u32) {
-        debug_assert_eq!(offset % 4, 0);
-        let shift = (offset % 8) * 8;
-        let word = self.word(offset);
-        *word = (*word & !(0xffff_ffff_u64 << shift)) | (u64::from(value) << shift);
-    }
-
-    fn put_u64(&mut self, offset: usize, value: u64) {
-        debug_assert_eq!(offset % 8, 0);
-        *self.word(offset) = value;
-    }
-
-    fn put_ptr(&mut self, offset: usize, value: *mut c_void) {
-        self.put_u64(offset, value as usize as u64);
-    }
-
-    fn put_guid(&mut self, offset: usize, guid: [u8; 16]) {
-        for (index, chunk) in guid.as_chunks::<4>().0.iter().enumerate() {
-            self.put_u32(offset + index * 4, u32::from_le_bytes(*chunk));
-        }
-    }
-
-    fn put_bits(&mut self, bits: Bits, value: u32) {
-        let mask = (1_u32 << bits.width) - 1;
-        let word = self.u32(bits.offset);
-        let word = (word & !(mask << bits.shift)) | ((value & mask) << bits.shift);
-        self.put_u32(bits.offset, word);
-    }
-
-    fn u32(&self, offset: usize) -> u32 {
-        let word = self.words.get(offset / 8).copied().unwrap_or(0);
-        // Truncation keeps the 32 bits at this offset.
-        (word >> ((offset % 8) * 8)) as u32
-    }
-
-    fn u64(&self, offset: usize) -> u64 {
-        self.words.get(offset / 8).copied().unwrap_or(0)
-    }
-
-    fn ptr(&self, offset: usize) -> *mut c_void {
-        self.u64(offset) as usize as *mut c_void
-    }
-
-    /// `len` bytes from `offset`, which is 8-byte aligned.
-    fn slice(&self, offset: usize, len: usize) -> Self {
-        let start = offset / 8;
-        let words = self
-            .words
-            .iter()
-            .skip(start)
-            .take(len.div_ceil(8))
-            .copied()
-            .collect();
-        Self { words }
-    }
-
-    fn as_mut_ptr(&mut self) -> *mut c_void {
-        self.words.as_mut_ptr().cast()
-    }
-}
 
 type GetMaxSupportedVersion = unsafe extern "C" fn(*mut u32) -> Status;
 type CreateInstance = unsafe extern "C" fn(*mut c_void) -> Status;
@@ -498,8 +413,8 @@ impl Session {
 
         let mut init = Blob::new(abi::init::SIZE);
         init.put_u32(abi::init::VERSION, abi::INITIALIZE_PARAMS_VER);
-        init.put_guid(abi::init::ENCODE_GUID, settings.codec_guid());
-        init.put_guid(abi::init::PRESET_GUID, abi::PRESET_P4);
+        init.put_bytes(abi::init::ENCODE_GUID, &settings.codec_guid());
+        init.put_bytes(abi::init::PRESET_GUID, &abi::PRESET_P4);
         init.put_u32(abi::init::ENCODE_WIDTH, settings.width);
         init.put_u32(abi::init::ENCODE_HEIGHT, settings.height);
         init.put_u32(abi::init::DAR_WIDTH, settings.width);
@@ -788,7 +703,7 @@ fn too_large() -> CodecError {
 fn configure(config: &mut Blob, settings: Settings) {
     use abi::config as c;
     config.put_u32(c::VERSION, abi::CONFIG_VER);
-    config.put_guid(c::PROFILE_GUID, settings.profile_guid());
+    config.put_bytes(c::PROFILE_GUID, &settings.profile_guid());
     config.put_u32(c::GOP_LENGTH, rate::KEYFRAME_INTERVAL);
     config.put_u32(c::FRAME_INTERVAL_P, 1);
     let (mode, peak) = if settings.constant {
@@ -799,20 +714,20 @@ fn configure(config: &mut Blob, settings: Settings) {
     config.put_u32(c::RC_MODE, mode);
     config.put_u32(c::RC_AVERAGE_BIT_RATE, settings.bitrate);
     config.put_u32(c::RC_MAX_BIT_RATE, peak);
-    config.put_bits(c::RC_ENABLE_LOOKAHEAD, 0);
+    config.set_bits(c::RC_ENABLE_LOOKAHEAD, 0);
     let vui = match settings.kind {
         Kind::Hevc => {
             config.put_u32(c::HEVC_IDR_PERIOD, rate::KEYFRAME_INTERVAL);
-            config.put_bits(c::HEVC_REPEAT_SPSPPS, 1);
-            config.put_bits(c::HEVC_OUTPUT_AUD, 0);
-            config.put_bits(c::HEVC_CHROMA_FORMAT_IDC, 1);
-            config.put_bits(c::HEVC_PIXEL_BIT_DEPTH_MINUS8, 0);
+            config.set_bits(c::HEVC_REPEAT_SPSPPS, 1);
+            config.set_bits(c::HEVC_OUTPUT_AUD, 0);
+            config.set_bits(c::HEVC_CHROMA_FORMAT_IDC, 1);
+            config.set_bits(c::HEVC_PIXEL_BIT_DEPTH_MINUS8, 0);
             c::HEVC_VUI
         }
         Kind::H264 | Kind::Av1 => {
             config.put_u32(c::H264_IDR_PERIOD, rate::KEYFRAME_INTERVAL);
-            config.put_bits(c::H264_REPEAT_SPSPPS, 1);
-            config.put_bits(c::H264_OUTPUT_AUD, 0);
+            config.set_bits(c::H264_REPEAT_SPSPPS, 1);
+            config.set_bits(c::H264_OUTPUT_AUD, 0);
             config.put_u32(c::H264_CHROMA_FORMAT_IDC, 1);
             c::H264_VUI
         }
@@ -1034,32 +949,6 @@ impl Encoder for NvEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn blobs_write_fields_at_their_offsets() {
-        let mut blob = Blob::new(32);
-        blob.put_u32(4, 0xdead_beef);
-        blob.put_u32(0, 7);
-        assert_eq!(blob.u32(0), 7);
-        assert_eq!(blob.u32(4), 0xdead_beef);
-        blob.put_u64(8, u64::MAX);
-        assert_eq!(blob.u64(8), u64::MAX);
-        blob.put_guid(12, abi::CODEC_H264);
-        let guid = Guid::from_bytes(abi::CODEC_H264);
-        assert_eq!(blob.u32(12), guid.data1);
-        assert_eq!(blob.u32(8), u32::MAX);
-        let bits = Bits {
-            offset: 0,
-            shift: 9,
-            width: 2,
-        };
-        blob.put_bits(bits, 3);
-        assert_eq!(blob.u32(0), 7 | (3 << 9));
-        blob.put_bits(bits, 1);
-        assert_eq!(blob.u32(0), 7 | (1 << 9));
-        let tail = blob.slice(8, 16);
-        assert_eq!(tail.u32(0), u32::MAX);
-    }
 
     #[test]
     fn the_guid_has_the_c_layout_and_the_header_values() {

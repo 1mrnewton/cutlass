@@ -1,7 +1,7 @@
 //! A plain-text account of the hardware video this machine offers, for the
 //! `video_probe` example and for bug reports.
 
-use super::{cuda, nvdec, nvenc};
+use super::{cuda, nvdec, nvenc, va};
 use crate::video::backend::{BACKEND_VAR, Backends};
 
 pub fn probe() -> Vec<String> {
@@ -26,5 +26,6 @@ pub fn probe() -> Vec<String> {
             lines.extend(nvenc::report());
         }
     }
+    lines.extend(va::report());
     lines
 }

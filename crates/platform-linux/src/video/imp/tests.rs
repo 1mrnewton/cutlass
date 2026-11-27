@@ -10,10 +10,11 @@ use cutlass_decode::{
 };
 use cutlass_encode::{CpuFrame, EncodeFactory, Encoder, FrameInput, FrameTime, PlatformFrame};
 
-use super::{cuda, nvdec, nvenc};
+use super::{cuda, nvdec, nvenc, va};
 use crate::video::fallback::rust_decoder;
 
 const REQUIRE_NVIDIA: &str = "CUTLASS_REQUIRE_NVIDIA";
+const REQUIRE_VAAPI: &str = "CUTLASS_REQUIRE_VAAPI";
 
 /// Whether the NVIDIA tests can run here. A missing GPU fails when
 /// [`REQUIRE_NVIDIA`] is set.
@@ -473,7 +474,237 @@ fn the_probe_says_something_for_each_backend() {
     let lines = super::probe();
     assert!(lines[0].starts_with(crate::BACKEND_VAR));
     assert!(lines.iter().any(|line| line.starts_with("NVIDIA")));
+    assert!(lines.iter().any(|line| line.starts_with("VA-API")));
     for line in &lines {
         eprintln!("{line}");
     }
+}
+
+/// Whether the VA-API tests can run here. A missing render node fails
+/// when [`REQUIRE_VAAPI`] is set.
+fn vaapi(what: &str) -> bool {
+    let present = va::hevc::available();
+    if !present {
+        assert!(
+            std::env::var_os(REQUIRE_VAAPI).is_none(),
+            "{REQUIRE_VAAPI} is set but no render node decodes HEVC"
+        );
+        eprintln!("skipped: {what}: no VA-API render node decodes HEVC");
+    }
+    present
+}
+
+/// An Annex B HEVC stream split into access units (clause 7.4.2.4.4), as
+/// packets 1/30 s apart.
+pub(super) fn hevc_access_units(data: &[u8]) -> Vec<Packet> {
+    let mut units: Vec<Vec<nal::Nal>> = Vec::new();
+    let mut current: Vec<nal::Nal> = Vec::new();
+    let mut has_slice = false;
+    for unit in nal::annex_b(data).expect("annex b") {
+        let bytes = &unit.bytes;
+        if bytes.len() < 3 {
+            continue;
+        }
+        let kind = (bytes[0] >> 1) & 0x3f;
+        let slice = kind <= 21;
+        let starts = if slice {
+            bytes[2] & 0x80 != 0
+        } else {
+            matches!(kind, 32..=35 | 39 | 41..=44 | 48..=55)
+        };
+        if starts && has_slice {
+            units.push(std::mem::take(&mut current));
+            has_slice = false;
+        }
+        has_slice |= slice;
+        current.push(unit);
+    }
+    if !current.is_empty() {
+        units.push(current);
+    }
+    units
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| {
+            let keyframe = unit
+                .iter()
+                .any(|nal| matches!(nal::hevc_type(&nal.bytes), Some(16..=23)));
+            Packet::video(nal::to_annex_b(unit), index as i64, 1, 30, keyframe)
+        })
+        .collect()
+}
+
+/// Whether ffmpeg with libx265 is here.
+fn has_x265() -> bool {
+    std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("libx265"))
+}
+
+/// An HEVC stream from ffmpeg's libx265, or `None` when ffmpeg is missing
+/// or fails. x265 runs with a thread pool: some builds crash encoding
+/// slices without one.
+fn x265(size: (u32, u32), frames: u32, pix: &str, params: &str) -> Option<Vec<u8>> {
+    if !has_x265() {
+        return None;
+    }
+    let path = std::env::temp_dir().join(format!(
+        "cutlass-vaapi-{}-{}x{}-{pix}-{}.hevc",
+        std::process::id(),
+        size.0,
+        size.1,
+        params.len()
+    ));
+    let source = format!("testsrc2=size={}x{}:rate=30", size.0, size.1);
+    let params = format!("pools=4:{params}");
+    let encoded = std::process::Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", &source])
+        .args(["-frames:v", &frames.to_string(), "-pix_fmt", pix])
+        .args(["-c:v", "libx265", "-x265-params", &params, "-f", "hevc"])
+        .arg(&path)
+        .output()
+        .ok()?;
+    let bytes = std::fs::read(&path).ok();
+    let _ = std::fs::remove_file(&path);
+    if !encoded.status.success() {
+        eprintln!(
+            "skipped: x265 could not encode {params}: {}",
+            String::from_utf8_lossy(&encoded.stderr).trim()
+        );
+        return None;
+    }
+    bytes
+}
+
+/// The HEVC streams the VA-API tests decode: the crate fixture, and x265
+/// streams with B-frames, weighted prediction, 10 bits, slices with
+/// wavefronts, scaling lists and a cropped 1080p when ffmpeg is here.
+pub(super) fn hevc_streams() -> Vec<(String, Vec<u8>, bool)> {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../codecs/hevc/tests/fixtures/testsrc-64x48.hevc");
+    // The fixture is smaller than some GPUs decode; it may fall back.
+    let mut streams = vec![(
+        String::from("fixture 64x48"),
+        std::fs::read(fixture).expect("fixture"),
+        false,
+    )];
+    let cases = [
+        (
+            (1280, 720),
+            30,
+            "yuv420p",
+            "bframes=3:ref=4:keyint=30:weightp=1:weightb=1",
+        ),
+        ((1280, 720), 20, "yuv420p10le", "bframes=2:keyint=20"),
+        (
+            (1280, 720),
+            12,
+            "yuv420p",
+            "bframes=0:keyint=12:slices=4:wpp=1",
+        ),
+        (
+            (640, 360),
+            12,
+            "yuv420p",
+            "bframes=2:keyint=6:scaling-list=default",
+        ),
+        (
+            (1920, 1080),
+            12,
+            "yuv420p",
+            "bframes=3:keyint=60:open-gop=1",
+        ),
+    ];
+    if !has_x265() {
+        eprintln!("skipped: x265 streams: no ffmpeg with libx265");
+        return streams;
+    }
+    for (size, frames, pix, params) in cases {
+        if let Some(bytes) = x265(size, frames, pix, params) {
+            streams.push((
+                format!("x265 {}x{} {pix} {params}", size.0, size.1),
+                bytes,
+                true,
+            ));
+        }
+    }
+    streams
+}
+
+#[test]
+fn vaapi_hevc_matches_the_rust_decoder() {
+    if !vaapi("vaapi hevc against rust") {
+        return;
+    }
+    for (name, bytes, must_decode) in hevc_streams() {
+        let packets = hevc_access_units(&bytes);
+        let mut params = CodecParams::video(CodecId::Hevc, 0, 0);
+        params.nal_length_size = 0;
+        let mut hardware = va::hevc::open(&params).expect("va-api opens");
+        let mut software = rust_decoder(&params).expect("rust decoder");
+        let ours = decode_all(&mut hardware, &packets);
+        let theirs = decode_all(software.as_mut(), &packets);
+        if !hardware.hardware() {
+            assert!(!must_decode, "{name}: VA-API handed the stream to Rust");
+            eprintln!("{name}: VA-API refused it; the Rust decoder took it");
+            continue;
+        }
+        assert_eq!(ours.len(), theirs.len(), "{name}");
+        assert!(!ours.is_empty(), "{name}");
+        for (index, (ours, theirs)) in ours.iter().zip(&theirs).enumerate() {
+            assert_eq!(ours.pts(), theirs.pts(), "{name} {index}");
+            let (a, b) = (ours.info(), theirs.info());
+            assert_eq!((a.width, a.height), (b.width, b.height), "{name}");
+            assert!(
+                samples(ours) == samples(theirs),
+                "{name}: picture {index} differs from the Rust decoder (PSNR {:.1} dB)",
+                psnr(samples(ours), samples(theirs))
+            );
+        }
+        eprintln!("{name}: VA-API matches the Rust decoder");
+    }
+}
+
+#[test]
+fn vaapi_hevc_decodes_again_after_drain_and_reset() {
+    if !vaapi("vaapi hevc drain and reset") {
+        return;
+    }
+    let bytes = x265((640, 360), 8, "yuv420p", "bframes=2:keyint=8").unwrap_or_else(|| {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../codecs/hevc/tests/fixtures/testsrc-64x48.hevc");
+        std::fs::read(fixture).expect("fixture")
+    });
+    let packets = hevc_access_units(&bytes);
+    let mut params = CodecParams::video(CodecId::Hevc, 0, 0);
+    params.nal_length_size = 0;
+    let mut decoder = va::hevc::open(&params).expect("va-api opens");
+    let first = decode_all(&mut decoder, &packets).len();
+    assert!(first > 0);
+    assert_eq!(
+        decode_all(&mut decoder, &packets).len(),
+        first,
+        "after drain"
+    );
+    decoder.push(&packets[0]).expect("push");
+    decoder.reset();
+    assert_eq!(
+        decode_all(&mut decoder, &packets).len(),
+        first,
+        "after reset"
+    );
+}
+
+/// With libva missing or no render node, the VA-API opener declines.
+#[test]
+fn vaapi_declines_without_a_render_node() {
+    let opened = va::hevc::open(&CodecParams::video(CodecId::Hevc, 320, 240));
+    if !va::hevc::available() {
+        assert!(matches!(opened, Err(CodecError::Unsupported { .. })));
+    }
+    assert!(matches!(
+        va::hevc::open(&CodecParams::video(CodecId::H264, 320, 240)),
+        Err(CodecError::Unsupported { .. })
+    ));
 }

@@ -1,5 +1,6 @@
 //! The Linux hardware openers: NVIDIA first, then VA-API.
 
+mod blob;
 mod cuda;
 mod nvdec;
 mod nvenc;
@@ -9,6 +10,7 @@ mod nvenc_abi;
 mod probe;
 #[cfg(test)]
 mod tests;
+mod va;
 
 pub use probe::probe;
 
@@ -33,6 +35,9 @@ pub fn register_decoders_with(factory: &mut DecodeFactory, video: bool) {
         for id in [CodecId::H264, CodecId::Hevc, CodecId::Av1] {
             factory.register(id, nvdec::open_decoder);
         }
+    }
+    if backends.vaapi {
+        factory.register(CodecId::Hevc, va::hevc::open_decoder);
     }
 }
 

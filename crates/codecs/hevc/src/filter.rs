@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use cutlass_simd::hevc::{deblock, sao};
 
-use crate::ctu::chroma_qp;
+use crate::ctu::chroma_qp_of;
 use crate::picture::{FLAG_KEEP, Picture, Work, lock};
 use crate::pixel::Pixel;
 
@@ -295,7 +295,7 @@ impl Picture {
     fn chroma_strength(&self, query: &EdgeQuery<'_>, offset: i32) -> Option<Strength> {
         let (qp, _, tc_offset, no_p, no_q) = self.edge_terms(query)?;
         let shift = u32::from(self.sps.bit_depth) - 8;
-        let qpc = chroma_qp((qp + offset).clamp(0, 57));
+        let qpc = chroma_qp_of(self.sps.chroma(), (qp + offset).clamp(0, 57));
         let tc = TC[(qpc + 2 + tc_offset).clamp(0, 53) as usize] << shift;
         Some(Strength {
             beta: 0,
@@ -368,12 +368,17 @@ impl Picture {
                 }
             }
         }
-        // Chroma edges lie on the 16×8 grid of luma.
+        // 4:2:0 chroma edges lie on the 16×8 grid of luma; those of the
+        // other layouts have their own loop.
+        let chroma = self.sps.chroma();
+        let c420 = chroma.is_420();
         let (ystep, xstep) = if fast { (8, 16) } else { (4, 8) };
-        for y in (top..bottom).step_by(ystep) {
+        let rows = if fast && !c420 { 0..0 } else { top..bottom };
+        for y in rows.step_by(ystep) {
             for x in (xstep..width).step_by(xstep) {
                 let bs = self.bs_ver.get((y >> 2) * ver_stride + (x >> 3));
-                if bs == 0 || (fast && !(bs == 2 && x % 16 == 0 && y % 8 == 0)) {
+                let chroma_here = c420 && bs == 2 && x % 16 == 0 && y % 8 == 0;
+                if bs == 0 || (fast && !chroma_here) {
                     continue;
                 }
                 let query = EdgeQuery {
@@ -390,7 +395,7 @@ impl Picture {
                     };
                     luma_edge(&mut edge, st);
                 }
-                if bs == 2 && x % 16 == 0 && y % 8 == 0 {
+                if chroma_here {
                     for (c, &offset) in offsets.iter().enumerate() {
                         if let Some(st) = self.chroma_strength(&query, offset) {
                             let mut edge = Ver {
@@ -401,6 +406,105 @@ impl Picture {
                             chroma_edge(&mut edge, st);
                         }
                     }
+                }
+            }
+        }
+        if chroma.present && !c420 {
+            self.deblock_chroma_vertical(band, top, bottom);
+        }
+    }
+
+    /// The vertical chroma edges of a 4:2:2 or 4:4:4 CTB row: those on
+    /// the 8×8 grid of chroma samples, each segment of four chroma lines
+    /// filtered with the boundary strength and QP of its first luma
+    /// position (clauses 8.7.2.5.2 and 8.7.2.5.5). Only intra edges
+    /// (`bS` 2) are filtered, by the chroma filter in every layout.
+    fn deblock_chroma_vertical<P: Pixel>(&self, band: &mut [Vec<P>; 3], top: usize, bottom: usize) {
+        let chroma = self.sps.chroma();
+        let (sub_w, sub_h) = (chroma.sub_w, chroma.sub_h);
+        let width = self.width;
+        let ver_stride = width / 8 + 1;
+        let cw = width >> sub_w;
+        let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
+        let memo = Cell::new((usize::MAX, 0, 0));
+        let (xstep, ystep) = (8 << sub_w, 4 << sub_h);
+        for y in (top..bottom).step_by(ystep) {
+            for x in (xstep..width).step_by(xstep) {
+                let bs = self.bs_ver.get((y >> 2) * ver_stride + (x >> 3));
+                if bs != 2 {
+                    continue;
+                }
+                let query = EdgeQuery {
+                    p: (x - 1, y),
+                    q: (x, y),
+                    bs,
+                    memo: &memo,
+                };
+                for (c, &offset) in offsets.iter().enumerate() {
+                    if let Some(st) = self.chroma_strength(&query, offset) {
+                        let mut edge = Ver {
+                            s: &mut band[c + 1],
+                            pos: ((y - top) >> sub_h) * cw + (x >> sub_w),
+                            stride: cw,
+                        };
+                        chroma_edge(&mut edge, st);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The horizontal chroma edges of a 4:2:2 or 4:4:4 CTB row, the one on
+    /// its top boundary included: as [`Self::deblock_chroma_vertical`],
+    /// segments of four chroma columns.
+    fn deblock_chroma_horizontal<P: Pixel>(
+        &self,
+        mut above: Option<&mut [Vec<P>; 3]>,
+        band: &mut [Vec<P>; 3],
+        top: usize,
+        bottom: usize,
+    ) {
+        let chroma = self.sps.chroma();
+        let (sub_w, sub_h) = (chroma.sub_w, chroma.sub_h);
+        let width = self.width;
+        let cw = width >> sub_w;
+        let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
+        let memo = Cell::new((usize::MAX, 0, 0));
+        let (xstep, ystep) = (4 << sub_w, 8 << sub_h);
+        for y in (top.max(ystep).next_multiple_of(ystep)..bottom).step_by(ystep) {
+            for x in (0..width).step_by(xstep) {
+                let bs = self.bs_hor.get((y >> 3) * self.w4 + (x >> 2));
+                if bs != 2 {
+                    continue;
+                }
+                let query = EdgeQuery {
+                    p: (x, y - 1),
+                    q: (x, y),
+                    bs,
+                    memo: &memo,
+                };
+                let (cx, cy, ctop) = (x >> sub_w, y >> sub_h, top >> sub_h);
+                for (c, &offset) in offsets.iter().enumerate() {
+                    let Some(st) = self.chroma_strength(&query, offset) else {
+                        continue;
+                    };
+                    let c = c + 1;
+                    // Rows from `cy` on in this band; those above in this
+                    // band or, on its top boundary, in the one above.
+                    let (p, q) = if cy > ctop {
+                        band[c].split_at_mut((cy - ctop) * cw)
+                    } else if let Some(above) = above.as_deref_mut() {
+                        (&mut above[c][..], &mut band[c][..])
+                    } else {
+                        continue;
+                    };
+                    let mut edge = Hor {
+                        p,
+                        q,
+                        x: cx,
+                        stride: cw,
+                    };
+                    chroma_edge(&mut edge, st);
                 }
             }
         }
@@ -451,11 +555,19 @@ impl Picture {
                 }
             }
         }
+        let layout = self.sps.chroma();
+        let c420 = layout.is_420();
         let (ystep, xstep) = if fast { (16, 8) } else { (8, 4) };
-        for y in (top.max(8).next_multiple_of(ystep)..bottom).step_by(ystep) {
+        let rows = if fast && !c420 {
+            0..0
+        } else {
+            top.max(8).next_multiple_of(ystep)..bottom
+        };
+        for y in rows.step_by(ystep) {
             for x in (0..width).step_by(xstep) {
                 let bs = self.bs_hor.get((y >> 3) * self.w4 + (x >> 2));
-                if bs == 0 || (fast && !(bs == 2 && y % 16 == 0 && x % 8 == 0)) {
+                let chroma = c420 && bs == 2 && y % 16 == 0 && x % 8 == 0;
+                if bs == 0 || (fast && !chroma) {
                     continue;
                 }
                 let query = EdgeQuery {
@@ -464,7 +576,6 @@ impl Picture {
                     bs,
                     memo: &memo,
                 };
-                let chroma = bs == 2 && y % 16 == 0 && x % 8 == 0;
                 for c in usize::from(fast)..3 {
                     if c > 0 && !chroma {
                         break;
@@ -499,6 +610,9 @@ impl Picture {
                     }
                 }
             }
+        }
+        if layout.present && !c420 {
+            self.deblock_chroma_horizontal(above, band, top, bottom);
         }
     }
 
@@ -568,12 +682,10 @@ impl Picture {
         let width = self.width;
         // Component line `y` of the deblocked picture, in row `r` or the
         // row above; empty past them.
+        let chroma = self.sps.chroma();
         let line = |c: usize, y: usize| -> &[P] {
-            let (t, stride) = if c == 0 {
-                (top, width)
-            } else {
-                (top / 2, width / 2)
-            };
+            let (sub_w, sub_h) = chroma.shifts(c);
+            let (t, stride) = (top >> sub_h, width >> sub_w);
             if y >= t {
                 band[c]
                     .get((y - t) * stride..(y - t + 1) * stride)
@@ -591,9 +703,9 @@ impl Picture {
         };
         if !self.sao_on() {
             for (c, d) in dst.iter_mut().enumerate() {
-                let sub = u32::from(c > 0);
-                let pw = self.width >> sub;
-                for (y, out) in (from >> sub..to >> sub).zip(d.chunks_exact_mut(pw.max(1))) {
+                let (sub_w, sub_h) = chroma.shifts(c);
+                let pw = self.width >> sub_w;
+                for (y, out) in (from >> sub_h..to >> sub_h).zip(d.chunks_exact_mut(pw.max(1))) {
                     let l = line(c, y);
                     let n = out.len().min(l.len());
                     out[..n].copy_from_slice(&l[..n]);
@@ -608,12 +720,12 @@ impl Picture {
         let ctb_rows = r.checked_sub(1).into_iter().chain([r]);
         for row in ctb_rows.clone() {
             for (c, d) in dst.iter_mut().enumerate() {
-                let sub = u32::from(c > 0);
-                let pw = self.width >> sub;
-                let size = 1usize << (log2_ctb - sub);
-                let base = from >> sub;
-                let ya = (row * size).max(base);
-                let yb = ((row + 1) * size).min(to >> sub);
+                let (sub_w, sub_h) = chroma.shifts(c);
+                let pw = self.width >> sub_w;
+                let (size_w, size_h) = (1usize << (log2_ctb - sub_w), 1usize << (log2_ctb - sub_h));
+                let base = from >> sub_h;
+                let ya = (row * size_h).max(base);
+                let yb = ((row + 1) * size_h).min(to >> sub_h);
                 let mut rx = 0;
                 while rx < ctb_w {
                     if self.sao.get(row * ctb_w + rx)[c].kind != 0 {
@@ -624,7 +736,7 @@ impl Picture {
                     while rx < ctb_w && self.sao.get(row * ctb_w + rx)[c].kind == 0 {
                         rx += 1;
                     }
-                    let (x0, x1) = (start * size, (rx * size).min(pw));
+                    let (x0, x1) = (start * size_w, (rx * size_w).min(pw));
                     for y in ya..yb {
                         let at = (y - base) * pw;
                         d[at + x0..at + x1].copy_from_slice(&line(c, y)[x0..x1]);
@@ -685,31 +797,31 @@ impl Picture {
                 *cell = self.sao_may_cross(rs, ny as usize * ctb_w + nx as usize);
             }
         }
+        let chroma = self.sps.chroma();
         for (c, p) in params.iter().enumerate() {
             if p.kind == 0 {
                 continue;
             }
-            let sub = u32::from(c > 0);
-            let pw = self.width >> sub;
-            let ph = self.height >> sub;
-            let size = 1usize << (log2_ctb - sub);
-            let x0 = rx * size;
-            let y0 = ry * size;
-            let x1 = (x0 + size).min(pw);
-            let y1 = (y0 + size).min(ph);
+            let (sub_w, sub_h) = chroma.shifts(c);
+            let pw = self.width >> sub_w;
+            let ph = self.height >> sub_h;
+            let x0 = rx * (size >> sub_w);
+            let y0 = ry * (size >> sub_h);
+            let x1 = (x0 + (size >> sub_w)).min(pw);
+            let y1 = (y0 + (size >> sub_h)).min(ph);
             // The lines of this CTB in the band, and the band's first.
-            let (ya, yb) = (y0.max(from >> sub), y1.min(to >> sub));
+            let (ya, yb) = (y0.max(from >> sub_h), y1.min(to >> sub_h));
             if ya >= yb {
                 continue;
             }
-            let base = from >> sub;
+            let base = from >> sub_h;
             let region = Region {
                 x0,
                 y0: ya,
                 x1,
                 y1: yb,
                 pw,
-                sub,
+                sub: (sub_w, sub_h),
                 keep_possible,
                 top: base,
             };
@@ -790,7 +902,7 @@ impl Picture {
                     let (xa, xb) = (x0 + left, x1 - right);
                     // 8-bit rows whose neighbours lie in this CTB row's
                     // buffer: one kernel call, by stride.
-                    let (tc, held) = (cur_top >> sub, cur[c].len() / pw.max(1));
+                    let (tc, held) = (cur_top >> sub_h, cur[c].len() / pw.max(1));
                     let (lo, hi) = (ay.min(by).min(0), ay.max(by).max(0));
                     let ia = ra.max(tc.saturating_add_signed(-lo));
                     let ib = rb.min((tc + held).saturating_add_signed(-hi));
@@ -910,7 +1022,7 @@ impl Picture {
         for y in r.y0..r.y1 {
             for x in r.x0..r.x1 {
                 if r.keep_possible
-                    && self.info.get(self.at4(x << r.sub, y << r.sub)) & FLAG_KEEP != 0
+                    && self.info.get(self.at4(x << r.sub.0, y << r.sub.1)) & FLAG_KEEP != 0
                 {
                     continue;
                 }
@@ -929,7 +1041,8 @@ struct Region {
     x1: usize,
     y1: usize,
     pw: usize,
-    sub: u32,
+    /// Shifts from luma, across and down.
+    sub: (u32, u32),
     keep_possible: bool,
     /// First component row of the band written.
     top: usize,

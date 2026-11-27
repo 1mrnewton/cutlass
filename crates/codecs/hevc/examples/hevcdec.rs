@@ -4,9 +4,10 @@
 //!
 //! The input is the first HEVC track of an MP4 or QuickTime file, or an
 //! Annex B byte stream. Pictures are written in output order, cropped,
-//! as planar 4:2:0: bytes for 8-bit streams, little-endian 16-bit values
-//! for deeper ones (as `ffmpeg -f rawvideo` writes `yuv420p` or
-//! `yuv420p10le`).
+//! as planar 4:2:0, 4:2:2 or 4:4:4 as the stream codes them (monochrome
+//! as 4:2:0 with mid-grey chroma): bytes for 8-bit streams, little-endian
+//! 16-bit values for deeper ones (as `ffmpeg -f rawvideo` writes
+//! `yuv420p`, `yuv422p10le` and the like).
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -18,6 +19,32 @@ use cutlass_hevc::HevcDecoder;
 mod common;
 
 fn write(out: &mut impl Write, picture: &VideoOutput) -> std::io::Result<()> {
+    let deep = |out: &mut dyn Write, planes: [&[u16]; 3]| -> std::io::Result<()> {
+        for plane in planes {
+            for v in plane {
+                out.write_all(&v.to_le_bytes())?;
+            }
+        }
+        Ok(())
+    };
+    if let Some(p) = &picture.yuv422_high {
+        return deep(out, [p.y(), p.u(), p.v()]);
+    }
+    if let Some(p) = &picture.yuv444_high {
+        return deep(out, [p.y(), p.u(), p.v()]);
+    }
+    if let Some(p) = &picture.yuv422 {
+        for plane in [p.y(), p.u(), p.v()] {
+            out.write_all(plane)?;
+        }
+        return Ok(());
+    }
+    if let Some(p) = &picture.yuv444 {
+        for plane in [p.y(), p.u(), p.v()] {
+            out.write_all(plane)?;
+        }
+        return Ok(());
+    }
     if let Some(p) = &picture.yuv420p10 {
         for plane in [p.y(), p.u(), p.v()] {
             for v in plane {

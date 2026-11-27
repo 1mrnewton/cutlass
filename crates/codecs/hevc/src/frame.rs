@@ -11,6 +11,7 @@ use cutlass_simd::shared_rows::{PlaneBuf, RowsWriter, SharedRows};
 
 use crate::picture::{ColMv, lock};
 use crate::pixel::{AnyRows, Pixel};
+use crate::ps::Chroma;
 
 /// What a finished decode job hands back with its picture.
 pub struct Done {
@@ -147,18 +148,19 @@ impl Frame {
     /// A frame to be decoded: no row published yet. Returns the frame
     /// and the writers of its samples and its motion.
     pub fn new<P: Pixel>(
-        (width, height): (usize, usize),
+        (width, height, chroma): (usize, usize, Chroma),
         poc: i32,
         spares: &Arc<Spares>,
         wrap: impl FnOnce(Arc<SharedRows<P>>) -> AnyRows,
         bufs: Option<PlaneBuf<P>>,
         samples: bool,
     ) -> (Arc<Self>, RowsWriter<P>, RowsWriter<ColMv>) {
-        let (cw, ch) = (width / 2, height / 2);
+        let (cw, ch) = (width >> chroma.sub_w, height >> chroma.sub_h);
         // A frame no picture reads holds no samples; its rows are still
         // counted as they are published.
         let widths = if samples { [width, cw, cw] } else { [0; 3] };
-        let writer = RowsWriter::new(widths, [height, ch, ch], [0, 1, 1], bufs);
+        let shifts = [0, chroma.sub_h, chroma.sub_h];
+        let writer = RowsWriter::new(widths, [height, ch, ch], shifts, bufs);
         let col_stride = width.div_ceil(16);
         let col_rows = height.div_ceil(16);
         let col_bufs = free(&spares.col);
@@ -183,11 +185,16 @@ impl Frame {
 
     /// A picture the stream named and did not send (clause 8.3.3):
     /// mid-grey, with no motion, every row published.
-    pub fn missing(width: usize, height: usize, bit_depth: u8, poc: i32) -> Arc<Self> {
+    pub fn missing(
+        (width, height, chroma): (usize, usize, Chroma),
+        bit_depth: u8,
+        poc: i32,
+    ) -> Arc<Self> {
         let grey = 1i32 << (bit_depth - 1);
-        fn grey_rows<P: Pixel>(w: usize, h: usize, v: i32) -> RowsWriter<P> {
-            let (cw, ch) = (w / 2, h / 2);
-            let mut writer = RowsWriter::new([w, cw, cw], [h, ch, ch], [0, 1, 1], None);
+        fn grey_rows<P: Pixel>(w: usize, h: usize, chroma: Chroma, v: i32) -> RowsWriter<P> {
+            let (cw, ch) = (w >> chroma.sub_w, h >> chroma.sub_h);
+            let shifts = [0, chroma.sub_h, chroma.sub_h];
+            let mut writer = RowsWriter::new([w, cw, cw], [h, ch, ch], shifts, None);
             for plane in writer.pending_mut(usize::MAX) {
                 plane.fill(P::of(v));
             }
@@ -195,9 +202,17 @@ impl Frame {
             writer
         }
         let rows = if bit_depth == 8 {
-            AnyRows::Eight(grey_rows::<u8>(width, height, grey).shared().clone())
+            AnyRows::Eight(
+                grey_rows::<u8>(width, height, chroma, grey)
+                    .shared()
+                    .clone(),
+            )
         } else {
-            AnyRows::Deep(grey_rows::<u16>(width, height, grey).shared().clone())
+            AnyRows::Deep(
+                grey_rows::<u16>(width, height, chroma, grey)
+                    .shared()
+                    .clone(),
+            )
         };
         let col_stride = width.div_ceil(16);
         let mut col = RowsWriter::new(

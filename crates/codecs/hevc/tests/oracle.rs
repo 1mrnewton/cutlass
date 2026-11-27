@@ -8,7 +8,9 @@ mod oracle {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use cutlass_decode::{CodecId, CodecParams, Packet, VideoDecoder, VideoOutput};
+    use cutlass_decode::{
+        CodecId, CodecParams, Packet, PictureSamples, PixelFormat, VideoDecoder, VideoOutput,
+    };
     use cutlass_hevc::HevcDecoder;
 
     fn ffmpeg() -> Option<PathBuf> {
@@ -86,12 +88,66 @@ mod oracle {
         out
     }
 
+    /// How a case's chroma is sampled.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Format {
+        Yuv420,
+        Yuv422,
+        Yuv444,
+        /// 4:0:0: ffmpeg writes luma alone, the decoder 4:2:0 with mid-grey
+        /// chroma.
+        Mono,
+    }
+
+    impl Format {
+        /// The size of each chroma plane ffmpeg writes for a `w`×`h` picture.
+        fn chroma(self, (w, h): (usize, usize)) -> (usize, usize) {
+            match self {
+                Self::Yuv420 => (w / 2, h / 2),
+                Self::Yuv422 => (w / 2, h),
+                Self::Yuv444 => (w, h),
+                Self::Mono => (0, 0),
+            }
+        }
+
+        /// ffmpeg's name for samples of `bits` bits in this format.
+        fn pix(self, bits: u8) -> String {
+            let base = match self {
+                Self::Yuv420 => "yuv420p",
+                Self::Yuv422 => "yuv422p",
+                Self::Yuv444 => "yuv444p",
+                Self::Mono => "gray",
+            };
+            if bits == 8 {
+                base.to_owned()
+            } else {
+                format!("{base}{bits}le")
+            }
+        }
+
+        /// The format of the packed pictures of `bits` bits.
+        fn packed(self, bits: u8) -> PixelFormat {
+            match (self, bits) {
+                (Self::Yuv422, 8) => PixelFormat::Yuv422p,
+                (Self::Yuv422, 10) => PixelFormat::Yuv422p10,
+                (Self::Yuv422, _) => PixelFormat::Yuv422p12,
+                (Self::Yuv444, 8) => PixelFormat::Yuv444p,
+                (Self::Yuv444, 10) => PixelFormat::Yuv444p10,
+                (Self::Yuv444, _) => PixelFormat::Yuv444p12,
+                (_, 8) => PixelFormat::Yuv420p,
+                (_, 10) => PixelFormat::Yuv420p10,
+                _ => PixelFormat::Yuv420p12,
+            }
+        }
+    }
+
     pub struct Case<'a> {
         pub name: &'a str,
         pub size: (usize, usize),
         pub frames: usize,
         /// 8, 10, or 12.
         pub bits: u8,
+        pub format: Format,
         pub params: &'a str,
         pub source: &'a str,
         /// Filters after the source, such as a fade for weighted prediction.
@@ -110,11 +166,8 @@ mod oracle {
         let dir = work_dir();
         let hevc = dir.join(format!("{tag}.hevc"));
         let yuv = dir.join(format!("{tag}.yuv"));
-        let pix = match case.bits {
-            10 => "yuv420p10le",
-            12 => "yuv420p12le",
-            _ => "yuv420p",
-        };
+        let pix = case.format.pix(case.bits);
+        let pix = pix.as_str();
         let (w, h) = case.size;
         let encoded = Command::new(ff)
             .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
@@ -213,6 +266,19 @@ mod oracle {
                 if let Some(p) = &frame.yuv420_high {
                     planes.extend([p.y().to_vec(), p.u().to_vec(), p.v().to_vec()]);
                 }
+                let narrow = |v: &[u8]| v.iter().map(|&b| u16::from(b)).collect::<Vec<u16>>();
+                if let Some(p) = &frame.yuv422 {
+                    planes.extend([narrow(p.y()), narrow(p.u()), narrow(p.v())]);
+                }
+                if let Some(p) = &frame.yuv422_high {
+                    planes.extend([p.y().to_vec(), p.u().to_vec(), p.v().to_vec()]);
+                }
+                if let Some(p) = &frame.yuv444 {
+                    planes.extend([narrow(p.y()), narrow(p.u()), narrow(p.v())]);
+                }
+                if let Some(p) = &frame.yuv444_high {
+                    planes.extend([p.y().to_vec(), p.u().to_vec(), p.v().to_vec()]);
+                }
                 planes
             })
             .collect()
@@ -289,6 +355,109 @@ mod oracle {
         }
     }
 
+    /// The samples of a picture at the case's depth, in its format (4:2:0
+    /// for monochrome).
+    fn samples(picture: &VideoOutput, case: &Case<'_>) -> [Vec<u16>; 3] {
+        let narrow = |v: &[u8]| v.iter().map(|&b| u16::from(b)).collect::<Vec<u16>>();
+        let name = case.name;
+        match (case.format, case.bits) {
+            (Format::Yuv422, 8) => {
+                let p = picture.yuv422.as_ref().expect("4:2:2 output");
+                [narrow(p.y()), narrow(p.u()), narrow(p.v())]
+            }
+            (Format::Yuv422, bits) => {
+                let p = picture.yuv422_high.as_ref().expect("deep 4:2:2 output");
+                assert_eq!(p.bit_depth(), bits, "{name}: depth");
+                [p.y().to_vec(), p.u().to_vec(), p.v().to_vec()]
+            }
+            (Format::Yuv444, 8) => {
+                let p = picture.yuv444.as_ref().expect("4:4:4 output");
+                [narrow(p.y()), narrow(p.u()), narrow(p.v())]
+            }
+            (Format::Yuv444, bits) => {
+                let p = picture.yuv444_high.as_ref().expect("deep 4:4:4 output");
+                assert_eq!(p.bit_depth(), bits, "{name}: depth");
+                [p.y().to_vec(), p.u().to_vec(), p.v().to_vec()]
+            }
+            (_, 8) => {
+                let p = &picture.picture;
+                [narrow(p.y()), narrow(p.u()), narrow(p.v())]
+            }
+            (_, 10) => {
+                let p = picture.yuv420p10.as_ref().expect("10-bit output");
+                [p.y().to_vec(), p.u().to_vec(), p.v().to_vec()]
+            }
+            (_, bits) => {
+                let p = picture.yuv420_high.as_ref().expect("high-bit-depth output");
+                assert_eq!(p.bit_depth(), bits, "{name}: depth");
+                [p.y().to_vec(), p.u().to_vec(), p.v().to_vec()]
+            }
+        }
+    }
+
+    /// The pictures of [`HevcDecoder::push_pictures`]: in the case's packed
+    /// format, ffmpeg's samples byte for byte (monochrome with mid-grey
+    /// 4:2:0 chroma after the luma).
+    fn check_packed(case: &Case<'_>, bytes: &[u8], reference: &[u8], frame_len: usize) {
+        let mut params = CodecParams::video(CodecId::Hevc, 0, 0);
+        params.nal_length_size = 0;
+        let mut decoder = HevcDecoder::open_with_threads(&params, 3).expect("open");
+        let mut got = Vec::new();
+        for (n, unit) in access_units(bytes).iter().enumerate() {
+            let packet = Packet::video(unit.clone(), n as i64, 1, 30, n == 0);
+            got.extend(
+                decoder
+                    .push_pictures(&packet)
+                    .unwrap_or_else(|e| panic!("access unit {n}: {e:?}")),
+            );
+        }
+        got.extend(decoder.drain_pictures().expect("drain"));
+        assert_eq!(
+            got.len(),
+            reference.len() / frame_len,
+            "{}: packed count",
+            case.name
+        );
+        let (w, h) = case.size;
+        let sample = if case.bits > 8 { 2 } else { 1 };
+        for (index, picture) in got.iter().enumerate() {
+            let info = picture.picture.info();
+            assert_eq!(
+                info.pixel,
+                case.format.packed(case.bits),
+                "{}: format",
+                case.name
+            );
+            assert_eq!((info.width, info.height), (w as u32, h as u32));
+            let PictureSamples::Cpu(got) = picture.picture.samples() else {
+                panic!("{}: packed picture not on the CPU", case.name);
+            };
+            let want = &reference[index * frame_len..(index + 1) * frame_len];
+            if case.format == Format::Mono {
+                assert!(
+                    got[..w * h * sample] == *want,
+                    "{} packed {index}: luma",
+                    case.name
+                );
+                let grey = (1u16 << (case.bits - 1)).to_le_bytes();
+                assert!(
+                    got[w * h * sample..]
+                        .chunks_exact(sample)
+                        .all(|s| s == &grey[..sample]),
+                    "{} packed {index}: chroma is not mid-grey",
+                    case.name
+                );
+            } else if let Some(at) = got.iter().zip(want).position(|(a, b)| a != b) {
+                panic!(
+                    "{} packed {index}: first difference at byte {at}",
+                    case.name
+                );
+            } else {
+                assert_eq!(got.len(), want.len(), "{} packed {index}: size", case.name);
+            }
+        }
+    }
+
     /// Every picture equal to ffmpeg's, in output order.
     pub fn check(case: &Case<'_>) -> bool {
         let Some(ff) = ffmpeg() else {
@@ -310,8 +479,14 @@ mod oracle {
         };
         let (w, h) = case.size;
         let sample = if case.bits > 8 { 2 } else { 1 };
-        let frame_len = w * h * 3 / 2 * sample;
+        let (cw, ch) = case.format.chroma((w, h));
+        let frame_len = (w * h + 2 * cw * ch) * sample;
         let want_frames = reference.len() / frame_len;
+        assert_eq!(
+            want_frames, case.frames,
+            "{}: ffmpeg's picture count",
+            case.name
+        );
         for prefixed in [false, true] {
             let got = decode_all(&bytes, case.size, prefixed);
             assert_eq!(got.len(), want_frames, "{}: picture count", case.name);
@@ -326,32 +501,33 @@ mod oracle {
                 } else {
                     at.iter().map(|&b| u16::from(b)).collect()
                 };
-                let (gy, gu, gv): (Vec<u16>, Vec<u16>, Vec<u16>) = if case.bits == 10 {
-                    let p = picture.yuv420p10.as_ref().expect("10-bit output");
-                    (p.y().to_vec(), p.u().to_vec(), p.v().to_vec())
-                } else if case.bits > 8 {
-                    let p = picture.yuv420_high.as_ref().expect("high-bit-depth output");
-                    assert_eq!(p.bit_depth(), case.bits);
-                    (p.y().to_vec(), p.u().to_vec(), p.v().to_vec())
-                } else {
-                    let p = &picture.picture;
-                    (
-                        p.y().iter().map(|&b| u16::from(b)).collect(),
-                        p.u().iter().map(|&b| u16::from(b)).collect(),
-                        p.v().iter().map(|&b| u16::from(b)).collect(),
-                    )
-                };
-                let (ly, lc) = (w * h, (w / 2) * (h / 2));
+                let [gy, gu, gv] = samples(picture, case);
+                let (ly, lc) = (w * h, cw * ch);
                 first_difference(case.name, index, "y", w, &gy, &want[..ly]);
-                first_difference(case.name, index, "u", w / 2, &gu, &want[ly..ly + lc]);
-                first_difference(case.name, index, "v", w / 2, &gv, &want[ly + lc..]);
-                if case.bits > 8 {
-                    let shift = case.bits - 8;
-                    let eight: Vec<u8> = gy.iter().map(|&s| (s >> shift) as u8).collect();
-                    assert_eq!(picture.picture.y(), &eight[..], "{}: 8-bit view", case.name);
+                if case.format == Format::Mono {
+                    let grey = 1u16 << (case.bits - 1);
+                    assert!(
+                        gu.iter().chain(&gv).all(|&s| s == grey),
+                        "{}: monochrome chroma is not mid-grey",
+                        case.name
+                    );
+                } else {
+                    first_difference(case.name, index, "u", cw, &gu, &want[ly..ly + lc]);
+                    first_difference(case.name, index, "v", cw, &gv, &want[ly + lc..]);
                 }
+                // The 8-bit 4:2:0 view: luma shifted down, cut to an even
+                // size.
+                let shift = case.bits - 8;
+                let (vw, vh) = (w / 2 * 2, h / 2 * 2);
+                let eight: Vec<u8> = gy
+                    .chunks_exact(w)
+                    .take(vh)
+                    .flat_map(|row| row[..vw].iter().map(|&s| (s >> shift) as u8))
+                    .collect();
+                assert_eq!(picture.picture.y(), &eight[..], "{}: 8-bit view", case.name);
             }
         }
+        check_packed(case, &bytes, &reference, frame_len);
         true
     }
 
@@ -363,6 +539,7 @@ mod oracle {
             size: (208, 120),
             frames: 10,
             bits: 8,
+            format: Format::Yuv420,
             params,
             source: "testsrc2",
             filter: "",
@@ -668,8 +845,226 @@ mod oracle {
         });
     }
 
+    /// A case in `format` at `bits` bits, named after both so that cases
+    /// sharing a name keep their own files.
+    fn run_in(format: Format, bits: u8, name: &str, extra: &str) {
+        let params = format!("{BASE}:{extra}");
+        let name = format!("{} {bits} {name}", format.pix(8));
+        check(&Case {
+            bits,
+            format,
+            ..case(&name, &params)
+        });
+    }
+
+    /// 4:2:2 intra pictures: two stacked chroma squares per transform block,
+    /// the 4:2:2 mode table, and both loop filters.
+    #[test]
+    fn four_two_two_ten_intra() {
+        run_in(Format::Yuv422, 10, "422p10 intra", "keyint=1");
+    }
+
+    #[test]
+    fn four_two_two_ten_intra_unfiltered() {
+        run_in(
+            Format::Yuv422,
+            10,
+            "422p10 intra raw",
+            "keyint=1:sao=0:deblock=0:tu-intra-depth=3",
+        );
+    }
+
+    /// Chroma motion at quarter-sample vertical and eighth-sample horizontal
+    /// steps, weighted, in a B pyramid.
+    #[test]
+    fn four_two_two_ten_inter() {
+        let params = format!("{BASE}:bframes=4:b-pyramid=1:ref=4:weightp=1:weightb=1");
+        check(&Case {
+            bits: 10,
+            format: Format::Yuv422,
+            filter: "fade=in:0:8",
+            ..case("422p10 inter", &params)
+        });
+    }
+
+    #[test]
+    fn four_two_two_eight() {
+        run_in(
+            Format::Yuv422,
+            8,
+            "422p",
+            "bframes=3:ref=3:rect=1:amp=1:tu-inter-depth=3",
+        );
+    }
+
+    #[test]
+    fn four_two_two_twelve() {
+        run_in(Format::Yuv422, 12, "422p12", "bframes=3:ref=3");
+    }
+
+    /// 4:4:4 intra with 4×4 parts, each with its own chroma mode.
+    #[test]
+    fn four_four_four_intra() {
+        run_in(Format::Yuv444, 8, "444p intra", "keyint=1:tu-intra-depth=3");
+    }
+
+    /// 4:4:4 chroma moves in eighths through the chroma filter.
+    #[test]
+    fn four_four_four_inter() {
+        run_in(
+            Format::Yuv444,
+            8,
+            "444p inter",
+            "bframes=4:b-pyramid=1:ref=4:rect=1:amp=1",
+        );
+    }
+
+    #[test]
+    fn four_four_four_ten() {
+        let params = format!("{BASE}:bframes=3:ref=3:weightp=1:weightb=1");
+        check(&Case {
+            bits: 10,
+            format: Format::Yuv444,
+            filter: "fade=in:0:8",
+            ..case("444p10", &params)
+        });
+    }
+
+    #[test]
+    fn four_four_four_twelve() {
+        run_in(
+            Format::Yuv444,
+            12,
+            "444p12",
+            "keyint=5:min-keyint=5:bframes=2",
+        );
+    }
+
+    /// Default scaling lists, whose 32×32 chroma lists 4:4:4 takes from the
+    /// 16×16 ones.
+    #[test]
+    fn scaling_lists_in_other_layouts() {
+        run_in(
+            Format::Yuv444,
+            8,
+            "444p scaling lists",
+            "scaling-list=default:bframes=2",
+        );
+        run_in(
+            Format::Yuv422,
+            10,
+            "422p10 scaling lists",
+            "scaling-list=default:bframes=2",
+        );
+    }
+
+    /// Chroma QP above the 4:2:0 table: capped at 51 outside 4:2:0, in the
+    /// transform and in the deblocking filter.
+    #[test]
+    fn chroma_offsets_and_quantizers_in_other_layouts() {
+        for format in [Format::Yuv422, Format::Yuv444] {
+            run_in(
+                format,
+                10,
+                "chroma offsets",
+                "bframes=2:qp=46:cbqpoffs=6:crqpoffs=-6:deblock=-3,2",
+            );
+            run_in(format, 8, "crf 12", "bframes=2:crf=12");
+            run_in(format, 8, "crf 40", "bframes=2:crf=40:deblock=3,3");
+        }
+    }
+
+    #[test]
+    fn loop_filters_alone_in_other_layouts() {
+        for format in [Format::Yuv422, Format::Yuv444] {
+            run_in(format, 8, "sao alone", "bframes=2:deblock=0");
+            run_in(format, 8, "deblock alone", "bframes=2:sao=0");
+        }
+    }
+
+    #[test]
+    fn slices_and_wavefronts_in_other_layouts() {
+        run_in(
+            Format::Yuv422,
+            10,
+            "422p10 slices",
+            "wpp=1:slices=3:bframes=2",
+        );
+        run_in(Format::Yuv444, 8, "444p wpp", "wpp=1:ctu=32:bframes=2");
+    }
+
+    #[test]
+    fn lossless_and_transform_skip_in_other_layouts() {
+        for format in [Format::Yuv422, Format::Yuv444] {
+            run_in(format, 8, "lossless", "lossless=1:bframes=2");
+            run_in(format, 10, "cu lossless", "cu-lossless=1:bframes=2");
+            run_in(format, 8, "tskip", "tskip=1:rdoq-level=2:bframes=2");
+            run_in(
+                format,
+                8,
+                "constrained intra",
+                "constrained-intra=1:signhide=0:strong-intra-smoothing=0:bframes=2",
+            );
+        }
+    }
+
+    /// Sizes that are not a multiple of the minimum coding block, cropped
+    /// in chroma units.
+    #[test]
+    fn cropped_sizes_in_other_layouts() {
+        let params = format!("{BASE}:bframes=2");
+        check(&Case {
+            size: (202, 122),
+            format: Format::Yuv444,
+            ..case("444p cropped", &params)
+        });
+        check(&Case {
+            size: (210, 118),
+            bits: 10,
+            format: Format::Yuv422,
+            ..case("422p10 cropped", &params)
+        });
+    }
+
+    #[test]
+    fn four_two_two_on_several_workers() {
+        let params = format!("{BASE}:wpp=1:ctu=32:bframes=3");
+        check_threads(&Case {
+            size: (640, 352),
+            frames: 10,
+            bits: 10,
+            format: Format::Yuv422,
+            ..case("422p10 threads", &params)
+        });
+    }
+
+    #[test]
+    fn four_four_four_on_several_workers() {
+        let params = format!("{BASE}:wpp=1:ctu=32:slices=2:bframes=2");
+        check_threads(&Case {
+            size: (640, 352),
+            frames: 8,
+            format: Format::Yuv444,
+            ..case("444p threads", &params)
+        });
+    }
+
+    /// 4:0:0 comes out as 4:2:0 with mid-grey chroma.
+    #[test]
+    fn monochrome() {
+        run_in(Format::Mono, 8, "gray", "bframes=3:ref=3");
+        run_in(
+            Format::Mono,
+            10,
+            "gray10",
+            "keyint=4:min-keyint=4:bframes=2",
+        );
+        run_in(Format::Mono, 12, "gray12", "bframes=2:deblock=0");
+    }
+
     /// A case named by the environment, for chasing a difference:
-    /// `HEVC_PARAMS`, `HEVC_SOURCE`, `HEVC_SIZE` (WxH), `HEVC_FRAMES`, `HEVC_BITS`, `HEVC_FILTER`.
+    /// `HEVC_PARAMS`, `HEVC_SOURCE`, `HEVC_SIZE` (WxH), `HEVC_FRAMES`, `HEVC_BITS`, `HEVC_FILTER`,
+    /// and `HEVC_FORMAT` (`420`, `422`, `444` or `400`).
     #[test]
     #[ignore = "run by hand"]
     fn from_environment() {
@@ -684,6 +1079,12 @@ mod oracle {
             size: (w.parse().expect("width"), h.parse().expect("height")),
             frames: var("HEVC_FRAMES", "1").parse().expect("frames"),
             bits: var("HEVC_BITS", "8").parse().expect("bits"),
+            format: match var("HEVC_FORMAT", "420").as_str() {
+                "422" => Format::Yuv422,
+                "444" => Format::Yuv444,
+                "400" => Format::Mono,
+                _ => Format::Yuv420,
+            },
             params: &params,
             source: &source,
             filter: &var("HEVC_FILTER", ""),

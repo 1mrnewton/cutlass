@@ -70,6 +70,11 @@ mod malformed {
         bit_depth_minus8: u64,
         log2_min_cb_minus3: u64,
         log2_diff_cb: u64,
+        /// `separate_colour_plane_flag`, written for 4:4:4.
+        separate_planes: u64,
+        /// The nine flags of `sps_range_extension`, first flag highest, or
+        /// no extension.
+        range_tools: Option<u64>,
     }
 
     const GOOD: SpsFields = SpsFields {
@@ -79,6 +84,8 @@ mod malformed {
         bit_depth_minus8: 0,
         log2_min_cb_minus3: 0,
         log2_diff_cb: 3,
+        separate_planes: 0,
+        range_tools: None,
     };
 
     fn sps(f: &SpsFields) -> Vec<u8> {
@@ -95,7 +102,7 @@ mod malformed {
             .u(8, 123);
         w.ue(0).ue(f.chroma);
         if f.chroma == 3 {
-            w.u(1, 0);
+            w.u(1, f.separate_planes);
         }
         w.ue(f.width).ue(f.height).u(1, 0);
         w.ue(f.bit_depth_minus8).ue(f.bit_depth_minus8).ue(4);
@@ -107,7 +114,13 @@ mod malformed {
             .ue(0)
             .ue(0);
         w.u(1, 0).u(1, 0).u(1, 0).u(1, 0);
-        w.ue(0).u(1, 0).u(1, 0).u(1, 0).u(1, 0).u(1, 0);
+        w.ue(0).u(1, 0).u(1, 0).u(1, 0).u(1, 0);
+        if let Some(flags) = f.range_tools {
+            // Extension present: the range extension alone, then its flags.
+            w.u(1, 1).u(1, 1).u(3, 0).u(4, 0).u(9, flags);
+        } else {
+            w.u(1, 0);
+        }
         w.nal(33)
     }
 
@@ -197,11 +210,60 @@ mod malformed {
     }
 
     #[test]
+    fn every_chroma_layout_parses() {
+        for chroma in 0..4 {
+            let mut data = sps(&SpsFields { chroma, ..GOOD });
+            data.extend(pps());
+            assert_eq!(
+                push(&mut decoder(), data),
+                Ok(0),
+                "chroma_format_idc {chroma}"
+            );
+        }
+        // A range extension with every tool off is no tool at all.
+        let mut data = sps(&SpsFields {
+            chroma: 2,
+            range_tools: Some(0),
+            ..GOOD
+        });
+        data.extend(pps());
+        assert_eq!(push(&mut decoder(), data), Ok(0));
+    }
+
+    #[test]
     fn unsupported_formats_say_so() {
         for (fields, what) in [
-            (SpsFields { chroma: 2, ..GOOD }, "4:2:2"),
-            (SpsFields { chroma: 3, ..GOOD }, "4:4:4"),
-            (SpsFields { chroma: 0, ..GOOD }, "4:0:0"),
+            (
+                SpsFields {
+                    chroma: 3,
+                    separate_planes: 1,
+                    ..GOOD
+                },
+                "separate colour planes",
+            ),
+            (
+                SpsFields {
+                    chroma: 2,
+                    range_tools: Some(1 << 8),
+                    ..GOOD
+                },
+                "transform skip rotation",
+            ),
+            (
+                SpsFields {
+                    chroma: 3,
+                    range_tools: Some(1 << 4),
+                    ..GOOD
+                },
+                "extended precision",
+            ),
+            (
+                SpsFields {
+                    range_tools: Some(1),
+                    ..GOOD
+                },
+                "cabac bypass alignment",
+            ),
         ] {
             let result = push(&mut decoder(), sps(&fields));
             assert!(
@@ -247,7 +309,11 @@ mod malformed {
         let mut data = sps(&GOOD);
         data.extend(pps());
         assert_eq!(push(&mut dec, data), Ok(0));
-        assert!(push(&mut dec, sps(&SpsFields { chroma: 2, ..GOOD })).is_err());
+        let refused = SpsFields {
+            range_tools: Some(1),
+            ..GOOD
+        };
+        assert!(push(&mut dec, sps(&refused)).is_err());
         // The good PPS survived the failed push: a slice naming it parses far
         // enough to fail on its missing data, not on a missing parameter set.
         let result = push(&mut dec, vec![0, 0, 1, 0x26, 0x01, 0xa0]);

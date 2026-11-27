@@ -621,11 +621,13 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         };
         // Wait for the reference rows the block reads: the luma filter
         // reaches 4 rows below, the chroma one 2 chroma rows.
+        let sub_h = self.chroma.sub_h;
         for (list, slot) in refs.iter().enumerate() {
             if let Some(frame) = slot {
                 let mv = field.mv[list];
                 let luma = (y + h) as isize + (isize::from(mv.y) >> 2) + 4;
-                let chroma = 2 * ((y / 2 + h / 2) as isize + (isize::from(mv.y) >> 3) + 2);
+                let mvc = isize::from(mv.y) << (1 - sub_h);
+                let chroma = (((y + h) >> sub_h) as isize + (mvc >> 3) + 2) << sub_h;
                 let need = luma.max(chroma).max(1) as usize;
                 let k = usize::from(field.ref_idx[list] as u8) & 15;
                 if need > self.seen_rows[list][k] {
@@ -652,12 +654,9 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         weights: Option<[[Wp; 2]; 3]>,
         bit_depth: u32,
     ) {
-        for c in 0..3 {
-            let (cx, cy, cw, ch) = if c == 0 {
-                (x, y, w, h)
-            } else {
-                (x / 2, y / 2, w / 2, h / 2)
-            };
+        for c in 0..self.chroma.planes() {
+            let (sub_w, sub_h) = self.chroma.shifts(c);
+            let (cx, cy, cw, ch) = (x >> sub_w, y >> sub_h, w >> sub_w, h >> sub_h);
             let n = cw * ch;
             let source = |list: usize| -> Option<(Plane<'_, P>, Block)> {
                 let frame = refs[list].as_ref()?;
@@ -673,11 +672,17 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                         luma: true,
                     }
                 } else {
+                    // In eighths of a chroma sample (clause 8.5.3.2.10):
+                    // `mvLX * 2 / SubWidthC`, `mvLX * 2 / SubHeightC`.
+                    let (mx, my) = (
+                        isize::from(mv.x) << (1 - sub_w),
+                        isize::from(mv.y) << (1 - sub_h),
+                    );
                     Block {
-                        x: cx as isize + (isize::from(mv.x) >> 3),
-                        y: cy as isize + (isize::from(mv.y) >> 3),
-                        fx: (mv.x & 7) as usize,
-                        fy: (mv.y & 7) as usize,
+                        x: cx as isize + (mx >> 3),
+                        y: cy as isize + (my >> 3),
+                        fx: (mx & 7) as usize,
+                        fy: (my & 7) as usize,
                         w: cw,
                         h: ch,
                         luma: false,
@@ -685,15 +690,15 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 };
                 // The reference's own size: a damaged stream may name a
                 // picture of another size.
-                let sub = usize::from(c > 0);
-                let (samples, rows) = match P::rows(&frame.rows).and_then(|r| r.rows_from(c, 0)) {
-                    Some((s, _, end)) => (s, end),
-                    None => (&[][..], 0),
-                };
+                let (samples, width, rows) =
+                    match P::rows(&frame.rows).and_then(|r| r.rows_from(c, 0)) {
+                        Some((s, width, end)) => (s, width, end),
+                        None => (&[][..], 0, 0),
+                    };
                 let plane = Plane {
                     samples,
-                    width: frame.width >> sub,
-                    height: frame.height >> sub,
+                    width,
+                    height: frame.height >> sub_h,
                     rows,
                 };
                 Some((plane, block))

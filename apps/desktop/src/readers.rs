@@ -1281,8 +1281,19 @@ mod tests {
     /// The first picture of an AV1 file from `crates/codecs/av1/tests/mp4`,
     /// decoded by the Rust decoder: its coded format and its RGBA.
     fn av1_software_picture(name: &str) -> (cutlass_decode::PixelFormat, (u32, u32), Vec<u8>) {
+        software_picture("av1", name)
+    }
+
+    /// The first picture of `name` in `crates/codecs/<codec>/tests/mp4`,
+    /// decoded with hardware decode off: its coded format and its RGBA.
+    fn software_picture(
+        codec: &str,
+        name: &str,
+    ) -> (cutlass_decode::PixelFormat, (u32, u32), Vec<u8>) {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../crates/codecs/av1/tests/mp4")
+            .join("../../crates/codecs")
+            .join(codec)
+            .join("tests/mp4")
             .join(name);
         let software = cutlass_settings::Hardware {
             decode: false,
@@ -1329,6 +1340,28 @@ mod tests {
             assert!(rgba.chunks(4).all(|p| p[3] == 255), "{name}");
             // A picture, not one flat value.
             assert!(rgba.chunks(4).any(|p| p[..3] != rgba[..3]), "{name}");
+        }
+    }
+
+    #[test]
+    fn hevc_four_two_two_and_four_four_four_open_on_the_rust_decoder() {
+        use cutlass_decode::PixelFormat as P;
+        // x265 streams that FFmpeg wrote as MP4, studio swing BT.709: 0x4080C0
+        // above 0xC08040. Chroma rows read as 4:2:0 would paint the lower
+        // half in the upper half's color.
+        for (name, pixel) in [("yuv422-10.mp4", P::Yuv422p10), ("yuv444.mp4", P::Yuv444p)] {
+            let (got, size, rgba) = software_picture("hevc", name);
+            assert_eq!(got, pixel, "{name}");
+            assert_eq!(size, (128, 96), "{name}");
+            for (row, want) in [(12, [64i32, 128, 192]), (84, [192, 128, 64])] {
+                for (channel, want) in want.into_iter().enumerate() {
+                    let got = i32::from(rgba[4 * (row * 128 + 64) + channel]);
+                    assert!(
+                        (got - want).abs() <= 5,
+                        "{name} row {row} channel {channel}: {got}"
+                    );
+                }
+            }
         }
     }
 

@@ -151,7 +151,89 @@ impl Vui {
     }
 }
 
+/// Where the chroma samples of a picture lie beside its luma ones: the
+/// log2 of `SubWidthC` and `SubHeightC` (Table 6-1), and whether there
+/// are chroma planes at all. A monochrome (4:0:0) picture is laid out as
+/// 4:2:0, its chroma planes mid-grey and never coded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Chroma {
+    pub sub_w: u32,
+    pub sub_h: u32,
+    /// `ChromaArrayType` is not 0.
+    pub present: bool,
+}
+
+impl Chroma {
+    pub const YUV420: Self = Self {
+        sub_w: 1,
+        sub_h: 1,
+        present: true,
+    };
+
+    /// The layout of `chroma_format_idc`.
+    pub const fn of(chroma_format_idc: u8) -> Self {
+        match chroma_format_idc {
+            0 => Self {
+                sub_w: 1,
+                sub_h: 1,
+                present: false,
+            },
+            2 => Self {
+                sub_w: 1,
+                sub_h: 0,
+                present: true,
+            },
+            3 => Self {
+                sub_w: 0,
+                sub_h: 0,
+                present: true,
+            },
+            _ => Self::YUV420,
+        }
+    }
+
+    /// How far plane `c` is shifted from luma, across and down.
+    #[inline(always)]
+    pub const fn shifts(self, c: usize) -> (u32, u32) {
+        if c == 0 {
+            (0, 0)
+        } else {
+            (self.sub_w, self.sub_h)
+        }
+    }
+
+    /// `ChromaArrayType` 1 (4:2:0).
+    #[inline(always)]
+    pub const fn is_420(self) -> bool {
+        self.present && self.sub_w == 1 && self.sub_h == 1
+    }
+
+    /// `ChromaArrayType` 2 (4:2:2).
+    #[inline(always)]
+    pub const fn is_422(self) -> bool {
+        self.present && self.sub_w == 1 && self.sub_h == 0
+    }
+
+    /// `ChromaArrayType` 3 (4:4:4).
+    #[inline(always)]
+    pub const fn is_444(self) -> bool {
+        self.present && self.sub_w == 0
+    }
+
+    /// The planes coded: luma alone for 4:0:0.
+    #[inline(always)]
+    pub const fn planes(self) -> usize {
+        if self.present { 3 } else { 1 }
+    }
+}
+
 impl Sps {
+    /// The layout of the chroma planes.
+    #[inline(always)]
+    pub fn chroma(&self) -> Chroma {
+        Chroma::of(self.chroma_format_idc)
+    }
+
     pub fn ctb_size(&self) -> u32 {
         1 << self.log2_ctb
     }
@@ -327,10 +409,15 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
             });
         }
     }
-    if chroma_format_idc != 1 {
-        return Err(CodecError::Unsupported {
-            what: "chroma format other than 4:2:0",
-        });
+    if chroma_format_idc == 0 {
+        // Laid out as 4:2:0 (see `Chroma`): the cropped picture keeps
+        // whole chroma samples.
+        let [left, right, top, bottom] = crop;
+        if (width - left - right) % 2 != 0 || (height - top - bottom) % 2 != 0 {
+            return Err(CodecError::Unsupported {
+                what: "monochrome picture of odd size",
+            });
+        }
     }
     if bit_depth != bit_depth_chroma || bit_depth > 12 {
         return Err(CodecError::Unsupported { what: "bit depth" });

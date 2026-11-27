@@ -9,7 +9,7 @@ use cutlass_decode::CodecError;
 use crate::cabac::Contexts;
 use crate::frame::Frame;
 use crate::pixel::Pixel;
-use crate::ps::{Layout, Pps, Sps};
+use crate::ps::{Chroma, Layout, Pps, Sps};
 use crate::slice::SliceHeader;
 
 /// A motion vector in quarter luma samples.
@@ -289,6 +289,10 @@ pub struct Work<P> {
     pub width: usize,
     pub height: usize,
     pub log2_ctb: u32,
+    /// The layout of the chroma planes.
+    pub chroma: Chroma,
+    /// Bits per sample: monochrome chroma planes hold its mid-grey.
+    pub bit_depth: u8,
     /// CTB rows of the picture.
     pub count: usize,
 }
@@ -302,11 +306,25 @@ pub const RING: usize = 4;
 
 impl<P: Pixel> Work<P> {
     /// Buffers for a picture of `width`×`height` with CTBs of `1 <<
-    /// log2_ctb`: `slots` of them, at most one for each CTB row.
-    pub fn new(width: usize, height: usize, log2_ctb: u32, slots: usize) -> Self {
+    /// log2_ctb` and chroma planes laid out as `chroma`: `slots` of them,
+    /// at most one for each CTB row. Monochrome chroma planes are
+    /// mid-grey for samples of `bit_depth` bits, and stay so: nothing
+    /// writes them.
+    pub fn new(
+        (width, height): (usize, usize),
+        log2_ctb: u32,
+        slots: usize,
+        (chroma, bit_depth): (Chroma, u8),
+    ) -> Self {
         let ctb = 1usize << log2_ctb;
         let count = height.div_ceil(ctb);
         let slots = slots.clamp(1, count.max(1));
+        let fill = if chroma.present {
+            P::default()
+        } else {
+            P::of(1 << (bit_depth - 1))
+        };
+        let cw = width >> chroma.sub_w;
         let rows = (0..slots)
             .map(|r| {
                 // Without the ring, the last row holds only its lines.
@@ -315,21 +333,16 @@ impl<P: Pixel> Work<P> {
                 } else {
                     ctb.min(height - r * ctb)
                 };
+                let chroma_len = (lines >> chroma.sub_h) * cw;
                 Mutex::new([
                     vec![P::default(); lines * width],
-                    vec![P::default(); lines / 2 * (width / 2)],
-                    vec![P::default(); lines / 2 * (width / 2)],
+                    vec![fill; chroma_len],
+                    vec![fill; chroma_len],
                 ])
             })
             .collect();
         let lines = (0..slots)
-            .map(|_| {
-                Mutex::new([
-                    vec![P::default(); width],
-                    vec![P::default(); width / 2],
-                    vec![P::default(); width / 2],
-                ])
-            })
+            .map(|_| Mutex::new([vec![P::default(); width], vec![fill; cw], vec![fill; cw]]))
             .collect();
         Self {
             rows,
@@ -337,16 +350,27 @@ impl<P: Pixel> Work<P> {
             width,
             height,
             log2_ctb,
+            chroma,
+            bit_depth,
             count,
         }
     }
 
-    /// Whether these buffers fit a picture of this size and CTB with
-    /// `slots` buffers.
-    pub fn fits(&self, width: usize, height: usize, log2_ctb: u32, slots: usize) -> bool {
+    /// Whether these buffers fit a picture of this size, CTB, chroma
+    /// layout and depth (for the grey of monochrome) with `slots`
+    /// buffers.
+    pub fn fits(
+        &self,
+        (width, height): (usize, usize),
+        log2_ctb: u32,
+        slots: usize,
+        (chroma, bit_depth): (Chroma, u8),
+    ) -> bool {
         self.width == width
             && self.height == height
             && self.log2_ctb == log2_ctb
+            && self.chroma == chroma
+            && (chroma.present || self.bit_depth == bit_depth)
             && self.rows.len() == slots.clamp(1, self.count.max(1))
     }
 
@@ -381,7 +405,21 @@ pub struct Samples<'p, P> {
 impl<P: Pixel> Samples<'_, P> {
     #[inline]
     fn stride(&self, c: usize) -> usize {
-        if c == 0 { self.width } else { self.width / 2 }
+        if c == 0 {
+            self.width
+        } else {
+            self.width >> self.work.chroma.sub_w
+        }
+    }
+
+    /// The first row of component `c` held.
+    #[inline]
+    fn top(&self, c: usize) -> usize {
+        if c == 0 {
+            self.top
+        } else {
+            self.top >> self.work.chroma.sub_h
+        }
     }
 
     /// The CTB row held.
@@ -392,8 +430,7 @@ impl<P: Pixel> Samples<'_, P> {
     /// Index of component sample (`x`, `y`). The row must be held.
     #[inline]
     pub fn index(&self, c: usize, x: usize, y: usize) -> usize {
-        let top = if c == 0 { self.top } else { self.top / 2 };
-        (y - top) * self.stride(c) + x
+        (y - self.top(c)) * self.stride(c) + x
     }
 
     /// The plane of component `c` from sample (`x`, `y`) on, and its stride.
@@ -407,7 +444,7 @@ impl<P: Pixel> Samples<'_, P> {
     /// Whether component row `y` is held here (else it is the line above).
     #[inline]
     pub fn holds(&self, c: usize, y: usize) -> bool {
-        y >= if c == 0 { self.top } else { self.top / 2 }
+        y >= self.top(c)
     }
 
     /// Component samples (`x`, `y`) downwards, one per entry of `out`. The
@@ -446,12 +483,9 @@ impl<P: Pixel> Samples<'_, P> {
         let bottom = (y + size).min(height) - 1;
         let w = size.min(self.width - x);
         let mut line = lock(line);
-        for c in 0..3 {
-            let (sx, sy, sw) = if c == 0 {
-                (x, bottom, w)
-            } else {
-                (x / 2, bottom / 2, w / 2)
-            };
+        for c in 0..self.work.chroma.planes() {
+            let (sub_w, sub_h) = self.work.chroma.shifts(c);
+            let (sx, sy, sw) = (x >> sub_w, bottom >> sub_h, w >> sub_w);
             let at = self.index(c, sx, sy);
             line[c][sx..sx + sw].copy_from_slice(&self.band[c][at..at + sw]);
         }

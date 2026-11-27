@@ -25,7 +25,7 @@ Constant-size audio is an audio track whose `stsz` has one sample size and whose
 
 A seek on such a track lands on the packet that holds the asked frame. The landing's time is that packet's first frame, so the asked frame is `asked time - landing time` frames into the next packet, and the preroll is 0.
 
-An audio entry whose rate field is 0 (the 16.16 field cannot hold a rate above 65535) takes its rate from the AAC `AudioSpecificConfig`, the FLAC `dfLa` STREAMINFO, or 48000 for Opus, and otherwise from the `mdhd` timescale.
+An audio entry whose rate field is 0 (the 16.16 field cannot hold a rate above 65535) takes its rate from the AAC `AudioSpecificConfig`, or 48000 for Opus, and otherwise from the `mdhd` timescale. A FLAC entry always takes its rate from the `dfLa` STREAMINFO, which is the rate the decoder gives: FFmpeg halves a rate above 65535 until it fits the field, so its 96 kHz FLAC says 48000 there.
 
 The sample entry names the codec:
 
@@ -73,6 +73,8 @@ A fragment is cut before a video keyframe once it holds `fragment_millis` (defau
 In a movie, samples that lie one after another in the file share a chunk of up to 1 MiB, and chunk offsets are `stco` unless one needs 64 bits (`co64`). The movie timescale is `movie_timescale` when set. Otherwise it is the least common multiple of the track timescales when that is at most 1,000,000, the first video track's timescale when it is not, and 1000 as the last resort; durations that do not divide round up. `mvhd`, `tkhd`, `mdhd` and `elst` are written as version 1, with 64-bit times, when a value does not fit 32 bits. `creation_time` sets the creation and modification time of the movie and its tracks.
 
 Decode times on a track must start at 0 and continue by each packet's duration. `set_edits` writes an `elst`.
+
+A FLAC track's configuration may be the 34-byte STREAMINFO body, `fLaC` and its blocks, or a `dfLa` body. It is written as a `dfLa` body either way: version 0, no flags, STREAMINFO first, as FFmpeg reads it. `Mp4Mux` takes no FLAC, since the app exports FLAC only to `.flac` files.
 
 `Mp4Mux` is the export muxer. `Mp4Mux::with_options` takes `Mp4Options` (`fast_start`, `recoverable`, both on by default, and `creation_time`) over an output that can be read back; `Mp4Mux::new` and `with_brand` write a progressive file to any seekable output. An AAC, AC-3 or E-AC-3 track whose encoder reports its delay and padding gets an edit that starts after the delay and lasts to the padding, and its last sample's duration ends where the padding starts, which is how FFmpeg marks the end. It accepts H.264, HEVC, MPEG-4 Visual, MPEG-2, ProRes, VP8, AV1, and Motion JPEG pictures, and AAC, ALAC, Opus, AC-3, E-AC-3, and 16-bit PCM sound. Motion JPEG is written only to a QuickTime movie. An AV1 track is an `av01` entry with its `av1C` record in a file that lists the `av01` brand; each sample is the temporal unit without its temporal delimiter, padding and redundant frame headers, every OBU with a size (AV1 Codec ISO Media File Format Binding 2.1 and 2.4).
 
@@ -235,7 +237,7 @@ Gaps:
 - A recoverable file's first `moov` is written with its first fragment. A codec configuration or color that changes after that is in the finished movie and not in a file recovered from a crash.
 - The muxer has no input for a pixel aspect ratio (`pasp`), mastering display or light level (`mdcv`, `clli`), or a rotation, and writes none.
 - If a write fails in the middle of a fragment after its `moof` went out, that `moof` is not taken back.
-- The FFmpeg comparison in this crate uses H.264, AAC, and Motion JPEG files. Most other sample entries are tested with hand-built entries. The AV1, VP9, FLAC, and MP3 entries have no test in this crate.
+- The FFmpeg comparison in this crate uses H.264, AAC, and Motion JPEG files. Most other sample entries are tested with hand-built entries. The AV1, VP9, and MP3 entries have no test in this crate. FLAC's rate and the `dfLa` body this writer makes are tested here with hand-built bytes; FFmpeg's FLAC in MP4 and this writer's are checked against each other in the desktop app's readers tests.
 - FFmpeg (`ffmpeg` and `ffprobe` share one library) is the only tool the packet comparison uses. GStreamer confirms codec and width only.
 
 ## Specifications
@@ -245,5 +247,6 @@ These are the documents the source comments name:
 - ISO/IEC 14496-12, ISO base media file format.
 - ISO/IEC 14496-1, for the `esds` object type indications.
 - Encapsulation of Opus in ISO Base Media File Format, version 0.6.8, and RFC 7845 (`OpusHead`).
+- Encapsulation of FLAC in ISO Base Media File Format (Xiph.Org), for the `dfLa` box.
 - Apple's `ALACMagicCookieDescription.txt`, for the ALAC cookie.
 - SMPTE RDD 36, for the color bytes of a ProRes frame header.

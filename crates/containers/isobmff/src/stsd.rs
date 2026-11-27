@@ -258,6 +258,14 @@ fn parse_audio(
         }
         configured.extradata = cookie;
     }
+    if codec == CodecId::Flac
+        && let Some(stated) = flac_rate(&configured.extradata)
+    {
+        // STREAMINFO is the rate the decoder gives. The entry's field stops
+        // at 65535, and FFmpeg halves a higher rate until it fits there, so
+        // a 96 kHz track says 48000.
+        rate = stated;
+    }
     if rate == 0 {
         // The 16.16 rate field stops at 65535, and some writers store 0
         // above it. The codec configuration states the rate itself.
@@ -1130,6 +1138,11 @@ mod tests {
         );
         assert_eq!(
             audio(&sound(b"fLaC", 0, 2, 16, 0, &boxed(b"dfLa", &dfla))).sample_rate,
+            96_000
+        );
+        // Except FLAC's: STREAMINFO wins over the halved rate FFmpeg writes.
+        assert_eq!(
+            audio(&sound(b"fLaC", 0, 2, 16, 48_000, &boxed(b"dfLa", &dfla))).sample_rate,
             96_000
         );
         assert_eq!(audio(&sound(b"Opus", 0, 2, 16, 0, &[])).sample_rate, 48_000);

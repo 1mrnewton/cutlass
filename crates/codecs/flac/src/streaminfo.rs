@@ -2,7 +2,8 @@
 //!
 //! The codec configuration a container hands over is this 34-byte body.
 //! [`StreamInfo::from_extra`] also accepts the body behind a `fLaC` marker
-//! and its block header, the form FFmpeg accepts as extradata.
+//! and its block header, the form FFmpeg accepts as extradata, and the body
+//! of a `dfLa` box, which is what an MP4 `fLaC` sample entry holds.
 
 use cutlass_decode::CodecError;
 
@@ -89,9 +90,11 @@ impl StreamInfo {
         })
     }
 
-    /// Reads codec configuration: empty is `None`; a 34-byte body; or the
-    /// `fLaC` marker, a STREAMINFO block header, and the body, with any
-    /// further metadata blocks after it ignored.
+    /// Reads codec configuration: empty is `None`; a 34-byte body; or four
+    /// bytes and then metadata blocks, STREAMINFO first, with any blocks
+    /// after it ignored. The four bytes are the `fLaC` marker, or a `dfLa`
+    /// box's version and flags, which are all zero (Encapsulation of FLAC
+    /// in ISO Base Media File Format).
     pub fn from_extra(extra: &[u8]) -> Result<Option<Self>, CodecError> {
         if extra.is_empty() {
             return Ok(None);
@@ -99,7 +102,8 @@ impl StreamInfo {
         if extra.len() == STREAMINFO_LEN {
             return Self::parse(extra).map(Some);
         }
-        if extra.len() >= 8 + STREAMINFO_LEN && extra.starts_with(b"fLaC") {
+        let marked = extra.starts_with(b"fLaC") || extra.starts_with(&[0; 4]);
+        if marked && extra.len() >= 8 + STREAMINFO_LEN {
             let kind = extra[4] & 0x7F;
             let len = u32::from_be_bytes([0, extra[5], extra[6], extra[7]]);
             if kind != 0 || len != 34 {
@@ -185,6 +189,29 @@ mod tests {
         marked[4] = 0x84;
         assert!(StreamInfo::from_extra(&marked).is_err());
         assert!(StreamInfo::from_extra(&body[..STREAMINFO_LEN - 1]).is_err());
+    }
+
+    /// An MP4 `fLaC` entry's `dfLa` body: version 0 and no flags, then the
+    /// blocks. FFmpeg writes STREAMINFO and then a VORBIS_COMMENT.
+    #[test]
+    fn a_dfla_body_is_read() {
+        let body = sample().to_bytes();
+        let mut dfla = vec![0, 0, 0, 0, 0x00, 0, 0, 34];
+        dfla.extend_from_slice(&body);
+        dfla.extend_from_slice(&[0x84, 0, 0, 8]);
+        dfla.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(StreamInfo::from_extra(&dfla).expect("dfLa"), Some(sample()));
+        assert_eq!(
+            StreamInfo::from_extra(&dfla[..8 + STREAMINFO_LEN]).expect("last block"),
+            Some(sample())
+        );
+        // A later version, flags, or another block first are refused.
+        for (at, value) in [(0, 1), (3, 1), (4, 0x84)] {
+            let mut other = dfla.clone();
+            other[at] = value;
+            assert!(StreamInfo::from_extra(&other).is_err(), "byte {at}");
+        }
+        assert!(StreamInfo::from_extra(&dfla[..8 + STREAMINFO_LEN - 1]).is_err());
     }
 
     #[test]

@@ -1670,7 +1670,10 @@ fn config_boxes(track: &TrackOut) -> Result<Vec<u8>, Error> {
     } else if &code == b"ec-3" {
         out.extend(box_bytes(b"dec3", &track.params.extradata));
     } else if &code == b"fLaC" {
-        out.extend(box_bytes(b"dfLa", &track.params.extradata));
+        let dfla = flac_dfla(&track.params.extradata).ok_or(Error::Unsupported {
+            what: "FLAC configuration that is neither STREAMINFO nor dfLa",
+        })?;
+        out.extend(box_bytes(b"dfLa", &dfla));
     } else if matches!(&code, b"mp4a" | b"mp4v")
         && (!track.params.extradata.is_empty() || track.params.codec == CodecId::Mpeg2)
     {
@@ -2242,6 +2245,38 @@ fn fixed_16_16(value: u32) -> u32 {
     u32::from(u16::try_from(value).unwrap_or(u16::MAX)) << 16
 }
 
+/// Bytes in a FLAC STREAMINFO body.
+const STREAMINFO_LEN: usize = 34;
+
+/// The body of a `dfLa` box for FLAC configuration (Encapsulation of FLAC
+/// in ISO Base Media File Format): a version and flags, all zero, then the
+/// metadata blocks with STREAMINFO first. The configuration is the 34-byte
+/// STREAMINFO body, as the FLAC encoder and FLAC files give it; the `fLaC`
+/// marker and the blocks; or a `dfLa` body already, as an MP4 `fLaC` entry
+/// reads.
+fn flac_dfla(config: &[u8]) -> Option<Vec<u8>> {
+    let mut out = vec![0, 0, 0, 0];
+    if config.len() == STREAMINFO_LEN {
+        // The last block, of type 0, 34 bytes long.
+        out.extend_from_slice(&[0x80, 0, 0, 34]);
+        out.extend_from_slice(config);
+        return Some(out);
+    }
+    let blocks = config
+        .strip_prefix(b"fLaC")
+        .or_else(|| config.strip_prefix(&[0; 4]))?;
+    let header = blocks.get(..4)?;
+    if header[0] & 0x7F != 0 || header[1..] != [0, 0, 34] || blocks.len() < 4 + STREAMINFO_LEN {
+        return None;
+    }
+    out.extend_from_slice(blocks);
+    if blocks.len() == 4 + STREAMINFO_LEN {
+        // STREAMINFO alone is the last block.
+        out[4] |= 0x80;
+    }
+    Some(out)
+}
+
 fn box_bytes(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     let size = 8u32.saturating_add(u32::try_from(payload.len()).unwrap_or(0));
     let mut out = Vec::with_capacity(payload.len() + 8);
@@ -2266,7 +2301,38 @@ fn sized_box(kind: &[u8; 4], payload: &[u8]) -> Result<Vec<u8>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::mpeg2_object_type;
+    use super::{flac_dfla, mpeg2_object_type};
+
+    /// STREAMINFO alone and in the `fLaC` form become one `dfLa` body, and
+    /// a `dfLa` body, such as FFmpeg's with a VORBIS_COMMENT after it, is
+    /// kept as it is.
+    #[test]
+    fn flac_configuration_is_written_as_a_dfla_body() {
+        let info: Vec<u8> = (1..=34).collect();
+        let mut want = vec![0, 0, 0, 0, 0x80, 0, 0, 34];
+        want.extend_from_slice(&info);
+        assert_eq!(flac_dfla(&info), Some(want.clone()));
+        let mut marked = b"fLaC\x00\x00\x00\x22".to_vec();
+        marked.extend_from_slice(&info);
+        assert_eq!(flac_dfla(&marked), Some(want.clone()));
+        assert_eq!(flac_dfla(&want), Some(want.clone()));
+
+        let mut ffmpeg = want.clone();
+        ffmpeg[4] = 0;
+        ffmpeg.extend_from_slice(&[0x84, 0, 0, 4, 1, 2, 3, 4]);
+        assert_eq!(flac_dfla(&ffmpeg), Some(ffmpeg.clone()));
+
+        // Not FLAC configuration: too short, a later version, or another
+        // block first.
+        assert_eq!(flac_dfla(&info[..33]), None);
+        assert_eq!(flac_dfla(&want[..41]), None);
+        let mut other = want.clone();
+        other[0] = 1;
+        assert_eq!(flac_dfla(&other), None);
+        other = want;
+        other[4] = 0x84;
+        assert_eq!(flac_dfla(&other), None);
+    }
 
     fn headers(indication: Option<u8>) -> Vec<u8> {
         let mut bytes = vec![

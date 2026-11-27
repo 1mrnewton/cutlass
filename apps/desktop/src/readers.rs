@@ -1257,6 +1257,153 @@ mod tests {
         }
     }
 
+    /// `source`, 16-bit stereo at `rate`, as FLAC in an MP4 from the box
+    /// writer, with the encoder's 34-byte STREAMINFO as the configuration.
+    /// The app exports FLAC only to `.flac` files, so `Mp4Mux` takes no FLAC.
+    fn flac_mp4(path: &std::path::Path, rate: u32, source: &[i16]) {
+        use cutlass_isobmff::Mux as _;
+
+        let samples: Vec<i32> = source.iter().map(|sample| i32::from(*sample)).collect();
+        let settings = cutlass_flac::Settings::level(5).expect("level");
+        let mut encoder = cutlass_flac::FlacEncoder::new(rate, 2, 16, settings).expect("encoder");
+        let mut frames = encoder.encode(&samples).expect("encode");
+        frames.extend(encoder.finish().expect("finish"));
+        let mut mux = cutlass_isobmff::IsoBmffMux::new(
+            std::fs::File::create(path).expect("create"),
+            cutlass_isobmff::MuxOptions {
+                brand: cutlass_isobmff::FileBrand::M4a,
+                ..Default::default()
+            },
+        );
+        let scale = cutlass_isobmff::Timescale(rate);
+        let mut params = cutlass_isobmff::StreamParams::audio(
+            cutlass_isobmff::CodecId::Flac,
+            scale,
+            rate,
+            2,
+            16,
+            cutlass_isobmff::SampleFormat::Unknown,
+        );
+        params.extradata = encoder.stream_info().to_bytes().to_vec();
+        let track = mux.add_stream(&params).expect("stream");
+        for frame in frames {
+            let pts = i64::try_from(frame.first_sample).expect("pts");
+            mux.write_packet(&cutlass_isobmff::Packet {
+                track_id: track,
+                payload: frame.data,
+                dts: pts,
+                pts,
+                duration: frame.samples,
+                timescale: scale,
+                keyframe: true,
+            })
+            .expect("write");
+        }
+        mux.finish_into().expect("finish");
+    }
+
+    /// Every sample the desktop readers play from a 16-bit FLAC track,
+    /// interleaved. The decoder gives `s / 32767`, which this undoes.
+    fn play_flac_s16(path: &std::path::Path) -> Vec<i16> {
+        let mut media = installed_readers().open(path).expect("open");
+        let mut out = Vec::new();
+        while let Some(ready) = media.pull_audio().expect("pull") {
+            let floats = ready.pcm.as_f32().expect("f32");
+            out.extend(floats.iter().map(|value| (value * 32_767.0).round() as i16));
+        }
+        out
+    }
+
+    /// A FLAC track in an MP4 opens at its own rate and plays exactly what
+    /// was encoded, from the start and after a seek. At 96 kHz the sample
+    /// entry's 16-bit rate field cannot hold the rate, so it comes from
+    /// STREAMINFO.
+    #[test]
+    fn a_flac_track_in_an_mp4_opens_seeks_and_decodes_exactly() {
+        for rate in [44_100_u32, 96_000] {
+            let path = std::env::temp_dir().join(format!(
+                "cutlass-readers-flac-mp4-{rate}-{}.m4a",
+                std::process::id()
+            ));
+            let source = test_signal(rate as usize * 3 / 2);
+            flac_mp4(&path, rate, &source);
+            let readers = installed_readers();
+            let info = readers.probe(&path).expect("probe");
+            assert_eq!(info.duration.map(|d| d.0), Some(1_500_000), "{rate}");
+            let mut media = readers.open(&path).expect("open");
+            let rates: Vec<u32> = media
+                .info()
+                .streams
+                .iter()
+                .filter_map(|stream| stream.sample_rate)
+                .collect();
+            assert_eq!(rates, [rate]);
+            let later = media
+                .audio_from(cutlass_model::Micros(1_000_000), 1_000)
+                .expect("seek");
+            let later: Vec<i16> = later
+                .as_f32()
+                .expect("f32")
+                .iter()
+                .map(|value| (value * 32_767.0).round() as i16)
+                .collect();
+            let start = rate as usize * 2;
+            assert_eq!(later, &source[start..start + 2_000], "{rate}");
+            assert_eq!(play_flac_s16(&path), source, "{rate}");
+            std::fs::remove_file(&path).expect("remove");
+        }
+    }
+
+    /// FFmpeg's FLAC in MP4 plays here sample for sample, at 44.1 kHz and
+    /// at 96 kHz, where FFmpeg writes 48000 in the sample entry. FFmpeg
+    /// plays this writer's file sample for sample too. Skipped without
+    /// FFmpeg.
+    #[test]
+    fn ffmpeg_flac_in_mp4_plays_here_and_ours_plays_in_ffmpeg() {
+        if !tool_exists("ffmpeg") {
+            eprintln!("skipped: ffmpeg is not on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "cutlass-readers-flac-oracle-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        for rate in [44_100_u32, 96_000] {
+            let source = test_signal(rate as usize);
+            let wav = dir.join("source.wav");
+            std::fs::write(&wav, s16_wav(rate, 2, &source)).expect("wav");
+            let theirs = dir.join(format!("theirs-{rate}.mp4"));
+            run_tool(
+                "ffmpeg",
+                &[
+                    "-v",
+                    "error",
+                    "-y",
+                    "-i",
+                    path_str(&wav),
+                    "-c:a",
+                    "flac",
+                    path_str(&theirs),
+                ],
+            );
+            let media = installed_readers().open(&theirs).expect("open");
+            let rates: Vec<u32> = media
+                .info()
+                .streams
+                .iter()
+                .filter_map(|stream| stream.sample_rate)
+                .collect();
+            assert_eq!(rates, [rate]);
+            assert_eq!(play_flac_s16(&theirs), source, "ffmpeg's at {rate}");
+
+            let ours = dir.join(format!("ours-{rate}.m4a"));
+            flac_mp4(&ours, rate, &source);
+            assert_eq!(ffmpeg_s16(&ours, &dir), source, "ours at {rate}");
+        }
+        std::fs::remove_dir_all(&dir).expect("remove");
+    }
+
     #[test]
     fn an_iphone_movie_with_spatial_audio_plays_its_picture_and_aac_sound() {
         // Recent iPhones store an `apac` spatial-audio track beside the AAC.

@@ -147,6 +147,17 @@ pub enum Block {
     /// deep red where it is faint, through orange and yellow to white where
     /// it is strong, with a second, pinker light beside it.
     Leak,
+    /// A film burn: a ragged wall of light crosses the frame, the whole
+    /// picture goes white in the middle, then the light leaves by the far
+    /// side, flickering and slipping from frame to frame.
+    Burn,
+    /// The soft discs far lights turn into when they are out of focus:
+    /// three depths of them, drifting and breathing.
+    Bokeh,
+    /// A lens flare: a bright light with its glow, a long streak, rays, a
+    /// faint ring, and coloured ghosts on the line from the light through
+    /// the middle of the frame.
+    Flare,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -445,9 +456,59 @@ const LEAK: &[Param] = &[
     param("blue2", 0.42, 0.0, 1.0),
 ];
 
+/// `progress` 0 to 1 carries the light across: white at 0.5, gone at
+/// both ends. `side` is as for the leak. `rough` is how ragged the wall
+/// is, `flicker` how much it jumps from frame to frame.
+const BURN: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("progress", 0.0, 0.0, 1.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("side", -1.0, -1.0, 1.0),
+    param("rough", 1.0, 0.0, 2.0),
+    param("flicker", 0.35, 0.0, 1.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.36, 0.0, 1.0),
+    param("blue", 0.09, 0.0, 1.0),
+];
+
+/// `fill` is how many cells hold a disc, `size` how big the discs are,
+/// `colours` how far each strays from the tint to a colour of its own.
+const BOKEH: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("fill", 1.0, 0.0, 2.0),
+    param("size", 1.0, 0.2, 3.0),
+    param("colours", 0.35, 0.0, 1.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.8, 0.0, 1.0),
+    param("blue", 0.52, 0.0, 1.0),
+];
+
+/// The light travels from (`from_x`, `from_y`) to (`to_x`, `to_y`), as
+/// shares of the frame from its top left, as `progress` goes 0 to 1, so
+/// the ghosts slide the other way.
+const FLARE: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("progress", 0.0, 0.0, 1.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("from_x", 0.12, -0.5, 1.5),
+    param("from_y", 0.2, -0.5, 1.5),
+    param("to_x", 0.42, -0.5, 1.5),
+    param("to_y", 0.14, -0.5, 1.5),
+    param("streak", 1.0, 0.0, 2.0),
+    param("rays", 1.0, 0.0, 2.0),
+    param("ghosts", 1.0, 0.0, 2.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.86, 0.0, 1.0),
+    param("blue", 0.62, 0.0, 1.0),
+];
+
 impl Block {
     /// Every block, in the order of their codes.
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 42] = [
         Self::Transform,
         Self::RgbSplit,
         Self::Slices,
@@ -487,6 +548,9 @@ impl Block {
         Self::Place,
         Self::Blend,
         Self::Leak,
+        Self::Burn,
+        Self::Bokeh,
+        Self::Flare,
     ];
 
     /// The parameters in the order the shader reads them.
@@ -532,6 +596,9 @@ impl Block {
             Self::Place => PLACE,
             Self::Blend => BLEND,
             Self::Leak => LEAK,
+            Self::Burn => BURN,
+            Self::Bokeh => BOKEH,
+            Self::Flare => FLARE,
         }
     }
 
@@ -578,6 +645,9 @@ impl Block {
             Self::Place => 36,
             Self::Blend => 37,
             Self::Leak => 38,
+            Self::Burn => 39,
+            Self::Bokeh => 40,
+            Self::Flare => 41,
         }
     }
 }
@@ -1525,7 +1595,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 207] = [
+const BUNDLED_FILES: [&str; 212] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -1733,6 +1803,11 @@ const BUNDLED_FILES: [&str; 207] = [
     include_str!("../recipes/watercolor.json"),
     include_str!("../recipes/film-leak.json"),
     include_str!("../recipes/leak-wash.json"),
+    include_str!("../recipes/burn-through.json"),
+    include_str!("../recipes/bokeh-lights.json"),
+    include_str!("../recipes/color-bokeh.json"),
+    include_str!("../recipes/lens-flare.json"),
+    include_str!("../recipes/streak-flare.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.

@@ -220,4 +220,146 @@ fn leak(uv: vec2<f32>) -> vec4<f32> {
     let light = vec3<f32>(1.0) - (vec3<f32>(1.0) - a) * (vec3<f32>(1.0) - b);
     return screened(c, light + vec3<f32>(dither(uv, time)) * min(amount, 1.0));
 }
+
+// amount, progress, time, seed | side, rough, flicker, red | green, blue
+fn burn(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    let amount = fx.a.x;
+    if (amount <= 0.0) {
+        return c;
+    }
+    let progress = fx.a.y;
+    let time = fx.a.z;
+    let seed = fx.a.w;
+    let rough = fx.b.y;
+    let flicker = fx.b.z;
+    let tint = vec3<f32>(fx.b.w, fx.c.x, fx.c.y);
+    let frame = film_frame(time);
+    // The film slips in the gate a little on every frame.
+    let jump = (hash22(vec2<f32>(frame * 1.7, seed * 3.3)) - 0.5) * 0.05 * flicker;
+    let p = from_middle(uv) + jump;
+    let dir = side_way(fx.b.x, seed, 8.1);
+    // +1 at the edge the light comes in by, -1 at the far edge.
+    var s = dot(p, dir) / edge_reach(dir);
+    s = s + (fbm3(vec3<f32>(p * 1.5 + seed * 3.0, time * 0.9), 4) - 0.5) * 1.7 * rough;
+    s = s + (fbm3(vec3<f32>(p * 5.5 + seed, time * 1.6), 3) - 0.5) * 0.4 * rough;
+    // The front of the light crosses in the first half, its back in the
+    // second: in the middle the whole frame is lit.
+    let front = mix(2.1, -2.1, smoothstep(0.0, 0.5, progress));
+    let back = mix(2.1, -2.1, smoothstep(0.5, 1.0, progress));
+    let heat = min(s - front, back - s);
+    var e = pow(smoothstep(-1.15, 0.8, heat), 3.4) * 40.0;
+    // Hot spots that boil.
+    e = e * (0.55 + 0.95 * fbm3(vec3<f32>(p * 2.6 - seed, time * 2.2), 3));
+    e = e * amount * (1.0 + (hash12(vec2<f32>(frame, seed * 5.1)) - 0.5) * 2.0 * flicker);
+    let light = vec3<f32>(1.0) - exp(-e * tint);
+    // Nothing is drawn before the light arrives or after it has left.
+    let lit = step(0.0001, progress) * step(progress, 0.9999);
+    return screened(c, (light + vec3<f32>(dither(uv, time))) * lit);
+}
+
+fn rainbow(h: f32) -> vec3<f32> {
+    return 0.5 + 0.5 * cos(TAU * (vec3<f32>(h) + vec3<f32>(0.0, 0.33, 0.67)));
+}
+
+// One depth of out-of-focus discs: a grid of cells, a disc in some.
+fn bokeh_discs(p: vec2<f32>, cells: f32, sd: f32) -> vec3<f32> {
+    let time = fx.a.y;
+    let fill = fx.a.w;
+    let size = fx.b.x;
+    let tint = fx.b.zwx;
+    let g = p * cells;
+    let id = floor(g);
+    var sum = vec3<f32>(0.0);
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let cell = id + vec2<f32>(f32(dx), f32(dy));
+            let h = hash22(cell + sd);
+            let h2 = hash22(cell * 1.9 + sd + 7.0);
+            if (h2.x > 0.5 * fill) {
+                continue;
+            }
+            let wander = vec2<f32>(
+                sin(time * (0.2 + 0.3 * h.x) + h.y * TAU),
+                cos(time * (0.17 + 0.25 * h.y) + h.x * TAU),
+            );
+            let at = cell + 0.5 + (h - 0.5) * 0.6 + 0.14 * wander;
+            let r = (0.16 + 0.3 * h2.y) * size;
+            let d = length(g - at);
+            let disc = 1.0 - smoothstep(r - 0.035, r, d);
+            // A real out-of-focus disc is a little brighter at its rim.
+            let rim = 0.55 + 0.45 * smoothstep(r * 0.55, r, d);
+            let breathe = mix(0.35, 1.0, 0.5 + 0.5 * sin(time * (0.5 + h.x) + h2.y * TAU));
+            let colour = mix(vec3<f32>(tint.x, tint.y, fx.c.x), rainbow(h.y), fx.b.y);
+            sum = sum + colour * disc * rim * breathe;
+        }
+    }
+    return sum;
+}
+
+// amount, time, seed, fill | size, colours, red, green | blue
+fn bokeh(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let seed = fx.a.z;
+    let p = uv * frame_shape();
+    let light = bokeh_discs(p, 2.6, seed * 3.7) * 0.5
+        + bokeh_discs(p + 5.0, 4.5, seed * 9.1 + 20.0) * 0.7
+        + bokeh_discs(p + 9.0, 8.0, seed * 5.3 + 60.0) * 0.6;
+    return screened(c, light * fx.a.x);
+}
+
+// amount, progress, time, seed | from_x, from_y, to_x, to_y |
+// streak, rays, ghosts, red | green, blue
+fn flare(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    let amount = fx.a.x;
+    if (amount <= 0.0) {
+        return c;
+    }
+    let progress = fx.a.y;
+    let time = fx.a.z;
+    let seed = fx.a.w;
+    let streak = fx.c.x;
+    let rays = fx.c.y;
+    let ghosts = fx.c.z;
+    let tint = vec3<f32>(fx.c.w, fx.d.x, fx.d.y);
+    let shape = frame_shape();
+    let k = progress * progress * (3.0 - 2.0 * progress);
+    let light = mix(fx.b.xy, fx.b.zw, k) * shape;
+    let mid = 0.5 * shape;
+    let p = uv * shape;
+    let d = p - light;
+    let r = length(d);
+    // The light itself and its glow.
+    var sum = tint * (0.0035 / (r * r + 0.0035) * 0.9 + exp(-r * 7.0) * 0.45);
+    // The streak of a wide-screen lens: thin, long, a little blue.
+    let blue = vec3<f32>(0.55, 0.7, 1.0);
+    sum = sum + blue * exp(-abs(d.y) * 110.0) * exp(-abs(d.x) * 1.5) * 0.8 * streak;
+    sum = sum + blue * exp(-abs(d.y) * 25.0) * exp(-abs(d.x) * 4.0) * 0.25 * streak;
+    // Rays: uneven spokes that turn slowly.
+    let a = atan2(d.y, d.x) + time * 0.05;
+    let spoke = pow(vnoise(vec2<f32>(a * 7.0, seed * 3.0)), 3.0)
+        + 0.5 * pow(vnoise(vec2<f32>(a * 19.0, seed * 5.0 + 3.0)), 4.0);
+    sum = sum + tint * spoke * exp(-r * 4.5) * 0.7 * rays;
+    // A faint rainbow ring round the light.
+    sum = sum + rainbow(r * 6.0 + 0.1) * (1.0 - smoothstep(0.0, 0.025, abs(r - 0.36))) * 0.07 * ghosts;
+    // Ghosts: discs and rings strung along the line through the middle
+    // of the frame, where a real lens puts them.
+    let axis = mid - light;
+    for (var i = 0; i < 8; i = i + 1) {
+        let fi = f32(i);
+        let h = hash22(vec2<f32>(fi * 3.1 + 1.0, seed * 7.7));
+        let along = 0.3 + fi * 0.3 + (h.x - 0.5) * 0.16;
+        let rad = 0.012 + 0.07 * h.y * h.y + 0.012 * fi * step(5.0, fi);
+        let gd = length(p - (light + axis * along));
+        let disc = 1.0 - smoothstep(rad * 0.9, rad, gd);
+        let rim = 0.35 + 0.65 * smoothstep(rad * 0.45, rad, gd);
+        sum = sum + mix(tint, rainbow(h.x + fi * 0.21), 0.7) * disc * rim * (0.05 + 0.1 * h.y) * ghosts;
+    }
+    let flick = 0.93 + 0.07 * vnoise(vec2<f32>(time * 9.0, seed));
+    return screened(c, sum * amount * flick);
+}
 ";

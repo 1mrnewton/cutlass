@@ -93,7 +93,10 @@ pub(crate) const fn space(block: Block) -> Option<Space> {
         | Block::Prints
         | Block::Rays
         | Block::Place
-        | Block::Leak => Some(Space::Display),
+        | Block::Leak
+        | Block::Burn
+        | Block::Bokeh
+        | Block::Flare => Some(Space::Display),
     }
 }
 
@@ -1064,6 +1067,9 @@ fn kernel(uv: vec2<f32>) -> vec4<f32> {
         case 36u: { return place(uv); }
         case 37u: { return blend(uv); }
         case 38u: { return leak(uv); }
+        case 39u: { return burn(uv); }
+        case 40u: { return bokeh(uv); }
+        case 41u: { return flare(uv); }
         case 100u: { return gauss(uv); }
         case 101u: { return halve(uv); }
         case 102u: { return smooth_up(uv); }
@@ -1911,6 +1917,9 @@ mod tests {
             step(Block::Focus, &[]),
             step(Block::Place, &[]),
             step(Block::Leak, &[]),
+            step(Block::Burn, &[]),
+            step(Block::Bokeh, &[]),
+            step(Block::Flare, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
     }
@@ -1927,7 +1936,12 @@ mod tests {
 
     /// Blocks that draw light over the picture, each with the values that
     /// turn it on: `amount` first, then a `time` for the ones that move.
-    const LIGHTS: &[(Block, &[(usize, f32)])] = &[(Block::Leak, &[(0, 1.5), (1, 1.3)])];
+    const LIGHTS: &[(Block, &[(usize, f32)])] = &[
+        (Block::Leak, &[(0, 1.5), (1, 1.3)]),
+        (Block::Burn, &[(0, 1.0), (1, 0.4), (2, 1.3)]),
+        (Block::Bokeh, &[(0, 1.0), (1, 1.3)]),
+        (Block::Flare, &[(0, 1.0), (1, 0.5), (2, 1.3)]),
+    ];
 
     #[test]
     fn drawn_light_only_brightens_and_draws_the_same_each_time() {

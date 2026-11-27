@@ -1,0 +1,90 @@
+{
+  "version": 4,
+  "id": "streak-flare",
+  "name": "Streak Flare",
+  "category": "Light",
+  "preview": "city",
+  "poster": 2.0,
+  "controls": [
+    {
+      "id": "speed",
+      "name": "Speed",
+      "default": 1,
+      "min": 0.25,
+      "max": 3,
+      "unit": "times",
+      "speed": true
+    },
+    {
+      "id": "intensity",
+      "name": "Intensity",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "amount"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "flare",
+      "params": {
+        "amount": {
+          "keys": [
+            [
+              0,
+              0
+            ],
+            [
+              0.4,
+              1
+            ],
+            [
+              3.6,
+              1
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          "repeat": 4
+        },
+        "progress": {
+          "keys": [
+            [
+              0,
+              0
+            ],
+            [
+              4,
+              1
+            ]
+          ],
+          "repeat": 4
+        },
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "seed": 5,
+        "from_x": 0.85,
+        "from_y": 0.3,
+        "to_x": 0.6,
+        "to_y": 0.35,
+        "streak": 2,
+        "rays": 0.3,
+        "ghosts": 0.6,
+        "red": 0.7,
+        "green": 0.85,
+        "blue": 1
+      }
+    }
+  ]
+}

@@ -13412,7 +13412,7 @@ mod tests {
         assert!(top_cards(&draft, Shelf::Audio, "").is_empty());
         assert!(top_cards(&draft, Shelf::Media, "nope").is_empty());
         let blends = top_cards(&draft, Shelf::Transitions, "");
-        assert_eq!(blends.len(), 202);
+        assert_eq!(blends.len(), 209);
         assert_eq!(
             blends[..3]
                 .iter()

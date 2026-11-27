@@ -7,7 +7,9 @@
 #[allow(dead_code)]
 mod abi;
 mod api;
+mod decode;
 mod display;
+pub mod h264;
 pub mod hevc;
 mod surface;
 

@@ -534,34 +534,46 @@ pub(super) fn hevc_access_units(data: &[u8]) -> Vec<Packet> {
         .collect()
 }
 
-/// Whether ffmpeg with libx265 is here.
-fn has_x265() -> bool {
+/// Whether ffmpeg with `encoder` (libx264, libx265) is here.
+fn has_encoder(encoder: &str) -> bool {
     std::process::Command::new("ffmpeg")
         .args(["-hide_banner", "-encoders"])
         .output()
-        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("libx265"))
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains(encoder))
 }
 
-/// An HEVC stream from ffmpeg's libx265, or `None` when ffmpeg is missing
-/// or fails. x265 runs with a thread pool: some builds crash encoding
-/// slices without one.
-fn x265(size: (u32, u32), frames: u32, pix: &str, params: &str) -> Option<Vec<u8>> {
-    if !has_x265() {
+/// A raw stream from ffmpeg's `encoder` of a moving test pattern, or
+/// `None` when ffmpeg is missing or fails.
+fn ffmpeg_encode(
+    encoder: &str,
+    size: (u32, u32),
+    frames: u32,
+    pix: &str,
+    params: &str,
+    extra: &[&str],
+) -> Option<Vec<u8>> {
+    if !has_encoder(encoder) {
         return None;
     }
+    let (format, flag) = if encoder == "libx265" {
+        ("hevc", "-x265-params")
+    } else {
+        ("h264", "-x264-params")
+    };
     let path = std::env::temp_dir().join(format!(
-        "cutlass-vaapi-{}-{}x{}-{pix}-{}.hevc",
+        "cutlass-vaapi-{}-{encoder}-{}x{}-{pix}-{}.{format}",
         std::process::id(),
         size.0,
         size.1,
         params.len()
     ));
     let source = format!("testsrc2=size={}x{}:rate=30", size.0, size.1);
-    let params = format!("pools=4:{params}");
     let encoded = std::process::Command::new("ffmpeg")
         .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", &source])
         .args(["-frames:v", &frames.to_string(), "-pix_fmt", pix])
-        .args(["-c:v", "libx265", "-x265-params", &params, "-f", "hevc"])
+        .args(["-c:v", encoder, flag, params])
+        .args(extra)
+        .args(["-f", format])
         .arg(&path)
         .output()
         .ok()?;
@@ -569,12 +581,135 @@ fn x265(size: (u32, u32), frames: u32, pix: &str, params: &str) -> Option<Vec<u8
     let _ = std::fs::remove_file(&path);
     if !encoded.status.success() {
         eprintln!(
-            "skipped: x265 could not encode {params}: {}",
+            "skipped: {encoder} could not encode {params}: {}",
             String::from_utf8_lossy(&encoded.stderr).trim()
         );
         return None;
     }
     bytes
+}
+
+/// An HEVC stream from libx265, which runs with a thread pool: some builds
+/// crash encoding slices without one.
+fn x265(size: (u32, u32), frames: u32, pix: &str, params: &str) -> Option<Vec<u8>> {
+    ffmpeg_encode(
+        "libx265",
+        size,
+        frames,
+        pix,
+        &format!("pools=4:{params}"),
+        &[],
+    )
+}
+
+/// An H.264 stream of `profile` from libx264.
+fn x264(size: (u32, u32), frames: u32, profile: &str, params: &str) -> Option<Vec<u8>> {
+    ffmpeg_encode(
+        "libx264",
+        size,
+        frames,
+        "yuv420p",
+        params,
+        &["-profile:v", profile],
+    )
+}
+
+/// An Annex B H.264 stream split into access units (clause 7.4.1.2.3), as
+/// packets 1/30 s apart.
+pub(super) fn h264_access_units(data: &[u8]) -> Vec<Packet> {
+    let mut units: Vec<Vec<nal::Nal>> = Vec::new();
+    let mut current: Vec<nal::Nal> = Vec::new();
+    let mut has_slice = false;
+    for unit in nal::annex_b(data).expect("annex b") {
+        let bytes = &unit.bytes;
+        if bytes.len() < 2 {
+            continue;
+        }
+        let kind = bytes[0] & 0x1f;
+        let slice = matches!(kind, 1 | 5);
+        // first_mb_in_slice is ue(v): 0 codes as a single 1 bit.
+        let starts = if slice {
+            bytes[1] & 0x80 != 0
+        } else {
+            matches!(kind, 6..=9 | 14..=18)
+        };
+        if starts && has_slice {
+            units.push(std::mem::take(&mut current));
+            has_slice = false;
+        }
+        has_slice |= slice;
+        current.push(unit);
+    }
+    if !current.is_empty() {
+        units.push(current);
+    }
+    units
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| {
+            let keyframe = unit.iter().any(|nal| nal::h264_type(&nal.bytes) == Some(5));
+            Packet::video(nal::to_annex_b(unit), index as i64, 1, 30, keyframe)
+        })
+        .collect()
+}
+
+/// The H.264 streams the VA-API tests decode, with the parameters to open
+/// them: the Rust encoder's, and x264 streams in each profile with B
+/// frames, explicit and implicit weights, slices, scaling matrices and a
+/// cropped 1080p when ffmpeg is here.
+pub(super) fn h264_streams() -> Vec<(String, Vec<Packet>, CodecParams)> {
+    let mut rust = EncodeFactory::new();
+    cutlass_h264::register_encoders(&mut rust);
+    let mut encoder = rust
+        .open(&encoder_params(CodecId::H264, 320, 240))
+        .expect("rust encoder");
+    let packets = encode(encoder.as_mut(), 320, 240, 12);
+    let params = decoder_params(CodecId::H264, 320, 240, config(&packets));
+    let mut streams = vec![(String::from("rust encoder 320x240"), packets, params)];
+    if !has_encoder("libx264") {
+        eprintln!("skipped: x264 streams: no ffmpeg with libx264");
+        return streams;
+    }
+    let cases = [
+        ((640, 360), 20, "baseline", "keyint=10:ref=2"),
+        (
+            (640, 360),
+            20,
+            "main",
+            "bframes=2:ref=3:keyint=10:weightp=1",
+        ),
+        (
+            (1280, 720),
+            30,
+            "high",
+            "bframes=3:ref=4:b-pyramid=normal:weightp=2:keyint=30",
+        ),
+        (
+            (1280, 720),
+            12,
+            "high",
+            "bframes=2:weightb=1:direct=temporal:keyint=12",
+        ),
+        (
+            (1280, 720),
+            12,
+            "high",
+            "slices=4:8x8dct=1:cqm=jvt:keyint=12",
+        ),
+        ((1920, 1080), 12, "high", "bframes=3:keyint=60:open-gop=1"),
+    ];
+    for (size, frames, profile, params) in cases {
+        if let Some(bytes) = x264(size, frames, profile, params) {
+            let mut decode = CodecParams::video(CodecId::H264, 0, 0);
+            decode.nal_length_size = 0;
+            streams.push((
+                format!("x264 {}x{} {profile} {params}", size.0, size.1),
+                h264_access_units(&bytes),
+                decode,
+            ));
+        }
+    }
+    streams
 }
 
 /// The HEVC streams the VA-API tests decode: the crate fixture, and x265
@@ -616,7 +751,7 @@ pub(super) fn hevc_streams() -> Vec<(String, Vec<u8>, bool)> {
             "bframes=3:keyint=60:open-gop=1",
         ),
     ];
-    if !has_x265() {
+    if !has_encoder("libx265") {
         eprintln!("skipped: x265 streams: no ffmpeg with libx265");
         return streams;
     }
@@ -707,4 +842,94 @@ fn vaapi_declines_without_a_render_node() {
         va::hevc::open(&CodecParams::video(CodecId::H264, 320, 240)),
         Err(CodecError::Unsupported { .. })
     ));
+    let opened = va::h264::open(&CodecParams::video(CodecId::H264, 320, 240));
+    if !va::h264::available() {
+        assert!(matches!(opened, Err(CodecError::Unsupported { .. })));
+    }
+}
+
+/// Whether the VA-API H.264 tests can run here.
+fn vaapi_h264(what: &str) -> bool {
+    let present = va::h264::available();
+    if !present {
+        assert!(
+            std::env::var_os(REQUIRE_VAAPI).is_none(),
+            "{REQUIRE_VAAPI} is set but no render node decodes H.264"
+        );
+        eprintln!("skipped: {what}: no VA-API render node decodes H.264");
+    }
+    present
+}
+
+#[test]
+fn vaapi_h264_matches_the_rust_decoder() {
+    if !vaapi_h264("vaapi h264 against rust") {
+        return;
+    }
+    for (name, packets, params) in h264_streams() {
+        let mut hardware = va::h264::open(&params).expect("va-api opens");
+        let mut software = rust_decoder(&params).expect("rust decoder");
+        let ours = decode_all(&mut hardware, &packets);
+        let theirs = decode_all(software.as_mut(), &packets);
+        assert!(
+            hardware.hardware(),
+            "{name}: VA-API handed the stream to Rust"
+        );
+        assert_eq!(ours.len(), theirs.len(), "{name}");
+        assert!(!ours.is_empty(), "{name}");
+        for (index, (ours, theirs)) in ours.iter().zip(&theirs).enumerate() {
+            assert_eq!(ours.pts(), theirs.pts(), "{name} {index}");
+            let (a, b) = (ours.info(), theirs.info());
+            assert_eq!((a.width, a.height), (b.width, b.height), "{name}");
+            assert!(
+                samples(ours) == samples(theirs),
+                "{name}: picture {index} differs from the Rust decoder (PSNR {:.1} dB)",
+                psnr(samples(ours), samples(theirs))
+            );
+        }
+        eprintln!("{name}: VA-API matches the Rust decoder");
+    }
+}
+
+#[test]
+fn vaapi_h264_decodes_again_after_drain_and_reset() {
+    if !vaapi_h264("vaapi h264 drain and reset") {
+        return;
+    }
+    let (_, packets, params) = h264_streams().remove(0);
+    let mut decoder = va::h264::open(&params).expect("va-api opens");
+    assert_eq!(decode_all(&mut decoder, &packets).len(), packets.len());
+    assert_eq!(
+        decode_all(&mut decoder, &packets).len(),
+        packets.len(),
+        "after drain"
+    );
+    decoder.push(&packets[0]).expect("push");
+    decoder.reset();
+    assert_eq!(
+        decode_all(&mut decoder, &packets).len(),
+        packets.len(),
+        "after reset"
+    );
+    assert!(decoder.hardware());
+}
+
+/// An interlaced stream is the Rust decoder's: the front end refuses it at
+/// its first SPS and the fallback replays it.
+#[test]
+fn an_interlaced_stream_falls_back_to_rust() {
+    if !vaapi_h264("vaapi h264 interlaced fallback") {
+        return;
+    }
+    let Some(bytes) = x264((640, 360), 6, "high", "interlaced=1:bframes=0") else {
+        eprintln!("skipped: no interlaced x264 stream");
+        return;
+    };
+    let packets = h264_access_units(&bytes);
+    let mut params = CodecParams::video(CodecId::H264, 0, 0);
+    params.nal_length_size = 0;
+    let mut decoder = va::h264::open(&params).expect("va-api opens");
+    let pictures = decode_all(&mut decoder, &packets);
+    assert!(!decoder.hardware());
+    assert!(!pictures.is_empty());
 }

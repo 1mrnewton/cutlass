@@ -37,6 +37,7 @@ pub fn register_decoders_with(factory: &mut DecodeFactory, video: bool) {
         }
     }
     if backends.vaapi {
+        factory.register(CodecId::H264, va::h264::open_decoder);
         factory.register(CodecId::Hevc, va::hevc::open_decoder);
     }
 }

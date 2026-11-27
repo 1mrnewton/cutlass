@@ -9,18 +9,18 @@
 
 use std::sync::Arc;
 
-use cutlass_decode::{CodecError, CodecId, CodecParams, Decoder, Output, Packet, PictureOutput};
+use cutlass_decode::{CodecError, CodecId, CodecParams, Decoder, Output, Packet};
 use cutlass_hevc::stateless::{
     self, Accelerator, Picture, PredWeightTable, Reference, RpsSet, ScalingList, Slice, SliceType,
     Sps, StatelessDecoder,
 };
 
 use super::abi::{self, hevc_iq, hevc_pic, hevc_slice, picture_hevc};
-use super::api::ConfigAttrib;
+use super::decode::{self, Session, Shape, byte, flag};
 use super::display::{self, Node};
-use super::surface::{Buffer, Config, Context, Pool, Readback, Surface, Window, refused};
+use super::surface::{Buffer, Readback, Surface, Window};
 use crate::video::backend::{note_decline, note_open};
-use crate::video::colour::{Signal, picture_info};
+use crate::video::colour::Signal;
 use crate::video::fallback::Fallback;
 use crate::video::imp::blob::{Base, Blob, Field};
 
@@ -93,24 +93,25 @@ impl VaDecoder {
         &mut self,
         decoded: Vec<stateless::Output<Arc<Surface>>>,
     ) -> Result<Vec<Output>, CodecError> {
-        let mut out = Vec::with_capacity(decoded.len());
-        for picture in decoded {
-            let sps = &picture.sps;
-            let window = Window::cropped(
-                sps.pic_width_in_luma_samples,
-                sps.pic_height_in_luma_samples,
-                sps.crop(),
-            )?;
-            let bytes = self.readback.read(&picture.surface, window)?;
-            let info = picture_info(window.width, window.height, signal(sps));
-            out.push(Output::Picture(PictureOutput::cpu(
-                info,
-                bytes,
-                picture.pts,
-                picture.timescale,
-            )?));
-        }
-        Ok(out)
+        decoded
+            .into_iter()
+            .map(|picture| {
+                let sps = &picture.sps;
+                let window = Window::cropped(
+                    sps.pic_width_in_luma_samples,
+                    sps.pic_height_in_luma_samples,
+                    sps.crop(),
+                )?;
+                decode::picture(
+                    &mut self.readback,
+                    &picture.surface,
+                    window,
+                    signal(sps),
+                    picture.pts,
+                    picture.timescale,
+                )
+            })
+            .collect()
     }
 }
 
@@ -146,24 +147,6 @@ fn signal(sps: &Sps) -> Signal {
     }
 }
 
-/// What a sequence's surfaces and context were made for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Shape {
-    width: u32,
-    height: u32,
-    depth: u8,
-    surfaces: usize,
-}
-
-/// One sequence's context. Fields drop in order: the context before the
-/// surfaces it renders into, and both before their config.
-struct Session {
-    context: Context,
-    pool: Pool,
-    _config: Config,
-    shape: Shape,
-}
-
 /// Decodes pictures on one render node.
 struct Accel {
     node: &'static Node,
@@ -177,114 +160,47 @@ impl Accel {
             session: None,
         }
     }
-
-    fn session(&self) -> Result<&Session, CodecError> {
-        self.session.as_ref().ok_or(CodecError::Malformed {
-            at_bit: 0,
-            what: "VA-API picture before its sequence",
-        })
-    }
-
-    fn surface(&self) -> Result<Arc<Surface>, CodecError> {
-        self.session()?.pool.take().ok_or(CodecError::Malformed {
-            at_bit: 0,
-            what: "VA-API has no free surface",
-        })
-    }
 }
 
 impl Accelerator for Accel {
     type Surface = Arc<Surface>;
 
     fn sequence(&mut self, sps: &Sps) -> Result<(), CodecError> {
-        let node = self.node;
         if sps.chroma_format_idc != 1 || sps.separate_colour_plane_flag {
             return Err(CodecError::Unsupported {
                 what: "VA-API decodes 4:2:0 HEVC only",
             });
         }
         let depth = sps.bit_depth();
-        let (profile, format) = match (depth, sps.bit_depth_chroma()) {
-            (8, 8) => (abi::VAProfileHEVCMain, abi::VA_RT_FORMAT_YUV420),
-            (10, 10) => (abi::VAProfileHEVCMain10, abi::VA_RT_FORMAT_YUV420_10),
+        let profile = match (depth, sps.bit_depth_chroma()) {
+            (8, 8) => abi::VAProfileHEVCMain,
+            (10, 10) => abi::VAProfileHEVCMain10,
             _ => {
                 return Err(CodecError::Unsupported {
                     what: "VA-API decodes 8 and 10-bit HEVC only",
                 });
             }
         };
-        if !node.offers(profile, abi::VAEntrypointVLD) {
-            return Err(CodecError::Unsupported {
-                what: "this GPU does not decode the HEVC profile",
-            });
-        }
         let shape = Shape {
+            profile,
             width: sps.pic_width_in_luma_samples,
             height: sps.pic_height_in_luma_samples,
             depth,
             surfaces: sps.max_dec_pic_buffering() + EXTRA_SURFACES,
         };
-        if self.session.as_ref().is_some_and(|s| s.shape == shape) {
-            return Ok(());
-        }
-        // The old context goes first; pictures of it waiting for output
-        // keep their surfaces.
-        self.session = None;
-        let Ok([rt_format, max_width, max_height]) = <[u32; 3]>::try_from(node.attributes(
-            profile,
-            abi::VAEntrypointVLD,
-            &[
-                abi::VAConfigAttribRTFormat,
-                abi::VAConfigAttribMaxPictureWidth,
-                abi::VAConfigAttribMaxPictureHeight,
-            ],
-        )) else {
-            return Err(CodecError::Unsupported {
-                what: "VA-API attributes",
-            });
-        };
-        let known = |value: u32| value != abi::VA_ATTRIB_NOT_SUPPORTED;
-        if known(rt_format) && rt_format & format == 0 {
-            return Err(CodecError::Unsupported {
-                what: "this GPU does not decode HEVC to this format",
-            });
-        }
-        if (known(max_width) && shape.width > max_width)
-            || (known(max_height) && shape.height > max_height)
-        {
-            return Err(CodecError::Unsupported {
-                what: "the picture size is out of the GPU's range",
-            });
-        }
-        let attribute = ConfigAttrib {
-            kind: abi::VAConfigAttribRTFormat,
-            value: format,
-        };
-        let config = Config::new(node, profile, abi::VAEntrypointVLD, &[attribute])
-            .map_err(|status| refused(node, status, "VA-API could not make an HEVC config"))?;
-        let pool = Pool::new(node, shape.width, shape.height, depth, shape.surfaces)
-            .map_err(|status| refused(node, status, "VA-API could not make HEVC surfaces"))?;
-        let context = Context::new(node, &config, shape.width, shape.height, &pool.ids())
-            .map_err(|status| refused(node, status, "VA-API could not make an HEVC context"))?;
-        self.session = Some(Session {
-            context,
-            pool,
-            _config: config,
-            shape,
-        });
-        Ok(())
+        decode::renew(self.node, &mut self.session, shape)
     }
 
     fn missing(&mut self, _sps: &Sps, _poc: i32) -> Result<Arc<Surface>, CodecError> {
         // Left as it is, as FFmpeg leaves it for hardware: it stands in for
         // a picture the stream lost and is never output.
-        self.surface()
+        decode::current(&self.session)?.take()
     }
 
     fn decode(&mut self, picture: &Picture<'_, Arc<Surface>>) -> Result<Arc<Surface>, CodecError> {
         let node = self.node;
-        let target = self.surface()?;
-        let session = self.session()?;
+        let session = decode::current(&self.session)?;
+        let target = session.take()?;
         let context = session.context.id;
         let slots = slots(picture.refs);
         let mut params = vec![Buffer::blob(
@@ -339,16 +255,6 @@ fn slots<S>(refs: &[Reference<'_, S>]) -> Vec<Option<u8>> {
         slots[index] = u8::try_from(slot).ok();
     }
     slots
-}
-
-fn flag(value: bool) -> u32 {
-    u32::from(value)
-}
-
-/// A value into a signed byte field. In range for every stream the parser
-/// takes.
-fn byte(value: i32) -> i8 {
-    value.clamp(i32::from(i8::MIN), i32::from(i8::MAX)) as i8
 }
 
 fn small(value: u32) -> u8 {
@@ -920,13 +826,6 @@ mod tests {
                 recorder.pictures, recorder.slices
             );
         }
-    }
-
-    #[test]
-    fn a_signed_field_saturates() {
-        assert_eq!(byte(-200), -128);
-        assert_eq!(byte(5), 5);
-        assert_eq!(byte(300), 127);
     }
 
     #[test]

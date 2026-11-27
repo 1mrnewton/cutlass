@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "ink-splash",
+  "name": "Ink Splash",
+  "category": "Shape",
+  "duration": 1.2,
+  "cross": {
+    "kind": 18,
+    "x": -0.2,
+    "y": 0.15,
+    "seed": 5,
+    "rough": 1.6
+  }
+}

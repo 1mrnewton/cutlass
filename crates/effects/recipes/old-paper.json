@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "id": "old-paper",
+  "name": "Old Paper",
+  "category": "Retro",
+  "preview": "lake",
+  "controls": [
+    {
+      "id": "intensity",
+      "name": "Intensity",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "amount"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "paper",
+      "params": {
+        "amount": 0.9,
+        "mottle": 0.6,
+        "creases": 1,
+        "red": 0.9,
+        "green": 0.82,
+        "blue": 0.66,
+        "seed": 3
+      }
+    }
+  ]
+}

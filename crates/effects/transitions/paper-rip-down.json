@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "paper-rip-down",
+  "name": "Paper Rip Down",
+  "category": "Wipe",
+  "duration": 0.8,
+  "cross": {
+    "kind": 20,
+    "angle": -90,
+    "seed": 6,
+    "rough": 1.5
+  }
+}

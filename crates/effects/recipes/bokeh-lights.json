@@ -1,0 +1,47 @@
+{
+  "version": 4,
+  "id": "bokeh-lights",
+  "name": "Bokeh Lights",
+  "category": "Light",
+  "preview": "portrait",
+  "poster": 1.0,
+  "controls": [
+    {
+      "id": "speed",
+      "name": "Speed",
+      "default": 1,
+      "min": 0.25,
+      "max": 3,
+      "unit": "times",
+      "speed": true
+    },
+    {
+      "id": "intensity",
+      "name": "Intensity",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "amount"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "bokeh",
+      "params": {
+        "amount": 0.5,
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "seed": 1
+      }
+    }
+  ]
+}

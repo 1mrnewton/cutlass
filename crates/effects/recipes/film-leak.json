@@ -1,0 +1,67 @@
+{
+  "version": 4,
+  "id": "film-leak",
+  "name": "Film Leak",
+  "category": "Light",
+  "preview": "beach",
+  "poster": 2.0,
+  "controls": [
+    {
+      "id": "speed",
+      "name": "Speed",
+      "default": 1,
+      "min": 0.25,
+      "max": 3,
+      "unit": "times",
+      "speed": true
+    },
+    {
+      "id": "intensity",
+      "name": "Intensity",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "amount"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "leak",
+      "params": {
+        "amount": {
+          "keys": [
+            [
+              0,
+              0
+            ],
+            [
+              2,
+              1
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          "repeat": 4,
+          "ease": [
+            "in_out",
+            "in_out"
+          ]
+        },
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "seed": 3
+      }
+    }
+  ]
+}

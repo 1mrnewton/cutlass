@@ -26,6 +26,7 @@
 //! then holds, and the chain goes on in a new texture. The picture as it
 //! entered the effect is always kept, as the canvas bytes it came in.
 
+use crate::drawn::{DRAWN, MATTES, NOISE};
 use crate::pool::{Bind, TextureKey};
 use cutlass_effects::{Block, MAX_SAVED, MAX_VALUES, Step};
 
@@ -71,7 +72,8 @@ pub(crate) const fn space(block: Block) -> Option<Space> {
         | Block::Stretch
         | Block::Blocks
         | Block::Kaleido
-        | Block::Fringe => None,
+        | Block::Fringe
+        | Block::BandTear => None,
         // Colour tuned by eye, and light whose thresholds and strengths
         // were tuned on encoded values.
         Block::Grade
@@ -91,7 +93,26 @@ pub(crate) const fn space(block: Block) -> Option<Space> {
         | Block::Halftone
         | Block::Prints
         | Block::Rays
-        | Block::Place => Some(Space::Display),
+        | Block::Place
+        | Block::Leak
+        | Block::Burn
+        | Block::Bokeh
+        | Block::Flare
+        | Block::Motes
+        | Block::Embers
+        | Block::Snow
+        | Block::Rain
+        | Block::Sparks
+        | Block::Fog
+        | Block::Smoke
+        | Block::FilmGrain
+        | Block::FilmDamage
+        | Block::Grime
+        | Block::Flicker
+        | Block::Tape
+        | Block::Paper
+        | Block::Crumple
+        | Block::BurnAway => Some(Space::Display),
     }
 }
 
@@ -204,6 +225,7 @@ struct Effect {
     a: vec4<f32>,
     b: vec4<f32>,
     c: vec4<f32>,
+    d: vec4<f32>,
 };
 
 @group(0) @binding(0) var source: texture_2d<f32>;
@@ -433,7 +455,10 @@ fn flash(uv: vec2<f32>) -> vec4<f32> {
 
 fn vignette(uv: vec2<f32>) -> vec4<f32> {
     let c = fetch(uv);
-    let d = length(uv - vec2<f32>(0.5)) * 1.4142;
+    // How far out this pixel is, 1 at the corner: measured in the frame's
+    // own shape, or with `round` in a true circle.
+    let shape = mix(vec2<f32>(1.0), fx.size / min(fx.size.x, fx.size.y), fx.a.z);
+    let d = length((uv - vec2<f32>(0.5)) * shape) / length(shape * 0.5);
     let dark = smoothstep(fx.a.y, fx.a.y + 0.5, d) * fx.a.x;
     return vec4<f32>(c.rgb * (1.0 - dark), c.a);
 }
@@ -696,6 +721,19 @@ fn reveal(uv: vec2<f32>) -> vec4<f32> {
     } else if (kind == 7u) {
         let grain = vec2<u32>(uv * fx.size / 3.0);
         run = rand(grain.x, grain.y, 7u);
+    } else if (kind >= 8u) {
+        // The drawn mattes: ink from the middle, a brush, a paper tear.
+        let shape = half * 2.0;
+        let one = 1.0 / min(fx.size.x, fx.size.y);
+        var matte = 0.0;
+        if (kind == 8u) {
+            matte = ink_matte(p, progress, fx.b.y, fx.b.z, length(half), one);
+        } else if (kind == 9u) {
+            matte = brush_matte(p, shape, progress, fx.b.y, fx.b.x, turn, 0.6 * fx.b.z);
+        } else {
+            matte = tear_matte(p, shape, progress, fx.b.y, fx.b.z, along, one).x;
+        }
+        return vec4<f32>(c.rgb * matte, c.a);
     } else {
         let reach = (abs(along.x) + abs(along.y)) * 0.5;
         run = dot(uv - vec2<f32>(0.5), along) / reach * 0.5 + 0.5;
@@ -794,7 +832,7 @@ fn place(uv: vec2<f32>) -> vec4<f32> {
     let back = r / scale / fx.size + vec2<f32>(0.5);
     let edge = fx.b.w * short * fx.a.x;
     let foot = fx.c.x * short * fx.a.x;
-    if (edge <= 0.0 && foot <= 0.0 && fx.c.w <= 0.0) {
+    if (edge <= 0.0 && foot <= 0.0 && fx.c.w <= 0.0 && fx.d.x <= 0.0) {
         if (any(back < vec2<f32>(0.0)) || any(back > vec2<f32>(1.0))) {
             return behind;
         }
@@ -814,7 +852,18 @@ fn place(uv: vec2<f32>) -> vec4<f32> {
         let shade = (1.0 - smoothstep(-soft, soft, distance)) * 0.45 * fx.b.z;
         behind = vec4<f32>(behind.rgb * (1.0 - shade), shade + behind.a * (1.0 - shade));
     }
-    let paper = 1.0 - smoothstep(-0.5, 0.5, rounded_box(r - paper_middle, paper_half, 0.0));
+    var paper_edge = rounded_box(r - paper_middle, paper_half, 0.0);
+    if (fx.d.x > 0.0) {
+        // A torn edge: a big slow wander, a middle wobble and fine teeth,
+        // measured on the print so the tear travels with it.
+        let at = r / (short * fx.a.x) * 1080.0;
+        let sd = fx.d.y;
+        let wander = (fbm(at * 0.005 + sd * 7.0, 4) - 0.5) * 90.0
+            + (fbm(at * 0.03 + sd * 3.0, 3) - 0.5) * 16.0
+            + (fbm(at * 0.22 + sd, 2) - 0.5) * 3.5;
+        paper_edge = paper_edge + wander * fx.d.x * short * fx.a.x / 1080.0;
+    }
+    let paper = 1.0 - smoothstep(-0.5, 0.5, paper_edge);
     let photo = 1.0 - smoothstep(-0.5, 0.5, rounded_box(r, half, 0.0));
     let picture = fetch(clamp(back, vec2<f32>(0.0), vec2<f32>(1.0)));
     let white = vec4<f32>(0.97, 0.97, 0.96, 1.0);
@@ -899,16 +948,20 @@ fn halftone(uv: vec2<f32>) -> vec4<f32> {
     if (cell < 2.0) {
         return c;
     }
-    // A grid turned 45 degrees, as printers turn theirs.
+    // A grid turned on its side, 45 degrees as printers turn theirs.
     let pixel = uv * fx.size;
-    let k = 0.70710678;
-    let turned = vec2<f32>(k * pixel.x - k * pixel.y, k * pixel.x + k * pixel.y);
+    let k = cos(radians(fx.a.w));
+    let j = sin(radians(fx.a.w));
+    let turned = vec2<f32>(k * pixel.x - j * pixel.y, j * pixel.x + k * pixel.y);
     let middle_turned = (floor(turned / cell) + vec2<f32>(0.5)) * cell;
-    let middle = vec2<f32>(k * middle_turned.x + k * middle_turned.y, -k * middle_turned.x + k * middle_turned.y);
+    let middle = vec2<f32>(k * middle_turned.x + j * middle_turned.y, -j * middle_turned.x + k * middle_turned.y);
     let sample = straight(fetch(middle / fx.size));
-    let radius = sqrt(1.0 - clamp(luma(sample), 0.0, 1.0)) * cell * 0.7;
+    let light = clamp((luma(sample) - 0.5) * fx.b.x + 0.5 + fx.b.y, 0.0, 1.0);
+    let radius = sqrt(1.0 - light) * cell * 0.7;
+    // Uneven inking pushes each dot's edge in or out a little.
+    let wobble = (hash12(middle_turned / cell) - 0.5) * 0.12 * fx.b.z * cell;
     // A dot under a pixel wide fades out rather than leaving half a pixel.
-    let dot_cover = (1.0 - smoothstep(radius - 0.75, radius + 0.75, length(turned - middle_turned)))
+    let dot_cover = (1.0 - smoothstep(radius - 0.75, radius + 0.75, length(turned - middle_turned) + wobble))
         * min(radius / 0.75, 1.0);
     let ink = mix(vec3<f32>(0.05), sample, fx.a.z);
     let printed = mix(vec3<f32>(0.97), ink, dot_cover);
@@ -1060,6 +1113,26 @@ fn kernel(uv: vec2<f32>) -> vec4<f32> {
         case 35u: { return focus(uv); }
         case 36u: { return place(uv); }
         case 37u: { return blend(uv); }
+        case 38u: { return leak(uv); }
+        case 39u: { return burn(uv); }
+        case 40u: { return bokeh(uv); }
+        case 41u: { return flare(uv); }
+        case 42u: { return motes(uv); }
+        case 43u: { return embers(uv); }
+        case 44u: { return snow(uv); }
+        case 45u: { return rain(uv); }
+        case 46u: { return sparks(uv); }
+        case 47u: { return fog(uv); }
+        case 48u: { return smoke(uv); }
+        case 49u: { return film_grain(uv); }
+        case 50u: { return film_damage(uv); }
+        case 51u: { return grime(uv); }
+        case 52u: { return flicker(uv); }
+        case 53u: { return tape(uv); }
+        case 54u: { return band_tear(uv); }
+        case 55u: { return paper(uv); }
+        case 56u: { return crumple(uv); }
+        case 57u: { return burn_away(uv); }
         case 100u: { return gauss(uv); }
         case 101u: { return halve(uv); }
         case 102u: { return smooth_up(uv); }
@@ -1072,7 +1145,7 @@ fn kernel(uv: vec2<f32>) -> vec4<f32> {
 ";
 
 /// Bytes in one draw's uniform block.
-const PARAMS: u64 = 64;
+const PARAMS: u64 = 16 + 4 * MAX_VALUES as u64;
 
 /// A picture one draw of a block reads or writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1102,7 +1175,7 @@ pub(crate) struct Draw {
     pub(crate) other: Option<Picture>,
     /// The picture drawn.
     pub(crate) write: Picture,
-    /// The kernel's twelve values.
+    /// The kernel's values, four to each of `a`, `b`, `c` and `d`.
     pub(crate) values: [f32; MAX_VALUES],
 }
 
@@ -1420,7 +1493,9 @@ impl Effects {
     pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render effect"),
-            source: wgpu::ShaderSource::Wgsl(format!("{LIGHT}{SHADER}").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{LIGHT}{SHADER}{NOISE}{MATTES}{DRAWN}").into(),
+            ),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cutlass-render effect"),
@@ -1906,8 +1981,205 @@ mod tests {
             step(Block::Rays, &[]),
             step(Block::Focus, &[]),
             step(Block::Place, &[]),
+            step(Block::Leak, &[]),
+            step(Block::Burn, &[]),
+            step(Block::Bokeh, &[]),
+            step(Block::Flare, &[]),
+            step(Block::Motes, &[]),
+            step(Block::Embers, &[]),
+            step(Block::Snow, &[]),
+            step(Block::Rain, &[]),
+            step(Block::Sparks, &[]),
+            step(Block::Fog, &[]),
+            step(Block::Smoke, &[]),
+            step(Block::FilmGrain, &[]),
+            step(Block::FilmDamage, &[]),
+            step(Block::Grime, &[]),
+            step(Block::Flicker, &[]),
+            step(Block::Tape, &[]),
+            step(Block::BandTear, &[]),
+            step(Block::Paper, &[]),
+            step(Block::Crumple, &[]),
+            step(Block::BurnAway, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
+    }
+
+    /// A flat mid grey picture, opaque.
+    fn grey(size: (u32, u32)) -> Vec<u8> {
+        [128, 128, 128, 255].repeat((size.0 * size.1) as usize)
+    }
+
+    fn mean(bytes: &[u8]) -> f64 {
+        let colour = bytes.chunks(4).flat_map(|pixel| &pixel[..3]);
+        colour.map(|byte| f64::from(*byte)).sum::<f64>() / (bytes.len() / 4 * 3) as f64
+    }
+
+    /// Blocks that draw light over the picture, each with the values that
+    /// turn it on: `amount` first, then a `time` for the ones that move.
+    const LIGHTS: &[(Block, &[(usize, f32)])] = &[
+        (Block::Leak, &[(0, 1.5), (1, 1.3)]),
+        (Block::Burn, &[(0, 1.0), (1, 0.4), (2, 1.3)]),
+        (Block::Bokeh, &[(0, 1.0), (1, 1.3)]),
+        (Block::Flare, &[(0, 1.0), (1, 0.5), (2, 1.3)]),
+        (Block::Motes, &[(0, 2.0), (1, 1.3)]),
+        (Block::Embers, &[(0, 2.0), (1, 1.3)]),
+        (Block::Snow, &[(0, 1.0), (1, 1.3)]),
+        (Block::Rain, &[(0, 2.0), (1, 1.3)]),
+        (Block::Sparks, &[(0, 2.0), (1, 0.02)]),
+        (Block::Fog, &[(0, 1.0), (1, 1.3)]),
+        (Block::Smoke, &[(0, 1.0), (1, 1.3)]),
+    ];
+
+    #[test]
+    fn drawn_light_only_brightens_and_draws_the_same_each_time() {
+        let Some(renderer) = renderer() else { return };
+        let size = (64, 36);
+        let flat = grey(size);
+        for (block, set) in LIGHTS {
+            let lit = draw(&renderer, &flat, size, &[step(*block, set)]);
+            assert!(
+                lit.chunks(4)
+                    .all(|pixel| pixel[..3].iter().all(|byte| *byte >= 127) && pixel[3] == 255),
+                "{block:?} darkened a pixel"
+            );
+            assert!(mean(&lit) > 128.2, "{block:?} drew nothing: {}", mean(&lit));
+            let again = draw(&renderer, &flat, size, &[step(*block, set)]);
+            assert_eq!(lit, again, "{block:?}");
+        }
+    }
+
+    #[test]
+    fn drawn_light_is_as_bright_at_twice_the_size_and_on_a_tall_frame() {
+        let Some(renderer) = renderer() else { return };
+        for (block, set) in LIGHTS {
+            let small = draw(&renderer, &grey((64, 36)), (64, 36), &[step(*block, set)]);
+            let large = draw(&renderer, &grey((128, 72)), (128, 72), &[step(*block, set)]);
+            let (small, large) = (mean(&small), mean(&large));
+            assert!((small - large).abs() < 4.0, "{block:?}: {small} vs {large}");
+            let tall = draw(&renderer, &grey((36, 64)), (36, 64), &[step(*block, set)]);
+            assert!(
+                mean(&tall) > 128.2,
+                "{block:?} drew nothing on a tall frame: {}",
+                mean(&tall)
+            );
+        }
+    }
+
+    #[test]
+    fn film_marks_light_or_shade_the_picture_as_named_and_draw_the_same_each_time() {
+        let Some(renderer) = renderer() else { return };
+        let size = (480, 270);
+        let flat = grey(size);
+        let run = |block: Block, set: &[(usize, f32)]| {
+            let once = draw(&renderer, &flat, size, &[step(block, set)]);
+            let again = draw(&renderer, &flat, size, &[step(block, set)]);
+            assert_eq!(once, again, "{block:?}");
+            assert!(once.chunks(4).all(|pixel| pixel[3] == 255), "{block:?}");
+            once
+        };
+        // Grain goes both ways and leaves the picture as bright as it was.
+        let grain = run(Block::FilmGrain, &[(0, 0.3), (1, 1.3)]);
+        assert!(grain.chunks(4).any(|pixel| pixel[0] > 134));
+        assert!(grain.chunks(4).any(|pixel| pixel[0] < 122));
+        assert!((mean(&grain) - 128.0).abs() < 2.0, "{}", mean(&grain));
+        // Bright dirt only lifts, dark dirt and flicker only lower.
+        let damage = run(Block::FilmDamage, &[(0, 2.0), (1, 1.3), (3, 2.0)]);
+        assert!(damage.chunks(4).all(|pixel| pixel[0] >= 127));
+        assert!(damage.chunks(4).any(|pixel| pixel[0] > 180));
+        for (block, set) in [
+            (Block::Grime, &[(0, 1.0), (1, 1.3)][..]),
+            (Block::Flicker, &[(0, 0.5), (1, 1.3), (4, 1.0)][..]),
+            (Block::Paper, &[(0, 1.0), (7, 1.0)][..]),
+            (Block::Crumple, &[(0, 1.0)][..]),
+        ] {
+            let shaded = run(block, set);
+            assert!(
+                shaded
+                    .chunks(4)
+                    .all(|pixel| pixel[..3].iter().all(|byte| *byte <= 129)),
+                "{block:?} lit a pixel"
+            );
+            assert!(mean(&shaded) < 127.0, "{block:?}: {}", mean(&shaded));
+        }
+        // Tape shades the picture with its scan lines and lights it with
+        // its static.
+        let tape = run(Block::Tape, &[(0, 1.0), (1, 1.3), (7, 3.0)]);
+        assert!(mean(&tape) < 127.0, "{}", mean(&tape));
+        assert!(tape.chunks(4).any(|pixel| pixel[0] > 160));
+    }
+
+    #[test]
+    fn a_torn_print_keeps_its_middle_and_loses_bites_from_its_edge() {
+        let Some(renderer) = renderer() else { return };
+        let size = (240, 240);
+        let flat = grey(size);
+        let print = |torn: f32| {
+            let set = [(0, 0.5), (7, 0.05), (12, torn)];
+            draw(&renderer, &flat, size, &[step(Block::Place, &set)])
+        };
+        let (cut, torn) = (print(0.0), print(1.0));
+        assert_eq!(torn, print(1.0));
+        let alpha = |frame: &[u8], x: usize, y: usize| frame[4 * (y * 240 + x) + 3];
+        // The middle is whole either way.
+        assert_eq!((alpha(&cut, 120, 120), alpha(&torn, 120, 120)), (255, 255));
+        // The cut print's edge is a straight line; the torn one's is not,
+        // so along a row just inside the cut edge some of it is gone and
+        // along a row just outside some of it is there.
+        let covered =
+            |frame: &[u8], y: usize| (60..180).filter(|x| alpha(frame, *x, y) > 128).count();
+        assert_eq!((covered(&cut, 56), covered(&cut, 52)), (120, 0));
+        let (inside, outside) = (covered(&torn, 56), covered(&torn, 52));
+        assert!(inside < 120 || outside > 0, "{inside} {outside}");
+        assert!(inside + outside > 20, "{inside} {outside}");
+    }
+
+    #[test]
+    fn the_drawn_reveals_show_nothing_then_part_then_all_of_the_picture() {
+        let Some(renderer) = renderer() else { return };
+        let size = (96, 64);
+        let flat = grey(size);
+        for kind in [8.0, 9.0, 10.0] {
+            let reveal = |progress: f32| {
+                let set = [(0, progress), (1, kind), (4, 3.0)];
+                draw(&renderer, &flat, size, &[step(Block::Reveal, &set)])
+            };
+            assert!(mean(&reveal(0.0)) < 1.0, "kind {kind} starts shown");
+            assert_eq!(reveal(1.0), flat, "kind {kind}");
+            let half = reveal(0.5);
+            assert_eq!(half, reveal(0.5), "kind {kind}");
+            assert!(
+                mean(&half) > 10.0 && mean(&half) < 118.0,
+                "kind {kind} at half: {}",
+                mean(&half)
+            );
+        }
+    }
+
+    #[test]
+    fn a_burn_chars_then_removes_the_picture_and_leaves_it_clear_or_black() {
+        let Some(renderer) = renderer() else { return };
+        let size = (96, 64);
+        let flat = grey(size);
+        let burn = |progress: f32, clear: f32| {
+            let set = [(0, progress), (5, clear)];
+            draw(&renderer, &flat, size, &[step(Block::BurnAway, &set)])
+        };
+        let alphas = |frame: &[u8]| frame.chunks(4).map(|pixel| pixel[3]).collect::<Vec<u8>>();
+        // All of it is gone at the end: clear, or black.
+        assert!(burn(1.0, 1.0).iter().all(|byte| *byte == 0));
+        let black = burn(1.0, 0.0);
+        assert!(black.chunks(4).all(|pixel| pixel == [0, 0, 0, 255]));
+        // Half way, some is gone, some is whole, some is charred darker
+        // than the picture and the rim glows redder than it.
+        let half = burn(0.5, 1.0);
+        assert_eq!(half, burn(0.5, 1.0));
+        let alpha = alphas(&half);
+        assert!(alpha.contains(&0) && alpha.contains(&255));
+        let whole = half.chunks(4).filter(|pixel| pixel[3] == 255);
+        assert!(whole.clone().any(|pixel| pixel[..3] == [128, 128, 128]));
+        assert!(whole.clone().any(|pixel| pixel[0] < 40 && pixel[2] < 40));
+        assert!(whole.clone().any(|pixel| pixel[0] > 200 && pixel[2] < 120));
     }
 
     #[test]
@@ -2444,6 +2716,7 @@ mod tests {
             step(Block::Kaleido, &[(0, 6.0), (1, 30.0)]),
             step(Block::Fringe, &[(0, 0.1)]),
             step(Block::Stretch, &[(0, 1.5), (1, 0.7)]),
+            step(Block::BandTear, &[(0, 2.0), (1, 0.5), (2, 1.3), (6, 1.0)]),
         ] {
             close(&draw(&renderer, &flat, size, &[moved]), &flat);
         }

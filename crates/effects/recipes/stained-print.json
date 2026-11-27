@@ -1,0 +1,37 @@
+{
+  "version": 4,
+  "id": "stained-print",
+  "name": "Stained Print",
+  "category": "Retro",
+  "preview": "beach",
+  "poster": 1.0,
+  "controls": [
+    {
+      "id": "intensity",
+      "name": "Intensity",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "amount"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "grime",
+      "params": {
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "amount": 1
+      }
+    }
+  ]
+}

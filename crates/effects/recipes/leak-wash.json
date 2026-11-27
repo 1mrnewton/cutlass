@@ -1,0 +1,49 @@
+{
+  "version": 4,
+  "id": "leak-wash",
+  "name": "Leak Wash",
+  "category": "Light",
+  "preview": "portrait",
+  "poster": 1.0,
+  "controls": [
+    {
+      "id": "speed",
+      "name": "Speed",
+      "default": 1,
+      "min": 0.25,
+      "max": 3,
+      "unit": "times",
+      "speed": true
+    },
+    {
+      "id": "intensity",
+      "name": "Intensity",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "amount"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "leak",
+      "params": {
+        "amount": 0.75,
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "seed": 7,
+        "side": 0.75,
+        "second": 0.9
+      }
+    }
+  ]
+}

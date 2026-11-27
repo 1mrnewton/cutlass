@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "paper-tear",
+  "name": "Paper Tear",
+  "category": "Wipe",
+  "duration": 1.0,
+  "cross": {
+    "kind": 20
+  }
+}

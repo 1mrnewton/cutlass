@@ -1,0 +1,82 @@
+{
+  "version": 4,
+  "id": "worn-print",
+  "name": "Worn Print",
+  "category": "Retro",
+  "preview": "lake",
+  "poster": 1.0,
+  "controls": [
+    {
+      "id": "intensity",
+      "name": "Intensity",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "amount"
+        ],
+        [
+          1,
+          "amount"
+        ],
+        [
+          2,
+          "amount"
+        ],
+        [
+          3,
+          "amount"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "grime",
+      "params": {
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "amount": 0.8
+      }
+    },
+    {
+      "block": "film_damage",
+      "params": {
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "amount": 0.9
+      }
+    },
+    {
+      "block": "film_grain",
+      "params": {
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "amount": 0.15
+      }
+    },
+    {
+      "block": "flicker",
+      "params": {
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "amount": 0.12
+      }
+    }
+  ]
+}

@@ -239,18 +239,25 @@ fn caf(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
 }
 
 /// The STREAMINFO sample count, or the frames counted when it is unknown.
+/// An ID3v2 tag in front of `fLaC` is skipped, even one longer than the
+/// header window.
 fn flac(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
-    if !matches!(
+    let marked = matches!(
         cutlass_flac_container::probe(header),
         cutlass_container::ProbeResult::Accept { .. }
-    ) {
+    );
+    if !marked && !header.starts_with(b"ID3") {
         return Ok(None);
     }
-    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let mut file = File::open(path).map_err(|error| io_error(path, error))?;
     let length = file
         .metadata()
         .map_err(|error| io_error(path, error))?
         .len();
+    if !marked && !cutlass_flac_container::starts_with_flac(&mut file, length) {
+        return Ok(None);
+    }
+    file.rewind().map_err(|error| io_error(path, error))?;
     let mut demux = cutlass_flac_container::FlacDemux::open(std::io::BufReader::new(file), length)
         .map_err(|error| ProbeError::new(format!("flac refused the file: {error}")))?;
     let info = *demux.stream_info();
@@ -1123,6 +1130,24 @@ mod tests {
             probe(&path).expect("flac"),
             Probed::Audio { duration: 500_000 }
         );
+    }
+
+    /// Taggers put ID3v2 in front of `fLaC`: a tag inside the header
+    /// window, the size of a signed download's, and one the size of cover
+    /// art.
+    #[test]
+    fn a_flac_file_behind_an_id3_tag_is_audio() {
+        let temp = Temp::new();
+        for total in [64, 17_160, 300_000] {
+            let mut bytes = id3_tag(total);
+            bytes.extend(flac_mono(4_000));
+            let path = temp.write(&format!("tagged-{total}.flac"), &bytes);
+            assert_eq!(
+                probe(&path).expect("tagged flac"),
+                Probed::Audio { duration: 500_000 },
+                "tag of {total} bytes"
+            );
+        }
     }
 
     fn flac_mono(samples: usize) -> Vec<u8> {

@@ -57,9 +57,10 @@ fn probe_isobmff(header: &[u8]) -> ProbeResult {
 }
 
 /// An ID3v2 tag longer than the header window, which cover art often makes,
-/// is taken as MP3: the demuxer skips the tag and refuses the file when no
-/// Layer III frame follows it. MP3 is registered last, so a family that
-/// names the header itself still wins.
+/// is taken as MP3: [`open_mp3`] opens the file as FLAC when `fLaC` follows
+/// the tag, and the MP3 demuxer otherwise skips the tag and refuses the file
+/// when no Layer III frame follows it. MP3 is registered last, so a family
+/// that names the header itself still wins.
 fn probe_mp3(header: &[u8]) -> ProbeResult {
     let accept = ProbeResult::Accept {
         family: ContainerId::Mp3,
@@ -93,9 +94,16 @@ fn open_adts(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
 }
 
 fn open_mp3(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
-    let file = File::open(path).map_err(|error| OpenError::Source {
+    let source = |error: std::io::Error| OpenError::Source {
         message: error.to_string(),
-    })?;
+    };
+    let mut file = File::open(path).map_err(source)?;
+    let length = file.metadata().map_err(source)?.len();
+    // A FLAC file behind an ID3v2 tag too long for the header window.
+    if cutlass_flac_container::starts_with_flac(&mut file, length) {
+        return open_flac(path);
+    }
+    std::io::Seek::rewind(&mut file).map_err(source)?;
     let demux =
         cutlass_mp3_container::Mp3Demux::open(std::io::BufReader::new(file)).map_err(|error| {
             OpenError::Source {
@@ -1191,24 +1199,25 @@ mod tests {
         assert_eq!(later, &expected[at..at + window * 2]);
     }
 
-    #[test]
-    fn a_flac_file_opens_seeks_and_decodes_exactly() {
-        let path =
-            std::env::temp_dir().join(format!("cutlass-readers-flac-{}.flac", std::process::id()));
-        let rate = 44_100u32;
-        let source: Vec<i32> = (0..rate as usize * 3 / 2)
+    /// A second and a half of a 440 Hz tone, left, and half of it inverted,
+    /// right, at 16 bits.
+    fn flac_source(rate: u32) -> Vec<i32> {
+        (0..rate as usize * 3 / 2)
             .flat_map(|i| {
                 let t = i as f64 / f64::from(rate);
                 let left = (8000.0 * (t * 440.0 * std::f64::consts::TAU).sin()) as i32;
                 [left, -left / 2]
             })
-            .collect();
+            .collect()
+    }
+
+    /// `source`, interleaved stereo, as a native FLAC file.
+    fn flac_bytes(rate: u32, source: &[i32]) -> Vec<u8> {
         let settings = cutlass_flac::Settings::level(5).expect("level");
         let mut encoder = cutlass_flac::FlacEncoder::new(rate, 2, 16, settings).expect("encoder");
-        let mut frames = encoder.encode(&source).expect("encode");
+        let mut frames = encoder.encode(source).expect("encode");
         frames.extend(encoder.finish().expect("finish"));
-        let file = std::fs::File::create(&path).expect("create");
-        let mut mux = cutlass_flac_container::FlacMux::new(file);
+        let mut mux = cutlass_flac_container::FlacMux::new(std::io::Cursor::new(Vec::new()));
         let params = StreamParams::try_audio(
             StreamCodec::Known(CodecId::Flac),
             rate,
@@ -1240,7 +1249,16 @@ mod tests {
             ticks,
         }])
         .expect("finish");
-        drop(mux);
+        mux.into_inner().into_inner()
+    }
+
+    #[test]
+    fn a_flac_file_opens_seeks_and_decodes_exactly() {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-flac-{}.flac", std::process::id()));
+        let rate = 44_100u32;
+        let source = flac_source(rate);
+        std::fs::write(&path, flac_bytes(rate, &source)).expect("write");
         let readers = installed_readers();
         let info = readers.probe(&path).expect("probe");
         assert_eq!(info.duration.map(|d| d.0), Some(1_500_000));
@@ -1254,6 +1272,87 @@ mod tests {
         for (index, value) in got.iter().enumerate() {
             let expected = source[start + index] as f32 / 32_767.0;
             assert!((value - expected).abs() < 1e-6, "sample {index}");
+        }
+    }
+
+    /// An ID3v2.3 tag of `body` bytes after its header: a title frame, then
+    /// padding, as taggers leave room to grow.
+    fn id3v2_tag(body: usize) -> Vec<u8> {
+        let size = u32::try_from(body).expect("size");
+        let mut tag = b"ID3\x03\x00\x00".to_vec();
+        tag.extend(
+            (0..4)
+                .rev()
+                .map(|shift| u8::try_from((size >> (7 * shift)) & 0x7F).expect("seven bits")),
+        );
+        let title = b"\x00Cutlass test tone";
+        tag.extend(b"TIT2");
+        tag.extend(u32::try_from(title.len()).expect("len").to_be_bytes());
+        tag.extend([0, 0]);
+        tag.extend(title);
+        tag.resize(10 + body, 0);
+        tag
+    }
+
+    /// Taggers put ID3v2 in front of `fLaC`. A short tag ends inside the
+    /// 4 KiB header the readers probe. Cover art makes one longer, which the
+    /// probe takes for MP3 and the MP3 opener hands back to FLAC. Both play
+    /// the samples written, from the start and after a seek, and FFmpeg
+    /// reads the same files to the same samples.
+    #[test]
+    fn a_flac_file_behind_an_id3v2_tag_opens_seeks_and_decodes_exactly() {
+        let rate = 44_100u32;
+        let source = flac_source(rate);
+        let bare = flac_bytes(rate, &source);
+        let ffmpeg = tool_exists("ffmpeg");
+        for body in [1_000usize, 300_000] {
+            let path = std::env::temp_dir().join(format!(
+                "cutlass-readers-id3-flac-{}-{body}.flac",
+                std::process::id()
+            ));
+            let mut bytes = id3v2_tag(body);
+            bytes.extend(&bare);
+            std::fs::write(&path, &bytes).expect("write");
+            let readers = installed_readers();
+            let info = readers.probe(&path).expect("probe");
+            assert_eq!(info.duration.map(|d| d.0), Some(1_500_000), "tag {body}");
+            let mut media = readers.open(&path).expect("open");
+            for (at, frames) in [(0usize, 4096u32), (rate as usize, 1000)] {
+                let micros = i64::try_from(at as u64 * 1_000_000 / u64::from(rate)).expect("us");
+                let pcm = media
+                    .audio_from(cutlass_model::Micros(micros), frames)
+                    .expect("audio");
+                let got = pcm.as_f32().expect("f32");
+                assert_eq!(got.len(), frames as usize * 2, "tag {body} at {at}");
+                for (index, value) in got.iter().enumerate() {
+                    let expected = source[at * 2 + index] as f32 / 32_767.0;
+                    assert!(
+                        (value - expected).abs() < 1e-6,
+                        "tag {body} at {at}: sample {index}"
+                    );
+                }
+            }
+            if ffmpeg {
+                let out = std::process::Command::new("ffmpeg")
+                    .args(["-v", "error", "-i"])
+                    .arg(&path)
+                    .args(["-map", "0:a", "-f", "s16le", "-"])
+                    .output()
+                    .expect("ffmpeg");
+                assert!(out.status.success(), "ffmpeg refused tag {body}");
+                let decoded: Vec<i32> = out
+                    .stdout
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| i32::from(i16::from_le_bytes(*pair)))
+                    .collect();
+                assert_eq!(decoded, source, "ffmpeg, tag {body}");
+            }
+            std::fs::remove_file(&path).expect("remove");
+        }
+        if !ffmpeg {
+            eprintln!("ffmpeg: skipped");
         }
     }
 

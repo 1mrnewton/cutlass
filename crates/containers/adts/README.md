@@ -133,7 +133,7 @@ Limits:
 
 Gaps:
 
-- No seek. This is why the app refuses raw AAC files.
+- `AdtsFile` and `LatmFile` read forward only. `AdtsSeekFile` seeks ADTS, and there is no seeking reader for LOAS.
 - There is no `cutlass_container::Mux` implementation for ADTS, LOAS, or the M4A pair. The muxers only implement this crate's own `Muxer` trait.
 - A header is accepted on its own. The demuxer does not check that another header follows the frame, so bytes that look like a header inside leading junk can be taken as the first frame.
 - ID3 and APE tags are not parsed. They are skipped as junk, within the 1 MiB limit.

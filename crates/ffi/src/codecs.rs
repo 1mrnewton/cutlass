@@ -85,9 +85,10 @@ pub fn decoders() -> DecodeFactory {
 }
 
 /// An ID3v2 tag longer than the header window, which cover art often makes,
-/// is taken as MP3: the demuxer skips the tag and refuses the file when no
-/// Layer III frame follows it. MP3 is registered last, so a family that
-/// names the header itself still wins.
+/// is taken as MP3: [`open_mp3`] opens the file as FLAC when `fLaC` follows
+/// the tag, and the MP3 demuxer otherwise skips the tag and refuses the file
+/// when no Layer III frame follows it. MP3 is registered last, so a family
+/// that names the header itself still wins.
 fn probe_mp3(header: &[u8]) -> ProbeResult {
     let accept = ProbeResult::Accept {
         family: ContainerId::Mp3,
@@ -121,9 +122,16 @@ fn open_adts(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
 }
 
 fn open_mp3(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
-    let file = File::open(path).map_err(|error| OpenError::Source {
+    let source = |error: std::io::Error| OpenError::Source {
         message: error.to_string(),
-    })?;
+    };
+    let mut file = File::open(path).map_err(source)?;
+    let length = file.metadata().map_err(source)?.len();
+    // A FLAC file behind an ID3v2 tag too long for the header window.
+    if cutlass_flac_container::starts_with_flac(&mut file, length) {
+        return open_flac(path);
+    }
+    std::io::Seek::rewind(&mut file).map_err(source)?;
     let demux =
         cutlass_mp3_container::Mp3Demux::open(std::io::BufReader::new(file)).map_err(|error| {
             OpenError::Source {
@@ -225,7 +233,7 @@ mod tests {
     use cutlass_encode::{AudioInput, Encoder, Pcm};
 
     #[test]
-    fn a_flac_file_opens_and_decodes_exactly() {
+    fn a_flac_file_opens_and_decodes_exactly_with_or_without_an_id3v2_tag() {
         let path =
             std::env::temp_dir().join(format!("cutlass-ffi-flac-{}.flac", std::process::id()));
         let rate = 48_000u32;
@@ -271,20 +279,38 @@ mod tests {
         }])
         .expect("finish");
         drop(mux);
+        let bare = std::fs::read(&path).expect("read");
         let readers = super::readers();
-        let info = readers.probe(&path).expect("probe");
-        assert_eq!(info.duration.map(|d| d.0), Some(1_000_000));
-        let mut media = readers.open(&path).expect("open");
-        let pcm = media
-            .audio_from(cutlass_model::Micros(0), 4096)
-            .expect("audio");
-        std::fs::remove_file(&path).expect("remove");
-        let got = pcm.as_f32().expect("f32");
-        assert!(!got.is_empty());
-        for (index, value) in got.iter().enumerate() {
-            let expected = source[index] as f32 / 32_767.0;
-            assert!((value - expected).abs() < 1e-6, "sample {index}");
+        // Bare, then behind an ID3v2 tag that ends inside the probed header
+        // and one that runs past it, as cover art makes.
+        for tag in [0usize, 1_000, 300_000] {
+            let mut bytes = Vec::new();
+            if tag > 0 {
+                let size = u32::try_from(tag).expect("size");
+                bytes.extend(b"ID3\x03\x00\x00");
+                bytes.extend(
+                    (0..4).rev().map(|shift| {
+                        u8::try_from((size >> (7 * shift)) & 0x7F).expect("seven bits")
+                    }),
+                );
+                bytes.resize(10 + tag, 0);
+            }
+            bytes.extend(&bare);
+            std::fs::write(&path, &bytes).expect("write");
+            let info = readers.probe(&path).expect("probe");
+            assert_eq!(info.duration.map(|d| d.0), Some(1_000_000), "tag {tag}");
+            let mut media = readers.open(&path).expect("open");
+            let pcm = media
+                .audio_from(cutlass_model::Micros(0), 4096)
+                .expect("audio");
+            let got = pcm.as_f32().expect("f32");
+            assert!(!got.is_empty());
+            for (index, value) in got.iter().enumerate() {
+                let expected = source[index] as f32 / 32_767.0;
+                assert!((value - expected).abs() < 1e-6, "tag {tag}: sample {index}");
+            }
         }
+        std::fs::remove_file(&path).expect("remove");
     }
 
     /// A raw AAC file opens, has the length of its frames, and a seek into

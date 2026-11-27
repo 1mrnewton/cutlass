@@ -50,7 +50,7 @@ A factory asks openers in the order they were registered and takes the first tha
 
 ### Stills
 
-- ImageIO output is 8-bit straight RGBA, turned upright by the file's orientation.
+- ImageIO output is 8 bits, RGB when every pixel is opaque and straight RGBA otherwise, turned upright by the file's orientation.
 - The encoder accepts 8-bit input only. A 16-bit still is declined with `Unsupported`.
 - `decode_file` and `encode_file` reach the other ImageIO types by name, including HEIC (`public.heic`) and AVIF (`public.avif`).
 
@@ -96,7 +96,8 @@ All tests are unit tests inside `src/`. `nal.rs`, `reorder.rs`, `status.rs` and 
 
 - Video: H.264 round trip of a solid color, decode to 4:2:0, display order after drain, reset, a session reopened after it is lost, a surface picture compared with the planar copy, a surface imported as two Metal planes, a retained frame encoded without a CPU copy, and a Rust MPEG-4 export decoded by VideoToolbox. HEVC, ProRes and Motion JPEG round trips pass when the machine can open them. AV1, VP9, MPEG-4 and MPEG-2 are only required to open or decline cleanly.
 - Sound: PCM and AAC round trips, HE-AAC configurations, E-AC-3 frame counts, and refusal of empty, non-finite and out-of-range input.
-- Stills: PNG, JPEG and GIF round trips; WebP and HEIC when ImageIO can write them; a 16-bit still declined; random bytes refused.
+- Stills: PNG, JPEG and GIF round trips; a translucent PNG kept as RGBA and an opaque one returned as RGB; WebP and HEIC when ImageIO can write them; a 16-bit still declined; random bytes refused.
+- Limits: photo sizes up to 9504 by 6336 inside the still caps and outside the picture caps, 8192 by 8193 refused, and a 128 MiB still file.
 - The output queue's copy and append logic. The test that opens a real output device is `#[ignore]`d.
 
 What has not been done: no output is compared with FFmpeg or any other decoder, there is no fuzz campaign (one test pushes 32 random H.264 packets), AVIF has no test, and nothing has been run on an iOS device. Results depend on the hardware of the machine that runs the tests.
@@ -108,13 +109,17 @@ What has not been done: no output is compared with FFmpeg or any other decoder, 
 | Picture edge | 8192, and even for video |
 | Pixels in one picture | 16,777,216 |
 | One packet | 16 MiB |
+| Still edge, decoding | 16,384 |
+| Pixels in one still, decoding | 67,108,864 (8192 by 8192) |
+| One still file, decoding | 128 MiB, the cap `cutlass-still` reads a file under |
 | Sound channels | 8 |
 | Sample rate | 192 kHz |
 | Reorder depth | 16 pictures |
 
-A picture over the size limits declines with `Unsupported`, not `Limit`, so a later opener with a larger cap can still run.
+A picture over the size limits declines with `Unsupported`, not `Limit`, so a later opener with a larger cap can still run. ImageIO decodes a photo of up to 64 megapixels itself, through its colour profile, which `cutlass-jpeg` does not read; the engine shrinks a picture with an edge past 8192 to fit. Encoding keeps the picture caps.
 
-- PNG and JPEG are decoded by ImageIO ahead of `cutlass-png` and `cutlass-jpeg` on macOS, so a 16-bit PNG arrives as 8 bits.
+- PNG and JPEG are decoded by ImageIO ahead of `cutlass-png` and `cutlass-jpeg` on macOS, so a 16-bit PNG arrives as 8 bits. A still whose pixels are all opaque arrives as RGB, as those two crates return it, and any other as straight RGBA.
+- ImageIO needs more memory than `cutlass-jpeg` for a large photo, as it draws the photo through its profile: a 48-megapixel JPEG peaks at about 700 MB against about 520 MB, and at about 900 MB when its EXIF orientation turns it.
 - A platform token stays alive until `release_buffer` is called for it. Nothing outside this crate calls it today; the engine asks for 4:2:0 and does not receive tokens.
 - The HEVC encoder hands out its parameter sets in a private `HVCC` envelope, not a standard `hvcC` record.
 - The encoder sets an expected frame rate of 30 and real-time mode whatever the caller's frame rate is, and does not take 4:2:0 input.

@@ -533,6 +533,8 @@ unsafe extern "C" {
 
     pub static kCGImagePropertyOrientation: *const c_void;
 
+    pub static kCGImageSourceShouldCache: *const c_void;
+
     pub fn CGImageSourceCreateWithData(data: *const c_void, options: *const c_void) -> *mut c_void;
 
     pub fn CGImageSourceGetCount(source: *const c_void) -> usize;

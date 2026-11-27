@@ -14,6 +14,19 @@ pub const MAX_PIXELS: u64 = 16_777_216;
 /// Largest compressed packet this crate will hand to a framework.
 pub const MAX_PACKET: usize = 16 * 1024 * 1024;
 
+/// Longest edge of a still ImageIO decodes. The engine shrinks a picture
+/// past 8192 to fit before it is drawn.
+pub const MAX_STILL_EDGE: u32 = 16_384;
+
+/// Most pixels in one still ImageIO decodes: 8192 by 8192, 64 megapixels,
+/// as `cutlass-jpeg` and `cutlass-png` take. Photos are 24 to 61 megapixels.
+pub const MAX_STILL_PIXELS: u64 = 67_108_864;
+
+/// Largest still file handed to ImageIO: the cap `cutlass-still` reads a
+/// file under. A 24-megapixel photo saved as PNG is about 40 MiB.
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+pub const MAX_STILL_PACKET: usize = 128 * 1024 * 1024;
+
 /// Most audio channels. Matches the shared layout cap.
 pub const MAX_CHANNELS: usize = 8;
 
@@ -22,12 +35,21 @@ pub const MAX_RATE: u32 = 192_000;
 
 /// A picture whose edges and pixel count sit inside the caps.
 pub fn picture_ok(width: u32, height: u32) -> Result<(), CodecError> {
+    within(width, height, MAX_EDGE, MAX_PIXELS)
+}
+
+/// A still whose edges and pixel count sit inside the still caps.
+pub fn still_ok(width: u32, height: u32) -> Result<(), CodecError> {
+    within(width, height, MAX_STILL_EDGE, MAX_STILL_PIXELS)
+}
+
+fn within(width: u32, height: u32, max_edge: u32, max_pixels: u64) -> Result<(), CodecError> {
     if width == 0 || height == 0 {
         return Err(CodecError::InvalidApi {
             what: "empty picture",
         });
     }
-    if width > MAX_EDGE || height > MAX_EDGE {
+    if width > max_edge || height > max_edge {
         return Err(CodecError::Limit {
             what: "picture edge",
         });
@@ -37,7 +59,7 @@ pub fn picture_ok(width: u32, height: u32) -> Result<(), CodecError> {
         .ok_or(CodecError::Limit {
             what: "picture pixels",
         })?;
-    if pixels > MAX_PIXELS {
+    if pixels > max_pixels {
         return Err(CodecError::Limit {
             what: "picture pixels",
         });
@@ -58,12 +80,22 @@ pub fn even_picture(width: u32, height: u32) -> Result<(), CodecError> {
 
 /// A packet small enough to copy into a framework buffer.
 pub fn packet_ok(len: usize) -> Result<(), CodecError> {
+    sized(len, MAX_PACKET)
+}
+
+/// A still file small enough to hand to ImageIO.
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+pub fn still_packet_ok(len: usize) -> Result<(), CodecError> {
+    sized(len, MAX_STILL_PACKET)
+}
+
+fn sized(len: usize, max: usize) -> Result<(), CodecError> {
     if len == 0 {
         return Err(CodecError::InvalidApi {
             what: "empty packet",
         });
     }
-    if len > MAX_PACKET {
+    if len > max {
         return Err(CodecError::Limit {
             what: "packet bytes",
         });
@@ -129,6 +161,35 @@ mod tests {
             picture_ok(width, height),
             Err(CodecError::Limit {
                 what: "picture pixels",
+            })
+        );
+    }
+
+    #[test]
+    fn a_photo_is_inside_the_still_caps_and_past_64_megapixels_is_not() {
+        for (width, height) in [(6000, 4000), (8064, 6048), (9504, 6336), (16_000, 1000)] {
+            assert!(picture_ok(width, height).is_err(), "{width}x{height}");
+            assert!(still_ok(width, height).is_ok(), "{width}x{height}");
+        }
+        assert!(still_ok(8192, 8192).is_ok());
+        assert_eq!(
+            still_ok(8192, 8193),
+            Err(CodecError::Limit {
+                what: "picture pixels",
+            })
+        );
+        assert_eq!(
+            still_ok(MAX_STILL_EDGE + 1, 1),
+            Err(CodecError::Limit {
+                what: "picture edge"
+            })
+        );
+        assert!(still_packet_ok(40 * 1024 * 1024).is_ok());
+        assert!(still_packet_ok(MAX_STILL_PACKET).is_ok());
+        assert_eq!(
+            still_packet_ok(MAX_STILL_PACKET + 1),
+            Err(CodecError::Limit {
+                what: "packet bytes"
             })
         );
     }

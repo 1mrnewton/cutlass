@@ -40,6 +40,34 @@ impl TimingClock {
             time_scale: 0,
         }
     }
+
+    /// The clock the VUI and HRD parameters of `sps` give picture timing.
+    pub(crate) fn of(sps: &crate::set::Sps) -> Self {
+        Self {
+            pic_struct: sps.vui.pic_struct_present_flag,
+            cpb_bits: sps.cpb_delay_bits,
+            dpb_bits: sps.dpb_delay_bits,
+            offset_bits: sps.time_offset_bits,
+            num_units: sps.vui.num_units_in_tick,
+            time_scale: sps.vui.time_scale,
+        }
+    }
+}
+
+/// Output `(pts, duration)` of a picture whose access unit carries
+/// `messages`, from its packet's: the last picture timing message decides.
+pub(crate) fn shown_time(
+    messages: &[Payload],
+    clock: &TimingClock,
+    pts: i64,
+    duration: i64,
+    timescale: u32,
+) -> Result<(i64, i64), CodecError> {
+    let mut shown = (pts, duration);
+    for message in messages.iter().filter(|message| message.kind == 1) {
+        shown = picture_timing(&message.data, clock, pts, duration, timescale)?;
+    }
+    Ok(shown)
 }
 
 /// Film grain that persists across pictures in one coded video sequence.

@@ -8,7 +8,7 @@ use crate::cavlc;
 use crate::recon::{self, Sample};
 use crate::set::{Sps, scan4, scan8};
 
-use super::{Entropy, Frame, Header, Mb, Mod, Slice, blk_x, blk_y, put_block};
+use super::{Entropy, Frame, Mb, Slice, blk_x, blk_y, put_block};
 
 #[derive(Clone, Copy)]
 struct Place {
@@ -151,8 +151,11 @@ impl LevelScale {
                 self.tables = vec![zero; QP_TABLES];
             }
             let (luma4, luma8, cb) = self.lists;
-            let chroma_qp = [pps.chroma_qp_offset, pps.second_chroma_qp_offset]
-                .map(|offset| recon::chroma_qps(qp, offset, S::QP_BD).0);
+            let chroma_qp = [
+                pps.chroma_qp_index_offset,
+                pps.second_chroma_qp_index_offset,
+            ]
+            .map(|offset| recon::chroma_qps(qp, offset, S::QP_BD).0);
             let weights = [pps.weight4.get(cb)?, pps.weight4.get(cb + 1)?];
             self.tables[index] = QpScale {
                 mul4: recon::dequant4(qp + S::QP_BD, pps.weight4.get(luma4)?)?,
@@ -202,8 +205,7 @@ impl Coeffs {
     }
 }
 
-/// A list slot the initialisation process left as "no reference picture".
-const NO_PICTURE: usize = usize::MAX;
+use crate::dpb::NO_PICTURE;
 
 #[path = "mbaff.rs"]
 mod mbaff;
@@ -216,360 +218,6 @@ fn next_qp<S: Sample>(qp: i32, delta: i32) -> i32 {
 
 fn chroma_deblock<S: Sample>(luma_qp: i32, offset: i32) -> i8 {
     recon::chroma_qps(luma_qp, offset, S::QP_BD).1 as i8
-}
-
-pub(crate) fn reference_lists<S: Sample>(
-    dpb: &[Frame<S>],
-    header: &Header,
-    poc: i32,
-    max_fn: u32,
-    size: (usize, usize),
-) -> Result<(Vec<usize>, Vec<usize>), CodecError> {
-    let view = header.view_id;
-    let (width, height) = size;
-    let short = |frame: &&Frame<S>| {
-        frame.referenced
-            && !frame.long_term
-            && !frame.nonexisting
-            && frame.view_id == view
-            && frame.w == width
-            && frame.h == height
-    };
-    let mut shorts: Vec<usize> = dpb
-        .iter()
-        .enumerate()
-        .filter(|(_, frame)| short(frame))
-        .map(|(index, _)| index)
-        .collect();
-    let mut longs: Vec<usize> = dpb
-        .iter()
-        .enumerate()
-        .filter(|(_, frame)| {
-            frame.referenced
-                && frame.long_term
-                && !frame.nonexisting
-                && frame.view_id == view
-                && frame.w == width
-                && frame.h == height
-        })
-        .map(|(index, _)| index)
-        .collect();
-    longs.sort_by_key(|&index| dpb[index].long_idx);
-    if super::intra_slice(header.kind) {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    if super::syntax_kind(header.kind) == 0 {
-        shorts.sort_by_key(|&index| {
-            std::cmp::Reverse(pic_num(&dpb[index], header.frame_num, max_fn))
-        });
-        let mut list = shorts;
-        list.extend(longs);
-        append_interview(&mut list, dpb, poc, &header.interview_l0, size);
-        let list = reorder(
-            list,
-            header.num_ref_l0,
-            dpb,
-            &header.ref_mod_l0,
-            header.frame_num,
-            max_fn,
-        )?;
-        return Ok((list, Vec::new()));
-    }
-    let mut past: Vec<usize> = shorts
-        .iter()
-        .copied()
-        .filter(|&index| dpb[index].poc < poc)
-        .collect();
-    let mut future: Vec<usize> = shorts
-        .iter()
-        .copied()
-        .filter(|&index| dpb[index].poc > poc)
-        .collect();
-    past.sort_by_key(|&index| std::cmp::Reverse(dpb[index].poc));
-    future.sort_by_key(|&index| dpb[index].poc);
-    let mut list0 = past.clone();
-    list0.extend(future.iter().copied());
-    list0.extend(longs.iter().copied());
-    let mut list1 = future;
-    list1.extend(past);
-    list1.extend(longs);
-    // Clause 8.2.4.2.3 switches the first two list 1 entries before the lists
-    // are cut to the active lengths.
-    if list0 == list1 && list1.len() > 1 {
-        list1.swap(0, 1);
-    }
-    append_interview(&mut list0, dpb, poc, &header.interview_l0, size);
-    append_interview(&mut list1, dpb, poc, &header.interview_l1, size);
-    let list0 = reorder(
-        list0,
-        header.num_ref_l0,
-        dpb,
-        &header.ref_mod_l0,
-        header.frame_num,
-        max_fn,
-    )?;
-    let list1 = reorder(
-        list1,
-        header.num_ref_l1,
-        dpb,
-        &header.ref_mod_l1,
-        header.frame_num,
-        max_fn,
-    )?;
-    Ok((list0, list1))
-}
-
-fn append_interview<S: Sample>(
-    list: &mut Vec<usize>,
-    dpb: &[Frame<S>],
-    poc: i32,
-    views: &[u16],
-    size: (usize, usize),
-) {
-    let (width, height) = size;
-    for view in views {
-        let Some(index) = dpb.iter().position(|frame| {
-            frame.referenced
-                && !frame.nonexisting
-                && frame.inter_view
-                && frame.view_id == *view
-                && frame.poc == poc
-                && frame.w == width
-                && frame.h == height
-        }) else {
-            continue;
-        };
-        if !list.contains(&index) {
-            list.push(index);
-        }
-    }
-}
-
-fn pic_num<S: Sample>(frame: &Frame<S>, current: u32, max_fn: u32) -> i32 {
-    let mut number = i32::try_from(frame.frame_num).unwrap_or(0);
-    if frame.frame_num > current {
-        number -= i32::try_from(max_fn).unwrap_or(0);
-    }
-    number
-}
-
-/// Clause 8.2.4.2 pads a short initial list, then 8.2.4.3 may repeat a picture
-/// so the active length is filled. A slot left as "no reference picture" stays
-/// [`NO_PICTURE`] and is rejected when a macroblock uses it.
-fn reorder<S: Sample>(
-    mut list: Vec<usize>,
-    active: usize,
-    dpb: &[Frame<S>],
-    mods: &[Mod],
-    current: u32,
-    max_fn: u32,
-) -> Result<Vec<usize>, CodecError> {
-    if active > 32 {
-        return Err(CodecError::Limit { what: "ref idx" });
-    }
-    if list.len() > active {
-        list.truncate(active);
-    }
-    list.resize(active, NO_PICTURE);
-    if mods.is_empty() {
-        return Ok(list);
-    }
-    let max_pic = i32::try_from(max_fn).map_err(|_| CodecError::Malformed {
-        at_bit: 0,
-        what: "ref list modification",
-    })?;
-    let curr = i32::try_from(current).map_err(|_| CodecError::Malformed {
-        at_bit: 0,
-        what: "ref list modification",
-    })?;
-    list.push(NO_PICTURE);
-    let mut pred = curr;
-    let mut ref_idx = 0usize;
-    for modification in mods {
-        if ref_idx >= active {
-            return Err(CodecError::Malformed {
-                at_bit: 0,
-                what: "ref list modification",
-            });
-        }
-        match modification.idc {
-            0 | 1 => {
-                let pic_num = short_target(&mut pred, modification, curr, max_pic)?;
-                let Some(picture) = short_index(dpb, pic_num, current, max_fn) else {
-                    return Err(CodecError::Malformed {
-                        at_bit: 0,
-                        what: "ref list modification",
-                    });
-                };
-                place_short(
-                    &mut list,
-                    ref_idx,
-                    active,
-                    picture,
-                    pic_num,
-                    dpb,
-                    ShortNums {
-                        current,
-                        max_fn,
-                        max_pic,
-                    },
-                );
-                ref_idx += 1;
-            }
-            2 => {
-                let Some(picture) = long_index(dpb, modification.arg) else {
-                    return Err(CodecError::Malformed {
-                        at_bit: 0,
-                        what: "ref list modification",
-                    });
-                };
-                place_long(&mut list, ref_idx, active, picture, modification.arg, dpb);
-                ref_idx += 1;
-            }
-            _ => {
-                return Err(CodecError::Malformed {
-                    at_bit: 0,
-                    what: "ref list modification",
-                });
-            }
-        }
-    }
-    list.truncate(active);
-    Ok(list)
-}
-
-fn short_target(
-    pred: &mut i32,
-    modification: &Mod,
-    curr: i32,
-    max_pic: i32,
-) -> Result<i32, CodecError> {
-    let Some(sum) = modification.arg.checked_add(1) else {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "ref list modification",
-        });
-    };
-    let Ok(abs) = i32::try_from(sum) else {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "ref list modification",
-        });
-    };
-    if abs <= 0 || abs > max_pic || max_pic <= 0 {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "ref list modification",
-        });
-    }
-    let no_wrap = if modification.idc == 0 {
-        if *pred < abs {
-            *pred - abs + max_pic
-        } else {
-            *pred - abs
-        }
-    } else if *pred > max_pic - abs {
-        *pred + abs - max_pic
-    } else {
-        *pred + abs
-    };
-    *pred = no_wrap;
-    Ok(if no_wrap > curr {
-        no_wrap - max_pic
-    } else {
-        no_wrap
-    })
-}
-
-struct ShortNums {
-    current: u32,
-    max_fn: u32,
-    max_pic: i32,
-}
-
-fn place_short<S: Sample>(
-    list: &mut [usize],
-    ref_idx: usize,
-    active: usize,
-    picture: usize,
-    pic_num: i32,
-    dpb: &[Frame<S>],
-    nums: ShortNums,
-) {
-    for c in (ref_idx + 1..=active).rev() {
-        list[c] = list[c - 1];
-    }
-    list[ref_idx] = picture;
-    let mut nidx = ref_idx + 1;
-    for c in (ref_idx + 1)..=active {
-        if pic_num_f(dpb, list[c], &nums) != pic_num {
-            list[nidx] = list[c];
-            nidx += 1;
-        }
-    }
-}
-
-fn place_long<S: Sample>(
-    list: &mut [usize],
-    ref_idx: usize,
-    active: usize,
-    picture: usize,
-    long_num: u32,
-    dpb: &[Frame<S>],
-) {
-    for c in (ref_idx + 1..=active).rev() {
-        list[c] = list[c - 1];
-    }
-    list[ref_idx] = picture;
-    let mut nidx = ref_idx + 1;
-    for c in (ref_idx + 1)..=active {
-        if !same_long(dpb, list[c], long_num) {
-            list[nidx] = list[c];
-            nidx += 1;
-        }
-    }
-}
-
-fn short_index<S: Sample>(
-    dpb: &[Frame<S>],
-    number: i32,
-    current: u32,
-    max_fn: u32,
-) -> Option<usize> {
-    dpb.iter().position(|frame| {
-        frame.referenced
-            && !frame.long_term
-            && !frame.nonexisting
-            && pic_num(frame, current, max_fn) == number
-    })
-}
-
-fn long_index<S: Sample>(dpb: &[Frame<S>], long_num: u32) -> Option<usize> {
-    let Ok(long_num) = i32::try_from(long_num) else {
-        return None;
-    };
-    dpb.iter().position(|frame| {
-        frame.referenced && frame.long_term && !frame.nonexisting && frame.long_idx == long_num
-    })
-}
-
-fn pic_num_f<S: Sample>(dpb: &[Frame<S>], slot: usize, nums: &ShortNums) -> i32 {
-    let Some(frame) = dpb.get(slot) else {
-        return nums.max_pic;
-    };
-    if !frame.referenced || frame.long_term {
-        return nums.max_pic;
-    }
-    pic_num(frame, nums.current, nums.max_fn)
-}
-
-fn same_long<S: Sample>(dpb: &[Frame<S>], slot: usize, long_num: u32) -> bool {
-    let Ok(long_num) = i32::try_from(long_num) else {
-        return false;
-    };
-    dpb.get(slot).is_some_and(|frame| {
-        frame.referenced && frame.long_term && !frame.nonexisting && frame.long_idx == long_num
-    })
 }
 
 /// Unsets the macroblock records of a picture decoded a row at a time up
@@ -723,7 +371,7 @@ pub(crate) fn decode_mbs<S: Sample>(
     layer: Option<&Frame<S>>,
 ) -> Result<(), CodecError> {
     let total = pic.mb_w.saturating_mul(pic.h / 16);
-    let mbaff = slice.sps.mbaff && !pic.field;
+    let mbaff = slice.sps.mb_adaptive_frame_field_flag && !pic.field;
     let next = slice.group_next.as_slice();
     if !next.is_empty() && next.len() != total {
         return Err(CodecError::Malformed {
@@ -1049,7 +697,7 @@ fn skip_mb<S: Sample>(
     qp: i32,
     field_mb: bool,
 ) -> Result<(), CodecError> {
-    let mbaff = slice.sps.mbaff && !pic.field;
+    let mbaff = slice.sps.mb_adaptive_frame_field_flag && !pic.field;
     let (mx, my) = locate(pic, addr, mbaff);
     if super::syntax_kind(slice.kind) == 0
         && !slice.vsp
@@ -1066,8 +714,8 @@ fn skip_mb<S: Sample>(
     mb.field_mb = field_mb;
     mb.skip = true;
     mb.qp = qp as i8;
-    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
-    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_index_offset);
+    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_index_offset);
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
@@ -1136,8 +784,8 @@ fn p_skip_in_place<S: Sample>(
     *held = Mb::new(slice_id);
     held.skip = true;
     held.qp = qp as i8;
-    held.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
-    held.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    held.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_index_offset);
+    held.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_index_offset);
     held.off_a = slice.off_a as i8;
     held.off_b = slice.off_b as i8;
     held.deblock = slice.deblock;
@@ -1191,8 +839,8 @@ fn b_skip_in_place<S: Sample>(
     *held = Mb::new(slice_id);
     held.skip = true;
     held.qp = qp as i8;
-    held.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
-    held.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    held.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_index_offset);
+    held.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_index_offset);
     held.off_a = slice.off_a as i8;
     held.off_b = slice.off_b as i8;
     held.deblock = slice.deblock;
@@ -1232,14 +880,14 @@ fn vsp_skip_mb<S: Sample>(
     qp: i32,
     field_mb: bool,
 ) -> Result<(), CodecError> {
-    let mbaff = slice.sps.mbaff && !pic.field;
+    let mbaff = slice.sps.mb_adaptive_frame_field_flag && !pic.field;
     let (mx, my) = locate(pic, addr, mbaff);
     let mut mb = Mb::new(slice_id);
     mb.field_mb = field_mb;
     mb.skip = true;
     mb.qp = qp as i8;
-    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
-    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_index_offset);
+    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_index_offset);
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
@@ -1556,7 +1204,11 @@ fn intra_base<S: Sample>(
     qp: i32,
     entropy: &mut Entropy<'_, '_>,
 ) -> Result<i32, CodecError> {
-    if slice.sps.mbaff || pic.field || pic.separate_plane || pic.chroma() != 1 {
+    if slice.sps.mb_adaptive_frame_field_flag
+        || pic.field
+        || pic.separate_plane
+        || pic.chroma() != 1
+    {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -1570,8 +1222,16 @@ fn intra_base<S: Sample>(
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
     pic.mb[slot] = mb;
-    let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, true, slice_id, slice.sps.chroma)?;
-    if luma_cbp > 0 && slice.pps.transform_8x8 {
+    let (luma_cbp, chroma_cbp) = read_cbp(
+        pic,
+        entropy,
+        mx,
+        my,
+        true,
+        slice_id,
+        slice.sps.chroma_format_idc,
+    )?;
+    if luma_cbp > 0 && slice.pps.transform_8x8_mode_flag {
         mb.transform8 = transform8_flag(pic, entropy, mx, my, slice_id)?;
     }
     let mut qp = qp;
@@ -1647,8 +1307,8 @@ fn intra_base<S: Sample>(
         );
     }
     mb.qp = qp as i8;
-    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
-    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_index_offset);
+    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_index_offset);
     pic.mb[slot] = mb;
     Ok(qp)
 }
@@ -1666,7 +1326,11 @@ fn motion_base<S: Sample>(
     state: (u16, i32),
 ) -> Result<i32, CodecError> {
     let (slice_id, qp) = state;
-    if slice.sps.mbaff || pic.field || pic.separate_plane || pic.chroma() != 1 {
+    if slice.sps.mb_adaptive_frame_field_flag
+        || pic.field
+        || pic.separate_plane
+        || pic.chroma() != 1
+    {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -1707,8 +1371,16 @@ fn motion_base<S: Sample>(
     }
     bind_refs(&mut mb, slice);
     pic.mb[slot] = mb;
-    let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, slice_id, slice.sps.chroma)?;
-    if luma_cbp > 0 && slice.pps.transform_8x8 {
+    let (luma_cbp, chroma_cbp) = read_cbp(
+        pic,
+        entropy,
+        mx,
+        my,
+        false,
+        slice_id,
+        slice.sps.chroma_format_idc,
+    )?;
+    if luma_cbp > 0 && slice.pps.transform_8x8_mode_flag {
         mb.transform8 = transform8_flag(pic, entropy, mx, my, slice_id)?;
     }
     let mut qp = qp;
@@ -1785,8 +1457,8 @@ fn motion_base<S: Sample>(
         );
     }
     mb.qp = qp as i8;
-    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
-    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_index_offset);
+    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_index_offset);
     pic.mb[slot] = mb;
     Ok(qp)
 }
@@ -2130,9 +1802,9 @@ pub(crate) fn resample_residual<S: Sample>(
 ) -> Result<ResidualPlanes, CodecError> {
     if layer.field
         || layer.mbaff
-        || slice.sps.mbaff
-        || !slice.sps.frame_mbs_only
-        || slice.sps.chroma != 1
+        || slice.sps.mb_adaptive_frame_field_flag
+        || !slice.sps.frame_mbs_only_flag
+        || slice.sps.chroma_format_idc != 1
     {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
@@ -2637,7 +2309,11 @@ fn add_layer_residual<S: Sample>(
     slice: &Slice<'_>,
     addr: usize,
 ) -> Result<(), CodecError> {
-    if slice.sps.mbaff || pic.field || pic.separate_plane || pic.chroma() != 1 {
+    if slice.sps.mb_adaptive_frame_field_flag
+        || pic.field
+        || pic.separate_plane
+        || pic.chroma() != 1
+    {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -2706,7 +2382,7 @@ fn add_tcoeff_residual<S: Sample>(
     slice: &Slice<'_>,
     addr: usize,
 ) -> Result<(), CodecError> {
-    if slice.sps.mbaff
+    if slice.sps.mb_adaptive_frame_field_flag
         || pic.field
         || pic.separate_plane
         || pic.chroma() != 1
@@ -2823,8 +2499,8 @@ fn add_tcoeff_chroma<S: Sample>(
     let (ref_qp, cur_qp) = qp;
     let chroma_stride = pic.w / 2;
     let offsets = [
-        slice.pps.chroma_qp_offset,
-        slice.pps.second_chroma_qp_offset,
+        slice.pps.chroma_qp_index_offset,
+        slice.pps.second_chroma_qp_index_offset,
     ];
     for (plane, offset) in offsets.into_iter().enumerate() {
         let (ref_c, _) = recon::chroma_qps(ref_qp, offset, S::QP_BD);
@@ -3110,7 +2786,7 @@ fn one_mb<S: Sample>(
     entropy: &mut Entropy<'_, '_>,
 ) -> Result<(i32, bool), CodecError> {
     let (qp, layer, coeffs) = coded;
-    let mbaff = slice.sps.mbaff && !pic.field;
+    let mbaff = slice.sps.mb_adaptive_frame_field_flag && !pic.field;
     let (mx, my) = locate(pic, addr, mbaff);
     let slot = my * pic.mb_w + mx;
     let mut mb = Mb::new(slice_id);
@@ -3171,8 +2847,8 @@ fn one_mb<S: Sample>(
         )?
     };
     mb.qp = qp as i8;
-    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
-    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_index_offset);
+    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_index_offset);
     if !mb.intra {
         bind_refs(&mut mb, slice);
     }
@@ -3588,7 +3264,7 @@ fn decode_intra<S: Sample>(
         (0, 0, 0)
     };
     let mut transform8 = false;
-    if !i16 && slice.pps.transform_8x8 {
+    if !i16 && slice.pps.transform_8x8_mode_flag {
         transform8 = transform8_flag(pic, entropy, mx, my, mb.slice)?;
     }
     mb.transform8 = transform8;
@@ -3599,25 +3275,36 @@ fn decode_intra<S: Sample>(
             read_intra4(pic, entropy, slice, mx, my, mb)?;
         }
     }
-    if slice.sps.chroma == 3 && i16 && cbp_chroma != 0 {
+    if slice.sps.chroma_format_idc == 3 && i16 && cbp_chroma != 0 {
         return Err(CodecError::Malformed {
             at_bit: 0,
             what: "chroma cbp",
         });
     }
-    let chroma = if slice.sps.chroma == 3 {
+    let chroma = if slice.sps.chroma_format_idc == 3 {
         0
     } else {
         read_chroma_mode(pic, entropy, mx, my, mb.slice)?
     };
     mb.chroma_mode = chroma;
     let (luma_cbp, chroma_cbp) = if i16 {
-        (cbp_luma, u8::from(slice.sps.chroma != 3) * cbp_chroma)
+        (
+            cbp_luma,
+            u8::from(slice.sps.chroma_format_idc != 3) * cbp_chroma,
+        )
     } else {
-        read_cbp(pic, entropy, mx, my, true, mb.slice, slice.sps.chroma)?
+        read_cbp(
+            pic,
+            entropy,
+            mx,
+            my,
+            true,
+            mb.slice,
+            slice.sps.chroma_format_idc,
+        )?
     };
     mb.cbp = luma_cbp | (chroma_cbp << 4);
-    if luma_cbp > 0 && slice.pps.transform_8x8 && !i16 && !transform8 {
+    if luma_cbp > 0 && slice.pps.transform_8x8_mode_flag && !i16 && !transform8 {
         // Inter-only syntax position. Intra already consumed the flag.
     }
     let mut delta = 0;
@@ -3697,7 +3384,7 @@ fn decode_intra<S: Sample>(
             }
         }
     }
-    if slice.sps.chroma == 3 {
+    if slice.sps.chroma_format_idc == 3 {
         chroma_res.reset();
     } else {
         read_chroma_into(pic, entropy, (mx, my), chroma_cbp, mb, chroma_res)?;
@@ -3728,7 +3415,7 @@ fn decode_intra<S: Sample>(
         },
         *qp,
     );
-    if slice.sps.chroma == 3 && !slice.sps.separate {
+    if slice.sps.chroma_format_idc == 3 && !slice.sps.separate_colour_plane_flag {
         recon_444(
             pic,
             entropy,
@@ -3761,7 +3448,7 @@ fn read_intra4<S: Sample>(
                 bx as i32 - 1,
                 by as i32,
                 mb,
-                slice.pps.constrained_intra,
+                slice.pps.constrained_intra_pred_flag,
             ),
             mode_at(
                 pic,
@@ -3770,7 +3457,7 @@ fn read_intra4<S: Sample>(
                 bx as i32,
                 by as i32 - 1,
                 mb,
-                slice.pps.constrained_intra,
+                slice.pps.constrained_intra_pred_flag,
             ),
         );
         let mode = read_mode(entropy, pred)?;
@@ -3799,7 +3486,7 @@ fn read_intra8<S: Sample>(
                 bx as i32 - 1,
                 by as i32,
                 mb,
-                slice.pps.constrained_intra,
+                slice.pps.constrained_intra_pred_flag,
             ),
             mode_at(
                 pic,
@@ -3808,7 +3495,7 @@ fn read_intra8<S: Sample>(
                 bx as i32,
                 by as i32 - 1,
                 mb,
-                slice.pps.constrained_intra,
+                slice.pps.constrained_intra_pred_flag,
             ),
         );
         let mode = read_mode(entropy, pred)?;
@@ -4994,7 +4681,12 @@ fn intra_frame_scaled<S: Sample>(
 ) -> Result<(), CodecError> {
     let (mul4, mul8) = (&scales.mul4, &scales.mul8);
     let Place { mx, my } = at;
-    let near = IntraNear::find(pic, (mx, my), mb.slice, slice.pps.constrained_intra);
+    let near = IntraNear::find(
+        pic,
+        (mx, my),
+        mb.slice,
+        slice.pps.constrained_intra_pred_flag,
+    );
     let (x0, y0, stride) = (mx * 16, my * 16, pic.w);
     let luma_cbp = mb.cbp & 15;
     let chroma_cbp = mb.cbp >> 4;
@@ -5273,7 +4965,7 @@ fn intra_frame_scaled<S: Sample>(
 
 /// Clause 8.5. `qp` is SliceQPY. Bypass applies when the flag is set and QP′Y is 0.
 fn qp_bypass<S: Sample>(slice: &Slice<'_>, qp: i32) -> bool {
-    slice.sps.bypass && qp + S::QP_BD == 0
+    slice.sps.qpprime_y_zero_transform_bypass_flag && qp + S::QP_BD == 0
 }
 
 fn place4(coeffs: &[i32], field: bool) -> [i32; 16] {
@@ -5442,8 +5134,14 @@ fn recon_intra<S: Sample>(
     // before those samples are read back, so availability sees this slice.
     pic.mb[my * pic.mb_w + mx] = *mb;
     if i16 {
-        let (above, left, above_ok, left_ok) =
-            edge16(pic, mx, my, mb.slice, slice.pps.constrained_intra, 0);
+        let (above, left, above_ok, left_ok) = edge16(
+            pic,
+            mx,
+            my,
+            mb.slice,
+            slice.pps.constrained_intra_pred_flag,
+            0,
+        );
         let corner = corner_sample(
             &pic.y,
             pic.w,
@@ -5517,7 +5215,7 @@ fn recon_intra<S: Sample>(
                     by: by / 4,
                 },
                 mb,
-                slice.pps.constrained_intra,
+                slice.pps.constrained_intra_pred_flag,
                 0,
             );
             put_block(&mut pic.y, pic.w, x0 + bx, span.at(by), &pred, 8, step);
@@ -5553,7 +5251,7 @@ fn recon_intra<S: Sample>(
                 Place { mx, my },
                 Cell { bx, by },
                 mb,
-                slice.pps.constrained_intra,
+                slice.pps.constrained_intra_pred_flag,
                 0,
             );
             put_block(
@@ -6098,8 +5796,8 @@ fn recon_chroma<S: Sample>(
     let y0 = span.y;
     let step = span.step;
     let scan = scan4(field || pic.field);
-    let (qp_cb, _) = recon::chroma_qps(qp, slice.pps.chroma_qp_offset, S::QP_BD);
-    let (qp_cr, _) = recon::chroma_qps(qp, slice.pps.second_chroma_qp_offset, S::QP_BD);
+    let (qp_cb, _) = recon::chroma_qps(qp, slice.pps.chroma_qp_index_offset, S::QP_BD);
+    let (qp_cr, _) = recon::chroma_qps(qp, slice.pps.second_chroma_qp_index_offset, S::QP_BD);
     // Intra chroma uses lists 1 and 2. Inter chroma uses lists 4 and 5.
     let base = if intra { 1 } else { 4 };
     for (cb, dc, ac, qp_c, list) in [
@@ -6107,8 +5805,15 @@ fn recon_chroma<S: Sample>(
         (false, cr_dc, cr_ac, qp_cr, base + 1),
     ] {
         let pred = if intra && spatial {
-            let (above, left, above_ok, left_ok) =
-                edge_chroma(pic, mx, my, cb, slice_id, slice.pps.constrained_intra, 8);
+            let (above, left, above_ok, left_ok) = edge_chroma(
+                pic,
+                mx,
+                my,
+                cb,
+                slice_id,
+                slice.pps.constrained_intra_pred_flag,
+                8,
+            );
             let plane = if cb { &pic.u } else { &pic.v };
             let corner = corner_sample(
                 plane,
@@ -6211,16 +5916,23 @@ fn recon_chroma422<S: Sample>(
     let y0 = span.y;
     let step = span.step;
     let scan = scan4(field || pic.field);
-    let (qp_cb, _) = recon::chroma_qps(qp, slice.pps.chroma_qp_offset, S::QP_BD);
-    let (qp_cr, _) = recon::chroma_qps(qp, slice.pps.second_chroma_qp_offset, S::QP_BD);
+    let (qp_cb, _) = recon::chroma_qps(qp, slice.pps.chroma_qp_index_offset, S::QP_BD);
+    let (qp_cr, _) = recon::chroma_qps(qp, slice.pps.second_chroma_qp_index_offset, S::QP_BD);
     let base = if intra { 1 } else { 4 };
     for (cb, dc, ac, qp_c, list) in [
         (true, cb_dc, cb_ac, qp_cb, base),
         (false, cr_dc, cr_ac, qp_cr, base + 1),
     ] {
         if intra && spatial {
-            let (above, left, above_ok, left_ok) =
-                edge_chroma(pic, mx, my, cb, slice_id, slice.pps.constrained_intra, 16);
+            let (above, left, above_ok, left_ok) = edge_chroma(
+                pic,
+                mx,
+                my,
+                cb,
+                slice_id,
+                slice.pps.constrained_intra_pred_flag,
+                16,
+            );
             let (samples, stride, height) = if cb {
                 (&pic.u[..], pic.chroma_stride(), pic.chroma_height())
             } else {
@@ -6332,9 +6044,9 @@ fn recon_444<S: Sample>(
     let Place { mx, my } = at;
     for plane in [1u8, 2] {
         let offset = if plane == 1 {
-            slice.pps.chroma_qp_offset
+            slice.pps.chroma_qp_index_offset
         } else {
-            slice.pps.second_chroma_qp_offset
+            slice.pps.second_chroma_qp_index_offset
         };
         let (qp_c, qp_base) = recon::chroma_qps(qp, offset, S::QP_BD);
         paint_444(
@@ -6369,8 +6081,14 @@ fn paint_444<S: Sample>(
     let scan = scan4(field);
     if mb.intra16 {
         let mode = mode16.unwrap_or(2);
-        let (above, left, above_ok, left_ok) =
-            edge16(pic, mx, my, mb.slice, slice.pps.constrained_intra, plane);
+        let (above, left, above_ok, left_ok) = edge16(
+            pic,
+            mx,
+            my,
+            mb.slice,
+            slice.pps.constrained_intra_pred_flag,
+            plane,
+        );
         let (samples, stride, height) = plane_samples(pic, plane);
         let corner = corner_sample(
             samples,
@@ -6485,7 +6203,7 @@ fn paint_444<S: Sample>(
                         by: by / 4,
                     },
                     mb,
-                    slice.pps.constrained_intra,
+                    slice.pps.constrained_intra_pred_flag,
                     plane,
                 );
                 let (dest, dest_stride) = mutable_plane(pic, plane);
@@ -6541,7 +6259,7 @@ fn paint_444<S: Sample>(
                 Place { mx, my },
                 Cell { bx, by },
                 mb,
-                slice.pps.constrained_intra,
+                slice.pps.constrained_intra_pred_flag,
                 plane,
             );
             let (dest, dest_stride) = mutable_plane(pic, plane);
@@ -8450,7 +8168,7 @@ fn sp_inter<S: Sample>(
     mb: &mut Mb,
     coded: SpCoded,
 ) -> Result<(), CodecError> {
-    sp_ok::<S>(mb.transform8, slice.sps.chroma)?;
+    sp_ok::<S>(mb.transform8, slice.sps.chroma_format_idc)?;
     let Place { mx, my } = at;
     let mut luma = [[0i32; 16]; 16];
     for (i, slot) in luma.iter_mut().enumerate() {
@@ -8492,7 +8210,7 @@ fn write_sp<S: Sample>(
     mb: &Mb,
     samples: SpSamples<'_>,
 ) -> Result<(), CodecError> {
-    sp_ok::<S>(false, slice.sps.chroma)?;
+    sp_ok::<S>(false, slice.sps.chroma_format_idc)?;
     let Place { mx, my } = at;
     let span = luma_span(my, mb.field_mb);
     let quant = crate::sp::SpQuant {
@@ -8538,7 +8256,7 @@ fn recon_si<S: Sample>(
     chroma: &ChromaResidual,
     qp: i32,
 ) -> Result<(), CodecError> {
-    sp_ok::<S>(mb.transform8 || mb.intra16, slice.sps.chroma)?;
+    sp_ok::<S>(mb.transform8 || mb.intra16, slice.sps.chroma_format_idc)?;
     let Place { mx, my } = at;
     let span = luma_span(my, mb.field_mb);
     let quant = crate::sp::SpQuant {
@@ -8551,7 +8269,7 @@ fn recon_si<S: Sample>(
             bx: blk_x(i),
             by: blk_y(i),
         };
-        let predicted = pred4_block(pic, at, cell, mb, slice.pps.constrained_intra, 0);
+        let predicted = pred4_block(pic, at, cell, mb, slice.pps.constrained_intra_pred_flag, 0);
         let mut pred = [0i32; 16];
         for (slot, sample) in pred.iter_mut().zip(predicted) {
             *slot = sample.into();
@@ -8599,8 +8317,8 @@ fn paint_chroma<S: Sample>(pic: &mut Frame<S>, slice: &Slice<'_>, at: Place, job
     let stride = pic.chroma_stride();
     let base = if job.intra { 1 } else { 4 };
     let offsets = [
-        slice.pps.chroma_qp_offset,
-        slice.pps.second_chroma_qp_offset,
+        slice.pps.chroma_qp_index_offset,
+        slice.pps.second_chroma_qp_index_offset,
     ];
     let dc = [&job.residual.cb_dc, &job.residual.cr_dc];
     let ac = [&job.residual.cb_ac, &job.residual.cr_ac];
@@ -8634,8 +8352,15 @@ fn si_chroma_pred<S: Sample>(
     cb: bool,
 ) -> [i32; 64] {
     let Place { mx, my } = at;
-    let (above, left, above_ok, left_ok) =
-        edge_chroma(pic, mx, my, cb, mb.slice, slice.pps.constrained_intra, 8);
+    let (above, left, above_ok, left_ok) = edge_chroma(
+        pic,
+        mx,
+        my,
+        cb,
+        mb.slice,
+        slice.pps.constrained_intra_pred_flag,
+        8,
+    );
     let span = chroma_span(my, 8, mb.field_mb);
     let plane = if cb { &pic.u } else { &pic.v };
     let corner = corner_sample(
@@ -8817,15 +8542,23 @@ fn decode_inter<S: Sample>(
         read_parts(pic, dpb, entropy, slice, mb, (mx, my, spec), layer)?;
     }
     let residual = coded_residual_flag(slice, entropy)?;
-    let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, mb.slice, slice.sps.chroma)?;
+    let (luma_cbp, chroma_cbp) = read_cbp(
+        pic,
+        entropy,
+        mx,
+        my,
+        false,
+        mb.slice,
+        slice.sps.chroma_format_idc,
+    )?;
     mb.cbp = luma_cbp | (chroma_cbp << 4);
     let direct16 = slice.kind == 1 && spec == 0;
     let allow8 = if direct16 {
-        slice.sps.direct_8x8_inference
+        slice.sps.direct_8x8_inference_flag
     } else {
         mb.partition8
     };
-    if luma_cbp > 0 && slice.pps.transform_8x8 && allow8 {
+    if luma_cbp > 0 && slice.pps.transform_8x8_mode_flag && allow8 {
         mb.transform8 = transform8_flag(pic, entropy, mx, my, mb.slice)?;
     }
     let mut delta = 0;
@@ -8837,7 +8570,7 @@ fn decode_inter<S: Sample>(
     predict_inter(pic, dpb, slice, (mx, my, whole), mb)?;
     let field = mb.field_mb || pic.field;
     let merge = residual && slice.tcoeff;
-    if merge && (mb.field_mb || slice.sps.chroma != 1) {
+    if merge && (mb.field_mb || slice.sps.chroma_format_idc != 1) {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -8926,7 +8659,7 @@ fn decode_inter<S: Sample>(
             }
         }
     }
-    if slice.sps.chroma == 3 && !slice.sps.separate {
+    if slice.sps.chroma_format_idc == 3 && !slice.sps.separate_colour_plane_flag {
         recon_444(pic, entropy, slice, Place { mx, my }, mb, *qp, None)?;
     } else if chroma_cbp == 0 && pic.levels.is_empty() {
         // No chroma levels: nothing to read, keep or add.
@@ -10125,7 +9858,7 @@ fn read_sub<S: Sample>(
     }
     for kind in kinds {
         if kind == 0 && slice.kind == 1 {
-            if !slice.sps.direct_8x8_inference {
+            if !slice.sps.direct_8x8_inference_flag {
                 mb.partition8 = false;
             }
             continue;
@@ -10415,7 +10148,7 @@ fn temporal_direct<S: Sample>(
     // With 8×8 inference every block of a quarter reads the same
     // co-located block, so a whole macroblock is worked out once a
     // quarter, and filled at once when the four agree.
-    if blocks.len() == 16 && slice.sps.direct_8x8_inference {
+    if blocks.len() == 16 && slice.sps.direct_8x8_inference_flag {
         let quarter = |part: usize| temporal_block(slice, col, (part % 2) * 2, (part / 2) * 2);
         let found = [quarter(0), quarter(1), quarter(2), quarter(3)];
         mb.ready = u16::MAX;
@@ -10463,7 +10196,7 @@ fn temporal_block(
         return (0, [0, 0], [0, 0]);
     }
     let part = (by / 2) * 2 + (bx / 2);
-    let index = if slice.sps.direct_8x8_inference {
+    let index = if slice.sps.direct_8x8_inference_flag {
         corner_block(bx, by)
     } else {
         by * 4 + bx
@@ -10657,7 +10390,7 @@ fn apply_direct<S: Sample>(
         // quarter is filled at once too.
         let corners = match col_mb {
             None => Some([false; 4]),
-            Some(col) if slice.sps.direct_8x8_inference => {
+            Some(col) if slice.sps.direct_8x8_inference_flag => {
                 Some([0, 3, 12, 15].map(|corner| corner_col_zero(col, corner)))
             }
             Some(_) => None,
@@ -10704,7 +10437,7 @@ fn apply_direct<S: Sample>(
         } else {
             col_matters
                 && col_mb.is_some_and(|mb| {
-                    if slice.sps.direct_8x8_inference {
+                    if slice.sps.direct_8x8_inference_flag {
                         corner_col_zero(mb, corner_block(bx, by))
                     } else {
                         col_zero(mb, index)
@@ -11320,7 +11053,7 @@ fn mc_block<S: Sample>(
         && default(1, r1)
         && (r0 < 0
             || r1 < 0
-            || slice.pps.weighted_bipred != 2
+            || slice.pps.weighted_bipred_idc != 2
             || slice.kind != 1
             || implicit_weights(slice, r0, r1) == (32, 32));
     let done = if pic.separate_plane || pic.chroma() != 1 {
@@ -11957,7 +11690,7 @@ fn mix(slice: &Slice<'_>, r0: i8, r1: i8, plane: i8) -> Mix {
     if r0 >= 0 && r1 >= 0 {
         if slice.weighted {
             Mix::Weighted(explicit_bi(slice, r0, r1, plane))
-        } else if slice.pps.weighted_bipred == 2 && slice.kind == 1 {
+        } else if slice.pps.weighted_bipred_idc == 2 && slice.kind == 1 {
             let (w0, w1) = implicit_weights(slice, r0, r1);
             Mix::Weighted(recon::BiWeight {
                 w0,
@@ -13571,10 +13304,10 @@ pub(crate) fn resample_intra<S: Sample>(
     if base.field
         || base.mbaff
         || base.mb.is_empty()
-        || sps.mbaff
-        || !sps.frame_mbs_only
-        || sps.separate
-        || sps.chroma != 1
+        || sps.mb_adaptive_frame_field_flag
+        || !sps.frame_mbs_only_flag
+        || sps.separate_colour_plane_flag
+        || sps.chroma_format_idc != 1
         || base.w == 0
         || base.h == 0
         || base.mb.iter().any(|mb| !mb.intra)

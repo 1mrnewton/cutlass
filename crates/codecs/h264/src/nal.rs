@@ -110,7 +110,7 @@ fn find_byte(bytes: &[u8], value: u8) -> Option<usize> {
         .map(|found| words.len() * 8 + found)
 }
 
-fn nal_from_ebsp(ebsp: &[u8]) -> Result<Nal, CodecError> {
+pub(crate) fn nal_from_ebsp(ebsp: &[u8]) -> Result<Nal, CodecError> {
     if ebsp.is_empty() {
         return Err(CodecError::Truncated {
             at_bit: 0,
@@ -219,6 +219,17 @@ fn mvc_header(bytes: &[u8]) -> Result<MvcHeader, CodecError> {
 
 /// Annex B access unit, or one length-prefixed access unit.
 pub fn access_unit(data: &[u8], length_size: u8) -> Result<Vec<Nal>, CodecError> {
+    access_unit_with(data, length_size, nal_from_ebsp)
+}
+
+/// [`access_unit`] with each NAL unit handed to `read` as it stands in
+/// `data`: its header and payload, emulation prevention bytes included,
+/// without the start code or length before it.
+pub(crate) fn access_unit_with<'a, T>(
+    data: &'a [u8],
+    length_size: u8,
+    mut read: impl FnMut(&'a [u8]) -> Result<T, CodecError>,
+) -> Result<Vec<T>, CodecError> {
     if data.is_empty() {
         return Err(CodecError::InvalidApi {
             what: "empty packet",
@@ -228,7 +239,7 @@ pub fn access_unit(data: &[u8], length_size: u8) -> Result<Vec<Nal>, CodecError>
     // Annex B start code. A length that accounts for the whole buffer wins.
     // Annex B remains the fallback when that length does not fit.
     if length_size != 0 {
-        match length_prefixed(data, length_size) {
+        match length_prefixed(data, length_size, &mut read) {
             Ok(nals) => return Ok(nals),
             Err(error) if !starts_annex_b(data) => return Err(error),
             Err(_) => {}
@@ -240,7 +251,7 @@ pub fn access_unit(data: &[u8], length_size: u8) -> Result<Vec<Nal>, CodecError>
             what: "access unit framing",
         });
     }
-    annex_b(data)
+    annex_b(data, &mut read)
 }
 
 fn starts_annex_b(data: &[u8]) -> bool {
@@ -268,7 +279,10 @@ fn start_codes(data: &[u8]) -> Vec<usize> {
     starts
 }
 
-fn annex_b(data: &[u8]) -> Result<Vec<Nal>, CodecError> {
+fn annex_b<'a, T>(
+    data: &'a [u8],
+    read: &mut impl FnMut(&'a [u8]) -> Result<T, CodecError>,
+) -> Result<Vec<T>, CodecError> {
     let starts = start_codes(data);
     if starts.is_empty() {
         return Err(CodecError::Malformed {
@@ -289,7 +303,7 @@ fn annex_b(data: &[u8]) -> Result<Vec<Nal>, CodecError> {
             }
         }
         if begin < end {
-            nals.push(nal_from_ebsp(&data[begin..end])?);
+            nals.push(read(&data[begin..end])?);
         }
     }
     if nals.is_empty() {
@@ -301,7 +315,11 @@ fn annex_b(data: &[u8]) -> Result<Vec<Nal>, CodecError> {
     Ok(nals)
 }
 
-fn length_prefixed(data: &[u8], length_size: u8) -> Result<Vec<Nal>, CodecError> {
+fn length_prefixed<'a, T>(
+    data: &'a [u8],
+    length_size: u8,
+    read: &mut impl FnMut(&'a [u8]) -> Result<T, CodecError>,
+) -> Result<Vec<T>, CodecError> {
     if !matches!(length_size, 1 | 2 | 4) {
         return Err(CodecError::Unsupported {
             what: "nal length size",
@@ -328,7 +346,7 @@ fn length_prefixed(data: &[u8], length_size: u8) -> Result<Vec<Nal>, CodecError>
                 what: "length-prefixed nal",
             });
         }
-        nals.push(nal_from_ebsp(&data[i..i + len])?);
+        nals.push(read(&data[i..i + len])?);
         i += len;
     }
     Ok(nals)

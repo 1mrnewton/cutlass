@@ -421,7 +421,7 @@ fn field_mix<S: Sample>(
     if r0 >= 0 && r1 >= 0 {
         if slice.weighted {
             Mix::Weighted(super::explicit_bi(slice, r0 >> 1, r1 >> 1, plane))
-        } else if slice.pps.weighted_bipred == 2 && slice.kind == 1 {
+        } else if slice.pps.weighted_bipred_idc == 2 && slice.kind == 1 {
             let (w0, w1) = field_implicit(pic, dpb, slice, parity, (r0, r1));
             Mix::Weighted(recon::BiWeight {
                 w0,

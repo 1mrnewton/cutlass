@@ -97,19 +97,28 @@ mod bits;
 mod cabac;
 mod cavlc;
 mod dec;
+mod dpb;
 mod enc;
 mod fmo;
 mod grain;
+mod header;
 mod nal;
+mod poc;
 mod recon;
 mod sei;
 mod set;
 mod sp;
+pub mod stateless;
 mod subpel;
 mod tables;
 
 pub use dec::{H264Decoder, register_decoders};
 pub use enc::{H264Encoder, register_encoders};
+pub use header::{
+    DecRefPicMarking, MemoryManagementControlOperation, PredWeight, PredWeightTable,
+    RefPicListModification, SliceHeader,
+};
+pub use set::{Pps, Sps, Vui};
 
 #[cfg(test)]
 mod annex_a;

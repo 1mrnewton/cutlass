@@ -9,7 +9,13 @@ use cutlass_decode::{
 
 use crate::bits::Bits;
 use crate::cabac::Cabac;
+use crate::dpb::{self, take_output};
+use crate::header::{
+    self as syntax, MemoryManagementControlOperation as Mmco, RefPicListModification, SliceHeader,
+};
+pub(crate) use crate::header::{intra_slice, syntax_kind};
 use crate::nal::{self, Nal};
+use crate::poc::{OrderSyntax, Poc};
 use crate::recon::{self, Sample};
 use crate::set::{self, Pps, Sps, ZIGZAG4, ZIGZAG8};
 
@@ -393,7 +399,7 @@ pub(crate) struct Frame<S: Sample = u8> {
     max_ref: usize,
     reorder: usize,
     adaptive: bool,
-    mmco: Vec<Mark>,
+    mmco: Vec<Mmco>,
     max_fn: u32,
     /// Annex H `view_id`. An Annex A picture is the base view, 0.
     view_id: u16,
@@ -472,14 +478,7 @@ impl Shown {
             pts,
             duration,
             grain: None,
-            clock: crate::sei::TimingClock {
-                pic_struct: sps.pic_struct_present,
-                cpb_bits: sps.cpb_delay_bits,
-                dpb_bits: sps.dpb_delay_bits,
-                offset_bits: sps.time_offset_bits,
-                num_units: sps.num_units,
-                time_scale: sps.time_scale,
-            },
+            clock: crate::sei::TimingClock::of(sps),
         }
     }
 }
@@ -643,35 +642,12 @@ impl Sets {
 fn store_subset(subset: &mut [Option<Sps>], rbsp: &[u8]) -> Result<(), CodecError> {
     match set::parse_subset_sps(rbsp) {
         Ok(sps) => {
-            let id = usize::from(sps.id);
+            let id = usize::from(sps.seq_parameter_set_id);
             subset[id] = Some(sps);
             Ok(())
         }
         Err(CodecError::Unsupported { what: "subset sps" }) => Ok(()),
         Err(err) => Err(err),
-    }
-}
-
-#[derive(Clone)]
-struct Poc {
-    prev_frame_num: u32,
-    prev_frame_num_offset: u32,
-    prev_poc_msb: i32,
-    prev_poc_lsb: i32,
-    have_ref: bool,
-    max_long: Option<u8>,
-}
-
-impl Poc {
-    fn new() -> Self {
-        Self {
-            prev_frame_num: 0,
-            prev_frame_num_offset: 0,
-            prev_poc_msb: 0,
-            prev_poc_lsb: 0,
-            have_ref: false,
-            max_long: None,
-        }
     }
 }
 
@@ -907,12 +883,12 @@ impl H264Decoder {
         match nal.kind {
             7 => {
                 let sps = set::parse_sps(&nal.rbsp)?;
-                let id = usize::from(sps.id);
+                let id = usize::from(sps.seq_parameter_set_id);
                 self.sets.sps[id] = Some(sps);
             }
             8 => {
                 let pps = set::parse_pps_in(&nal.rbsp, &self.sets.sps, &self.sets.subset)?;
-                let id = usize::from(pps.id);
+                let id = usize::from(pps.pic_parameter_set_id);
                 self.sets.pps[id] = Some(pps);
             }
             15 => store_subset(&mut self.sets.subset, &nal.rbsp)?,
@@ -1104,12 +1080,12 @@ fn au_depth(sets: &Sets, nals: &[Nal], current: u8) -> Result<u8, CodecError> {
         match nal.kind {
             7 => {
                 let sps = set::parse_sps(&nal.rbsp)?;
-                let id = usize::from(sps.id);
+                let id = usize::from(sps.seq_parameter_set_id);
                 sets.sps[id] = Some(sps);
             }
             8 => {
                 let pps = set::parse_pps_in(&nal.rbsp, &sets.sps, &sets.subset)?;
-                let id = usize::from(pps.id);
+                let id = usize::from(pps.pic_parameter_set_id);
                 sets.pps[id] = Some(pps);
             }
             15 => store_subset(&mut sets.subset, &nal.rbsp)?,
@@ -1137,7 +1113,7 @@ fn au_depth(sets: &Sets, nals: &[Nal], current: u8) -> Result<u8, CodecError> {
                     &mut bits,
                     &mut sets,
                     nal.kind == 5 || slice_idr(class),
-                    nal.ref_idc != 0,
+                    nal.ref_idc,
                     class,
                 )?;
                 let Some(sps) = sets.sequence(header.sps_id, header.subset) else {
@@ -1188,13 +1164,13 @@ fn decode_au<S: Sample>(
             7 | 8 | 15 => {
                 if kind == 7 {
                     let sps = set::parse_sps(&nals[index].rbsp)?;
-                    let id = usize::from(sps.id);
+                    let id = usize::from(sps.seq_parameter_set_id);
                     sets.sps[id] = Some(sps);
                 } else if kind == 15 {
                     store_subset(&mut sets.subset, &nals[index].rbsp)?;
                 } else {
                     let pps = set::parse_pps_in(&nals[index].rbsp, &sets.sps, &sets.subset)?;
-                    let id = usize::from(pps.id);
+                    let id = usize::from(pps.pic_parameter_set_id);
                     sets.pps[id] = Some(pps);
                 }
                 index += 1;
@@ -1567,20 +1543,19 @@ fn present<S: Sample>(
     if idr {
         hold.clear();
     }
+    let (pts, duration) = crate::sei::shown_time(
+        messages,
+        &pic.shown.clock,
+        pic.pts,
+        pic.duration,
+        pic.timescale,
+    )?;
+    pic.shown.pts = pts;
+    pic.shown.duration = duration;
     let mut explicit = false;
     let mut chosen = None;
     for message in messages {
-        if message.kind == 1 {
-            let (pts, duration) = crate::sei::picture_timing(
-                &message.data,
-                &pic.shown.clock,
-                pic.pts,
-                pic.duration,
-                pic.timescale,
-            )?;
-            pic.shown.pts = pts;
-            pic.shown.duration = duration;
-        } else if message.kind == 19 {
+        if message.kind == 19 {
             match crate::sei::film_grain(&message.data, S::BITS)? {
                 crate::sei::GrainChoice::Cancel => {
                     hold.clear();
@@ -1683,7 +1658,7 @@ fn begin_plane<S: Sample>(
     active: &mut u8,
     fresh: bool,
 ) -> Result<(), CodecError> {
-    if !sps.separate {
+    if !sps.separate_colour_plane_flag {
         return Ok(());
     }
     let plane = header.colour_plane;
@@ -1772,291 +1747,85 @@ fn weave<S: Sample>(first: Frame<S>, second: Frame<S>) -> Result<Frame<S>, Codec
 }
 
 fn finish_picture<S: Sample>(
-    _poc: &mut Poc,
+    poc: &mut Poc,
     dpb: &mut Vec<Frame<S>>,
     mut pic: Frame<S>,
 ) -> Result<Vec<Frame<S>>, CodecError> {
-    let max_ref = dpb_max(dpb, &pic);
-    if pic.referenced {
-        if pic.adaptive {
-            apply_mmco(dpb, &mut pic, _poc)?;
-        } else {
-            mark_ref(dpb, &pic, max_ref);
-        }
-    }
-    let reorder = pic_reorder(&pic);
+    let marking = pic.adaptive.then(|| std::mem::take(&mut pic.mmco));
+    let reorder = pic.reorder;
     pic.seal();
-    dpb.push(pic);
-    dpb.retain(|frame| frame.referenced || frame.output);
-    Ok(take_output(dpb, reorder))
+    dpb::store(dpb, pic, marking.as_deref(), poc, reorder)
 }
 
-fn dpb_max<S: Sample>(dpb: &[Frame<S>], pic: &Frame<S>) -> usize {
-    let _ = dpb;
-    pic.max_ref.clamp(1, 16)
-}
+impl<S: Sample> dpb::Stored for Frame<S> {
+    fn frame_num(&self) -> u32 {
+        self.frame_num
+    }
 
-fn pic_reorder<S: Sample>(pic: &Frame<S>) -> usize {
-    pic.reorder
-}
+    fn set_frame_num(&mut self, frame_num: u32) {
+        self.frame_num = frame_num;
+    }
 
-fn mark_ref<S: Sample>(dpb: &mut [Frame<S>], pic: &Frame<S>, max_ref: usize) {
-    let same = |frame: &&Frame<S>| frame.w == pic.w && frame.h == pic.h;
-    let mut short = dpb
-        .iter()
-        .filter(|frame| frame.referenced && !frame.long_term && same(frame))
-        .count();
-    let long = dpb
-        .iter()
-        .filter(|frame| frame.referenced && frame.long_term && same(frame))
-        .count();
-    short += 1;
-    while short + long > max_ref && short > 0 {
-        if let Some(pos) = oldest_short(dpb, pic.frame_num, pic.max_fn, (pic.w, pic.h)) {
-            dpb[pos].referenced = false;
-            short -= 1;
-        } else {
-            break;
-        }
+    fn poc(&self) -> i32 {
+        self.poc
     }
-}
 
-/// Clause 8.2.5. Adaptive marking replaces the sliding window for this picture.
-fn apply_mmco<S: Sample>(
-    dpb: &mut [Frame<S>],
-    pic: &mut Frame<S>,
-    poc: &mut Poc,
-) -> Result<(), CodecError> {
-    let mut current_long = false;
-    for mark in pic.mmco.clone() {
-        match mark.op {
-            1 | 3 => {
-                let target = i32::try_from(pic.frame_num).unwrap_or(0)
-                    - i32::try_from(mark.arg).unwrap_or(0)
-                    - 1;
-                let Some(pos) = short_at(dpb, target, pic.frame_num, pic.max_fn, mark.op == 3)
-                else {
-                    return Err(CodecError::Malformed {
-                        at_bit: 0,
-                        what: "mmco",
-                    });
-                };
-                if mark.op == 1 {
-                    dpb[pos].referenced = false;
-                } else {
-                    let idx = i32::try_from(mark.arg2).unwrap_or(i32::MAX);
-                    assign_long(dpb, pos, idx, poc.max_long)?;
-                }
-            }
-            2 => {
-                let idx = i32::try_from(mark.arg).unwrap_or(i32::MAX);
-                if let Some(frame) = dpb
-                    .iter_mut()
-                    .find(|frame| frame.referenced && frame.long_term && frame.long_idx == idx)
-                {
-                    frame.referenced = false;
-                }
-            }
-            4 => {
-                if mark.arg > 16 {
-                    return Err(CodecError::Malformed {
-                        at_bit: 0,
-                        what: "mmco",
-                    });
-                }
-                if mark.arg == 0 {
-                    poc.max_long = None;
-                    for frame in dpb.iter_mut().filter(|frame| frame.long_term) {
-                        frame.referenced = false;
-                    }
-                } else {
-                    let max = mark.arg - 1;
-                    poc.max_long = Some(u8::try_from(max).unwrap_or(0));
-                    for frame in dpb.iter_mut() {
-                        if frame.long_term && frame.long_idx > i32::try_from(max).unwrap_or(0) {
-                            frame.referenced = false;
-                        }
-                    }
-                }
-            }
-            5 => {
-                for frame in dpb.iter_mut() {
-                    frame.referenced = false;
-                }
-                pic.frame_num = 0;
-                poc.prev_frame_num = 0;
-                poc.prev_frame_num_offset = 0;
-                poc.max_long = None;
-            }
-            6 => {
-                let idx = i32::try_from(mark.arg).unwrap_or(i32::MAX);
-                let allowed = poc
-                    .max_long
-                    .is_some_and(|max| idx >= 0 && idx <= i32::from(max));
-                if !allowed {
-                    return Err(CodecError::Malformed {
-                        at_bit: 0,
-                        what: "mmco",
-                    });
-                }
-                for frame in dpb.iter_mut() {
-                    if frame.long_term && frame.long_idx == idx {
-                        frame.referenced = false;
-                    }
-                }
-                pic.long_term = true;
-                pic.long_idx = idx;
-                current_long = true;
-            }
-            _ => {
-                return Err(CodecError::Malformed {
-                    at_bit: 0,
-                    what: "mmco",
-                });
-            }
-        }
+    fn size(&self) -> (usize, usize) {
+        (self.w, self.h)
     }
-    if !current_long {
-        pic.long_term = false;
-    }
-    pic.mmco.clear();
-    let refs = dpb.iter().filter(|frame| frame.referenced).count() + 1;
-    if refs > pic.max_ref {
-        return Err(CodecError::Limit {
-            what: "reference frames",
-        });
-    }
-    Ok(())
-}
 
-fn short_at<S: Sample>(
-    dpb: &[Frame<S>],
-    pic_num: i32,
-    current: u32,
-    max_fn: u32,
-    coded_only: bool,
-) -> Option<usize> {
-    dpb.iter().enumerate().find_map(|(index, frame)| {
-        if frame.referenced
-            && !frame.long_term
-            && !(coded_only && frame.nonexisting)
-            && wrapped(frame, current, max_fn) == pic_num
-        {
-            Some(index)
-        } else {
-            None
-        }
-    })
-}
+    fn nonexisting(&self) -> bool {
+        self.nonexisting
+    }
 
-fn wrapped<S: Sample>(frame: &Frame<S>, current: u32, max_fn: u32) -> i32 {
-    let mut number = i32::try_from(frame.frame_num).unwrap_or(0);
-    if frame.frame_num > current {
-        number -= i32::try_from(max_fn).unwrap_or(0);
+    fn referenced(&self) -> bool {
+        self.referenced
     }
-    number
-}
 
-fn assign_long<S: Sample>(
-    dpb: &mut [Frame<S>],
-    pos: usize,
-    idx: i32,
-    max_long: Option<u8>,
-) -> Result<(), CodecError> {
-    let allowed = max_long.is_some_and(|max| idx >= 0 && idx <= i32::from(max));
-    if !allowed {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "mmco",
-        });
+    fn set_referenced(&mut self, referenced: bool) {
+        self.referenced = referenced;
     }
-    for (index, frame) in dpb.iter_mut().enumerate() {
-        if index != pos && frame.long_term && frame.long_idx == idx {
-            frame.referenced = false;
-        }
-    }
-    dpb[pos].long_term = true;
-    dpb[pos].long_idx = idx;
-    Ok(())
-}
 
-fn oldest_short<S: Sample>(
-    dpb: &[Frame<S>],
-    current: u32,
-    max_fn: u32,
-    size: (usize, usize),
-) -> Option<usize> {
-    let (w, h) = size;
-    dpb.iter()
-        .enumerate()
-        .filter(|(_, frame)| frame.referenced && !frame.long_term && frame.w == w && frame.h == h)
-        .min_by_key(|(_, frame)| wrapped(frame, current, max_fn))
-        .map(|(index, _)| index)
-}
+    fn long_term(&self) -> bool {
+        self.long_term
+    }
 
-/// Clause 8.2.5.2. Each missing frame_num becomes a non-existing short-term reference
-/// and can slide an older reference out. Those pictures are not displayed and are not
-/// eligible as inter references.
-fn fill_frame_num_gap<S: Sample>(
-    sps: &Sps,
-    state: &mut Poc,
-    dpb: &mut Vec<Frame<S>>,
-    frame_num: u32,
-) -> Result<(), CodecError> {
-    if !state.have_ref {
-        return Ok(());
+    fn long_idx(&self) -> i32 {
+        self.long_idx
     }
-    let max_fn = 1u32 << sps.log2_max_frame_num;
-    if max_fn == 0 {
-        return Ok(());
-    }
-    let mut unused = state.prev_frame_num.wrapping_add(1) % max_fn;
-    if frame_num == state.prev_frame_num || frame_num == unused {
-        return Ok(());
-    }
-    if !sps.gaps_allowed {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "frame_num gap",
-        });
-    }
-    let mut steps = 0u32;
-    while unused != frame_num {
-        if steps >= max_fn {
-            return Err(CodecError::Malformed {
-                at_bit: 0,
-                what: "frame_num gap",
-            });
-        }
-        steps += 1;
-        let (poc, offset) = ghost_order(sps, state, unused)?;
-        let ghost = absent_frame(sps, unused, poc);
-        mark_ref(dpb, &ghost, ghost.max_ref);
-        state.prev_frame_num = unused;
-        state.prev_frame_num_offset = offset;
-        dpb.push(ghost);
-        dpb.retain(|frame| frame.referenced || frame.output);
-        unused = unused.wrapping_add(1) % max_fn;
-    }
-    Ok(())
-}
 
-fn ghost_order(sps: &Sps, state: &Poc, frame_num: u32) -> Result<(i32, u32), CodecError> {
-    let max_fn = 1u32 << sps.log2_max_frame_num;
-    let offset = if frame_num < state.prev_frame_num {
-        state.prev_frame_num_offset.wrapping_add(max_fn)
-    } else {
-        state.prev_frame_num_offset
-    };
-    let poc = if sps.poc_type == 1 {
-        poc_type1(sps, offset, frame_num, true, [0, 0])?
-    } else if sps.poc_type == 2 {
-        let abs = i32::try_from(offset.saturating_add(frame_num)).unwrap_or(0);
-        2 * abs
-    } else {
-        0
-    };
-    Ok((poc, offset))
+    fn set_long(&mut self, idx: i32) {
+        self.long_term = true;
+        self.long_idx = idx;
+    }
+
+    fn set_short(&mut self) {
+        self.long_term = false;
+    }
+
+    fn output(&self) -> bool {
+        self.output
+    }
+
+    fn set_output(&mut self, output: bool) {
+        self.output = output;
+    }
+
+    fn max_fn(&self) -> u32 {
+        self.max_fn
+    }
+
+    fn max_ref(&self) -> usize {
+        self.max_ref
+    }
+
+    fn view_id(&self) -> u16 {
+        self.view_id
+    }
+
+    fn inter_view(&self) -> bool {
+        self.inter_view
+    }
 }
 
 fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
@@ -2088,11 +1857,11 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         transfer: sps.transfer,
         matrix: sps.matrix,
         sample_aspect: sps.sample_aspect,
-        num_units: sps.num_units,
-        time_scale: sps.time_scale,
-        fixed_rate: sps.fixed_frame_rate,
+        num_units: sps.vui.num_units_in_tick,
+        time_scale: sps.vui.time_scale,
+        fixed_rate: sps.vui.fixed_frame_rate_flag,
         nonexisting: true,
-        separate_plane: sps.separate,
+        separate_plane: sps.separate_colour_plane_flag,
         field: false,
         mbaff: false,
         bottom: false,
@@ -2100,7 +1869,7 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         reorder: 0,
         adaptive: false,
         mmco: Vec::new(),
-        max_fn: 1u32 << sps.log2_max_frame_num,
+        max_fn: 1u32 << sps.log2_max_frame_num(),
         view_id: 0,
         inter_view: false,
         depth: false,
@@ -2114,31 +1883,6 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         pending: None,
         writer: None,
     }
-}
-
-/// The pictures whose turn it is to be shown, in order. Each is still to
-/// be turned into an output; one decoded on another thread may not be
-/// finished yet.
-fn take_output<S: Sample>(dpb: &mut Vec<Frame<S>>, keep: usize) -> Vec<Frame<S>> {
-    let mut out = Vec::new();
-    loop {
-        let pending: Vec<usize> = dpb
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| f.output)
-            .map(|(i, _)| i)
-            .collect();
-        if pending.len() <= keep {
-            break;
-        }
-        let pos = pending.into_iter().min_by_key(|&i| dpb[i].poc).unwrap_or(0);
-        dpb[pos].output = false;
-        if !dpb[pos].nonexisting {
-            out.push(dpb[pos].clone());
-        }
-    }
-    dpb.retain(|frame| frame.referenced || frame.output);
-    out
 }
 
 fn wide_plane<S: Sample>(len: usize) -> Option<Vec<u16>> {
@@ -2759,7 +2503,7 @@ fn decode_slice<S: Sample>(
         spares,
     } = scratch;
     let mut bits = Bits::new(&nal.rbsp);
-    let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0, slice_class(nal))?;
+    let header = read_header(&mut bits, sets, idr, nal.ref_idc, slice_class(nal))?;
     let (part_intra, part_inter) = if nal.kind == 2 {
         read_partitions(&mut bits, sets, &header, (intra, inter))?
     } else {
@@ -2789,9 +2533,9 @@ fn decode_slice<S: Sample>(
             .get(usize::from(header.pps_id))
             .and_then(|pps| pps.as_ref());
         let rows = !header.field
-            && sps.frame_mbs_only
-            && sps.chroma == 1
-            && !sps.separate
+            && sps.frame_mbs_only_flag
+            && sps.chroma_format_idc == 1
+            && !sps.separate_colour_plane_flag
             && pps.is_some_and(|pps| pps.groups.minus1 == 0)
             && sets.subset.iter().all(|subset| subset.is_none())
             && layer.is_none();
@@ -2820,31 +2564,25 @@ fn decode_slice<S: Sample>(
         }
     }
     if picture.is_none() && !idr {
-        fill_frame_num_gap(&sps, poc_state, dpb, header.frame_num)?;
+        dpb::fill_frame_num_gap(&sps, poc_state, dpb, header.frame_num, |frame_num, poc| {
+            Ok(absent_frame(&sps, frame_num, poc))
+        })?;
     }
-    let (poc, frame_num_offset) = picture_order(&header, &sps, poc_state, idr)?;
-    let field_poc = field_orders(&sps, &header, poc);
     // Clause 8.2.1: a frame's order count is the smaller of its fields'.
-    let poc = if header.field {
-        poc
-    } else {
-        field_poc[0].min(field_poc[1])
-    };
-    let _ = frame_num_offset;
+    let counts = crate::poc::counts(&header.order(), &sps, poc_state, idr)?;
+    let (poc, field_poc) = (counts.poc, counts.fields);
     let fresh = picture.is_none();
     if fresh {
         // An IDR marks every earlier picture unused for reference. The flag
         // drops pictures that were still waiting; otherwise they are returned
         // before this picture. The flag does not hide the IDR itself.
         if idr {
-            poc_state.max_long = if header.long_term_ref { Some(0) } else { None };
-            for frame in dpb.iter_mut() {
-                frame.referenced = false;
-                if header.no_output_prior {
-                    frame.output = false;
-                }
-            }
-            prior.extend(take_output(dpb, 0));
+            prior.extend(dpb::begin_idr(
+                dpb,
+                poc_state,
+                header.long_term_ref,
+                header.no_output_prior,
+            ));
         }
         let keep_levels = sets.subset.iter().flatten().any(|sps| sps.seq_tcoeff);
         let here = jobs.is_none();
@@ -2871,9 +2609,9 @@ fn decode_slice<S: Sample>(
         if here
             && frame.w.saturating_mul(frame.h) >= LARGE
             && !header.field
-            && sps.frame_mbs_only
-            && sps.chroma == 1
-            && !sps.separate
+            && sps.frame_mbs_only_flag
+            && sps.chroma_format_idc == 1
+            && !sps.separate_colour_plane_flag
             && pps.is_some_and(|pps| pps.groups.minus1 == 0)
             && sets.subset.iter().all(|subset| subset.is_none())
             && layer.is_none()
@@ -2889,9 +2627,7 @@ fn decode_slice<S: Sample>(
         *picture = Some(frame);
         *next_mb = 0;
         if header.nal_ref {
-            poc_state.prev_frame_num = header.frame_num;
-            poc_state.prev_frame_num_offset = frame_num_offset;
-            poc_state.have_ref = true;
+            poc_state.follow(header.frame_num, &counts);
         }
     }
     {
@@ -2900,7 +2636,7 @@ fn decode_slice<S: Sample>(
         };
         begin_plane(&sps, &header, pic, dpb, next_mb, &mut planes.active, fresh)?;
     }
-    if sps.separate {
+    if sps.separate_colour_plane_flag {
         let bit = 1u8 << header.colour_plane;
         if fresh {
             planes.seen = bit;
@@ -3081,19 +2817,6 @@ impl<'a> std::ops::DerefMut for Cavlc<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Mod {
-    idc: u32,
-    arg: u32,
-}
-
-#[derive(Clone)]
-struct Mark {
-    op: u8,
-    arg: u32,
-    arg2: u32,
-}
-
 struct Header {
     first_mb: usize,
     pps_id: u8,
@@ -3121,9 +2844,9 @@ struct Header {
     no_output_prior: bool,
     long_term_ref: bool,
     adaptive: bool,
-    mmco: Vec<Mark>,
-    ref_mod_l0: Vec<Mod>,
-    ref_mod_l1: Vec<Mod>,
+    mmco: Vec<Mmco>,
+    ref_mod_l0: Vec<RefPicListModification>,
+    ref_mod_l1: Vec<RefPicListModification>,
     weights: bool,
     luma_denom: i32,
     chroma_denom: i32,
@@ -3178,6 +2901,140 @@ struct Header {
     /// Crop of this slice. Picture-level scalability copies the sequence crop.
     /// Macroblock-level scalability reads it from the slice header.
     scale: set::SvcScale,
+}
+
+impl Header {
+    /// What decoding needs of an Annex A slice header, with the fields of
+    /// the extensions as an Annex A slice has them.
+    fn from_syntax(parsed: &SliceHeader, sps: &Sps, pps: &Pps) -> Self {
+        let kind = parsed.slice_kind();
+        let [num_ref_l0, num_ref_l1] = if intra_slice(kind) {
+            [0, 0]
+        } else {
+            [
+                usize::from(parsed.num_ref_idx_l0_active_minus1) + 1,
+                usize::from(parsed.num_ref_idx_l1_active_minus1) + 1,
+            ]
+        };
+        let marking = &parsed.dec_ref_pic_marking;
+        let mut weights = false;
+        let mut luma_denom = 0;
+        let mut chroma_denom = 0;
+        let mut yw = [[0i32; 32]; 2];
+        let mut yo = [[0i32; 32]; 2];
+        let mut cw = [[[0i32; 2]; 32]; 2];
+        let mut co = [[[0i32; 2]; 32]; 2];
+        if let Some(table) = &parsed.pred_weight_table {
+            luma_denom = i32::from(table.luma_log2_weight_denom);
+            chroma_denom = i32::from(table.chroma_log2_weight_denom);
+            let sample_shift = i32::from(sps.bit_depth) - 8;
+            for (list, entries) in [&table.l0, &table.l1].into_iter().enumerate() {
+                for (i, entry) in entries.iter().enumerate().take(32) {
+                    yw[list][i] = entry.luma_weight;
+                    yo[list][i] = entry.luma_offset << sample_shift;
+                    cw[list][i] = entry.chroma_weight;
+                    co[list][i] = entry.chroma_offset.map(|offset| offset << sample_shift);
+                }
+            }
+            // Every weight the default one, 2^denom with no offset, weights
+            // nothing: one prediction comes out as it is and two as their
+            // rounded average, as FFmpeg's `use_weight` left clear has them
+            // predicted. Adaptive luma compensation reads the flag apart.
+            let plain = |entries: &[syntax::PredWeight]| {
+                entries.iter().all(|entry| {
+                    entry.luma_weight == 1 << luma_denom
+                        && entry.luma_offset == 0
+                        && entry.chroma_weight == [1 << chroma_denom; 2]
+                        && entry.chroma_offset == [0; 2]
+                })
+            };
+            weights = sps.alc || !(plain(&table.l0) && plain(&table.l1));
+        }
+        Self {
+            first_mb: parsed.first_mb_in_slice as usize,
+            pps_id: parsed.pic_parameter_set_id,
+            sps_id: pps.seq_parameter_set_id,
+            kind,
+            colour_plane: parsed.colour_plane_id,
+            field: parsed.field_pic_flag,
+            bottom: parsed.bottom_field_flag,
+            frame_num: parsed.frame_num,
+            poc_lsb: parsed.pic_order_cnt_lsb as i32,
+            delta_poc: syntax::delta_poc(parsed, sps),
+            qp: parsed.qp(pps),
+            deblock: parsed.disable_deblocking_filter_idc,
+            off_a: parsed.slice_alpha_c0_offset_div2 * 2,
+            off_b: parsed.slice_beta_offset_div2 * 2,
+            cabac_init: parsed.cabac_init_idc,
+            spatial_direct: kind != 1 || parsed.direct_spatial_mv_pred_flag,
+            num_ref_l0,
+            num_ref_l1,
+            nal_ref: parsed.nal_ref_idc != 0,
+            redundant: parsed.redundant_pic_cnt,
+            no_output_prior: marking.no_output_of_prior_pics_flag,
+            long_term_ref: marking.long_term_reference_flag,
+            adaptive: marking.adaptive_ref_pic_marking_mode_flag,
+            mmco: marking.operations.clone(),
+            ref_mod_l0: parsed.ref_pic_list_modification_l0.clone(),
+            ref_mod_l1: parsed.ref_pic_list_modification_l1.clone(),
+            weights,
+            luma_denom,
+            chroma_denom,
+            yw,
+            yo,
+            cw,
+            co,
+            group_cycle: parsed.slice_group_change_cycle,
+            sp_switch: parsed.sp_for_switch_flag,
+            qs: if matches!(kind, 3 | 4) {
+                pps.init_qs() + parsed.slice_qs_delta
+            } else {
+                0
+            },
+            subset: false,
+            output: true,
+            base_mode: false,
+            adaptive_base: false,
+            adaptive_motion: false,
+            motion_pred: false,
+            residual_pred: false,
+            tcoeff: false,
+            adaptive_residual: false,
+            view_id: 0,
+            inter_view: true,
+            interview_l0: Vec::new(),
+            interview_l1: Vec::new(),
+            depth_weight: false,
+            dps_id: 0,
+            dmvp: false,
+            vsp: false,
+            depth: false,
+            scale: sps.svc_scale.clone(),
+        }
+    }
+
+    /// What the picture's order counts are worked out from.
+    fn order(&self) -> OrderSyntax {
+        OrderSyntax {
+            frame_num: self.frame_num,
+            nal_ref: self.nal_ref,
+            field: self.field,
+            poc_lsb: self.poc_lsb,
+            delta_poc: self.delta_poc,
+        }
+    }
+
+    /// What the slice's reference lists are built from.
+    fn lists(&self) -> dpb::ListSyntax<'_> {
+        dpb::ListSyntax {
+            kind: self.kind,
+            frame_num: self.frame_num,
+            view_id: self.view_id,
+            active: [self.num_ref_l0, self.num_ref_l1],
+            modifications: [&self.ref_mod_l0, &self.ref_mod_l1],
+            interview: [&self.interview_l0, &self.interview_l1],
+        }
+    }
 }
 
 enum Layer {
@@ -3252,7 +3109,7 @@ fn read_header(
     bits: &mut Bits<'_>,
     sets: &mut Sets,
     idr: bool,
-    nal_ref: bool,
+    nal_ref_idc: u8,
     class: SliceClass,
 ) -> Result<Header, CodecError> {
     let svc = match class {
@@ -3268,24 +3125,13 @@ fn read_header(
         SliceClass::ThreeD(three) => Some(three),
         _ => None,
     };
-    let first_mb = bits.ue()? as usize;
-    let slice_type = bits.ue()?;
-    let kind = match slice_type % 5 {
-        0 => 0,
-        1 => 1,
-        2 => 2,
-        3 => 3,
-        _ => 4,
-    };
-    let pps_id = bits.ue()?;
-    if pps_id >= set::MAX_PPS as u32 {
-        return Err(bits.malformed("pps id"));
-    }
-    let Some(pps) = sets.pps[pps_id as usize].clone() else {
+    let start = syntax::read_start(bits)?;
+    let kind = start.kind();
+    let Some(pps) = sets.pps[usize::from(start.pic_parameter_set_id)].clone() else {
         return Err(bits.malformed("missing pps"));
     };
     let Some(sps) = sets.sequence(
-        pps.sps_id,
+        pps.seq_parameter_set_id,
         svc.is_some() || mvc.is_some() || three.is_some(),
     ) else {
         return Err(bits.malformed("missing sps"));
@@ -3300,241 +3146,24 @@ fn read_header(
             &pps,
             three,
             PredictedIds {
-                first_mb,
+                first_mb: start.first_mb_in_slice as usize,
                 kind,
-                pps_id,
+                pps_id: u32::from(start.pic_parameter_set_id),
                 idr,
-                nal_ref,
+                nal_ref: nal_ref_idc != 0,
             },
         );
     }
     let restriction = sps.slice_header_restriction;
-    let base_quality = svc.is_none_or(|svc| svc.quality_id == 0);
-    let mut colour_plane = 0u8;
-    if sps.separate {
-        let id = bits.u(2)?;
-        if id > 2 {
-            return Err(bits.malformed("colour plane"));
-        }
-        colour_plane = id as u8;
-    }
-    let frame_num = bits.u(u32::from(sps.log2_max_frame_num))?;
-    let mut field = false;
-    let mut bottom = false;
-    if !sps.frame_mbs_only {
-        field = bits.bit()?;
-        if field {
-            bottom = bits.bit()?;
-        }
-    }
-    if idr {
-        let _ = bits.ue()?;
-    }
-    let mut poc_lsb = 0i32;
-    // For order count type 0 the second entry is delta_pic_order_cnt_bottom.
-    let mut delta_poc = [0i32; 2];
-    if sps.poc_type == 0 {
-        poc_lsb = bits.u(u32::from(sps.log2_max_poc_lsb))? as i32;
-        if pps.bottom_field_pic_order && !field {
-            delta_poc[1] = bits.se()?;
-        }
-    } else if sps.poc_type == 1 && !sps.delta_pic_order_always_zero {
-        delta_poc[0] = bits.se()?;
-        if pps.bottom_field_pic_order && !field {
-            delta_poc[1] = bits.se()?;
-        }
-    }
-    let mut redundant = 0u32;
-    if pps.redundant_pic_cnt_present {
-        redundant = bits.ue()?;
-        if redundant > 127 {
-            return Err(bits.malformed("redundant_pic_cnt"));
-        }
-    }
-    let mut spatial_direct = true;
-    if kind == 1 {
-        spatial_direct = bits.bit()?;
-    }
-    let mut num_ref_l0 = usize::from(pps.num_ref_idx_l0);
-    let mut num_ref_l1 = usize::from(pps.num_ref_idx_l1);
-    if !intra_slice(kind) && base_quality {
-        if bits.bit()? {
-            num_ref_l0 = bits.ue()? as usize + 1;
-            if kind == 1 {
-                num_ref_l1 = bits.ue()? as usize + 1;
-            }
-        }
-        if num_ref_l0 > 16 || num_ref_l1 > 16 {
-            return Err(CodecError::Limit {
-                what: "reference index",
-            });
-        }
-    } else if intra_slice(kind) {
-        num_ref_l0 = 0;
-        num_ref_l1 = 0;
-    }
-    let (ref_mod_l0, ref_mod_l1) = if !intra_slice(kind) && base_quality {
-        (
-            read_list_mod(bits)?,
-            if kind == 1 {
-                read_list_mod(bits)?
-            } else {
-                Vec::new()
-            },
-        )
-    } else {
-        (Vec::new(), Vec::new())
+    let context = syntax::Context {
+        idr,
+        nal_ref_idc,
+        // A quality enhancement leaves the lists, weights and marking to its base.
+        base_quality: svc.is_none_or(|svc| svc.quality_id == 0),
+        store_ref_base: svc.is_some() && !restriction,
     };
-    let mut weights = false;
-    let mut luma_denom = 0;
-    let mut chroma_denom = 0;
-    let mut yw = [[0i32; 32]; 2];
-    let mut yo = [[0i32; 32]; 2];
-    let mut cw = [[[0i32; 2]; 32]; 2];
-    let mut co = [[[0i32; 2]; 32]; 2];
-    if base_quality
-        && ((pps.weighted_pred && syntax_kind(kind) == 0)
-            || (pps.weighted_bipred == 1 && kind == 1))
-    {
-        weights = true;
-        luma_denom = bits.ue()? as i32;
-        chroma_denom = bits.ue()? as i32;
-        if luma_denom > 7 || chroma_denom > 7 {
-            return Err(bits.malformed("weight denom"));
-        }
-        let sample_shift = i32::from(sps.bit_depth) - 8;
-        read_weights(
-            bits,
-            0,
-            num_ref_l0,
-            (luma_denom, chroma_denom),
-            sample_shift,
-            WeightTables {
-                yw: &mut yw,
-                yo: &mut yo,
-                cw: &mut cw,
-                co: &mut co,
-            },
-        )?;
-        if kind == 1 {
-            read_weights(
-                bits,
-                1,
-                num_ref_l1,
-                (luma_denom, chroma_denom),
-                sample_shift,
-                WeightTables {
-                    yw: &mut yw,
-                    yo: &mut yo,
-                    cw: &mut cw,
-                    co: &mut co,
-                },
-            )?;
-        }
-        // Every weight the default one, 2^denom with no offset, weights
-        // nothing: one prediction comes out as it is and two as their
-        // rounded average, as FFmpeg's `use_weight` left clear has them
-        // predicted. Adaptive luma compensation reads the flag apart.
-        let plain = |list: usize, count: usize| {
-            (0..count.min(32)).all(|i| {
-                yw[list][i] == 1 << luma_denom
-                    && yo[list][i] == 0
-                    && cw[list][i] == [1 << chroma_denom; 2]
-                    && co[list][i] == [0; 2]
-            })
-        };
-        if !sps.alc && plain(0, num_ref_l0) && (kind != 1 || plain(1, num_ref_l1)) {
-            weights = false;
-        }
-    }
-    let mut no_output_prior = false;
-    let mut long_term_ref = false;
-    let mut adaptive = false;
-    let mut mmco = Vec::new();
-    if nal_ref && base_quality {
-        if idr {
-            no_output_prior = bits.bit()?;
-            long_term_ref = bits.bit()?;
-        } else if bits.bit()? {
-            adaptive = true;
-            loop {
-                let op = bits.ue()?;
-                if op == 0 {
-                    break;
-                }
-                if op > 6 {
-                    return Err(bits.malformed("mmco"));
-                }
-                let mut arg = 0u32;
-                let mut arg2 = 0u32;
-                if matches!(op, 1..=4) {
-                    arg = bits.ue()?;
-                }
-                if matches!(op, 3 | 6) {
-                    arg2 = bits.ue()?;
-                }
-                if op == 6 {
-                    arg = arg2;
-                    arg2 = 0;
-                }
-                mmco.push(Mark {
-                    op: u8::try_from(op).unwrap_or(0),
-                    arg,
-                    arg2,
-                });
-            }
-        }
-        if svc.is_some() && !restriction && bits.bit()? {
-            return Err(CodecError::Unsupported {
-                what: "reference base picture",
-            });
-        }
-    }
-    let mut cabac_init = 0u8;
-    if pps.cabac && !intra_slice(kind) {
-        cabac_init = bits.ue()? as u8;
-        if cabac_init > 2 {
-            return Err(bits.malformed("cabac_init_idc"));
-        }
-    }
-    let qp = pps.init_qp + bits.se()?;
-    let qp_bd = 6 * i32::from(sps.bit_depth.saturating_sub(8));
-    if !(-qp_bd..=51).contains(&qp) {
-        return Err(bits.malformed("slice qp"));
-    }
-    let mut sp_switch = false;
-    let mut qs = 0i32;
-    if matches!(kind, 3 | 4) {
-        if kind == 3 {
-            sp_switch = bits.bit()?;
-        }
-        qs = pps.init_qs + bits.se()?;
-        if !(0..=51).contains(&qs) {
-            return Err(bits.malformed("slice qs"));
-        }
-    }
-    let mut deblock = 0u8;
-    let mut off_a = 0i32;
-    let mut off_b = 0i32;
-    if pps.deblocking_control {
-        deblock = bits.ue()? as u8;
-        if deblock > 2 {
-            return Err(bits.malformed("deblock idc"));
-        }
-        if deblock != 1 {
-            off_a = bits.se()? * 2;
-            off_b = bits.se()? * 2;
-            if !(-12..=12).contains(&off_a) || !(-12..=12).contains(&off_b) {
-                return Err(bits.malformed("deblock offset"));
-            }
-        }
-    }
-    let mut group_cycle = 0u32;
-    if base_quality && pps.groups.minus1 > 0 && (3..=5).contains(&pps.groups.map_type) {
-        let units = crate::fmo::map_units(sps.mb_width, sps.mb_height, sps.frame_mbs_only);
-        let width = crate::fmo::cycle_bits(units, pps.groups.rate)?;
-        group_cycle = bits.u(width)?;
-    }
+    let parsed = syntax::read_rest(bits, start, sps, &pps, context)?;
+    let mut header = Header::from_syntax(&parsed, sps, &pps);
     let mut view_id = 0u16;
     let mut inter_view = matches!(class, SliceClass::Avc);
     let mut interview_l0 = Vec::new();
@@ -3664,63 +3293,25 @@ fn read_header(
             dps_id = id as u8;
         }
     }
-    let header = Header {
-        first_mb,
-        pps_id: pps_id as u8,
-        sps_id: pps.sps_id,
-        kind,
-        colour_plane,
-        field,
-        bottom,
-        frame_num,
-        poc_lsb,
-        delta_poc,
-        qp,
-        deblock,
-        off_a,
-        off_b,
-        cabac_init,
-        spatial_direct,
-        num_ref_l0,
-        num_ref_l1,
-        nal_ref,
-        redundant,
-        no_output_prior,
-        long_term_ref,
-        adaptive,
-        mmco,
-        ref_mod_l0,
-        ref_mod_l1,
-        weights,
-        luma_denom,
-        chroma_denom,
-        yw,
-        yo,
-        cw,
-        co,
-        group_cycle,
-        sp_switch,
-        qs,
-        subset: svc.is_some() || mvc.is_some() || three.is_some(),
-        output: svc.is_none_or(|svc| svc.output),
-        base_mode: layer.base_mode,
-        adaptive_base: layer.adaptive_base,
-        adaptive_motion: layer.adaptive_motion,
-        motion_pred: layer.motion_pred,
-        residual_pred: layer.residual_pred,
-        tcoeff: layer.tcoeff,
-        adaptive_residual: layer.adaptive_residual,
-        view_id,
-        inter_view,
-        interview_l0,
-        interview_l1,
-        depth_weight,
-        dps_id,
-        dmvp,
-        vsp,
-        depth: three.is_some_and(|header| header.depth),
-        scale: layer.scale,
-    };
+    header.subset = svc.is_some() || mvc.is_some() || three.is_some();
+    header.output = svc.is_none_or(|svc| svc.output);
+    header.base_mode = layer.base_mode;
+    header.adaptive_base = layer.adaptive_base;
+    header.adaptive_motion = layer.adaptive_motion;
+    header.motion_pred = layer.motion_pred;
+    header.residual_pred = layer.residual_pred;
+    header.tcoeff = layer.tcoeff;
+    header.adaptive_residual = layer.adaptive_residual;
+    header.view_id = view_id;
+    header.inter_view = inter_view;
+    header.interview_l0 = interview_l0;
+    header.interview_l1 = interview_l1;
+    header.depth_weight = depth_weight;
+    header.dps_id = dps_id;
+    header.dmvp = dmvp;
+    header.vsp = vsp;
+    header.depth = three.is_some_and(|three| three.depth);
+    header.scale = layer.scale;
     Ok(header)
 }
 
@@ -3758,13 +3349,13 @@ struct HeaderCopy {
     no_output_prior: bool,
     long_term_ref: bool,
     adaptive: bool,
-    mmco: Vec<Mark>,
+    mmco: Vec<Mmco>,
     /// The source slice carried reference-list syntax. An intra source did not.
     has_ref_lists: bool,
     num_ref_l0: usize,
     num_ref_l1: usize,
-    ref_mod_l0: Vec<Mod>,
-    ref_mod_l1: Vec<Mod>,
+    ref_mod_l0: Vec<RefPicListModification>,
+    ref_mod_l1: Vec<RefPicListModification>,
 }
 
 fn remember(sets: &mut Sets, header: &Header, depth: bool) {
@@ -3845,8 +3436,8 @@ fn predicted_header(
         if lists != 2 {
             return Err(CodecError::Unsupported { what: "3d" });
         }
-        let weighted = (pps.weighted_pred && syntax_kind(ids.kind) == 0)
-            || (pps.weighted_bipred == 1 && ids.kind == 1);
+        let weighted = (pps.weighted_pred_flag && syntax_kind(ids.kind) == 0)
+            || (pps.weighted_bipred_idc == 1 && ids.kind == 1);
         if weighted {
             return Err(CodecError::Unsupported { what: "3d" });
         }
@@ -3868,7 +3459,7 @@ fn predicted_header(
             return Err(CodecError::Unsupported { what: "3d" });
         }
     }
-    let qp = pps.init_qp + bits.se()?;
+    let qp = pps.init_qp() + bits.se()?;
     let qp_bd = 6 * i32::from(sps.bit_depth.saturating_sub(8));
     if !(-qp_bd..=51).contains(&qp) {
         return Err(bits.malformed("slice qp"));
@@ -3884,7 +3475,7 @@ fn predicted_header(
     let header = Header {
         first_mb: ids.first_mb,
         pps_id: ids.pps_id as u8,
-        sps_id: pps.sps_id,
+        sps_id: pps.seq_parameter_set_id,
         kind: ids.kind,
         colour_plane: source.colour_plane,
         field: source.field,
@@ -3903,14 +3494,14 @@ fn predicted_header(
         } else if source.has_ref_lists {
             source.num_ref_l0
         } else {
-            usize::from(pps.num_ref_idx_l0)
+            usize::from(pps.num_ref_idx_l0_default_active_minus1) + 1
         },
         num_ref_l1: if ids.kind != 1 {
             0
         } else if source.has_ref_lists {
             source.num_ref_l1
         } else {
-            usize::from(pps.num_ref_idx_l1)
+            usize::from(pps.num_ref_idx_l1_default_active_minus1) + 1
         },
         nal_ref: ids.nal_ref,
         redundant: source.redundant,
@@ -4104,7 +3695,7 @@ fn slice_scale(bits: &mut Bits<'_>, sps: &Sps) -> Result<set::SvcScale, CodecErr
         return Ok(sps.svc_scale.clone());
     }
     let mut scale = sps.svc_scale.clone();
-    if sps.chroma > 0 {
+    if sps.chroma_format_idc > 0 {
         scale.ref_chroma_x = if bits.bit()? { 0 } else { -1 };
         let plus1 = bits.u(2)?;
         if plus1 > 2 {
@@ -4117,187 +3708,6 @@ fn slice_scale(bits: &mut Bits<'_>, sps: &Sps) -> Result<set::SvcScale, CodecErr
     scale.right = bits.se()?;
     scale.bottom = bits.se()?;
     Ok(scale)
-}
-
-fn read_list_mod(bits: &mut Bits<'_>) -> Result<Vec<Mod>, CodecError> {
-    let mut mods = Vec::new();
-    if !bits.bit()? {
-        return Ok(mods);
-    }
-    loop {
-        let idc = bits.ue()?;
-        if idc == 3 {
-            break;
-        }
-        if idc > 3 {
-            return Err(bits.malformed("ref list modification"));
-        }
-        let arg = bits.ue()?;
-        mods.push(Mod { idc, arg });
-        if mods.len() > 32 {
-            return Err(CodecError::Limit {
-                what: "ref list modification",
-            });
-        }
-    }
-    Ok(mods)
-}
-
-struct WeightTables<'a> {
-    yw: &'a mut [[i32; 32]; 2],
-    yo: &'a mut [[i32; 32]; 2],
-    cw: &'a mut [[[i32; 2]; 32]; 2],
-    co: &'a mut [[[i32; 2]; 32]; 2],
-}
-
-fn read_weights(
-    bits: &mut Bits<'_>,
-    list: usize,
-    n: usize,
-    denom: (i32, i32),
-    sample_shift: i32,
-    tables: WeightTables<'_>,
-) -> Result<(), CodecError> {
-    let (luma_denom, chroma_denom) = denom;
-    let WeightTables { yw, yo, cw, co } = tables;
-    for i in 0..n {
-        yw[list][i] = 1 << luma_denom;
-        yo[list][i] = 0;
-        cw[list][i] = [1 << chroma_denom, 1 << chroma_denom];
-        co[list][i] = [0, 0];
-        if bits.bit()? {
-            yw[list][i] = bits.se()?;
-            yo[list][i] = bits.se()? << sample_shift;
-        }
-        if bits.bit()? {
-            for c in 0..2 {
-                cw[list][i][c] = bits.se()?;
-                co[list][i][c] = bits.se()? << sample_shift;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn picture_order(
-    header: &Header,
-    sps: &Sps,
-    state: &mut Poc,
-    idr: bool,
-) -> Result<(i32, u32), CodecError> {
-    let max_fn = 1u32 << sps.log2_max_frame_num;
-    let offset = if idr || !state.have_ref {
-        0
-    } else if header.frame_num < state.prev_frame_num {
-        state.prev_frame_num_offset.wrapping_add(max_fn)
-    } else {
-        state.prev_frame_num_offset
-    };
-    if idr && header.nal_ref {
-        state.prev_poc_msb = 0;
-        state.prev_poc_lsb = if sps.poc_type == 0 { header.poc_lsb } else { 0 };
-    }
-    let poc = if sps.poc_type == 1 {
-        poc_type1(
-            sps,
-            offset,
-            header.frame_num,
-            header.nal_ref,
-            header.delta_poc,
-        )?
-    } else if sps.poc_type == 2 {
-        let abs = i32::try_from(offset.saturating_add(header.frame_num)).unwrap_or(0);
-        if header.nal_ref { 2 * abs } else { 2 * abs - 1 }
-    } else if idr {
-        header.poc_lsb
-    } else {
-        let max_lsb = 1i32 << sps.log2_max_poc_lsb;
-        let prev_msb = if state.have_ref {
-            state.prev_poc_msb
-        } else {
-            0
-        };
-        let prev_lsb = if state.have_ref {
-            state.prev_poc_lsb
-        } else {
-            0
-        };
-        let msb = if header.poc_lsb < prev_lsb && prev_lsb - header.poc_lsb >= max_lsb / 2 {
-            prev_msb + max_lsb
-        } else if header.poc_lsb > prev_lsb && header.poc_lsb - prev_lsb > max_lsb / 2 {
-            prev_msb - max_lsb
-        } else {
-            prev_msb
-        };
-        if header.nal_ref {
-            state.prev_poc_msb = msb;
-            state.prev_poc_lsb = header.poc_lsb;
-        }
-        msb + header.poc_lsb
-    };
-    Ok((poc, offset))
-}
-
-/// Clause 8.2.1: the order counts of a frame's top and bottom fields, from
-/// the count [`picture_order`] gave. Type 0 gives the top field's and sends
-/// the bottom one as a difference; type 1 gives the smaller of the two,
-/// which lie a known distance apart; type 2 gives both the same. A field
-/// picture has the one count.
-fn field_orders(sps: &Sps, header: &Header, poc: i32) -> [i32; 2] {
-    if header.field {
-        return [poc; 2];
-    }
-    match sps.poc_type {
-        0 => [poc, poc.saturating_add(header.delta_poc[1])],
-        1 => {
-            let apart = sps.offset_top_bottom.saturating_add(header.delta_poc[1]);
-            let top = poc.saturating_sub(apart.min(0));
-            [top, top.saturating_add(apart)]
-        }
-        _ => [poc; 2],
-    }
-}
-
-/// Clause 8.2.1.2. A frame's order count is the smaller of the two fields.
-fn poc_type1(
-    sps: &Sps,
-    frame_num_offset: u32,
-    frame_num: u32,
-    nal_ref: bool,
-    delta: [i32; 2],
-) -> Result<i32, CodecError> {
-    let mut abs_frame_num = if sps.offset_for_ref.is_empty() {
-        0
-    } else {
-        i64::from(frame_num_offset) + i64::from(frame_num)
-    };
-    if !nal_ref && abs_frame_num > 0 {
-        abs_frame_num -= 1;
-    }
-    let mut expected = 0i64;
-    if abs_frame_num > 0 {
-        let cycle = sps.offset_for_ref.len() as i64;
-        let per_cycle: i64 = sps
-            .offset_for_ref
-            .iter()
-            .map(|offset| i64::from(*offset))
-            .sum();
-        let cycle_count = (abs_frame_num - 1) / cycle;
-        let in_cycle = usize::try_from((abs_frame_num - 1) % cycle).unwrap_or(0);
-        expected = cycle_count * per_cycle;
-        for offset in sps.offset_for_ref.iter().take(in_cycle + 1) {
-            expected += i64::from(*offset);
-        }
-    }
-    if !nal_ref {
-        expected += i64::from(sps.offset_non_ref);
-    }
-    let top = expected + i64::from(delta[0]);
-    let bottom = top + i64::from(sps.offset_top_bottom) + i64::from(delta[1]);
-    i32::try_from(top.min(bottom)).map_err(|_| CodecError::Malformed {
-        at_bit: 0,
-        what: "picture order count",
-    })
 }
 
 fn new_frame<S: Sample>(
@@ -4347,7 +3757,7 @@ fn new_frame<S: Sample>(
         vis_w = u32::try_from(w).unwrap_or(u32::MAX);
         vis_h = u32::try_from(h).unwrap_or(u32::MAX);
     }
-    let chroma = match sps.chroma {
+    let chroma = match sps.chroma_format_idc {
         3 => w.saturating_mul(h),
         2 => (w / 2).saturating_mul(h),
         _ => (w / 2).saturating_mul(h / 2),
@@ -4367,8 +3777,8 @@ fn new_frame<S: Sample>(
     };
     Ok(Frame {
         y: plane(spares, luma, S::default(), true),
-        u: plane(spares, chroma, S::mid(), sps.chroma != 0),
-        v: plane(spares, chroma, S::mid(), sps.chroma != 0),
+        u: plane(spares, chroma, S::mid(), sps.chroma_format_idc != 0),
+        v: plane(spares, chroma, S::mid(), sps.chroma_format_idc != 0),
         mb: records(spares, blocks, false),
         w,
         h,
@@ -4387,14 +3797,14 @@ fn new_frame<S: Sample>(
         crop_x: if reduced {
             0
         } else {
-            sps.crop_left.saturating_mul(unit_x)
+            sps.frame_crop_left_offset.saturating_mul(unit_x)
         },
         crop_y: if reduced {
             0
         } else if field_pic {
-            sps.crop_top.saturating_mul(unit_y) / 2
+            sps.frame_crop_top_offset.saturating_mul(unit_y) / 2
         } else {
-            sps.crop_top.saturating_mul(unit_y)
+            sps.frame_crop_top_offset.saturating_mul(unit_y)
         },
         vis_w,
         vis_h,
@@ -4403,19 +3813,19 @@ fn new_frame<S: Sample>(
         transfer: sps.transfer,
         matrix: sps.matrix,
         sample_aspect: sps.sample_aspect,
-        num_units: sps.num_units,
-        time_scale: sps.time_scale,
-        fixed_rate: sps.fixed_frame_rate,
+        num_units: sps.vui.num_units_in_tick,
+        time_scale: sps.vui.time_scale,
+        fixed_rate: sps.vui.fixed_frame_rate_flag,
         nonexisting: false,
-        separate_plane: sps.separate,
+        separate_plane: sps.separate_colour_plane_flag,
         field: header.field,
-        mbaff: sps.mbaff && !header.field,
+        mbaff: sps.mb_adaptive_frame_field_flag && !header.field,
         bottom: header.bottom,
         max_ref: usize::from(sps.max_num_ref_frames).clamp(1, 16),
         reorder,
         adaptive: header.adaptive,
         mmco: header.mmco.clone(),
-        max_fn: 1u32 << sps.log2_max_frame_num,
+        max_fn: 1u32 << sps.log2_max_frame_num(),
         view_id: header.view_id,
         inter_view: header.inter_view,
         depth: header.depth,
@@ -4426,7 +3836,7 @@ fn new_frame<S: Sample>(
         svc_right: mb::sample_offset(header.scale.right)?,
         svc_bottom: mb::sample_offset(header.scale.bottom)?,
         levels: if keep_levels {
-            let stride = if sps.chroma == 1 { 384 } else { 256 };
+            let stride = if sps.chroma_format_idc == 1 { 384 } else { 256 };
             vec![0; mb_w.saturating_mul(mb_h).saturating_mul(stride)]
         } else {
             Vec::new()
@@ -4576,17 +3986,19 @@ fn make_slice<'a, S: Sample>(
             what: "missing pps",
         });
     };
-    let max_fn = 1u32 << sps.log2_max_frame_num;
-    let (ref0, ref1) = mb::reference_lists(
+    let max_fn = 1u32 << sps.log2_max_frame_num();
+    let (ref0, ref1) = dpb::reference_lists(
         dpb,
-        header,
+        &header.lists(),
         poc,
         max_fn,
         (sps.width as usize, sps.height as usize),
     )?;
+    #[cfg(test)]
+    list_pocs::record(dpb, [ref0.as_slice(), ref1.as_slice()]);
     let (poc0, long0) = ref_marks(dpb, &ref0);
     let (poc1, long1) = ref_marks(dpb, &ref1);
-    let implicit = if pps.weighted_bipred == 2 && header.kind == 1 {
+    let implicit = if pps.weighted_bipred_idc == 2 && header.kind == 1 {
         mb::implicit_table(poc, (&poc0, &long0), (&poc1, &long1))
     } else {
         Vec::new()
@@ -4602,7 +4014,7 @@ fn make_slice<'a, S: Sample>(
             (slot, pocs.get(index).copied().unwrap_or(0))
         })
     });
-    let origin = if sps.mbaff && !header.field {
+    let origin = if sps.mb_adaptive_frame_field_flag && !header.field {
         header.first_mb.saturating_mul(2)
     } else {
         header.first_mb
@@ -4611,8 +4023,8 @@ fn make_slice<'a, S: Sample>(
         crate::fmo::Grid {
             mb_w: sps.mb_width,
             frame_mb_h: sps.mb_height,
-            frame_only: sps.frame_mbs_only,
-            mbaff: sps.mbaff,
+            frame_only: sps.frame_mbs_only_flag,
+            mbaff: sps.mb_adaptive_frame_field_flag,
             field: header.field,
         },
         &pps.groups,
@@ -4662,9 +4074,9 @@ fn make_slice<'a, S: Sample>(
         pps: std::borrow::Cow::Borrowed(pps),
         kind: header.kind,
         poc,
-        corner_zero: header.nal_ref && sps.direct_8x8_inference,
+        corner_zero: header.nal_ref && sps.direct_8x8_inference_flag,
         qp: header.qp,
-        cabac: pps.cabac,
+        cabac: pps.entropy_coding_mode_flag,
         deblock: header.deblock,
         off_a: header.off_a,
         off_b: header.off_b,
@@ -4769,19 +4181,6 @@ fn cabac_init(header: &Header) -> usize {
     }
 }
 
-/// SP uses P syntax. SI uses I syntax. The raw kind stays on the slice for clause 8.6.
-pub(crate) fn syntax_kind(kind: u8) -> u8 {
-    match kind {
-        3 => 0,
-        4 => 2,
-        other => other,
-    }
-}
-
-pub(crate) fn intra_slice(kind: u8) -> bool {
-    matches!(kind, 2 | 4)
-}
-
 fn partition_limit(sps: &Sps, field: bool) -> u32 {
     let height = if field {
         sps.mb_height / 2
@@ -4789,7 +4188,11 @@ fn partition_limit(sps: &Sps, field: bool) -> u32 {
         sps.mb_height
     };
     let size = sps.mb_width.saturating_mul(height);
-    let size = if sps.mbaff && !field { size / 2 } else { size };
+    let size = if sps.mb_adaptive_frame_field_flag && !field {
+        size / 2
+    } else {
+        size
+    };
     u32::try_from(size).unwrap_or(u32::MAX)
 }
 
@@ -4849,9 +4252,9 @@ fn read_partitions<'a>(
             return Err(bits.malformed("missing sps"));
         };
         (
-            pps.cabac,
-            sps.separate,
-            pps.redundant_pic_cnt_present,
+            pps.entropy_coding_mode_flag,
+            sps.separate_colour_plane_flag,
+            pps.redundant_pic_cnt_present_flag,
             partition_limit(sps, header.field),
         )
     };
@@ -5424,6 +4827,43 @@ fn add_scaled<S: Sample>(
     }
 }
 
+/// The order counts of the pictures in each reference list this decoder
+/// builds, slice by slice, for tests that hold another front end to the
+/// same lists.
+#[cfg(test)]
+pub(crate) mod list_pocs {
+    use std::cell::RefCell;
+
+    type Lists = Vec<[Vec<i32>; 2]>;
+
+    thread_local! {
+        static LISTS: RefCell<Option<Lists>> = const { RefCell::new(None) };
+    }
+
+    /// Starts recording on this thread.
+    pub(crate) fn start() {
+        LISTS.with(|lists| *lists.borrow_mut() = Some(Vec::new()));
+    }
+
+    /// What was recorded since [`start`], which stops.
+    pub(crate) fn take() -> Lists {
+        LISTS.with(|lists| lists.borrow_mut().take().unwrap_or_default())
+    }
+
+    pub(super) fn record<S: super::Sample>(dpb: &[super::Frame<S>], lists: [&[usize]; 2]) {
+        LISTS.with(|recorded| {
+            if let Some(recorded) = recorded.borrow_mut().as_mut() {
+                recorded.push(lists.map(|list| {
+                    list.iter()
+                        .map_while(|&slot| dpb.get(slot))
+                        .map(|frame| frame.poc)
+                        .collect()
+                }));
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{H264Decoder, register_decoders};
@@ -5470,7 +4910,7 @@ mod tests {
     fn picture_order_type1_follows_the_reference_cycle() {
         let sps = type1_sps(&[2, 4], -1, 1);
         let order = |frame_num, nal_ref, delta| {
-            super::poc_type1(&sps, 0, frame_num, nal_ref, delta).expect("poc")
+            crate::poc::poc_type1(&sps, 0, frame_num, nal_ref, delta).expect("poc")
         };
         assert_eq!(order(0, true, [0, 0]), 0);
         assert_eq!(order(1, true, [0, 0]), 2);
@@ -5479,7 +4919,7 @@ mod tests {
         assert_eq!(order(1, false, [0, 0]), -1);
         assert_eq!(order(2, false, [3, -8]), -3);
         let wide = type1_sps(&[2_000_000_000], 0, 0);
-        assert!(super::poc_type1(&wide, 0, 2, true, [0, 0]).is_err());
+        assert!(crate::poc::poc_type1(&wide, 0, 2, true, [0, 0]).is_err());
     }
 
     /// Clause 8.2.1: each field of a frame has its own order count. Type 0
@@ -5489,38 +4929,41 @@ mod tests {
     fn a_frame_keeps_the_order_count_of_each_field() {
         let mut header = p_header(1, 1, Vec::new());
         let mut sps = type1_sps(&[2, 4], -1, 1);
-        sps.poc_type = 0;
+        sps.pic_order_cnt_type = 0;
         header.delta_poc = [0, -1];
-        assert_eq!(super::field_orders(&sps, &header, 8), [8, 7]);
+        assert_eq!(crate::poc::field_orders(&sps, &header.order(), 8), [8, 7]);
         header.delta_poc = [0, 3];
-        assert_eq!(super::field_orders(&sps, &header, 8), [8, 11]);
+        assert_eq!(crate::poc::field_orders(&sps, &header.order(), 8), [8, 11]);
         // Type 1: `poc` is already the smaller of the two.
-        sps.poc_type = 1;
+        sps.pic_order_cnt_type = 1;
         header.delta_poc = [0, 0];
-        assert_eq!(super::field_orders(&sps, &header, 8), [8, 9]);
+        assert_eq!(crate::poc::field_orders(&sps, &header.order(), 8), [8, 9]);
         header.delta_poc = [0, -4];
-        assert_eq!(super::field_orders(&sps, &header, 8), [11, 8]);
-        sps.poc_type = 2;
-        assert_eq!(super::field_orders(&sps, &header, 8), [8, 8]);
+        assert_eq!(crate::poc::field_orders(&sps, &header.order(), 8), [11, 8]);
+        sps.pic_order_cnt_type = 2;
+        assert_eq!(crate::poc::field_orders(&sps, &header.order(), 8), [8, 8]);
         // A field picture has the one count.
-        sps.poc_type = 0;
+        sps.pic_order_cnt_type = 0;
         header.field = true;
         header.delta_poc = [0, 5];
-        assert_eq!(super::field_orders(&sps, &header, 8), [8, 8]);
+        assert_eq!(crate::poc::field_orders(&sps, &header.order(), 8), [8, 8]);
     }
 
     #[test]
     fn frame_num_gap_slides_real_references_out() {
         let mut sps = type1_sps(&[], 0, 0);
-        sps.poc_type = 2;
-        sps.gaps_allowed = true;
+        sps.pic_order_cnt_type = 2;
+        sps.gaps_in_frame_num_value_allowed_flag = true;
         sps.max_num_ref_frames = 2;
-        sps.log2_max_frame_num = 4;
+        sps.log2_max_frame_num_minus4 = 0;
         let mut dpb = vec![held(0), held(1)];
         let mut poc = super::Poc::new();
         poc.prev_frame_num = 1;
         poc.have_ref = true;
-        super::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 4).unwrap();
+        crate::dpb::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 4, |frame_num, poc| {
+            Ok(super::absent_frame(&sps, frame_num, poc))
+        })
+        .unwrap();
         let live: Vec<_> = dpb
             .iter()
             .filter(|frame| frame.referenced)
@@ -5528,84 +4971,81 @@ mod tests {
             .collect();
         assert_eq!(live, vec![(2, true, false), (3, true, false)]);
         assert_eq!(poc.prev_frame_num, 3);
-        sps.gaps_allowed = false;
+        sps.gaps_in_frame_num_value_allowed_flag = false;
         poc.prev_frame_num = 1;
-        assert!(super::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 4).is_err());
+        assert!(
+            crate::dpb::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 4, |frame_num, poc| {
+                Ok(super::absent_frame(&sps, frame_num, poc))
+            })
+            .is_err()
+        );
     }
 
     #[test]
     fn memory_management_commands_change_which_pictures_stay_referenced() {
+        use crate::dpb::apply_mmco;
         let mut dpb = vec![held(0), held(1)];
         let mut current = held(2);
-        current.mmco = vec![super::Mark {
-            op: 1,
-            arg: 0,
-            arg2: 0,
-        }];
         let mut poc = super::Poc::new();
-        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        apply_mmco(&mut dpb, &mut current, &[mmco(1)], &mut poc).unwrap();
         assert!(dpb[0].referenced);
         assert!(!dpb[1].referenced);
 
         let mut dpb = vec![held(0), held(1)];
         let mut current = held(2);
-        current.mmco = vec![
-            super::Mark {
-                op: 4,
-                arg: 1,
-                arg2: 0,
+        let operations = [
+            super::Mmco {
+                max_long_term_frame_idx_plus1: 1,
+                ..mmco(4)
             },
-            super::Mark {
-                op: 3,
-                arg: 1,
-                arg2: 0,
+            super::Mmco {
+                difference_of_pic_nums_minus1: 1,
+                ..mmco(3)
             },
         ];
-        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        apply_mmco(&mut dpb, &mut current, &operations, &mut poc).unwrap();
         assert!(dpb[0].long_term && dpb[0].long_idx == 0);
         assert!(dpb[1].referenced && !dpb[1].long_term);
 
-        current.mmco = vec![super::Mark {
-            op: 2,
-            arg: 0,
-            arg2: 0,
-        }];
-        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        apply_mmco(&mut dpb, &mut current, &[mmco(2)], &mut poc).unwrap();
         assert!(!dpb[0].referenced);
 
-        current.mmco = vec![super::Mark {
-            op: 6,
-            arg: 0,
-            arg2: 0,
-        }];
-        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        apply_mmco(&mut dpb, &mut current, &[mmco(6)], &mut poc).unwrap();
         assert!(current.long_term && current.long_idx == 0);
 
-        current.mmco = vec![super::Mark {
-            op: 5,
-            arg: 0,
-            arg2: 0,
-        }];
-        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        apply_mmco(&mut dpb, &mut current, &[mmco(5)], &mut poc).unwrap();
         assert!(dpb.iter().all(|frame| !frame.referenced));
         assert_eq!(current.frame_num, 0);
         assert_eq!(poc.prev_frame_num, 0);
         assert!(poc.max_long.is_none());
     }
 
+    /// Operation `op` with every value 0.
+    fn mmco(op: u8) -> super::Mmco {
+        super::Mmco {
+            memory_management_control_operation: op,
+            difference_of_pic_nums_minus1: 0,
+            long_term_pic_num: 0,
+            long_term_frame_idx: 0,
+            max_long_term_frame_idx_plus1: 0,
+        }
+    }
+
+    /// `modification_of_pic_nums_idc` 0 with `abs_diff_pic_num_minus1` `minus1`.
+    fn back(minus1: u32) -> super::RefPicListModification {
+        super::RefPicListModification {
+            modification_of_pic_nums_idc: 0,
+            abs_diff_pic_num_minus1: minus1,
+            long_term_pic_num: 0,
+        }
+    }
+
     #[test]
     fn reordering_repeats_a_short_term_picture_to_fill_the_active_list() {
         let dpb = vec![held(0), held(1)];
-        let header = p_header(
-            2,
-            3,
-            vec![
-                super::Mod { idc: 0, arg: 0 },
-                super::Mod { idc: 0, arg: 15 },
-                super::Mod { idc: 0, arg: 0 },
-            ],
-        );
-        let (list0, list1) = super::mb::reference_lists(&dpb, &header, 4, 16, (16, 16)).unwrap();
+        let header = p_header(2, 3, vec![back(0), back(15), back(0)]);
+        let (list0, list1) =
+            crate::dpb::reference_lists(&dpb, &header.lists(), 4, 16, (16, 16)).unwrap();
         assert!(list1.is_empty());
         let frames: Vec<u32> = list0.iter().map(|&index| dpb[index].frame_num).collect();
         assert_eq!(frames, vec![1, 1, 0]);
@@ -5614,11 +5054,15 @@ mod tests {
     #[test]
     fn a_reordered_picture_that_is_not_in_the_dpb_is_malformed() {
         let dpb = vec![held(0)];
-        let header = p_header(1, 1, vec![super::Mod { idc: 0, arg: 5 }]);
-        assert!(super::mb::reference_lists(&dpb, &header, 0, 16, (16, 16)).is_err());
+        let header = p_header(1, 1, vec![back(5)]);
+        assert!(crate::dpb::reference_lists(&dpb, &header.lists(), 0, 16, (16, 16)).is_err());
     }
 
-    fn p_header(frame_num: u32, num_ref_l0: usize, ref_mod_l0: Vec<super::Mod>) -> super::Header {
+    fn p_header(
+        frame_num: u32,
+        num_ref_l0: usize,
+        ref_mod_l0: Vec<super::RefPicListModification>,
+    ) -> super::Header {
         super::Header {
             first_mb: 0,
             pps_id: 0,
@@ -5737,77 +5181,12 @@ mod tests {
     }
 
     fn type1_sps(offsets: &[i32], non_ref: i32, top_bottom: i32) -> super::Sps {
-        use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, SampleAspect, Transfer};
-        super::Sps {
-            id: 0,
-            level_idc: 0,
-            log2_max_frame_num: 4,
-            poc_type: 1,
-            log2_max_poc_lsb: 0,
-            delta_pic_order_always_zero: false,
-            offset_non_ref: non_ref,
-            offset_top_bottom: top_bottom,
-            offset_for_ref: offsets.to_vec(),
-            max_num_ref_frames: 1,
-            gaps_allowed: false,
-            width: 16,
-            height: 16,
-            crop_left: 0,
-            crop_right: 0,
-            crop_top: 0,
-            crop_bottom: 0,
-            direct_8x8_inference: true,
-            frame_mbs_only: true,
-            mbaff: false,
-            mb_width: 1,
-            mb_height: 1,
-            weight4: [[16; 16]; 6],
-            weight8: [[16; 64]; 6],
-            range: ColorRange::Limited,
-            primaries: ColorPrimaries::Unspecified,
-            transfer: Transfer::Unspecified,
-            matrix: ColorMatrix::Unspecified,
-            max_reorder: 0,
-            bit_depth: 8,
-            chroma: 1,
-            bypass: false,
-            separate: false,
-            pic_struct_present: false,
-            num_units: 0,
-            time_scale: 0,
-            fixed_frame_rate: false,
-            sample_aspect: SampleAspect::UNSPECIFIED,
-            cpb_delay_bits: 0,
-            dpb_delay_bits: 0,
-            time_offset_bits: 0,
-            slice_header_restriction: true,
-            inter_layer_deblock: false,
-            svc_spatial: 0,
-            svc_scale: crate::set::SvcScale::default(),
-            seq_tcoeff: false,
-            adaptive_tcoeff: false,
-            views: Vec::new(),
-            depth_views: Vec::new(),
-            texture_views: Vec::new(),
-            avc_3d: false,
-            acquisition: 0,
-            depth_near: Vec::new(),
-            depth_far: Vec::new(),
-            header_prediction: false,
-            view_synthesis: false,
-            disparity_scale: Vec::new(),
-            disparity_offset: Vec::new(),
-            reduced_depth: false,
-            depth_mb_width: 1,
-            depth_mb_height: 1,
-            depth_hor_mult: 2,
-            depth_ver_mult: 2,
-            depth_hor_rsh: 0,
-            depth_ver_rsh: 0,
-            alc: false,
-            rle: false,
-            interview: Vec::new(),
-        }
+        let mut sps = super::Sps::for_tests();
+        sps.pic_order_cnt_type = 1;
+        sps.offset_for_non_ref_pic = non_ref;
+        sps.offset_for_top_to_bottom_field = top_bottom;
+        sps.offset_for_ref_frame = offsets.to_vec();
+        sps
     }
 
     fn same(name: &str, got: &[u8], want: &[u8]) {

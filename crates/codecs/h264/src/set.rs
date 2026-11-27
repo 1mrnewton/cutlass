@@ -5,6 +5,12 @@
 //! QP′Y-zero transform bypass, and slice groups of every map type.
 //! A bit depth outside 8 through 14, or a luma depth that differs from chroma,
 //! is refused. A picture that fits no level in Annex A is refused.
+//!
+//! The public fields of [`Sps`], [`Vui`] and [`Pps`] are the syntax elements
+//! of clauses 7.3.2.1.1, E.1.1 and 7.3.2.2 under their names in the
+//! Recommendation, with the values inferred by clauses 7.4.2.1.1, E.2.1 and
+//! 7.4.2.2 when an element is absent. The crate-only fields hold what the
+//! decoder derives from them and the Annex G, H and I extensions.
 
 use cutlass_decode::{CodecError, ColorMatrix, ColorPrimaries, ColorRange, SampleAspect, Transfer};
 
@@ -14,128 +20,224 @@ pub const MAX_SPS: usize = 32;
 pub const MAX_PPS: usize = 256;
 const MAX_REFS: u32 = 16;
 
-#[derive(Clone, Debug)]
+/// A sequence parameter set, `seq_parameter_set_data()` (clause 7.3.2.1.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sps {
-    pub id: u8,
+    /// `profile_idc`: 66 Baseline, 77 Main, 88 Extended, 100 High, 110 High
+    /// 10, 122 High 4:2:2, 244 High 4:4:4 Predictive (Annex A).
+    pub profile_idc: u8,
+    /// `constraint_set0_flag` through `constraint_set5_flag`, in that order.
+    /// Profile 66 with `constraint_set1_flag` is Constrained Baseline.
+    pub constraint_set_flags: [bool; 6],
     /// `level_idc`. Ten times the level number, or 9 for level 1b.
     pub level_idc: u8,
-    pub log2_max_frame_num: u8,
-    pub poc_type: u8,
-    pub log2_max_poc_lsb: u8,
-    pub delta_pic_order_always_zero: bool,
-    pub offset_non_ref: i32,
-    pub offset_top_bottom: i32,
-    pub offset_for_ref: Vec<i32>,
-    pub max_num_ref_frames: u8,
-    pub gaps_allowed: bool,
-    pub width: u32,
-    pub height: u32,
-    pub crop_left: u32,
-    pub crop_right: u32,
-    pub crop_top: u32,
-    pub crop_bottom: u32,
-    pub direct_8x8_inference: bool,
-    /// `frame_mbs_only_flag`. False selects field or picture-adaptive coding.
-    pub frame_mbs_only: bool,
-    /// `mb_adaptive_frame_field_flag`. A frame picture is pairs of macroblocks.
-    pub mbaff: bool,
-    pub mb_width: usize,
-    pub mb_height: usize,
-    pub weight4: [[u8; 16]; 6],
-    pub weight8: [[u8; 64]; 6],
-    pub range: ColorRange,
-    pub primaries: ColorPrimaries,
-    pub transfer: Transfer,
-    pub matrix: ColorMatrix,
-    pub max_reorder: u32,
-    pub bit_depth: u8,
-    /// `chroma_format_idc`: 1 is 4:2:0, 2 is 4:2:2, 3 is 4:4:4.
-    pub chroma: u8,
-    /// `qpprime_y_zero_transform_bypass_flag`.
-    pub bypass: bool,
+    /// `seq_parameter_set_id`, 0 to 31.
+    pub seq_parameter_set_id: u8,
+    /// `chroma_format_idc`: 1 is 4:2:0, 2 is 4:2:2, 3 is 4:4:4. Inferred 1
+    /// for the profiles that do not code it. Monochrome (0) is refused.
+    pub chroma_format_idc: u8,
     /// `separate_colour_plane_flag`. Each plane is coded with monochrome syntax.
-    pub separate: bool,
-    /// `pic_struct_present_flag`.
-    pub pic_struct_present: bool,
-    /// `num_units_in_tick`. Zero when timing is absent.
-    pub num_units: u32,
-    /// `time_scale`. Zero when timing is absent.
-    pub time_scale: u32,
-    /// `fixed_frame_rate_flag`. False when timing is absent.
-    pub fixed_frame_rate: bool,
+    pub separate_colour_plane_flag: bool,
+    /// `bit_depth_luma_minus8`. Inferred 0 when not coded.
+    pub bit_depth_luma_minus8: u8,
+    /// `bit_depth_chroma_minus8`. Inferred 0 when not coded; the decoder
+    /// refuses a value that differs from the luma one.
+    pub bit_depth_chroma_minus8: u8,
+    /// `qpprime_y_zero_transform_bypass_flag`.
+    pub qpprime_y_zero_transform_bypass_flag: bool,
+    /// `seq_scaling_matrix_present_flag`. The lists themselves, after the
+    /// fall-back rules, are [`Sps::scaling_list_4x4`] and
+    /// [`Sps::scaling_list_8x8`].
+    pub seq_scaling_matrix_present_flag: bool,
+    /// `log2_max_frame_num_minus4`, 0 to 12.
+    pub log2_max_frame_num_minus4: u8,
+    /// `pic_order_cnt_type`, 0 to 2.
+    pub pic_order_cnt_type: u8,
+    /// `log2_max_pic_order_cnt_lsb_minus4`, 0 to 12. 0 when
+    /// `pic_order_cnt_type` is not 0.
+    pub log2_max_pic_order_cnt_lsb_minus4: u8,
+    /// `delta_pic_order_always_zero_flag`. False unless `pic_order_cnt_type` is 1.
+    pub delta_pic_order_always_zero_flag: bool,
+    /// `offset_for_non_ref_pic`. 0 unless `pic_order_cnt_type` is 1.
+    pub offset_for_non_ref_pic: i32,
+    /// `offset_for_top_to_bottom_field`. 0 unless `pic_order_cnt_type` is 1.
+    pub offset_for_top_to_bottom_field: i32,
+    /// `offset_for_ref_frame[i]`; its length is
+    /// `num_ref_frames_in_pic_order_cnt_cycle`. Empty unless
+    /// `pic_order_cnt_type` is 1.
+    pub offset_for_ref_frame: Vec<i32>,
+    /// `max_num_ref_frames`, 0 to 16.
+    pub max_num_ref_frames: u8,
+    /// `gaps_in_frame_num_value_allowed_flag`.
+    pub gaps_in_frame_num_value_allowed_flag: bool,
+    /// `pic_width_in_mbs_minus1`.
+    pub pic_width_in_mbs_minus1: u32,
+    /// `pic_height_in_map_units_minus1`. A map unit is a macroblock when
+    /// `frame_mbs_only_flag` is 1 and a macroblock pair otherwise.
+    pub pic_height_in_map_units_minus1: u32,
+    /// `frame_mbs_only_flag`. False selects field or picture-adaptive coding.
+    pub frame_mbs_only_flag: bool,
+    /// `mb_adaptive_frame_field_flag`. A frame picture is pairs of macroblocks.
+    pub mb_adaptive_frame_field_flag: bool,
+    /// `direct_8x8_inference_flag`.
+    pub direct_8x8_inference_flag: bool,
+    /// `frame_cropping_flag`.
+    pub frame_cropping_flag: bool,
+    /// `frame_crop_left_offset`, in units of `CropUnitX` ([`Sps::crop_unit`]).
+    pub frame_crop_left_offset: u32,
+    /// `frame_crop_right_offset`, in units of `CropUnitX`.
+    pub frame_crop_right_offset: u32,
+    /// `frame_crop_top_offset`, in units of `CropUnitY`.
+    pub frame_crop_top_offset: u32,
+    /// `frame_crop_bottom_offset`, in units of `CropUnitY`.
+    pub frame_crop_bottom_offset: u32,
+    /// `vui_parameters_present_flag`.
+    pub vui_parameters_present_flag: bool,
+    /// `vui_parameters()`, or the values Annex E infers when it is absent.
+    pub vui: Vui,
+    /// `8 + bit_depth_luma_minus8`.
+    pub(crate) bit_depth: u8,
+    /// Coded width and height in luma samples: whole macroblocks.
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    /// `PicWidthInMbs` and `FrameHeightInMbs`.
+    pub(crate) mb_width: usize,
+    pub(crate) mb_height: usize,
+    /// Scaling weights in raster order, after the fall-back rules.
+    pub(crate) weight4: [[u8; 16]; 6],
+    pub(crate) weight8: [[u8; 64]; 6],
+    /// The colour tags of the VUI, mapped. Unspecified when absent.
+    pub(crate) range: ColorRange,
+    pub(crate) primaries: ColorPrimaries,
+    pub(crate) transfer: Transfer,
+    pub(crate) matrix: ColorMatrix,
+    /// `max_num_reorder_frames`, or `max_num_ref_frames` when the VUI does
+    /// not restrict the bitstream.
+    pub(crate) max_reorder: u32,
     /// Annex E sample aspect. Unspecified is width 0, height 1.
-    pub sample_aspect: SampleAspect,
+    pub(crate) sample_aspect: SampleAspect,
     /// Bit length of `cpb_removal_delay`. Zero when the HRD is absent.
-    pub cpb_delay_bits: u8,
+    pub(crate) cpb_delay_bits: u8,
     /// Bit length of `dpb_output_delay`. Zero when the HRD is absent.
-    pub dpb_delay_bits: u8,
+    pub(crate) dpb_delay_bits: u8,
     /// `time_offset_length`.
-    pub time_offset_bits: u8,
+    pub(crate) time_offset_bits: u8,
     /// `slice_header_restriction_flag`. True for an Annex A SPS, so an
     /// extension slice omits `store_ref_base_pic_flag` and `scan_idx`.
-    pub slice_header_restriction: bool,
+    pub(crate) slice_header_restriction: bool,
     /// `inter_layer_deblocking_filter_control_present_flag`.
-    pub inter_layer_deblock: bool,
+    pub(crate) inter_layer_deblock: bool,
     /// `extended_spatial_scalability_idc`. 0 is the same size as the reference.
-    pub svc_spatial: u8,
+    pub(crate) svc_spatial: u8,
     /// Picture-level spatial offsets and chroma phases. Each offset is the
     /// coded value; the luma sample offset is twice that value.
-    pub svc_scale: SvcScale,
+    pub(crate) svc_scale: SvcScale,
     /// `seq_tcoeff_level_prediction_flag`.
-    pub seq_tcoeff: bool,
+    pub(crate) seq_tcoeff: bool,
     /// `adaptive_tcoeff_level_prediction_flag`.
-    pub adaptive_tcoeff: bool,
+    pub(crate) adaptive_tcoeff: bool,
     /// Annex H `view_id` list. Empty for an Annex A or SVC sequence.
     /// Index 0 is the base view.
-    pub views: Vec<u16>,
+    pub(crate) views: Vec<u16>,
     /// Annex I `depth_view_present_flag`, one entry per `views` index.
-    pub depth_views: Vec<bool>,
+    pub(crate) depth_views: Vec<bool>,
     /// Annex I `texture_view_present_flag`, one entry per `views` index.
-    pub texture_views: Vec<bool>,
+    pub(crate) texture_views: Vec<bool>,
     /// Profile 139. The 3D-AVC extension was present.
-    pub avc_3d: bool,
+    pub(crate) avc_3d: bool,
     /// `3dv_acquisition_idc`. 0 has no depth ranges. 1 and 2 store them.
-    pub acquisition: u8,
+    pub(crate) acquisition: u8,
     /// `ZNear` for each depth view, in acquisition order. Empty when absent.
-    pub depth_near: Vec<i32>,
+    pub(crate) depth_near: Vec<i32>,
     /// `ZFar` for each depth view, in acquisition order.
-    pub depth_far: Vec<i32>,
+    pub(crate) depth_far: Vec<i32>,
     /// `slice_header_prediction_flag`. A 3D slice copies header fields.
-    pub header_prediction: bool,
+    pub(crate) header_prediction: bool,
     /// `seq_view_synthesis_flag`. A texture partition can copy an interview picture.
-    pub view_synthesis: bool,
+    pub(crate) view_synthesis: bool,
     /// `DisparityScale` for depth-view pair `(source, reference)`, row-major.
     /// Empty means every entry is zero.
-    pub disparity_scale: Vec<i32>,
+    pub(crate) disparity_scale: Vec<i32>,
     /// `DisparityOffset`, same layout as `disparity_scale`.
-    pub disparity_offset: Vec<i32>,
+    pub(crate) disparity_offset: Vec<i32>,
     /// `reduced_resolution_flag`. Depth pictures are half the texture size.
-    pub reduced_depth: bool,
+    pub(crate) reduced_depth: bool,
     /// Depth picture width in macroblocks. Equal to the texture width when
     /// `reduced_depth` is clear.
-    pub depth_mb_width: usize,
+    pub(crate) depth_mb_width: usize,
     /// Depth picture height in macroblocks.
-    pub depth_mb_height: usize,
+    pub(crate) depth_mb_height: usize,
     /// `depth_hor_mult_minus1 + 1`. 2 when reduced resolution is absent.
-    pub depth_hor_mult: u32,
+    pub(crate) depth_hor_mult: u32,
     /// `depth_ver_mult_minus1 + 1`.
-    pub depth_ver_mult: u32,
+    pub(crate) depth_ver_mult: u32,
     /// `depth_hor_rsh`. 0 when reduced resolution is absent.
-    pub depth_hor_rsh: u32,
+    pub(crate) depth_hor_rsh: u32,
     /// `depth_ver_rsh`.
-    pub depth_ver_rsh: u32,
+    pub(crate) depth_ver_rsh: u32,
     /// `alc_sps_enable_flag`. A texture P macroblock may carry adaptive luminance compensation.
-    pub alc: bool,
+    pub(crate) alc: bool,
     /// `enable_rle_skip_flag`. A CABAC B slice may code a run of skipped macroblocks.
-    pub rle: bool,
+    pub(crate) rle: bool,
     /// Annex H interview reference views, one entry per `views` index.
     /// View 0 is empty. An Annex A or SVC sequence has no entries.
-    pub interview: Vec<Interview>,
+    pub(crate) interview: Vec<Interview>,
+}
+
+/// `vui_parameters()` (clause E.1.1). When `vui_parameters_present_flag` is
+/// 0, or an element is not coded, the field holds the value clause E.2.1
+/// infers. The HRD parameters are read but not kept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Vui {
+    /// `aspect_ratio_info_present_flag`.
+    pub aspect_ratio_info_present_flag: bool,
+    /// `aspect_ratio_idc`. 0 (unspecified) when absent.
+    pub aspect_ratio_idc: u8,
+    /// `sar_width`, coded when `aspect_ratio_idc` is 255. Otherwise 0.
+    pub sar_width: u16,
+    /// `sar_height`, coded when `aspect_ratio_idc` is 255. Otherwise 0.
+    pub sar_height: u16,
+    /// `video_signal_type_present_flag`.
+    pub video_signal_type_present_flag: bool,
+    /// `video_format`. 5 (unspecified) when absent.
+    pub video_format: u8,
+    /// `video_full_range_flag`. False when absent.
+    pub video_full_range_flag: bool,
+    /// `colour_description_present_flag`.
+    pub colour_description_present_flag: bool,
+    /// `colour_primaries` (Table E-3). 2 (unspecified) when absent.
+    pub colour_primaries: u8,
+    /// `transfer_characteristics` (Table E-4). 2 (unspecified) when absent.
+    pub transfer_characteristics: u8,
+    /// `matrix_coefficients` (Table E-5). 2 (unspecified) when absent.
+    pub matrix_coefficients: u8,
+    /// `timing_info_present_flag`.
+    pub timing_info_present_flag: bool,
+    /// `num_units_in_tick`. 0 when timing is absent.
+    pub num_units_in_tick: u32,
+    /// `time_scale`. 0 when timing is absent.
+    pub time_scale: u32,
+    /// `fixed_frame_rate_flag`. False when timing is absent.
+    pub fixed_frame_rate_flag: bool,
+    /// `nal_hrd_parameters_present_flag`.
+    pub nal_hrd_parameters_present_flag: bool,
+    /// `vcl_hrd_parameters_present_flag`.
+    pub vcl_hrd_parameters_present_flag: bool,
+    /// `pic_struct_present_flag`.
+    pub pic_struct_present_flag: bool,
+    /// `bitstream_restriction_flag`.
+    pub bitstream_restriction_flag: bool,
+    /// `max_num_reorder_frames`. When `bitstream_restriction_flag` is 0 the
+    /// decoder takes `max_num_ref_frames` instead ([`Sps::output_delay`]),
+    /// and this field holds 0.
+    pub max_num_reorder_frames: u32,
+    /// `max_dec_frame_buffering`. 0 when `bitstream_restriction_flag` is 0.
+    pub max_dec_frame_buffering: u32,
 }
 
 /// Picture-level extended spatial scalability. Offsets are `se` syntax values.
-#[derive(Clone, Debug, Default)]
-pub struct SvcScale {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SvcScale {
     pub left: i32,
     pub top: i32,
     pub right: i32,
@@ -151,8 +253,8 @@ pub struct SvcScale {
 }
 
 /// Interview reference views for one view. Annex H.
-#[derive(Clone, Debug, Default)]
-pub struct Interview {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Interview {
     pub anchor_l0: Vec<u16>,
     pub anchor_l1: Vec<u16>,
     pub non_anchor_l0: Vec<u16>,
@@ -161,8 +263,8 @@ pub struct Interview {
 
 /// `num_slice_groups_minus1` and the map parameters that follow it.
 /// `minus1` of zero is one group covering the picture.
-#[derive(Clone, Debug)]
-pub struct SliceGroups {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SliceGroups {
     pub minus1: u8,
     pub map_type: u8,
     pub run: Vec<u32>,
@@ -188,50 +290,74 @@ impl SliceGroups {
     }
 }
 
-#[derive(Clone, Debug)]
+/// A picture parameter set, `pic_parameter_set_rbsp()` (clause 7.3.2.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pps {
-    pub id: u8,
-    pub sps_id: u8,
-    pub cabac: bool,
-    pub bottom_field_pic_order: bool,
-    pub num_ref_idx_l0: u8,
-    pub num_ref_idx_l1: u8,
-    pub weighted_pred: bool,
-    pub weighted_bipred: u8,
-    pub init_qp: i32,
-    /// `26 + pic_init_qs_minus26`. QSY starts here.
-    pub init_qs: i32,
-    pub chroma_qp_offset: i32,
-    pub second_chroma_qp_offset: i32,
-    pub deblocking_control: bool,
-    pub constrained_intra: bool,
-    pub redundant_pic_cnt_present: bool,
-    pub transform_8x8: bool,
-    pub weight4: [[u8; 16]; 6],
-    pub weight8: [[u8; 64]; 6],
-    pub groups: SliceGroups,
+    /// `pic_parameter_set_id`, 0 to 255.
+    pub pic_parameter_set_id: u8,
+    /// `seq_parameter_set_id`, 0 to 31.
+    pub seq_parameter_set_id: u8,
+    /// `entropy_coding_mode_flag`. True is CABAC.
+    pub entropy_coding_mode_flag: bool,
+    /// `bottom_field_pic_order_in_frame_present_flag` (once `pic_order_present_flag`).
+    pub bottom_field_pic_order_in_frame_present_flag: bool,
+    /// `num_ref_idx_l0_default_active_minus1`, 0 to 15.
+    pub num_ref_idx_l0_default_active_minus1: u8,
+    /// `num_ref_idx_l1_default_active_minus1`, 0 to 15.
+    pub num_ref_idx_l1_default_active_minus1: u8,
+    /// `weighted_pred_flag`.
+    pub weighted_pred_flag: bool,
+    /// `weighted_bipred_idc`, 0 to 2.
+    pub weighted_bipred_idc: u8,
+    /// `pic_init_qp_minus26`.
+    pub pic_init_qp_minus26: i32,
+    /// `pic_init_qs_minus26`.
+    pub pic_init_qs_minus26: i32,
+    /// `chroma_qp_index_offset`.
+    pub chroma_qp_index_offset: i32,
+    /// `deblocking_filter_control_present_flag`.
+    pub deblocking_filter_control_present_flag: bool,
+    /// `constrained_intra_pred_flag`.
+    pub constrained_intra_pred_flag: bool,
+    /// `redundant_pic_cnt_present_flag`.
+    pub redundant_pic_cnt_present_flag: bool,
+    /// `transform_8x8_mode_flag`. False when the PPS ends before it.
+    pub transform_8x8_mode_flag: bool,
+    /// `pic_scaling_matrix_present_flag`. The lists in force for a picture
+    /// that uses this PPS, after the fall-back rules, are
+    /// [`Pps::scaling_list_4x4`] and [`Pps::scaling_list_8x8`].
+    pub pic_scaling_matrix_present_flag: bool,
+    /// `second_chroma_qp_index_offset`. Inferred equal to
+    /// `chroma_qp_index_offset` when the PPS ends before it.
+    pub second_chroma_qp_index_offset: i32,
+    /// The scaling weights in force, raster order: the PPS lists, or the
+    /// SPS lists when the PPS has none.
+    pub(crate) weight4: [[u8; 16]; 6],
+    pub(crate) weight8: [[u8; 64]; 6],
+    pub(crate) groups: SliceGroups,
 }
 
 impl Sps {
     /// CropUnitX and CropUnitY from Table 6-1. Monochrome is not stored.
     pub fn crop_unit(&self) -> (u32, u32) {
-        let frame = u32::from(self.frame_mbs_only);
-        match self.chroma {
+        let frame = u32::from(self.frame_mbs_only_flag);
+        match self.chroma_format_idc {
             3 => (1, 2 - frame),
             2 => (2, 2 - frame),
             _ => (2, (2 - frame) * 2),
         }
     }
 
+    /// Width and height of the cropped picture, in luma samples.
     pub fn visible(&self) -> Result<(u32, u32), CodecError> {
         let (unit_x, unit_y) = self.crop_unit();
         let crop_x = self
-            .crop_left
-            .saturating_add(self.crop_right)
+            .frame_crop_left_offset
+            .saturating_add(self.frame_crop_right_offset)
             .saturating_mul(unit_x);
         let crop_y = self
-            .crop_top
-            .saturating_add(self.crop_bottom)
+            .frame_crop_top_offset
+            .saturating_add(self.frame_crop_bottom_offset)
             .saturating_mul(unit_y);
         if crop_x >= self.width || crop_y >= self.height {
             return Err(CodecError::Malformed {
@@ -250,6 +376,93 @@ impl Sps {
         Ok((width, height))
     }
 
+    /// The cropped rectangle inside the coded frame: left and top offsets,
+    /// then width and height, in luma samples.
+    pub fn crop_rect(&self) -> Result<(u32, u32, u32, u32), CodecError> {
+        let (unit_x, unit_y) = self.crop_unit();
+        let (width, height) = self.visible()?;
+        Ok((
+            self.frame_crop_left_offset.saturating_mul(unit_x),
+            self.frame_crop_top_offset.saturating_mul(unit_y),
+            width,
+            height,
+        ))
+    }
+
+    /// Coded frame width and height in luma samples: whole macroblocks,
+    /// `PicWidthInMbs * 16` by `FrameHeightInMbs * 16`.
+    pub fn coded_size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// `MaxFrameNum`, `2^(log2_max_frame_num_minus4 + 4)`.
+    pub fn max_frame_num(&self) -> u32 {
+        1u32 << self.log2_max_frame_num()
+    }
+
+    pub(crate) fn log2_max_frame_num(&self) -> u32 {
+        u32::from(self.log2_max_frame_num_minus4) + 4
+    }
+
+    pub(crate) fn log2_max_pic_order_cnt_lsb(&self) -> u32 {
+        u32::from(self.log2_max_pic_order_cnt_lsb_minus4) + 4
+    }
+
+    /// How many decoded pictures the decoder holds back for display order:
+    /// `max_num_reorder_frames` of the VUI, or `max_num_ref_frames` when the
+    /// VUI does not restrict the bitstream, or 1 when that is 0 and the
+    /// sequence has more than one reference frame. A picture is output once
+    /// more than this many wait.
+    pub fn output_delay(&self) -> usize {
+        if self.max_reorder > 0 {
+            self.max_reorder as usize
+        } else if self.max_num_ref_frames > 1 {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// The six 4×4 scaling lists after fall-back rule A and the flat
+    /// default, in the zig-zag order they are coded in: Intra Y, Intra Cb,
+    /// Intra Cr, Inter Y, Inter Cb, Inter Cr. A picture uses
+    /// [`Pps::scaling_list_4x4`], which is these when its PPS has none.
+    pub fn scaling_list_4x4(&self) -> [[u8; 16]; 6] {
+        coded4(&self.weight4)
+    }
+
+    /// The six 8×8 scaling lists in coded zig-zag order: Intra Y, Inter Y,
+    /// Intra Cb, Inter Cb, Intra Cr, Inter Cr. Below 4:4:4 only the first two
+    /// are coded and the chroma entries repeat them.
+    pub fn scaling_list_8x8(&self) -> [[u8; 64]; 6] {
+        coded8(&self.weight8)
+    }
+
+    /// The VUI's colour range, or limited when absent.
+    pub fn color_range(&self) -> ColorRange {
+        self.range
+    }
+
+    /// The VUI's `colour_primaries`, mapped; unspecified when absent.
+    pub fn color_primaries(&self) -> ColorPrimaries {
+        self.primaries
+    }
+
+    /// The VUI's `transfer_characteristics`, mapped; unspecified when absent.
+    pub fn transfer(&self) -> Transfer {
+        self.transfer
+    }
+
+    /// The VUI's `matrix_coefficients`, mapped; unspecified when absent.
+    pub fn color_matrix(&self) -> ColorMatrix {
+        self.matrix
+    }
+
+    /// The VUI's sample aspect ratio; unspecified (0:1) when absent.
+    pub fn sample_aspect(&self) -> SampleAspect {
+        self.sample_aspect
+    }
+
     /// The coded picture fits the level named in the SPS, or a higher defined level.
     fn within_level(&self) -> bool {
         let Ok(width_mbs) = u32::try_from(self.mb_width) else {
@@ -262,6 +475,53 @@ impl Sps {
             .is_some_and(|max_fs| macroblocks_fit(width_mbs, height_mbs, max_fs));
         named || frame_within_levels(width_mbs, height_mbs)
     }
+}
+
+impl Pps {
+    /// `num_slice_groups_minus1`. Its map parameters are not public.
+    pub fn num_slice_groups_minus1(&self) -> u8 {
+        self.groups.minus1
+    }
+
+    /// `26 + pic_init_qp_minus26`.
+    pub(crate) fn init_qp(&self) -> i32 {
+        26 + self.pic_init_qp_minus26
+    }
+
+    /// `26 + pic_init_qs_minus26`. QSY starts here.
+    pub(crate) fn init_qs(&self) -> i32 {
+        26 + self.pic_init_qs_minus26
+    }
+
+    /// The six 4×4 scaling lists a picture that uses this PPS is decoded
+    /// with, in coded zig-zag order: Intra Y, Intra Cb, Intra Cr, Inter Y,
+    /// Inter Cb, Inter Cr. With `pic_scaling_matrix_present_flag` these are
+    /// the PPS lists after fall-back rule A (or B, when the SPS has lists);
+    /// without it they are the SPS lists, which are flat (all 16) when the
+    /// SPS has none either. This is the `ScalingList4x4` of
+    /// `VAIQMatrixBufferH264`.
+    pub fn scaling_list_4x4(&self) -> [[u8; 16]; 6] {
+        coded4(&self.weight4)
+    }
+
+    /// The six 8×8 scaling lists in coded zig-zag order: Intra Y, Inter Y,
+    /// Intra Cb, Inter Cb, Intra Cr, Inter Cr, chosen as in
+    /// [`Pps::scaling_list_4x4`]. Below 4:4:4 the first two are the
+    /// `ScalingList8x8` of `VAIQMatrixBufferH264`. They are flat when the
+    /// PPS codes lists without `transform_8x8_mode_flag`, which leaves the
+    /// 8×8 transform unused.
+    pub fn scaling_list_8x8(&self) -> [[u8; 64]; 6] {
+        coded8(&self.weight8)
+    }
+}
+
+/// Raster weights back to the zig-zag order they are coded in.
+fn coded4(raster: &[[u8; 16]; 6]) -> [[u8; 16]; 6] {
+    raster.map(|list| std::array::from_fn(|idx| list[ZIGZAG4[idx]]))
+}
+
+fn coded8(raster: &[[u8; 64]; 6]) -> [[u8; 64]; 6] {
+    raster.map(|list| std::array::from_fn(|idx| list[ZIGZAG8[idx]]))
 }
 
 struct Level {
@@ -418,6 +678,90 @@ pub(crate) fn max_coded_mbs() -> u32 {
     greatest_max_fs()
 }
 
+#[cfg(test)]
+impl Sps {
+    /// A 16×16 Baseline 4:2:0 8-bit frame sequence, order count type 0,
+    /// one reference frame, no VUI: for tests that need an SPS to change.
+    pub(crate) fn for_tests() -> Self {
+        Sps {
+            profile_idc: 66,
+            constraint_set_flags: [false; 6],
+            level_idc: 0,
+            seq_parameter_set_id: 0,
+            chroma_format_idc: 1,
+            separate_colour_plane_flag: false,
+            bit_depth_luma_minus8: 0,
+            bit_depth_chroma_minus8: 0,
+            qpprime_y_zero_transform_bypass_flag: false,
+            seq_scaling_matrix_present_flag: false,
+            log2_max_frame_num_minus4: 0,
+            pic_order_cnt_type: 0,
+            log2_max_pic_order_cnt_lsb_minus4: 0,
+            delta_pic_order_always_zero_flag: false,
+            offset_for_non_ref_pic: 0,
+            offset_for_top_to_bottom_field: 0,
+            offset_for_ref_frame: Vec::new(),
+            max_num_ref_frames: 1,
+            gaps_in_frame_num_value_allowed_flag: false,
+            pic_width_in_mbs_minus1: 0,
+            pic_height_in_map_units_minus1: 0,
+            frame_mbs_only_flag: true,
+            mb_adaptive_frame_field_flag: false,
+            direct_8x8_inference_flag: true,
+            frame_cropping_flag: false,
+            frame_crop_left_offset: 0,
+            frame_crop_right_offset: 0,
+            frame_crop_top_offset: 0,
+            frame_crop_bottom_offset: 0,
+            vui_parameters_present_flag: false,
+            vui: Vui::absent(),
+            bit_depth: 8,
+            width: 16,
+            height: 16,
+            mb_width: 1,
+            mb_height: 1,
+            weight4: flat4(),
+            weight8: flat8(),
+            range: ColorRange::Limited,
+            primaries: ColorPrimaries::Unspecified,
+            transfer: Transfer::Unspecified,
+            matrix: ColorMatrix::Unspecified,
+            max_reorder: 0,
+            sample_aspect: SampleAspect::UNSPECIFIED,
+            cpb_delay_bits: 0,
+            dpb_delay_bits: 0,
+            time_offset_bits: 0,
+            slice_header_restriction: true,
+            inter_layer_deblock: false,
+            svc_spatial: 0,
+            svc_scale: SvcScale::default(),
+            seq_tcoeff: false,
+            adaptive_tcoeff: false,
+            views: Vec::new(),
+            depth_views: Vec::new(),
+            texture_views: Vec::new(),
+            avc_3d: false,
+            acquisition: 0,
+            depth_near: Vec::new(),
+            depth_far: Vec::new(),
+            header_prediction: false,
+            view_synthesis: false,
+            disparity_scale: Vec::new(),
+            disparity_offset: Vec::new(),
+            reduced_depth: false,
+            depth_mb_width: 1,
+            depth_mb_height: 1,
+            depth_hor_mult: 2,
+            depth_ver_mult: 2,
+            depth_hor_rsh: 0,
+            depth_ver_rsh: 0,
+            alc: false,
+            rle: false,
+            interview: Vec::new(),
+        }
+    }
+}
+
 pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
     parse_sequence(rbsp, false)
 }
@@ -431,7 +775,8 @@ pub(crate) fn parse_subset_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
 fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     let mut bits = Bits::new(rbsp);
     let profile = bits.u(8)? as u8;
-    let _constraint = bits.u(8)? as u8;
+    let constraint = bits.u(8)? as u8;
+    let constraint_set_flags = std::array::from_fn(|i| constraint & (0x80 >> i) != 0);
     let level_idc = bits.u(8)? as u8;
     let id = bits.ue()?;
     if id >= MAX_SPS as u32 {
@@ -444,13 +789,14 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     let mut bit_depth = 8u8;
     let mut separate = false;
     let mut bypass = false;
+    let mut seq_scaling = false;
     let mut weight4 = flat4();
     let mut weight8 = flat8();
     if matches!(
         profile,
         100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
     ) {
-        chroma_format = bits.ue()? as u8;
+        chroma_format = u8::try_from(bits.ue()?).unwrap_or(u8::MAX);
         if chroma_format == 3 && bits.bit()? {
             separate = true;
         }
@@ -461,8 +807,9 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         }
         bit_depth = (8 + bit_depth_luma) as u8;
         bypass = bits.bit()?;
-        if bits.bit()? {
-            (weight4, weight8) = scaling_lists(&mut bits, true, chroma_format == 3)?;
+        seq_scaling = bits.bit()?;
+        if seq_scaling {
+            (weight4, weight8) = scaling_lists(&mut bits, true, chroma_format == 3, None)?;
         }
     }
     if chroma_format == 0 || chroma_format > 3 {
@@ -521,8 +868,10 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         });
     }
     let gaps_allowed = bits.bit()?;
-    let width_mbs = bits.ue()?.saturating_add(1);
-    let height_map = bits.ue()?.saturating_add(1);
+    let width_minus1 = bits.ue()?;
+    let height_map_minus1 = bits.ue()?;
+    let width_mbs = width_minus1.saturating_add(1);
+    let height_map = height_map_minus1.saturating_add(1);
     // Reject an edge no level allows before reading the rest of the SPS.
     if !frame_within_levels(width_mbs, 1) || !frame_within_levels(1, height_map) {
         return Err(CodecError::Limit {
@@ -546,16 +895,18 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     let mut crop_right = 0u32;
     let mut crop_top = 0u32;
     let mut crop_bottom = 0u32;
-    if bits.bit()? {
+    let cropping = bits.bit()?;
+    if cropping {
         crop_left = bits.ue()?;
         crop_right = bits.ue()?;
         crop_top = bits.ue()?;
         crop_bottom = bits.ue()?;
     }
-    let vui = if bits.bit()? {
+    let vui_present = bits.bit()?;
+    let vui = if vui_present {
         parse_vui(&mut bits, max_num_ref_frames)?
     } else {
-        Vui::unspecified(max_num_ref_frames)
+        Parsed::unspecified(max_num_ref_frames)
     };
     let plain = SvcSyntax {
         inter_layer_deblock: false,
@@ -667,26 +1018,40 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     }
     let _ = bits.rbsp_trailing();
     let sps = Sps {
-        id: id as u8,
+        profile_idc: profile,
+        constraint_set_flags,
         level_idc,
-        log2_max_frame_num,
-        poc_type,
-        log2_max_poc_lsb,
-        delta_pic_order_always_zero,
-        offset_non_ref,
-        offset_top_bottom,
-        offset_for_ref,
+        seq_parameter_set_id: id as u8,
+        chroma_format_idc: chroma_format,
+        separate_colour_plane_flag: separate,
+        bit_depth_luma_minus8: bit_depth - 8,
+        bit_depth_chroma_minus8: bit_depth - 8,
+        qpprime_y_zero_transform_bypass_flag: bypass,
+        seq_scaling_matrix_present_flag: seq_scaling,
+        log2_max_frame_num_minus4: log2_max_frame_num - 4,
+        pic_order_cnt_type: poc_type,
+        log2_max_pic_order_cnt_lsb_minus4: log2_max_poc_lsb.saturating_sub(4),
+        delta_pic_order_always_zero_flag: delta_pic_order_always_zero,
+        offset_for_non_ref_pic: offset_non_ref,
+        offset_for_top_to_bottom_field: offset_top_bottom,
+        offset_for_ref_frame: offset_for_ref,
         max_num_ref_frames: max_num_ref_frames as u8,
-        gaps_allowed,
+        gaps_in_frame_num_value_allowed_flag: gaps_allowed,
+        pic_width_in_mbs_minus1: width_minus1,
+        pic_height_in_map_units_minus1: height_map_minus1,
+        frame_mbs_only_flag: frame_mbs_only,
+        mb_adaptive_frame_field_flag: mbaff,
+        direct_8x8_inference_flag: direct_8x8_inference,
+        frame_cropping_flag: cropping,
+        frame_crop_left_offset: crop_left,
+        frame_crop_right_offset: crop_right,
+        frame_crop_top_offset: crop_top,
+        frame_crop_bottom_offset: crop_bottom,
+        vui_parameters_present_flag: vui_present,
+        vui: vui.syntax,
+        bit_depth,
         width,
         height,
-        crop_left,
-        crop_right,
-        crop_top,
-        crop_bottom,
-        direct_8x8_inference,
-        frame_mbs_only,
-        mbaff,
         mb_width: width_mbs as usize,
         mb_height: height_mbs as usize,
         weight4,
@@ -696,14 +1061,6 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         transfer: vui.transfer,
         matrix: vui.matrix,
         max_reorder: vui.max_reorder,
-        bit_depth,
-        chroma: chroma_format,
-        bypass,
-        separate,
-        pic_struct_present: vui.pic_struct_present,
-        num_units: vui.num_units,
-        time_scale: vui.time_scale,
-        fixed_frame_rate: vui.fixed_frame_rate,
         sample_aspect: vui.sample_aspect,
         cpb_delay_bits: vui.cpb_delay_bits,
         dpb_delay_bits: vui.dpb_delay_bits,
@@ -1325,16 +1682,14 @@ fn signed_ue(bits: &mut Bits<'_>) -> Result<i32, CodecError> {
     i32::try_from(value).map_err(|_| CodecError::Unsupported { what: "3d" })
 }
 
-struct Vui {
+/// The VUI as coded, and what the decoder takes from it.
+struct Parsed {
+    syntax: Vui,
     range: ColorRange,
     primaries: ColorPrimaries,
     transfer: Transfer,
     matrix: ColorMatrix,
     max_reorder: u32,
-    pic_struct_present: bool,
-    num_units: u32,
-    time_scale: u32,
-    fixed_frame_rate: bool,
     sample_aspect: SampleAspect,
     cpb_delay_bits: u8,
     dpb_delay_bits: u8,
@@ -1342,17 +1697,43 @@ struct Vui {
 }
 
 impl Vui {
+    /// The values clause E.2.1 infers when `vui_parameters()` is absent.
+    fn absent() -> Self {
+        Self {
+            aspect_ratio_info_present_flag: false,
+            aspect_ratio_idc: 0,
+            sar_width: 0,
+            sar_height: 0,
+            video_signal_type_present_flag: false,
+            video_format: 5,
+            video_full_range_flag: false,
+            colour_description_present_flag: false,
+            colour_primaries: 2,
+            transfer_characteristics: 2,
+            matrix_coefficients: 2,
+            timing_info_present_flag: false,
+            num_units_in_tick: 0,
+            time_scale: 0,
+            fixed_frame_rate_flag: false,
+            nal_hrd_parameters_present_flag: false,
+            vcl_hrd_parameters_present_flag: false,
+            pic_struct_present_flag: false,
+            bitstream_restriction_flag: false,
+            max_num_reorder_frames: 0,
+            max_dec_frame_buffering: 0,
+        }
+    }
+}
+
+impl Parsed {
     fn unspecified(max_reorder: u32) -> Self {
         Self {
+            syntax: Vui::absent(),
             range: ColorRange::Limited,
             primaries: ColorPrimaries::Unspecified,
             transfer: Transfer::Unspecified,
             matrix: ColorMatrix::Unspecified,
             max_reorder,
-            pic_struct_present: false,
-            num_units: 0,
-            time_scale: 0,
-            fixed_frame_rate: false,
             sample_aspect: SampleAspect::UNSPECIFIED,
             cpb_delay_bits: 0,
             dpb_delay_bits: 0,
@@ -1361,37 +1742,53 @@ impl Vui {
     }
 }
 
-fn parse_vui(bits: &mut Bits<'_>, max_reorder: u32) -> Result<Vui, CodecError> {
-    let mut vui = Vui::unspecified(max_reorder);
-    if bits.bit()? {
-        vui.sample_aspect = sample_aspect(bits)?;
+fn parse_vui(bits: &mut Bits<'_>, max_reorder: u32) -> Result<Parsed, CodecError> {
+    let mut vui = Parsed::unspecified(max_reorder);
+    let syntax = &mut vui.syntax;
+    syntax.aspect_ratio_info_present_flag = bits.bit()?;
+    if syntax.aspect_ratio_info_present_flag {
+        syntax.aspect_ratio_idc = bits.u(8)? as u8;
+        if syntax.aspect_ratio_idc == 255 {
+            syntax.sar_width = bits.u(16)? as u16;
+            syntax.sar_height = bits.u(16)? as u16;
+        }
+        vui.sample_aspect =
+            sample_aspect(syntax.aspect_ratio_idc, syntax.sar_width, syntax.sar_height);
     }
     if bits.bit()? {
         let _ = bits.bit()?;
     }
-    if bits.bit()? {
-        let _ = bits.u(3)?;
-        vui.range = if bits.bit()? {
+    syntax.video_signal_type_present_flag = bits.bit()?;
+    if syntax.video_signal_type_present_flag {
+        syntax.video_format = bits.u(3)? as u8;
+        syntax.video_full_range_flag = bits.bit()?;
+        vui.range = if syntax.video_full_range_flag {
             ColorRange::Full
         } else {
             ColorRange::Limited
         };
-        if bits.bit()? {
-            vui.primaries = colour(bits.u(8)?);
-            vui.transfer = transfer_of(bits.u(8)?);
-            vui.matrix = matrix_of(bits.u(8)?);
+        syntax.colour_description_present_flag = bits.bit()?;
+        if syntax.colour_description_present_flag {
+            syntax.colour_primaries = bits.u(8)? as u8;
+            syntax.transfer_characteristics = bits.u(8)? as u8;
+            syntax.matrix_coefficients = bits.u(8)? as u8;
+            vui.primaries = colour(u32::from(syntax.colour_primaries));
+            vui.transfer = transfer_of(u32::from(syntax.transfer_characteristics));
+            vui.matrix = matrix_of(u32::from(syntax.matrix_coefficients));
         }
     }
     if bits.bit()? {
         let _ = bits.ue()?;
         let _ = bits.ue()?;
     }
-    if bits.bit()? {
-        vui.num_units = bits.u(32)?;
-        vui.time_scale = bits.u(32)?;
-        vui.fixed_frame_rate = bits.bit()?;
+    syntax.timing_info_present_flag = bits.bit()?;
+    if syntax.timing_info_present_flag {
+        syntax.num_units_in_tick = bits.u(32)?;
+        syntax.time_scale = bits.u(32)?;
+        syntax.fixed_frame_rate_flag = bits.bit()?;
     }
     let nal_hrd = bits.bit()?;
+    syntax.nal_hrd_parameters_present_flag = nal_hrd;
     if nal_hrd {
         let lengths = hrd(bits)?;
         vui.cpb_delay_bits = lengths.0;
@@ -1399,6 +1796,7 @@ fn parse_vui(bits: &mut Bits<'_>, max_reorder: u32) -> Result<Vui, CodecError> {
         vui.time_offset_bits = lengths.2;
     }
     let vcl_hrd = bits.bit()?;
+    vui.syntax.vcl_hrd_parameters_present_flag = vcl_hrd;
     if vcl_hrd {
         let lengths = hrd(bits)?;
         if nal_hrd && (vui.cpb_delay_bits, vui.dpb_delay_bits, vui.time_offset_bits) != lengths {
@@ -1411,15 +1809,18 @@ fn parse_vui(bits: &mut Bits<'_>, max_reorder: u32) -> Result<Vui, CodecError> {
     if nal_hrd || vcl_hrd {
         let _ = bits.bit()?;
     }
-    vui.pic_struct_present = bits.bit()?;
-    if bits.bit()? {
+    let syntax = &mut vui.syntax;
+    syntax.pic_struct_present_flag = bits.bit()?;
+    syntax.bitstream_restriction_flag = bits.bit()?;
+    if syntax.bitstream_restriction_flag {
         let _ = bits.bit()?;
         let _ = bits.ue()?;
         let _ = bits.ue()?;
         let _ = bits.ue()?;
         let _ = bits.ue()?;
-        vui.max_reorder = bits.ue()?;
-        let _ = bits.ue()?;
+        syntax.max_num_reorder_frames = bits.ue()?;
+        syntax.max_dec_frame_buffering = bits.ue()?;
+        vui.max_reorder = syntax.max_num_reorder_frames;
     }
     Ok(vui)
 }
@@ -1512,20 +1913,14 @@ const ASPECT: [SampleAspect; 17] = [
     },
 ];
 
-fn sample_aspect(bits: &mut Bits<'_>) -> Result<SampleAspect, CodecError> {
-    let idc = bits.u(8)?;
+fn sample_aspect(idc: u8, sar_width: u16, sar_height: u16) -> SampleAspect {
     if idc == 255 {
-        let width = bits.u(16)?;
-        let height = bits.u(16)?;
-        return Ok(SampleAspect::ratio(width, height));
+        return SampleAspect::ratio(u32::from(sar_width), u32::from(sar_height));
     }
-    let Some(index) = usize::try_from(idc).ok() else {
-        return Ok(SampleAspect::UNSPECIFIED);
-    };
-    Ok(ASPECT
-        .get(index)
+    ASPECT
+        .get(usize::from(idc))
         .copied()
-        .unwrap_or(SampleAspect::UNSPECIFIED))
+        .unwrap_or(SampleAspect::UNSPECIFIED)
 }
 
 fn colour(idc: u32) -> ColorPrimaries {
@@ -1583,13 +1978,24 @@ fn matrix_of(idc: u32) -> ColorMatrix {
     }
 }
 
-/// A picture parameter set names an id. An Annex A slice resolves it in
-/// `sps_of`. A slice extension resolves it in `subset` when the Annex A
-/// table has no set with that id.
 pub(crate) fn parse_pps_in(
     rbsp: &[u8],
     sps_of: &[Option<Sps>],
     subset: &[Option<Sps>],
+) -> Result<Pps, CodecError> {
+    parse_pps_with(rbsp, |id| {
+        sps_of
+            .get(id)
+            .and_then(|sps| sps.as_ref())
+            .or_else(|| subset.get(id).and_then(|sps| sps.as_ref()))
+    })
+}
+
+/// A picture parameter set, with `sps_of` finding the sequence parameter set
+/// it names: the PPS syntax depends on it.
+pub(crate) fn parse_pps_with<'a>(
+    rbsp: &[u8],
+    sps_of: impl Fn(usize) -> Option<&'a Sps>,
 ) -> Result<Pps, CodecError> {
     let mut bits = Bits::new(rbsp);
     let id = bits.ue()?;
@@ -1597,11 +2003,7 @@ pub(crate) fn parse_pps_in(
     if id >= MAX_PPS as u32 || sps_id >= MAX_SPS as u32 {
         return Err(bits.malformed("pps id"));
     }
-    let Some(sps) = sps_of
-        .get(sps_id as usize)
-        .and_then(|sps| sps.as_ref())
-        .or_else(|| subset.get(sps_id as usize).and_then(|sps| sps.as_ref()))
-    else {
+    let Some(sps) = sps_of(sps_id as usize) else {
         return Err(bits.malformed("pps without sps"));
     };
     let cabac = bits.bit()?;
@@ -1615,9 +2017,9 @@ pub(crate) fn parse_pps_in(
     } else {
         read_groups(&mut bits, sps, group_count as u8)?
     };
-    let num_ref_idx_l0 = (bits.ue()? + 1) as u8;
-    let num_ref_idx_l1 = (bits.ue()? + 1) as u8;
-    if num_ref_idx_l0 > 16 || num_ref_idx_l1 > 16 {
+    let l0_minus1 = bits.ue()?;
+    let l1_minus1 = bits.ue()?;
+    if l0_minus1 >= 16 || l1_minus1 >= 16 {
         return Err(CodecError::Limit { what: "ref idx" });
     }
     let weighted_pred = bits.bit()?;
@@ -1627,24 +2029,33 @@ pub(crate) fn parse_pps_in(
     if !(-(26 + qp_bd)..=25).contains(&init_minus) {
         return Err(bits.malformed("init qp"));
     }
-    let init_qp = init_minus + 26;
     let qs_minus = bits.se()?;
     if !(-26..=25).contains(&qs_minus) {
         return Err(bits.malformed("init qs"));
     }
-    let init_qs = qs_minus + 26;
     let chroma_qp_offset = bits.se()?;
     let deblocking_control = bits.bit()?;
     let constrained_intra = bits.bit()?;
     let redundant = bits.bit()?;
     let mut transform_8x8 = false;
+    let mut pic_scaling = false;
     let mut weight4 = sps.weight4;
     let mut weight8 = sps.weight8;
     let mut second = chroma_qp_offset;
     if bits.more_rbsp() {
         transform_8x8 = bits.bit()?;
-        if bits.bit()? {
-            (weight4, weight8) = scaling_lists(&mut bits, transform_8x8, sps.chroma == 3)?;
+        pic_scaling = bits.bit()?;
+        if pic_scaling {
+            // Fall-back rule B when the SPS has lists of its own, else A.
+            let fallback = sps
+                .seq_scaling_matrix_present_flag
+                .then_some((&sps.weight4, &sps.weight8));
+            (weight4, weight8) = scaling_lists(
+                &mut bits,
+                transform_8x8,
+                sps.chroma_format_idc == 3,
+                fallback,
+            )?;
         }
         if bits.more_rbsp() {
             second = bits.se()?;
@@ -1652,22 +2063,23 @@ pub(crate) fn parse_pps_in(
     }
     let _ = bits.rbsp_trailing();
     Ok(Pps {
-        id: id as u8,
-        sps_id: sps_id as u8,
-        cabac,
-        bottom_field_pic_order: bottom,
-        num_ref_idx_l0,
-        num_ref_idx_l1,
-        weighted_pred,
-        weighted_bipred,
-        init_qp,
-        init_qs,
-        chroma_qp_offset,
-        second_chroma_qp_offset: second,
-        deblocking_control,
-        constrained_intra,
-        redundant_pic_cnt_present: redundant,
-        transform_8x8,
+        pic_parameter_set_id: id as u8,
+        seq_parameter_set_id: sps_id as u8,
+        entropy_coding_mode_flag: cabac,
+        bottom_field_pic_order_in_frame_present_flag: bottom,
+        num_ref_idx_l0_default_active_minus1: l0_minus1 as u8,
+        num_ref_idx_l1_default_active_minus1: l1_minus1 as u8,
+        weighted_pred_flag: weighted_pred,
+        weighted_bipred_idc: weighted_bipred,
+        pic_init_qp_minus26: init_minus,
+        pic_init_qs_minus26: qs_minus,
+        chroma_qp_index_offset: chroma_qp_offset,
+        deblocking_filter_control_present_flag: deblocking_control,
+        constrained_intra_pred_flag: constrained_intra,
+        redundant_pic_cnt_present_flag: redundant,
+        transform_8x8_mode_flag: transform_8x8,
+        pic_scaling_matrix_present_flag: pic_scaling,
+        second_chroma_qp_index_offset: second,
         weight4,
         weight8,
         groups,
@@ -1680,7 +2092,7 @@ fn read_groups(bits: &mut Bits<'_>, sps: &Sps, minus1: u8) -> Result<SliceGroups
         return Err(bits.malformed("slice group map"));
     }
     let map_type = map_type as u8;
-    let units = crate::fmo::map_units(sps.mb_width, sps.mb_height, sps.frame_mbs_only);
+    let units = crate::fmo::map_units(sps.mb_width, sps.mb_height, sps.frame_mbs_only_flag);
     if units == 0 {
         return Err(bits.malformed("slice group map"));
     }
@@ -1754,7 +2166,18 @@ fn rectangle(top: u32, bottom: u32, width: u32, units: u32) -> bool {
 
 type Scaling = ([[u8; 16]; 6], [[u8; 64]; 6]);
 
-fn scaling_lists(bits: &mut Bits<'_>, with8: bool, chroma444: bool) -> Result<Scaling, CodecError> {
+/// The sequence-level 4x4 and 8x8 lists a PPS falls back to.
+type Fallback<'a> = (&'a [[u8; 16]; 6], &'a [[u8; 64]; 6]);
+
+/// `fallback` is the sequence-level lists for fall-back rule B (Table 7-2): a
+/// PPS list 0, 3, 6 or 7 that is absent takes the SPS one. Without it, rule A
+/// takes the default list.
+fn scaling_lists(
+    bits: &mut Bits<'_>,
+    with8: bool,
+    chroma444: bool,
+    fallback: Option<Fallback<'_>>,
+) -> Result<Scaling, CodecError> {
     let mut w4 = flat4();
     let mut w8 = flat8();
     for i in 0..6 {
@@ -1769,6 +2192,8 @@ fn scaling_lists(bits: &mut Bits<'_>, with8: bool, chroma444: bool) -> Result<Sc
                 };
             }
             w4[i] = inverse4(&list);
+        } else if let (0 | 3, Some((sps4, _))) = (i, fallback) {
+            w4[i] = sps4[i];
         } else if i == 0 {
             w4[i] = inverse4(&DEFAULT4_INTRA);
         } else if i == 3 {
@@ -1793,6 +2218,8 @@ fn scaling_lists(bits: &mut Bits<'_>, with8: bool, chroma444: bool) -> Result<Sc
                     };
                 }
                 w8[i] = inverse8(&list);
+            } else if let (0 | 1, Some((_, sps8))) = (i, fallback) {
+                w8[i] = sps8[i];
             } else if i == 0 {
                 w8[i] = inverse8(&DEFAULT8_INTRA);
             } else if i == 1 {

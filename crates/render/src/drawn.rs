@@ -231,6 +231,52 @@ fn brush_matte(p0: vec2<f32>, shape: vec2<f32>, progress: f32, seed: f32, stroke
     return max(m, smoothstep(0.86, 1.0, progress));
 }
 
+// Fire eating a picture: a ragged front spreads out from a point, with
+// holes opening ahead of it. Returns how much of the picture is gone, how
+// hot the glowing rim is, and how charred the picture is ahead of it.
+//
+// q: the pixel from where the fire starts, in shorter sides. far: how far
+// the frame's farthest corner is from there. one: a pixel, in shorter
+// sides.
+fn burn_matte(q: vec2<f32>, progress: f32, seed: f32, rough: f32, far: f32, one: f32) -> vec3<f32> {
+    if (progress <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let sd = seed * 5.3;
+    // When the fire reaches this pixel: later the farther out it is, and
+    // sooner or later by clouds of two sizes, which is what tears the
+    // front into tongues and opens holes ahead of it.
+    let big = fbm(q * 2.6 + sd, 5) - 0.5;
+    let small = fbm(q * 13.0 + sd + 20.0, 3) - 0.5;
+    let reached = length(q) / max(far, 0.001) * 0.62 + 0.19 + (big * 0.62 + small * 0.1) * rough;
+    let burn = mix(-0.2, 1.35, progress) - reached;
+    let soft = max(0.004, one * 1.5);
+    let gone = smoothstep(0.0, soft, burn);
+    // The rim glows just before the picture goes, and flickers.
+    let frame = floor(progress * 40.0);
+    let flick = 0.7 + 0.3 * hash12(vec2<f32>(frame, floor(atan2(q.y, q.x) * 9.0) + sd));
+    let rim = smoothstep(-0.05, 0.0, burn) * (1.0 - gone) * flick;
+    // Ahead of the rim the picture browns, then blackens.
+    let char = smoothstep(-0.2, -0.03, burn) * (1.0 - gone);
+    return vec3<f32>(gone, rim, char);
+}
+
+// The picture as the fire leaves it: scorched brown then black where it
+// is charred, with the rim's heat laid over it, deep red where it is
+// coolest and yellow-white where it is hottest.
+fn burn_scorch(c: vec4<f32>, fire: vec3<f32>) -> vec4<f32> {
+    var rgb = vec3<f32>(0.0);
+    if (c.a > 0.0) {
+        rgb = c.rgb / c.a;
+    }
+    let brown = vec3<f32>(dot(rgb, vec3<f32>(0.3, 0.5, 0.2))) * vec3<f32>(0.5, 0.3, 0.16);
+    rgb = mix(rgb, brown, smoothstep(0.0, 0.6, fire.z));
+    rgb = rgb * (1.0 - 0.93 * smoothstep(0.45, 1.0, fire.z));
+    let heat = fire.y;
+    rgb = rgb + vec3<f32>(1.0, 0.33, 0.04) * heat * 1.6 + vec3<f32>(1.0, 0.85, 0.5) * pow(heat, 3.0);
+    return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * c.a, c.a);
+}
+
 // A paper tear travelling across the frame along `dir`. Returns how much
 // of the top sheet is gone, and how much of the paper's white core shows
 // along the tear.
@@ -1256,5 +1302,21 @@ fn crumple(uv: vec2<f32>) -> vec4<f32> {
     // Soft, so a steep facet does not go black or white.
     let shade = lit / (1.0 + abs(lit) * 0.6) * 0.085 * fx.a.x;
     return multiplied(c, vec3<f32>(mix(1.0, fx.a.w, min(fx.a.x, 1.0)) + shade));
+}
+
+// progress, x, y, seed | rough, clear
+fn burn_away(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let shape = frame_shape();
+    let start = fx.a.yz * shape;
+    let q = from_middle(uv) - start;
+    let far = length(abs(start) + shape * 0.5);
+    let fire = burn_matte(q, fx.a.x, fx.a.w, fx.b.x, far, 1.0 / min(fx.size.x, fx.size.y));
+    let left = burn_scorch(c, fire) * (1.0 - fire.x);
+    // What is burnt is clear, or black.
+    return vec4<f32>(left.rgb, mix(c.a, left.a, fx.b.y));
 }
 ";

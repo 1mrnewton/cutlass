@@ -209,6 +209,10 @@ pub enum Block {
     /// facets that each catch the light differently, with sharp creases
     /// between them.
     Crumple,
+    /// The picture burnt away: fire spreads out from a point with a ragged
+    /// front and holes opening ahead of it. The picture chars brown then
+    /// black, a glowing rim eats it, and what is burnt is gone.
+    BurnAway,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -818,9 +822,22 @@ const CRUMPLE: &[Param] = &[
     param("light", 2.2, -3.2, 3.2),
 ];
 
+/// `progress` 0 is the whole picture and 1 none of it. `x` and `y` are
+/// where the fire starts, from the middle, in frames. `seed` picks the
+/// fire and `rough` is how ragged its front is. `clear` 1 leaves the
+/// burnt part see-through, 0 leaves it black.
+const BURN_AWAY: &[Param] = &[
+    param("progress", 0.0, 0.0, 1.0),
+    param("x", 0.0, -1.0, 1.0),
+    param("y", 0.0, -1.0, 1.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("rough", 1.0, 0.0, 3.0),
+    param("clear", 1.0, 0.0, 1.0),
+];
+
 impl Block {
     /// Every block, in the order of their codes.
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 58] = [
         Self::Transform,
         Self::RgbSplit,
         Self::Slices,
@@ -878,6 +895,7 @@ impl Block {
         Self::BandTear,
         Self::Paper,
         Self::Crumple,
+        Self::BurnAway,
     ];
 
     /// The parameters in the order the shader reads them.
@@ -941,6 +959,7 @@ impl Block {
             Self::BandTear => BAND_TEAR,
             Self::Paper => PAPER,
             Self::Crumple => CRUMPLE,
+            Self::BurnAway => BURN_AWAY,
         }
     }
 
@@ -1005,6 +1024,7 @@ impl Block {
             Self::BandTear => 54,
             Self::Paper => 55,
             Self::Crumple => 56,
+            Self::BurnAway => 57,
         }
     }
 }
@@ -1960,7 +1980,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 240] = [
+const BUNDLED_FILES: [&str; 242] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -2201,6 +2221,8 @@ const BUNDLED_FILES: [&str; 240] = [
     include_str!("../recipes/ink-reveal.json"),
     include_str!("../recipes/brush-reveal.json"),
     include_str!("../recipes/tear-reveal.json"),
+    include_str!("../recipes/burn-out.json"),
+    include_str!("../recipes/burn-from-corner.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.

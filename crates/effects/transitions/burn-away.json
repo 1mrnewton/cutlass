@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "burn-away",
+  "name": "Burn Away",
+  "category": "Light",
+  "duration": 1.6,
+  "cross": {
+    "kind": 21
+  }
+}

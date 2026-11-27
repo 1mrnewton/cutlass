@@ -151,6 +151,12 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             let ink = ink_matte(middle - landing, cx.a.x, cx.size.z, cx.size.w, far, one);
             return mix(a, b, ink);
         }
+        if (kind == 21u) {
+            let start = vec2<f32>(cx.b.y, cx.b.z) * shape;
+            let reach = length(abs(start) + shape * 0.5);
+            let fire = burn_matte(middle - start, cx.a.x, cx.size.z, cx.size.w, reach, one);
+            return mix(burn_scorch(a, fire), b, fire.x);
+        }
         if (kind == 19u) {
             let paint = brush_matte(middle, shape, cx.a.x, cx.size.z, cx.b.x, tilt, 0.6 * cx.size.w);
             return mix(a, b, paint);

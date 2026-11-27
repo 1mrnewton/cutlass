@@ -111,7 +111,8 @@ pub(crate) const fn space(block: Block) -> Option<Space> {
         | Block::Flicker
         | Block::Tape
         | Block::Paper
-        | Block::Crumple => Some(Space::Display),
+        | Block::Crumple
+        | Block::BurnAway => Some(Space::Display),
     }
 }
 
@@ -1131,6 +1132,7 @@ fn kernel(uv: vec2<f32>) -> vec4<f32> {
         case 54u: { return band_tear(uv); }
         case 55u: { return paper(uv); }
         case 56u: { return crumple(uv); }
+        case 57u: { return burn_away(uv); }
         case 100u: { return gauss(uv); }
         case 101u: { return halve(uv); }
         case 102u: { return smooth_up(uv); }
@@ -1998,6 +2000,7 @@ mod tests {
             step(Block::BandTear, &[]),
             step(Block::Paper, &[]),
             step(Block::Crumple, &[]),
+            step(Block::BurnAway, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
     }
@@ -2151,6 +2154,32 @@ mod tests {
                 mean(&half)
             );
         }
+    }
+
+    #[test]
+    fn a_burn_chars_then_removes_the_picture_and_leaves_it_clear_or_black() {
+        let Some(renderer) = renderer() else { return };
+        let size = (96, 64);
+        let flat = grey(size);
+        let burn = |progress: f32, clear: f32| {
+            let set = [(0, progress), (5, clear)];
+            draw(&renderer, &flat, size, &[step(Block::BurnAway, &set)])
+        };
+        let alphas = |frame: &[u8]| frame.chunks(4).map(|pixel| pixel[3]).collect::<Vec<u8>>();
+        // All of it is gone at the end: clear, or black.
+        assert!(burn(1.0, 1.0).iter().all(|byte| *byte == 0));
+        let black = burn(1.0, 0.0);
+        assert!(black.chunks(4).all(|pixel| pixel == [0, 0, 0, 255]));
+        // Half way, some is gone, some is whole, some is charred darker
+        // than the picture and the rim glows redder than it.
+        let half = burn(0.5, 1.0);
+        assert_eq!(half, burn(0.5, 1.0));
+        let alpha = alphas(&half);
+        assert!(alpha.contains(&0) && alpha.contains(&255));
+        let whole = half.chunks(4).filter(|pixel| pixel[3] == 255);
+        assert!(whole.clone().any(|pixel| pixel[..3] == [128, 128, 128]));
+        assert!(whole.clone().any(|pixel| pixel[0] < 40 && pixel[2] < 40));
+        assert!(whole.clone().any(|pixel| pixel[0] > 200 && pixel[2] < 120));
     }
 
     #[test]

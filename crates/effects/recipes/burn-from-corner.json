@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "id": "burn-from-corner",
+  "name": "Burn From Corner",
+  "category": "Reveal",
+  "preview": "lake",
+  "poster": 1.5,
+  "controls": [
+    {
+      "id": "speed",
+      "name": "Speed",
+      "default": 1,
+      "min": 0.25,
+      "max": 3,
+      "unit": "times",
+      "speed": true
+    }
+  ],
+  "passes": [
+    {
+      "block": "burn_away",
+      "params": {
+        "progress": {
+          "keys": [
+            [
+              0.2,
+              0
+            ],
+            [
+              2.6,
+              1
+            ]
+          ]
+        },
+        "x": 0.5,
+        "y": 0.5,
+        "seed": 4,
+        "rough": 1.4
+      }
+    }
+  ]
+}

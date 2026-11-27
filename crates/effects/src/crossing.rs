@@ -90,11 +90,15 @@ pub enum CrossKind {
     /// travelling along `angle` with the paper's white core showing along
     /// it. `rough` is how ragged the tear is.
     Tear,
+    /// The outgoing picture burnt away from `x`, `y`: it chars, a glowing
+    /// rim eats it and the incoming picture shows through the holes.
+    /// `seed` picks the fire and `rough` is how ragged its front is.
+    Burn,
 }
 
 impl CrossKind {
     /// Every kind, in the order of its number.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Wipe,
         Self::Circle,
         Self::Blinds,
@@ -116,6 +120,7 @@ impl CrossKind {
         Self::Ink,
         Self::Brush,
         Self::Tear,
+        Self::Burn,
     ];
 }
 
@@ -134,10 +139,10 @@ const fn param(name: &'static str, default: f32, min: f32, max: f32) -> Param {
 /// colour along the swapping line, as wide as that part of the run.
 /// `close` runs the swap the other way: a shape closes in on the
 /// outgoing picture instead of opening out of it. `seed` and `rough` shape
-/// the drawn kinds: ink, brush and tear.
+/// the drawn kinds: ink, brush, tear and burn.
 pub const CROSS: &[Param] = &[
     param("progress", 0.0, 0.0, 1.0),
-    param("kind", 8.0, 0.0, 20.0),
+    param("kind", 8.0, 0.0, 21.0),
     param("angle", 0.0, -360.0, 360.0),
     param("soft", 0.02, 0.0, 1.0),
     param("count", 8.0, 1.0, 64.0),
@@ -410,7 +415,7 @@ pub fn transition_preview_t(elapsed: Micros) -> f32 {
 }
 
 /// The transition recipes the app ships, in shelf order.
-const BUNDLED_FILES: [&str; 189] = [
+const BUNDLED_FILES: [&str; 191] = [
     include_str!("../transitions/flash.json"),
     include_str!("../transitions/quick-flash.json"),
     include_str!("../transitions/red-flash.json"),
@@ -600,6 +605,8 @@ const BUNDLED_FILES: [&str; 189] = [
     include_str!("../transitions/paper-tear.json"),
     include_str!("../transitions/paper-rip-down.json"),
     include_str!("../transitions/film-burn.json"),
+    include_str!("../transitions/burn-away.json"),
+    include_str!("../transitions/corner-burn.json"),
 ];
 
 /// Every bundled transition recipe, read once.
@@ -720,13 +727,13 @@ mod tests {
         assert!(half.outgoing.is_empty() && half.incoming.is_empty());
         // The last kind reads; one past it does not.
         assert_eq!(
-            read(r#"{"version":1,"id":"a","name":"A","cross":{"kind":20}}"#)
+            read(r#"{"version":1,"id":"a","name":"A","cross":{"kind":21}}"#)
                 .at(0.5)
                 .kind(),
-            CrossKind::Tear
+            CrossKind::Burn
         );
         assert!(
-            TransitionRecipe::read(br#"{"version":1,"id":"a","name":"A","cross":{"kind":21}}"#)
+            TransitionRecipe::read(br#"{"version":1,"id":"a","name":"A","cross":{"kind":22}}"#)
                 .is_err()
         );
     }

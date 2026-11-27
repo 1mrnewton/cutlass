@@ -111,6 +111,9 @@ muda = { version = "0.21.2", default-features = false }
 [target.'cfg(target_os = "windows")'.dependencies]
 cutlass-platform-windows = { path = "../../crates/platform-windows", version = "0.8.0" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+cutlass-platform-linux = { path = "../../crates/platform-linux", version = "0.8.0" }
+
 [lints]
 workspace = true
 

@@ -308,10 +308,12 @@ impl Default for Playback {
 /// Audio and still codecs are not covered by these switches.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Hardware {
-    /// Decode pictures with the platform decoder, such as VideoToolbox.
+    /// Decode pictures with the platform decoder: VideoToolbox, Media
+    /// Foundation, MediaCodec, or NVDEC and VA-API on Linux.
     #[serde(default = "default_on")]
     pub decode: bool,
-    /// Encode pictures with the platform encoder, such as VideoToolbox.
+    /// Encode pictures with the platform encoder: VideoToolbox, Media
+    /// Foundation, MediaCodec, or NVENC and VA-API on Linux.
     #[serde(default = "default_on")]
     pub encode: bool,
     /// Keys this record does not name.

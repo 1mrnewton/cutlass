@@ -21,6 +21,7 @@
 mod convert;
 mod lut;
 pub mod nv12;
+pub mod p010;
 mod still;
 mod transfer;
 

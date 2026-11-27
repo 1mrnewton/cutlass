@@ -82,7 +82,14 @@ pub fn register_codecs_with(
         cutlass_platform_windows::register_decoders_with(&mut decoders, hardware.decode);
         cutlass_platform_windows::register_encoders_with(&mut encoders, hardware.encode);
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        // NVDEC and NVENC on an NVIDIA GPU, then VA-API. Each declines when
+        // this machine cannot run it, and the Rust codec below takes over.
+        cutlass_platform_linux::register_decoders_with(&mut decoders, hardware.decode);
+        cutlass_platform_linux::register_encoders_with(&mut encoders, hardware.encode);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     let _ = hardware;
     cutlass_png::register_decoders(&mut decoders);
     cutlass_png::register_encoders(&mut encoders);
@@ -102,8 +109,8 @@ pub fn register_codecs_with(
     cutlass_vp8::register_engine_decoders(&mut decoders);
     cutlass_vp8::register_engine_encoders(&mut encoders);
     // After the platform codecs: the Rust HEVC, MPEG-2 and MPEG-4 Visual
-    // decoders serve Linux, and the other platforms when hardware decode is
-    // off. No platform encodes MPEG-2. VideoToolbox claims MPEG-4 Visual on
+    // decoders serve a machine whose hardware does not take the stream, and
+    // every platform when hardware decode is off. No platform encodes MPEG-2. VideoToolbox claims MPEG-4 Visual on
     // Apple; these openers run when the platform opener is absent, and the
     // MPEG-4 encoder is the same fallback.
     cutlass_hevc::register_decoders(&mut decoders);

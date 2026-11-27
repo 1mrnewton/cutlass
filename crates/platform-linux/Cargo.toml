@@ -4,11 +4,21 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "The ALSA preview queue."
+description = "VA-API, NVDEC and NVENC video codecs, and the ALSA preview queue."
+
+[dependencies]
+cutlass-codec = { path = "../codec", version = "0.8.0" }
+cutlass-decode = { path = "../decode", version = "0.8.0" }
+cutlass-encode = { path = "../encode", version = "0.8.0" }
+cutlass-color = { path = "../color", version = "0.8.0" }
+cutlass-logger = { path = "../logger", version = "0.8.0" }
+cutlass-h264 = { path = "../codecs/h264", version = "0.8.0" }
+cutlass-hevc = { path = "../codecs/hevc", version = "0.8.0" }
+cutlass-av1 = { path = "../codecs/av1", version = "0.8.0" }
 
 # Cargo cannot mix `workspace = true` with one overridden lint, and `forbid`
 # cannot be allowed in a module. These are the workspace lints with
-# `unsafe_code` lowered to `deny` so the ALSA module can allow it.
+# `unsafe_code` lowered to `deny` so the ALSA and video modules can allow it.
 [lints.rust]
 unsafe_code = "deny"
 future_incompatible = { level = "deny", priority = -1 }

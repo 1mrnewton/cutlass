@@ -6,8 +6,8 @@
 //! silence. An underrun is recovered and playing goes on; a device that
 //! cannot recover ends the thread, and the queue stays silent.
 //!
-//! `libasound.so.2` is opened with `dlopen`, so neither the build nor a
-//! system without ALSA needs it until a queue opens.
+//! `libasound.so.2` is opened with `dlopen` through [`Library`], so neither
+//! the build nor a system without ALSA needs it until a queue opens.
 
 #![allow(unsafe_code)]
 
@@ -17,10 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
+use crate::dl::Library;
 use crate::slice::{QueueError, Slice, layout};
 
-/// `RTLD_NOW`.
-const LOAD_NOW: c_int = 2;
 /// `SND_PCM_STREAM_PLAYBACK`.
 const STREAM_PLAYBACK: c_int = 0;
 /// `SND_PCM_FORMAT_FLOAT_LE`.
@@ -34,13 +33,6 @@ const LATENCY_US: c_uint = 40_000;
 /// Frames written at a time: 10 ms at 48 kHz.
 const PERIOD_FRAMES: usize = 480;
 
-#[link(name = "dl")]
-unsafe extern "C" {
-    fn dlopen(file: *const c_char, mode: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
-    fn dlclose(handle: *mut c_void) -> c_int;
-}
-
 type Open = unsafe extern "C" fn(*mut *mut c_void, *const c_char, c_int, c_int) -> c_int;
 type SetParams =
     unsafe extern "C" fn(*mut c_void, c_int, c_int, c_uint, c_uint, c_int, c_uint) -> c_int;
@@ -50,65 +42,33 @@ type Handle = unsafe extern "C" fn(*mut c_void) -> c_int;
 
 /// The library and the few calls the queue makes.
 struct Alsa {
-    library: *mut c_void,
     open: Open,
     set_params: SetParams,
     writei: WriteI,
     recover: Recover,
     drop: Handle,
     close: Handle,
+    /// Last, so the calls above are dropped before the library closes.
+    _library: Library,
 }
 
 impl Alsa {
     fn load() -> Option<Self> {
-        // SAFETY: the name is a valid C string, and dlopen has no other
-        // precondition.
-        let library = unsafe { dlopen(c"libasound.so.2".as_ptr(), LOAD_NOW) };
-        if library.is_null() {
-            return None;
-        }
-        let found = (|| {
+        let library = Library::open(&[c"libasound.so.2"])?;
+        // SAFETY: each symbol has this signature in alsa/pcm.h, and the
+        // pointers live in the same struct as the library.
+        unsafe {
             Some(Self {
-                library,
-                // SAFETY: each symbol has this signature in alsa/pcm.h.
-                open: unsafe { symbol::<Open>(library, c"snd_pcm_open")? },
-                set_params: unsafe { symbol::<SetParams>(library, c"snd_pcm_set_params")? },
-                writei: unsafe { symbol::<WriteI>(library, c"snd_pcm_writei")? },
-                recover: unsafe { symbol::<Recover>(library, c"snd_pcm_recover")? },
-                drop: unsafe { symbol::<Handle>(library, c"snd_pcm_drop")? },
-                close: unsafe { symbol::<Handle>(library, c"snd_pcm_close")? },
+                open: library.symbol::<Open>(c"snd_pcm_open")?,
+                set_params: library.symbol::<SetParams>(c"snd_pcm_set_params")?,
+                writei: library.symbol::<WriteI>(c"snd_pcm_writei")?,
+                recover: library.symbol::<Recover>(c"snd_pcm_recover")?,
+                drop: library.symbol::<Handle>(c"snd_pcm_drop")?,
+                close: library.symbol::<Handle>(c"snd_pcm_close")?,
+                _library: library,
             })
-        })();
-        if found.is_none() {
-            // SAFETY: the handle came from dlopen and nothing from it is kept.
-            unsafe { dlclose(library) };
         }
-        found
     }
-}
-
-impl Drop for Alsa {
-    fn drop(&mut self) {
-        // SAFETY: the handle came from dlopen, and the PCM using it was
-        // closed before the library is dropped.
-        unsafe { dlclose(self.library) };
-    }
-}
-
-/// Look `name` up in `library` as a function of type `F`.
-///
-/// # Safety
-///
-/// `F` must be the function pointer type of the symbol.
-unsafe fn symbol<F: Copy>(library: *mut c_void, name: &CStr) -> Option<F> {
-    // SAFETY: the handle is live and the name is a valid C string.
-    let found = unsafe { dlsym(library, name.as_ptr()) };
-    if found.is_null() || size_of::<F>() != size_of::<*mut c_void>() {
-        return None;
-    }
-    // SAFETY: the caller names the symbol's type, which is a function
-    // pointer the size of the address.
-    Some(unsafe { std::mem::transmute_copy::<*mut c_void, F>(&found) })
 }
 
 /// An open PCM on the default device. Closed on drop.

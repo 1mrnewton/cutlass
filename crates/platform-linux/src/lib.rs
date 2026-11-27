@@ -20,6 +20,7 @@
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+mod credits;
 mod slice;
 mod video;
 
@@ -35,6 +36,7 @@ pub use alsa::OutputQueue;
 #[cfg(not(target_os = "linux"))]
 pub use off::OutputQueue;
 
+pub use credits::{HEADER_CREDITS, HeaderCredit};
 pub use slice::QueueError;
 /// Lines describing the hardware video this machine offers: the NVIDIA
 /// GPU, what NVDEC decodes and NVENC encodes there, and each VA-API render

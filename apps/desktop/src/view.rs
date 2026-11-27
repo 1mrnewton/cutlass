@@ -1585,6 +1585,8 @@ fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
                 ui.add_space(8.0);
                 font_credits(ui, &mut view.title_fonts_shown);
                 word_list_credits(ui);
+                #[cfg(target_os = "linux")]
+                header_credits(ui);
                 ui.add_space(8.0);
                 for krate in &notices.crates {
                     egui::CollapsingHeader::new(format!("{} {}", krate.name, krate.version))
@@ -1641,6 +1643,25 @@ fn word_list_credits(ui: &mut Ui) {
             ui.label(RichText::new(words.link).color(tokens::FAINT));
             ui.label(RichText::new(words.text).monospace().size(10.0));
         });
+}
+
+/// The C headers the Linux hardware video codecs were written against,
+/// on one row each that opens to whose they are, their license and their
+/// home, and the license text.
+#[cfg(target_os = "linux")]
+fn header_credits(ui: &mut Ui) {
+    for credit in cutlass_platform_linux::HEADER_CREDITS {
+        egui::CollapsingHeader::new(credit.name)
+            .id_salt(("header license", credit.name))
+            .show(ui, |ui| {
+                ui.label(format!(
+                    "{} by {}, licensed under the {}.",
+                    credit.name, credit.author, credit.license
+                ));
+                ui.label(RichText::new(credit.link).color(tokens::FAINT));
+                ui.label(RichText::new(credit.text).monospace().size(10.0));
+            });
+    }
 }
 
 /// The faces that are part of the app: each face, who made it, its

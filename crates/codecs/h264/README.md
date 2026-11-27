@@ -1,6 +1,6 @@
 # cutlass-h264
 
-An H.264 (AVC) decoder and encoder in safe Rust. The crate has `#![forbid(unsafe_code)]` and depends only on `cutlass-decode`, `cutlass-encode` and `cutlass-h264-kernels`, which holds its sample loops and the `unsafe` their NEON versions need. It runs on the caller's thread unless the decoder is given threads with `with_threads`. The desktop app registers both: on macOS and Windows the platform codec is asked first when hardware decode or encode is on in Settings, and this crate is used when that opener declines, when hardware is off, and always on Linux.
+An H.264 (AVC) decoder and encoder in safe Rust. The crate has `#![forbid(unsafe_code)]` and depends only on `cutlass-decode`, `cutlass-encode` and `cutlass-h264-kernels`, which holds its sample loops and the `unsafe` their NEON versions need. It runs on the caller's thread unless the decoder is given threads with `with_threads`. The desktop app registers both: on macOS, Windows and Linux (NVDEC and NVENC, or VA-API) the platform codec is asked first when hardware decode or encode is on in Settings, and this crate is used when that opener declines or when hardware is off.
 
 ## What it supports
 

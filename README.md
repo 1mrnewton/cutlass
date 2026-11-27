@@ -65,7 +65,7 @@ The builds are not signed with a developer certificate yet, so the first launch 
 
 **Sound.** Volume and fades, extract the audio from a video, sync video and audio by their sound, and mark the beat.
 
-**Export.** MP4 or MOV, the whole timeline, a range, or the selected clips. Sound on its own, a GIF, or an animated WebP. On macOS and Windows the system's hardware codecs do the work when they can, and a switch in Settings turns them off.
+**Export.** MP4 or MOV, the whole timeline, a range, or the selected clips. Sound on its own, a GIF, or an animated WebP. On macOS and Windows the system's hardware codecs do the work when they can, and on Linux NVIDIA's NVDEC and NVENC or VA-API on Intel and AMD; a switch in Settings turns them off.
 
 ## The assistant
 
@@ -84,7 +84,7 @@ The decoders and encoders below are Rust code in [`crates/codecs`](crates/codecs
 | | Open | Export |
 | --- | :---: | :---: |
 | **Files** | MP4, MOV, M4V, M4A, WAV, AIFF, FLAC, Ogg, MP3 | MP4, MOV, and sound on its own |
-| **Video** | H.264, HEVC, AV1, ProRes, VP8, MPEG-4, MPEG-2, Motion JPEG | H.264, ProRes, VP8, MPEG-4, MPEG-2, Motion JPEG. HEVC through the system encoder on macOS and Windows |
+| **Video** | H.264, HEVC, AV1, ProRes, VP8, MPEG-4, MPEG-2, Motion JPEG | H.264, ProRes, VP8, MPEG-4, MPEG-2, Motion JPEG. HEVC through the hardware encoder on macOS, Windows and Linux |
 | **Sound** | AAC, MP3, FLAC, ALAC, Opus, Vorbis, AC-3, E-AC-3, PCM | AAC, MP3, FLAC, ALAC, Opus, Vorbis, AC-3, E-AC-3, PCM |
 | **Pictures** | JPEG, PNG, WebP, GIF, animated or still | GIF, animated WebP |
 
@@ -95,6 +95,8 @@ You need the stable [Rust](https://rustup.rs) toolchain and a C compiler. On Lin
 ```sh
 sudo apt-get install libgtk-3-dev libasound2-dev
 ```
+
+The Linux hardware video codecs need nothing more to build. At run time they use the NVIDIA driver, or libva with your GPU's VA-API driver, when the machine has them.
 
 Then:
 
@@ -135,7 +137,7 @@ A bug report with the file that caused it is the most useful thing you can send.
 | [`crates/model`](crates/model), [`crates/session`](crates/session), [`crates/editor`](crates/editor) | The project, the edit requests with undo, and editor behavior shared by every app |
 | [`crates/eval`](crates/eval), [`crates/engine`](crates/engine), [`crates/render`](crates/render), [`crates/playback`](crates/playback), [`crates/export`](crates/export) | Turning a project and a time into a frame and its sound, for preview and for export |
 | [`crates/codecs`](crates/codecs), [`crates/containers`](crates/containers) | One crate per codec and per file format |
-| [`crates/platform-apple`](crates/platform-apple), [`crates/platform-windows`](crates/platform-windows) | The system's hardware codecs |
+| [`crates/platform-apple`](crates/platform-apple), [`crates/platform-windows`](crates/platform-windows), [`crates/platform-linux`](crates/platform-linux) | The system's hardware codecs |
 | [`crates/effects`](crates/effects), [`crates/text`](crates/text), [`crates/captions`](crates/captions) | Filters, effects, transitions, masks, color, text and captions |
 | [`crates/vision`](crates/vision), [`crates/transcription`](crates/transcription) | The on-device models for pictures and for speech |
 | [`crates/agent`](crates/agent) | The assistant: its tools, skills and MCP |

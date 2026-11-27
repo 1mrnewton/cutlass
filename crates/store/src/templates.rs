@@ -19,6 +19,8 @@ use cutlass_model::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::folder::read_existing;
+use crate::json::parse_struct;
 use crate::projects::{copy_tree, unix_millis};
 use crate::{Folder, StoreError};
 
@@ -265,11 +267,7 @@ pub fn delete_template(path: &Path) -> Result<(), StoreError> {
 
 fn read_info(path: &Path) -> Result<TemplateInfo, StoreError> {
     let file = path.join(TEMPLATE_FILE);
-    let bytes = fs::read(&file).map_err(|error| io(&file, &error))?;
-    let info: TemplateInfo = serde_json::from_slice(&bytes).map_err(|error| StoreError::Json {
-        path: file.clone(),
-        message: error.to_string(),
-    })?;
+    let info: TemplateInfo = parse_struct(&read_existing(&file)?, &file)?;
     if info.format_version > TEMPLATE_FORMAT_VERSION {
         return Err(StoreError::Json {
             path: file,
@@ -597,6 +595,29 @@ mod tests {
             Err(StoreError::MissingMedia { .. })
         ));
         assert!(!other.join("Resources").join("beach.mp4").exists());
+    }
+
+    #[test]
+    fn an_oversized_template_file_is_refused_and_the_template_kept() {
+        let temp = Temp::new();
+        let root = temp.path.join("templates");
+        let project = project(&temp.path, true, None);
+        let template = save_as_template(&project, &root, "Beach day", "Travel").unwrap();
+        fs::File::create(template.join(TEMPLATE_FILE))
+            .unwrap()
+            .set_len(crate::json::MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert!(listed_template(&template).is_none());
+        let error = delete_template(&template).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                StoreError::TooLarge { limit: crate::JsonLimit::File, ref path }
+                    if path.ends_with(TEMPLATE_FILE)
+            ),
+            "{error}"
+        );
+        assert!(template.is_dir());
     }
 
     #[test]

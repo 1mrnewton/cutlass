@@ -35,7 +35,7 @@ pub use folder::{
     TimelineLayout, open,
 };
 pub use hold::{Hold, held_address, hold};
-pub use json::{parse_draft, write_draft};
+pub use json::{JsonLimit, parse_draft, write_draft};
 pub use matte::{MatteKey, find_matte, matte_file, remove_mattes_but};
 pub use projects::{
     ListedProject, create_project, delete_project, duplicate_project, list_projects,
@@ -58,6 +58,9 @@ pub use upgrade::{BUILD, Protocol, upgrade};
 pub enum StoreError {
     /// The bytes are not the JSON this loader accepts.
     Json { path: PathBuf, message: String },
+    /// A project file, or one string, array, or object in it, is past the
+    /// bound this loader reads. Nothing is built from the file.
+    TooLarge { path: PathBuf, limit: JsonLimit },
     /// `new_version` is empty, so no upgrade task can be ordered.
     EmptyProtocol { draft_id: String },
     /// `new_version` is not a numeric protocol version.
@@ -91,6 +94,9 @@ impl fmt::Display for StoreError {
         match self {
             Self::Json { path, message } => {
                 write!(formatter, "could not read {}: {message}", path.display())
+            }
+            Self::TooLarge { path, limit } => {
+                write!(formatter, "could not read {}: {limit}", path.display())
             }
             Self::EmptyProtocol { draft_id } => {
                 write!(formatter, "draft {draft_id} has an empty protocol version")

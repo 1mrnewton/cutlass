@@ -180,6 +180,28 @@ pub enum Block {
     /// A plume of smoke rising from one point, swaying, curling and
     /// thinning out as it climbs.
     Smoke,
+    /// Film grain: specks of two sizes, new on every frame, that lift and
+    /// lower the picture and fade out by themselves in pure black and white.
+    FilmGrain,
+    /// The bright dirt on an old print: dust and lint, curled hairs, short
+    /// nicks, and long scratches running down the reel. A mark is on one
+    /// frame and gone on the next; only the long scratches stay a while.
+    FilmDamage,
+    /// The dark dirt on an old print: water stains with a darker rim and
+    /// grime along the frame's edges, which stay put, and dark dust and the
+    /// odd big blotch, which come and go.
+    Grime,
+    /// Projector flicker: the picture dips a little on some frames, with a
+    /// soft band of shade rolling up it. It only ever darkens.
+    Flicker,
+    /// The faults of an old video tape: lines that jitter sideways, a band
+    /// that rolls up the frame tearing and snowing as it goes, a torn strip
+    /// along the bottom where the heads switch, scan lines and dropouts.
+    Tape,
+    /// A burst of digital tearing: the frame is cut into bands that jump
+    /// every couple of frames, a few of them shoved sideways, with the
+    /// colours pulled apart. It swells and dies as `progress` goes 0 to 1.
+    BandTear,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -225,7 +247,12 @@ const FLASH: &[Param] = &[
     param("green", 1.0, 0.0, 1.0),
     param("blue", 1.0, 0.0, 1.0),
 ];
-const VIGNETTE: &[Param] = &[param("amount", 0.0, 0.0, 1.0), param("size", 0.6, 0.0, 1.5)];
+/// `round` 0 darkens in the frame's own shape, 1 in a true circle.
+const VIGNETTE: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("size", 0.6, 0.0, 1.5),
+    param("round", 0.0, 0.0, 1.0),
+];
 const NOISE: &[Param] = &[
     param("amount", 0.0, 0.0, 1.0),
     param("seed", 0.0, 0.0, 1000.0),
@@ -644,9 +671,102 @@ const SMOKE: &[Param] = &[
     param("blue", 0.84, 0.0, 1.0),
 ];
 
+/// `amount` is how far the specks push the picture (0.13 is ordinary
+/// film); `size` is a speck's size in the pixels of a 1080 frame;
+/// `clump` mixes in bigger, softer clumps; `colour` 1 gives each colour
+/// layer its own grain.
+const FILM_GRAIN: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("size", 1.5, 0.5, 8.0),
+    param("clump", 0.6, 0.0, 1.0),
+    param("colour", 0.3, 0.0, 1.0),
+];
+
+/// `amount` is how bright the marks are and `count` how many there are;
+/// `hold` is how many frames a pattern lasts (1 a projector, 4 or 5
+/// stop-motion grit). `specks`, `hairs`, `scratches` and `lines` set
+/// each kind; `clumps` gathers the dust in patches; `size` 2 doubles
+/// every mark.
+const FILM_DAMAGE: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("hold", 1.0, 1.0, 12.0),
+    param("specks", 1.0, 0.0, 2.0),
+    param("hairs", 1.0, 0.0, 2.0),
+    param("scratches", 1.0, 0.0, 2.0),
+    param("lines", 1.0, 0.0, 2.0),
+    param("clumps", 0.6, 0.0, 1.0),
+    param("size", 1.0, 0.5, 4.0),
+];
+
+/// `amount` is how dark the dirt is and `count` how much dust and
+/// blotching there is; `hold` is how many frames the dust lasts.
+/// `stains`, `edges`, `specks` and `blotches` set each kind; the
+/// colour is the dirt's.
+const GRIME: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.4),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("hold", 2.0, 1.0, 12.0),
+    param("stains", 1.0, 0.0, 2.0),
+    param("edges", 1.0, 0.0, 2.0),
+    param("specks", 1.0, 0.0, 2.0),
+    param("blotches", 1.0, 0.0, 2.0),
+    param("red", 0.42, 0.0, 1.0),
+    param("green", 0.33, 0.0, 1.0),
+    param("blue", 0.22, 0.0, 1.0),
+];
+
+/// `amount` is the deepest dip, as a share of the brightness; `hold` is
+/// how many frames each brightness lasts; `band` is the rolling shade
+/// and `pulse` a slow swell under the quick flicker.
+const FLICKER: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("hold", 1.0, 1.0, 12.0),
+    param("band", 0.5, 0.0, 1.0),
+    param("pulse", 0.3, 0.0, 1.0),
+];
+
+/// `wobble` is the line jitter and slow bend, `tracking` the rolling
+/// band, `switching` the bottom strip, `scan` the scan lines and `snow`
+/// the dropouts and static.
+const TAPE: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("wobble", 1.0, 0.0, 3.0),
+    param("tracking", 1.0, 0.0, 2.0),
+    param("switching", 1.0, 0.0, 2.0),
+    param("scan", 1.0, 0.0, 2.0),
+    param("snow", 1.0, 0.0, 3.0),
+];
+
+/// `push` is the furthest a band is shoved and `split` how far red and
+/// blue come apart, in the pixels of a 1080 frame; `torn` is the share
+/// of bands that tear; `hold` the frames a pattern lasts; `blocks`
+/// adds small squares that jump.
+const BAND_TEAR: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("progress", 0.0, 0.0, 1.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("push", 90.0, 0.0, 300.0),
+    param("split", 14.0, 0.0, 60.0),
+    param("torn", 0.35, 0.0, 1.0),
+    param("hold", 2.0, 1.0, 12.0),
+    param("blocks", 0.5, 0.0, 2.0),
+];
+
 impl Block {
     /// Every block, in the order of their codes.
-    pub const ALL: [Self; 49] = [
+    pub const ALL: [Self; 55] = [
         Self::Transform,
         Self::RgbSplit,
         Self::Slices,
@@ -696,6 +816,12 @@ impl Block {
         Self::Sparks,
         Self::Fog,
         Self::Smoke,
+        Self::FilmGrain,
+        Self::FilmDamage,
+        Self::Grime,
+        Self::Flicker,
+        Self::Tape,
+        Self::BandTear,
     ];
 
     /// The parameters in the order the shader reads them.
@@ -751,6 +877,12 @@ impl Block {
             Self::Sparks => SPARKS,
             Self::Fog => FOG,
             Self::Smoke => SMOKE,
+            Self::FilmGrain => FILM_GRAIN,
+            Self::FilmDamage => FILM_DAMAGE,
+            Self::Grime => GRIME,
+            Self::Flicker => FLICKER,
+            Self::Tape => TAPE,
+            Self::BandTear => BAND_TEAR,
         }
     }
 
@@ -807,6 +939,12 @@ impl Block {
             Self::Sparks => 46,
             Self::Fog => 47,
             Self::Smoke => 48,
+            Self::FilmGrain => 49,
+            Self::FilmDamage => 50,
+            Self::Grime => 51,
+            Self::Flicker => 52,
+            Self::Tape => 53,
+            Self::BandTear => 54,
         }
     }
 }
@@ -1762,7 +1900,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 223] = [
+const BUNDLED_FILES: [&str; 232] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -1986,6 +2124,15 @@ const BUNDLED_FILES: [&str; 223] = [
     include_str!("../recipes/fog.json"),
     include_str!("../recipes/ground-mist.json"),
     include_str!("../recipes/smoke.json"),
+    include_str!("../recipes/real-grain.json"),
+    include_str!("../recipes/heavy-grain.json"),
+    include_str!("../recipes/scratched-film.json"),
+    include_str!("../recipes/stop-motion-grit.json"),
+    include_str!("../recipes/stained-print.json"),
+    include_str!("../recipes/projector.json"),
+    include_str!("../recipes/worn-print.json"),
+    include_str!("../recipes/tape-tracking.json"),
+    include_str!("../recipes/band-tear.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.

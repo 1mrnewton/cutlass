@@ -662,4 +662,329 @@ fn smoke(uv: vec2<f32>) -> vec4<f32> {
     let tint = vec3<f32>(fx.c.z, fx.c.w, fx.d.x);
     return screened(c, tint * clamp(body * wisps * fade * min(thin, 1.0) * fx.a.x * 1.28, 0.0, 1.0));
 }
+
+// Where a pixel is on the film, in the pixels of a frame 1080 on its
+// shorter side: the measure film dirt and tape lines are sized in.
+fn film_at(uv: vec2<f32>) -> vec2<f32> {
+    return uv * frame_shape() * 1080.0;
+}
+
+// One layer of grain specks, about -1 to 1, for one colour layer on one
+// frame.
+fn grain_specks(at: vec2<f32>, cell: f32, frame: f32, channel: f32, seed: f32) -> f32 {
+    let slide = hash22(vec2<f32>(frame * 1.37 + channel * 91.0, seed * 7.13 + cell)) * 4096.0;
+    // A frame too small to show a speck draws specks a pixel wide and
+    // that much weaker, as many small specks average out in one pixel.
+    let shown = max(cell, 1080.0 / min(fx.size.x, fx.size.y) * 0.8);
+    let q = at / shown + slide;
+    // Two lots of hills, the second turned, so no grid shows.
+    let n = vnoise(q) + vnoise(turn(q, 0.9) * 1.31 + 57.0) - 1.0;
+    return n * 2.2 * cell / shown;
+}
+
+fn grain_layer(at: vec2<f32>, frame: f32, channel: f32) -> f32 {
+    let size = fx.a.w;
+    let clump = fx.b.x;
+    let fine = grain_specks(at, size, frame, channel, fx.a.z);
+    let big = grain_specks(at, size * 2.7, frame, channel + 3.0, fx.a.z);
+    return (fine + big * clump) / (1.0 + clump * 0.6);
+}
+
+// amount, time, seed, size | clump, colour
+fn film_grain(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let frame = film_frame(fx.a.y);
+    let at = film_at(uv);
+    var g = vec3<f32>(grain_layer(at, frame, 0.0));
+    if (fx.b.y > 0.0) {
+        let own = vec3<f32>(grain_layer(at, frame, 1.0), grain_layer(at, frame, 2.0), grain_layer(at, frame, 3.0));
+        g = mix(g, own, fx.b.y);
+    }
+    return overlaid(c, clamp(vec3<f32>(0.5) + g * fx.a.x, vec3<f32>(0.0), vec3<f32>(1.0)));
+}
+
+// Dust in one grid: `cell` is the cell size and `big` the largest
+// radius, both in film pixels. `rag` is how ragged the bits are and
+// `rare` how few of them are big.
+fn film_dust(at: vec2<f32>, cell: f32, big: f32, density: f32, sd: f32, clumps: f32, size: f32) -> f32 {
+    let g = at / cell;
+    let id = floor(g);
+    var sum = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let cl = id + vec2<f32>(f32(dx), f32(dy));
+            // Patches: some parts of the frame are dirtier than others.
+            let dirtier = mix(1.0, smoothstep(0.35, 0.75, fbm(cl * cell * 0.0035 + sd * 0.37, 3)) * 2.2, clumps);
+            if (hash12(cl * 1.7 + sd * 3.1) > min(density * dirtier, 0.4)) {
+                continue;
+            }
+            let h = hash22(cl + sd * 17.3);
+            let h2 = hash22(cl * 2.3 + sd * 5.9 + 11.0);
+            // Anywhere in its cell, so no rows or columns show.
+            var q = (g - cl - h) * cell;
+            // Most bits are tiny, a few are big.
+            let r = mix(0.55, big, pow(h2.x, 5.0)) * size;
+            // Ragged: the edge is pushed in and out, and the bit is
+            // squashed a random way.
+            q = turn(q, h2.y * TAU) * vec2<f32>(1.0, 0.55 + 0.9 * h.x);
+            let rag = (vnoise(q * 0.9 / size + cl * 7.0) - 0.5) * r * 1.1;
+            let d = length(q) + rag;
+            sum = sum + (1.0 - smoothstep(r - 0.7, r + 0.5, d)) * (0.45 + 0.55 * h2.y);
+        }
+    }
+    return sum;
+}
+
+// A hair or a nick: a thin line `len` long through `mid`, lying at
+// `angle`, bent by `curl`.
+fn film_fibre(at: vec2<f32>, mid: vec2<f32>, angle: f32, len: f32, thick: f32, curl: f32, sd: f32) -> f32 {
+    let q = turn(at - mid, -angle);
+    let along = q.x / (len * 0.5);
+    if (abs(along) > 1.0) {
+        return 0.0;
+    }
+    // The bend: a bow plus a wriggle, both scaled by the hair's length.
+    let bend = curl * len * (0.22 * (along * along - 0.4) * sin(sd * 9.0)
+        + 0.09 * sin(along * (2.5 + 4.0 * fract(sd * 3.7)) + sd * 20.0));
+    let d = abs(q.y - bend);
+    // Thinner towards the ends.
+    let w = thick * (1.0 - 0.6 * along * along);
+    return 1.0 - smoothstep(w - 0.5, w + 0.5, d);
+}
+
+// amount, time, seed, count | hold, specks, hairs, scratches | lines,
+// clumps, size
+fn film_damage(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let t = fx.a.y;
+    let seed = fx.a.z;
+    let count = fx.a.w;
+    let clumps = fx.c.y;
+    let size = fx.c.z;
+    let frame = film_frame(t);
+    let beat = floor(frame / max(fx.b.x, 1.0));
+    let at = film_at(uv);
+    let full = frame_shape() * 1080.0;
+    let sd = seed * 13.7 + beat * 7.31;
+    var v = 0.0;
+    // Specks: a fine layer of pin-points, laid twice with the second
+    // turned so its grid cannot be seen, and a coarse layer of lint.
+    if (fx.b.y > 0.0) {
+        let dust = count * fx.b.y;
+        v = v + film_dust(at, 31.0 * size, 2.2, 0.09 * dust, sd, clumps, size) * 0.9;
+        v = v + film_dust(turn(at, 0.63) + 300.0, 23.0 * size, 2.0, 0.07 * dust, sd + 80.0, clumps, size) * 0.9;
+        v = v + film_dust(turn(at, -0.31), 95.0 * size, 7.0, 0.17 * dust, sd + 40.0, clumps, size);
+    }
+    // Hairs and nicks: a handful a frame, each somewhere new.
+    let hairs = i32(clamp(7.0 * count * fx.b.z, 0.0, 24.0));
+    for (var i = 0; i < hairs; i = i + 1) {
+        let fi = f32(i);
+        let h = hash22(vec2<f32>(fi * 3.3 + 1.0, sd));
+        let h2 = hash22(vec2<f32>(fi * 7.1 + 5.0, sd + 3.0));
+        let len = mix(25.0, 150.0, h2.x * h2.x) * size;
+        v = v + film_fibre(at, h * full, h2.y * TAU, len, 0.8 * size, 1.0 + 1.5 * h.x, sd + fi) * (0.4 + 0.5 * h.y);
+    }
+    let nicks = i32(clamp(6.0 * count * fx.b.w, 0.0, 24.0));
+    for (var i = 0; i < nicks; i = i + 1) {
+        let fi = f32(i);
+        let h = hash22(vec2<f32>(fi * 4.7 + 9.0, sd + 21.0));
+        let h2 = hash22(vec2<f32>(fi * 2.9 + 2.0, sd + 27.0));
+        let len = mix(12.0, 70.0, h2.x * h2.x) * size;
+        v = v + film_fibre(at, h * full, h2.y * TAU, len, (0.9 + 1.3 * h.x * h.x) * size, 0.0, sd + fi) * (0.6 + 0.4 * h.y);
+    }
+    // Lines: scratches down the reel. Each keeps its place for a second
+    // or two, shivers from frame to frame, breaks up along its length
+    // and comes and goes.
+    if (fx.c.x > 0.0) {
+        for (var i = 0; i < 4; i = i + 1) {
+            let fi = f32(i);
+            let lasts = 1.0 + 1.5 * hash12(vec2<f32>(fi, seed * 3.0));
+            let turn_no = floor(t / lasts + fi * 0.37);
+            let h = hash22(vec2<f32>(fi * 5.9 + turn_no * 1.3, seed * 2.3 + turn_no));
+            if (h.y > 0.45 * fx.c.x * count) {
+                continue;
+            }
+            let x = h.x * full.x + (hash12(vec2<f32>(frame, fi + seed)) - 0.5) * 2.0
+                + (vnoise(vec2<f32>(at.y * 0.004, fi + turn_no)) - 0.5) * 6.0;
+            let broken = smoothstep(0.3, 0.6, vnoise(vec2<f32>(at.y * 0.012 + frame * 3.0, fi * 9.0 + seed)));
+            let flick = 0.35 + 0.65 * hash12(vec2<f32>(frame * 1.7, fi * 3.0 + seed));
+            v = v + (1.0 - smoothstep(0.3 * size, 1.1 * size, abs(at.x - x))) * broken * flick * 0.45;
+        }
+    }
+    return screened(c, vec3<f32>(v * fx.a.x));
+}
+
+fn grime_dust(at: vec2<f32>, cell: f32, big: f32, density: f32, sd: f32) -> f32 {
+    let g = at / cell;
+    let id = floor(g);
+    var sum = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let cl = id + vec2<f32>(f32(dx), f32(dy));
+            if (hash12(cl * 1.7 + sd * 3.1) > density) {
+                continue;
+            }
+            let h = hash22(cl + sd * 17.3);
+            let h2 = hash22(cl * 2.3 + sd * 5.9 + 11.0);
+            var q = (g - cl - h) * cell;
+            let r = mix(0.7, big, pow(h2.x, 4.0));
+            q = turn(q, h2.y * TAU) * vec2<f32>(1.0, 0.6 + 0.8 * h.x);
+            let d = length(q) + (vnoise(q * 0.8 + cl * 7.0) - 0.5) * r;
+            sum = sum + (1.0 - smoothstep(r - 0.8, r + 0.6, d)) * (0.5 + 0.5 * h2.y);
+        }
+    }
+    return sum;
+}
+
+// amount, time, seed, count | hold, stains, edges, specks | blotches,
+// red, green, blue
+fn grime(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let seed = fx.a.z;
+    let count = fx.a.w;
+    let stains = fx.b.y;
+    let frame = film_frame(fx.a.y);
+    let beat = floor(frame / max(fx.b.x, 1.0));
+    let at = film_at(uv);
+    let full = frame_shape() * 1080.0;
+    let sd = seed * 13.7 + beat * 7.31;
+    var dark = 0.0;
+    // Stains: the inside a little darker, the rim clearly darker, like
+    // a dried water mark. These stay put.
+    let fine = fbm(at * 0.009 + seed * 2.1, 4);
+    let s = fbm(at * 0.0022 + seed * 5.3, 5) + (fine - 0.5) * 0.22;
+    dark = dark + smoothstep(0.58, 0.63, s) * 0.14 * stains * (0.5 + fine);
+    dark = dark + (1.0 - smoothstep(0.0, 0.018, abs(s - 0.6))) * 0.2 * stains * (0.4 + fine);
+    // Edges: the frame's border is dirtier, unevenly.
+    let inside = min(min(at.x, full.x - at.x), min(at.y, full.y - at.y));
+    let reach = 40.0 + 190.0 * fbm(at * 0.004 + seed * 8.0, 3);
+    dark = dark + (1.0 - smoothstep(0.0, reach, inside)) * 0.6 * fx.b.z * fbm(at * 0.02 + seed * 9.0, 3);
+    // Specks: dark dust and lint, new every few frames.
+    dark = dark + grime_dust(at, 37.0, 2.4, 0.06 * count * fx.b.w, sd) * 0.8;
+    dark = dark + grime_dust(turn(at, 0.5) + 200.0, 110.0, 8.0, 0.14 * count * fx.b.w, sd + 40.0) * 0.9;
+    // Blotches: one frame in a few has a big ragged splotch.
+    for (var i = 0; i < 2; i = i + 1) {
+        let fi = f32(i);
+        let h = hash22(vec2<f32>(fi * 3.3 + 1.0, sd));
+        let h2 = hash22(vec2<f32>(fi * 7.1 + 5.0, sd + 3.0));
+        if (h2.x > 0.22 * fx.c.x * count) {
+            continue;
+        }
+        let q = at - h * full;
+        let r = 18.0 + 60.0 * h2.y;
+        let d = length(q * vec2<f32>(1.0, 0.6 + 0.8 * h.x)) + (fbm(q * 0.03 + fi * 9.0 + sd, 3) - 0.5) * r * 1.6;
+        dark = dark + (1.0 - smoothstep(r * 0.7, r, d)) * 0.75;
+    }
+    return multiplied(c, mix(vec3<f32>(1.0), fx.c.yzw, clamp(dark * fx.a.x * 0.7, 0.0, 1.0)));
+}
+
+// amount, time, seed, hold | band, pulse
+fn flicker(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let t = fx.a.y;
+    let seed = fx.a.z;
+    let beat = floor(film_frame(t) / max(fx.a.w, 1.0));
+    // Most frames are nearly clean, a few dip hard.
+    let quick = pow(hash12(vec2<f32>(beat * 1.37, seed * 9.1)), 2.5);
+    let slow = 0.5 + 0.5 * sin(t * 2.1 + seed) * sin(t * 0.77 + seed * 2.0);
+    var dip = mix(quick, slow, fx.b.y * 0.5);
+    // A soft band of shade rolling up the picture.
+    let roll = 0.5 + 0.5 * sin((uv.y * 1.3 + t * 0.9 + seed) * TAU);
+    dip = dip + fx.b.x * 0.5 * roll * (0.4 + 0.6 * hash12(vec2<f32>(beat, seed + 4.0)));
+    return multiplied(c, vec3<f32>(1.0 - clamp(dip * fx.a.x, 0.0, 1.0)));
+}
+
+// amount, time, seed, wobble | tracking, switching, scan, snow
+fn tape(uv: vec2<f32>) -> vec4<f32> {
+    let amount = fx.a.x;
+    if (amount <= 0.0) {
+        return fetch(uv);
+    }
+    let t = fx.a.y;
+    let seed = fx.a.z;
+    let scan = fx.b.z;
+    let snow = fx.b.w;
+    let frame = film_frame(t);
+    let at = film_at(uv);
+    // Tape lines are two film pixels tall.
+    let row = floor(at.y / 2.0);
+    // The tracking band rolls up the frame about once every nine
+    // seconds; the bottom strip tears where the heads switch.
+    let band_y = fract(0.85 - t * 0.11 + seed * 0.37);
+    let off = (uv.y - band_y) / 0.03;
+    let band = exp(-off * off) * fx.b.x;
+    let strip = step(0.977, uv.y) * fx.b.y;
+    // How far this line is shoved sideways, in film pixels: lines
+    // jitter, the picture bends, the band and the strip tear.
+    var shove = fx.a.w * ((hash12(vec2<f32>(row, frame + seed)) - 0.5) * 1.6
+        + sin(uv.y * 9.0 + t * 2.3) * 2.0 * vnoise(vec2<f32>(t * 0.7, seed)));
+    shove = shove + band * (hash12(vec2<f32>(row * 1.3, frame * 1.7 + seed)) - 0.25) * 46.0;
+    shove = shove + strip * (22.0 + 34.0 * hash12(vec2<f32>(row, frame * 2.1 + seed)));
+    let c = fetch(uv + vec2<f32>(shove * amount / (1080.0 * frame_shape().x), 0.0));
+    // Scan lines and a rolling shade. A frame too small to hold a line
+    // every four pixels gets the shade without the lines.
+    let fits = clamp(min(fx.size.x, fx.size.y) / 540.0 - 0.5, 0.0, 1.0);
+    let line = mix(0.5, 0.5 + 0.5 * cos(at.y * PI * 0.5), fits);
+    var shade = 1.0 - scan * 0.2 * line;
+    shade = shade * (1.0 - 0.05 * scan * (0.5 + 0.5 * sin(uv.y * 5.0 - t * 1.7)));
+    shade = shade * (1.0 - 0.25 * band);
+    // Static: dropouts (a white dash with a tail), and snow in the
+    // band and the strip.
+    var v = 0.0;
+    let h = hash22(vec2<f32>(floor(at.x / 90.0), row) + vec2<f32>(frame * 3.1, seed));
+    if (h.x > 1.0 - 0.0016 * snow) {
+        v = v + (1.0 - fract(at.x / 90.0)) * (0.5 + 0.5 * h.y);
+    }
+    let grit = hash12(vec2<f32>(floor(at.x / 2.0), row) + frame * 7.7);
+    v = v + band * step(0.55, grit) * 0.7 * snow;
+    v = v + strip * step(0.45, grit) * 0.55 * snow;
+    let shaded = multiplied(c, vec3<f32>(mix(1.0, shade, min(amount, 1.0))));
+    return screened(shaded, vec3<f32>(v * min(amount, 1.0)));
+}
+
+// amount, progress, time, seed | push, split, torn, hold | blocks
+fn band_tear(uv: vec2<f32>) -> vec4<f32> {
+    let amount = fx.a.x;
+    if (amount <= 0.0) {
+        return fetch(uv);
+    }
+    let seed = fx.a.w;
+    let beat = floor(film_frame(fx.a.z) / max(fx.b.w, 1.0));
+    // The burst: nothing at the ends, strongest in the middle, never
+    // smooth.
+    var swell = sin(PI * clamp(fx.a.y, 0.0, 1.0)) * amount;
+    swell = swell * (0.55 + 0.45 * hash12(vec2<f32>(beat, seed * 3.0)));
+    // Bands of uneven height: most stay still, a few tear.
+    let rows = mix(6.0, 26.0, hash12(vec2<f32>(beat * 1.3, seed)));
+    let band = floor(uv.y * rows + hash12(vec2<f32>(beat, seed + 5.0)) * 3.0);
+    var shove = 0.0;
+    if (hash12(vec2<f32>(band * 3.7, beat * 1.9 + seed)) < fx.b.z) {
+        shove = (hash12(vec2<f32>(band, beat + seed * 7.0)) - 0.5) * 2.0;
+    }
+    // Small blocks that jump, on top of the bands.
+    let cell = floor(uv * vec2<f32>(24.0, 14.0));
+    if (hash12(cell + beat * 5.3 + seed) < 0.06 * fx.c.x) {
+        shove = shove + (hash12(cell * 1.3 + beat) - 0.5) * 1.2;
+    }
+    // Film pixels to a share of the frame's width.
+    let wide = 1080.0 * frame_shape().x;
+    let base = shove * fx.b.x * swell / wide;
+    let apart = fx.b.y * swell * (0.6 + 0.8 * hash12(vec2<f32>(beat, seed + 9.0))) / wide;
+    let red = fetch(uv + vec2<f32>(base + apart, 0.0));
+    let middle = fetch(uv + vec2<f32>(base, 0.0));
+    let blue = fetch(uv + vec2<f32>(base - apart, 0.0));
+    return vec4<f32>(red.r, middle.g, blue.b, max(middle.a, max(red.a, blue.a)));
+}
 ";

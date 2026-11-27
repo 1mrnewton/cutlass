@@ -72,7 +72,8 @@ pub(crate) const fn space(block: Block) -> Option<Space> {
         | Block::Stretch
         | Block::Blocks
         | Block::Kaleido
-        | Block::Fringe => None,
+        | Block::Fringe
+        | Block::BandTear => None,
         // Colour tuned by eye, and light whose thresholds and strengths
         // were tuned on encoded values.
         Block::Grade
@@ -103,7 +104,12 @@ pub(crate) const fn space(block: Block) -> Option<Space> {
         | Block::Rain
         | Block::Sparks
         | Block::Fog
-        | Block::Smoke => Some(Space::Display),
+        | Block::Smoke
+        | Block::FilmGrain
+        | Block::FilmDamage
+        | Block::Grime
+        | Block::Flicker
+        | Block::Tape => Some(Space::Display),
     }
 }
 
@@ -446,7 +452,10 @@ fn flash(uv: vec2<f32>) -> vec4<f32> {
 
 fn vignette(uv: vec2<f32>) -> vec4<f32> {
     let c = fetch(uv);
-    let d = length(uv - vec2<f32>(0.5)) * 1.4142;
+    // How far out this pixel is, 1 at the corner: measured in the frame's
+    // own shape, or with `round` in a true circle.
+    let shape = mix(vec2<f32>(1.0), fx.size / min(fx.size.x, fx.size.y), fx.a.z);
+    let d = length((uv - vec2<f32>(0.5)) * shape) / length(shape * 0.5);
     let dark = smoothstep(fx.a.y, fx.a.y + 0.5, d) * fx.a.x;
     return vec4<f32>(c.rgb * (1.0 - dark), c.a);
 }
@@ -1084,6 +1093,12 @@ fn kernel(uv: vec2<f32>) -> vec4<f32> {
         case 46u: { return sparks(uv); }
         case 47u: { return fog(uv); }
         case 48u: { return smoke(uv); }
+        case 49u: { return film_grain(uv); }
+        case 50u: { return film_damage(uv); }
+        case 51u: { return grime(uv); }
+        case 52u: { return flicker(uv); }
+        case 53u: { return tape(uv); }
+        case 54u: { return band_tear(uv); }
         case 100u: { return gauss(uv); }
         case 101u: { return halve(uv); }
         case 102u: { return smooth_up(uv); }
@@ -1941,6 +1956,12 @@ mod tests {
             step(Block::Sparks, &[]),
             step(Block::Fog, &[]),
             step(Block::Smoke, &[]),
+            step(Block::FilmGrain, &[]),
+            step(Block::FilmDamage, &[]),
+            step(Block::Grime, &[]),
+            step(Block::Flicker, &[]),
+            step(Block::Tape, &[]),
+            step(Block::BandTear, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
     }
@@ -2004,6 +2025,47 @@ mod tests {
                 mean(&tall)
             );
         }
+    }
+
+    #[test]
+    fn film_marks_light_or_shade_the_picture_as_named_and_draw_the_same_each_time() {
+        let Some(renderer) = renderer() else { return };
+        let size = (480, 270);
+        let flat = grey(size);
+        let run = |block: Block, set: &[(usize, f32)]| {
+            let once = draw(&renderer, &flat, size, &[step(block, set)]);
+            let again = draw(&renderer, &flat, size, &[step(block, set)]);
+            assert_eq!(once, again, "{block:?}");
+            assert!(once.chunks(4).all(|pixel| pixel[3] == 255), "{block:?}");
+            once
+        };
+        // Grain goes both ways and leaves the picture as bright as it was.
+        let grain = run(Block::FilmGrain, &[(0, 0.3), (1, 1.3)]);
+        assert!(grain.chunks(4).any(|pixel| pixel[0] > 134));
+        assert!(grain.chunks(4).any(|pixel| pixel[0] < 122));
+        assert!((mean(&grain) - 128.0).abs() < 2.0, "{}", mean(&grain));
+        // Bright dirt only lifts, dark dirt and flicker only lower.
+        let damage = run(Block::FilmDamage, &[(0, 2.0), (1, 1.3), (3, 2.0)]);
+        assert!(damage.chunks(4).all(|pixel| pixel[0] >= 127));
+        assert!(damage.chunks(4).any(|pixel| pixel[0] > 180));
+        for (block, set) in [
+            (Block::Grime, &[(0, 1.0), (1, 1.3)][..]),
+            (Block::Flicker, &[(0, 0.5), (1, 1.3), (4, 1.0)][..]),
+        ] {
+            let shaded = run(block, set);
+            assert!(
+                shaded
+                    .chunks(4)
+                    .all(|pixel| pixel[..3].iter().all(|byte| *byte <= 129)),
+                "{block:?} lit a pixel"
+            );
+            assert!(mean(&shaded) < 127.0, "{block:?}: {}", mean(&shaded));
+        }
+        // Tape shades the picture with its scan lines and lights it with
+        // its static.
+        let tape = run(Block::Tape, &[(0, 1.0), (1, 1.3), (7, 3.0)]);
+        assert!(mean(&tape) < 127.0, "{}", mean(&tape));
+        assert!(tape.chunks(4).any(|pixel| pixel[0] > 160));
     }
 
     #[test]
@@ -2540,6 +2602,7 @@ mod tests {
             step(Block::Kaleido, &[(0, 6.0), (1, 30.0)]),
             step(Block::Fringe, &[(0, 0.1)]),
             step(Block::Stretch, &[(0, 1.5), (1, 0.7)]),
+            step(Block::BandTear, &[(0, 2.0), (1, 0.5), (2, 1.3), (6, 1.0)]),
         ] {
             close(&draw(&renderer, &flat, size, &[moved]), &flat);
         }

@@ -165,6 +165,21 @@ fn map_stream(movie_timescale: u32, stream: &LegacyStream) -> Result<Stream, Ope
     for edit in &stream.edits {
         edits.push(map_edit(edit, movie_timescale, params.timescale.get())?);
     }
+    // An `iTunSMPB` note stands in for the edit list the file does not
+    // have: one edit over the valid samples, as the CAF and Ogg demuxers
+    // state their priming, and the same counts as the trim.
+    if let Some(note) = stream.gapless
+        && let MediaKind::Audio(audio) = params.kind
+        && let Some(edit) = gapless_edit(note)
+    {
+        edits.push(edit);
+        let rate = audio.sample_rate;
+        let ticks = params.timescale.get();
+        trim = Trim::new(
+            samples_of(note.priming, rate, ticks),
+            samples_of(note.remainder, rate, ticks),
+        );
+    }
     Ok(Stream::new(
         TrackId::new(params.track_id),
         described,
@@ -174,6 +189,25 @@ fn map_stream(movie_timescale: u32, stream: &LegacyStream) -> Result<Stream, Ope
         trim,
     )
     .with_display(stream.display))
+}
+
+/// The edit an `iTunSMPB` note describes: play the valid ticks from the
+/// end of the priming, at the file's rate.
+fn gapless_edit(note: crate::legacy::Gapless) -> Option<Edit> {
+    let start = i64::try_from(note.priming).ok()?;
+    let valid = i64::try_from(note.valid).ok()?;
+    Edit::try_new(Some(start), valid, 65_536, 65_536).ok()
+}
+
+/// `ticks` of a `timescale` clock in samples at `rate`, when that is a whole
+/// number: an HE-AAC track often counts its ticks at half its output rate.
+fn samples_of(ticks: u64, rate: u32, timescale: u32) -> Option<u64> {
+    let scaled = u128::from(ticks) * u128::from(rate);
+    let per = u128::from(timescale.max(1));
+    if !scaled.is_multiple_of(per) {
+        return None;
+    }
+    u64::try_from(scaled / per).ok()
 }
 
 fn map_edit(

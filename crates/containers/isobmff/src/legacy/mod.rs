@@ -23,4 +23,4 @@ pub use params::{AudioParams, MediaKind, StreamParams, VideoParams};
 pub use pixel::ColorTags;
 pub use sample::SampleFormat;
 pub use source::{FileSource, SliceSource, Source};
-pub use stream::{Edit, Stream};
+pub use stream::{Edit, Gapless, Stream};

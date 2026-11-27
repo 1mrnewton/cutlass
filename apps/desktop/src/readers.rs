@@ -667,6 +667,192 @@ mod tests {
         }
     }
 
+    /// A mono AAC M4A of `samples` from the Rust encoder with no edit list,
+    /// as `afconvert` writes one, and the ticks its packets cover. `note`
+    /// adds the `iTunSMPB` item such a file states its priming in: this
+    /// encoder's 1024 samples, the samples given, and the padding that
+    /// fills the last packet.
+    fn aac_m4a_without_edits(samples: &[f32], note: bool) -> (Vec<u8>, i64) {
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        let spec = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
+        let mut encoder = cutlass_aac::AacEncoder::open(&spec).expect("encoder");
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), samples.to_vec()).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        // The index after the media, so user data joins it without moving
+        // a chunk.
+        let mut mux = cutlass_isobmff::Mp4Mux::with_options(
+            std::io::Cursor::new(Vec::new()),
+            cutlass_isobmff::Mp4Options {
+                brand: cutlass_isobmff::FileBrand::M4a,
+                fast_start: false,
+                recoverable: false,
+                creation_time: None,
+            },
+        );
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Aac), 48_000, 1, Vec::new())
+                .expect("params");
+        let track = mux
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(48_000),
+                language: None,
+            })
+            .expect("stream");
+        let mut ticks = 0;
+        for packet in &packets {
+            for side in &packet.side {
+                // The encoder's delay is not handed over: the mux would
+                // write it as an edit list.
+                if let SideData::Config(config) = side {
+                    mux.set_config(track, config).expect("config");
+                }
+            }
+            let timestamp =
+                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                    .expect("timestamp");
+            let out = Packet::try_new(
+                track.get(),
+                packet.data.clone(),
+                timestamp,
+                Timescale::new(48_000),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&out).expect("write");
+            ticks += packet.duration;
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(48_000),
+            ticks,
+        }])
+        .expect("finish");
+        let mut bytes = mux.into_writer().expect("writer").into_inner();
+        if !note {
+            return (bytes, ticks);
+        }
+        let valid = i64::try_from(samples.len()).expect("valid");
+        let text = format!(
+            " 00000000 {:08X} {:08X} {:016X} 00000000 00000000",
+            1024,
+            ticks - 1024 - valid,
+            valid
+        );
+        let boxed = |kind: &[u8; 4], payload: &[u8]| {
+            let mut out = u32::try_from(payload.len() + 8)
+                .expect("size")
+                .to_be_bytes()
+                .to_vec();
+            out.extend(kind);
+            out.extend(payload);
+            out
+        };
+        let mut item = boxed(b"mean", b"\0\0\0\0com.apple.iTunes");
+        item.extend(boxed(b"name", b"\0\0\0\0iTunSMPB"));
+        item.extend(boxed(
+            b"data",
+            &[b"\0\0\0\x01\0\0\0\0".as_slice(), text.as_bytes()].concat(),
+        ));
+        let mut hdlr = vec![0; 8];
+        hdlr.extend(b"mdirappl");
+        hdlr.extend([0; 9]);
+        let mut meta = vec![0; 4];
+        meta.extend(boxed(b"hdlr", &hdlr));
+        meta.extend(boxed(b"ilst", &boxed(b"----", &item)));
+        let udta = boxed(b"udta", &boxed(b"meta", &meta));
+        let mut at = 0;
+        loop {
+            let mut size = u32::from_be_bytes(bytes[at..at + 4].try_into().expect("size")) as usize;
+            if size == 1 {
+                let large = u64::from_be_bytes(bytes[at + 8..at + 16].try_into().expect("size"));
+                size = usize::try_from(large).expect("size");
+            }
+            if &bytes[at + 4..at + 8] == b"moov" {
+                assert_eq!(at + size, bytes.len(), "moov is not last");
+                let grown = u32::try_from(size + udta.len()).expect("size");
+                bytes[at..at + 4].copy_from_slice(&grown.to_be_bytes());
+                bytes.extend(udta);
+                return (bytes, ticks);
+            }
+            at += size;
+        }
+    }
+
+    /// An M4A that states its AAC priming only in `iTunSMPB`, with no edit
+    /// list, plays from its first valid sample to its last: the click the
+    /// encoder was given at sample 5000 is heard at 5000, the padding that
+    /// fills the last packet is not heard, and the duration is the valid
+    /// samples. The same packets without the note play the priming first.
+    #[test]
+    fn an_m4a_with_only_an_itunsmpb_note_plays_from_its_first_valid_sample() {
+        const VALID: usize = 30_000;
+        let mut samples: Vec<f32> = (0..VALID)
+            .map(|i| ((i as f32) * 0.05).sin() * 0.1)
+            .collect();
+        samples[5_000] = 0.9;
+        let loudest = |pcm: &[f32]| {
+            pcm.iter()
+                .enumerate()
+                .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+                .map(|(index, _)| index)
+        };
+        let dir = std::env::temp_dir();
+        let plain_path = dir.join(format!(
+            "cutlass-readers-smpb-plain-{}.m4a",
+            std::process::id()
+        ));
+        let noted_path = dir.join(format!(
+            "cutlass-readers-smpb-noted-{}.m4a",
+            std::process::id()
+        ));
+        let (plain, ticks) = aac_m4a_without_edits(&samples, false);
+        let (noted, _) = aac_m4a_without_edits(&samples, true);
+        let total = usize::try_from(ticks).expect("ticks");
+        assert!(total > 1024 + VALID, "no padding to trim");
+        std::fs::write(&plain_path, plain).expect("write");
+        std::fs::write(&noted_path, noted).expect("write");
+        let window = u32::try_from(total + 4_096).expect("window");
+        let micros = |sample: usize| cutlass_model::Micros(sample as i64 * 1_000_000 / 48_000);
+
+        // No note: every decoded sample, the priming first.
+        let mut media = installed_readers().open(&plain_path).expect("open");
+        assert_eq!(media.info().duration, Some(micros(total)));
+        let raw = media
+            .audio_from(cutlass_model::Micros(0), window)
+            .expect("audio");
+        let raw = raw.as_f32().expect("f32").to_vec();
+        assert_eq!(raw.len(), total);
+        assert_eq!(loudest(&raw), Some(1024 + 5_000));
+
+        // The note: the valid samples and nothing else.
+        let mut media = installed_readers().open(&noted_path).expect("open");
+        assert_eq!(media.info().duration, Some(micros(VALID)));
+        let heard = media
+            .audio_from(cutlass_model::Micros(0), window)
+            .expect("audio");
+        let heard = heard.as_f32().expect("f32");
+        assert_eq!(heard.len(), VALID);
+        assert_eq!(loudest(heard), Some(5_000));
+        assert_eq!(heard, &raw[1024..1024 + VALID]);
+
+        // A seek lands on the asked sample, and the end is still cut.
+        let mut media = installed_readers().open(&noted_path).expect("open");
+        let later = media.audio_from(micros(24_000), window).expect("seek");
+        let later = later.as_f32().expect("f32");
+        assert_eq!(later.len(), VALID - 24_000);
+        for (index, value) in later.iter().enumerate() {
+            assert!(
+                (value - raw[1024 + 24_000 + index]).abs() < 1e-6,
+                "sample {index}"
+            );
+        }
+        std::fs::remove_file(&plain_path).expect("remove");
+        std::fs::remove_file(&noted_path).expect("remove");
+    }
+
     /// An `.opus` file opens, plays from the start exactly what the Rust
     /// decoder gives after the pre-skip, and converges on it after a seek.
     #[test]

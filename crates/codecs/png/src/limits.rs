@@ -7,8 +7,9 @@
 /// Longest edge this codec will decode or encode.
 pub(crate) const MAX_EDGE: u32 = 16_384;
 
-/// Most pixels in one still.
-pub(crate) const MAX_PIXELS: u64 = 16_777_216;
+/// Most pixels in one still: 8192 by 8192, 64 megapixels, as the JPEG and
+/// WebP decoders allow.
+pub(crate) const MAX_PIXELS: u64 = 67_108_864;
 
 /// Largest single chunk, including an embedded profile.
 pub(crate) const MAX_CHUNK: usize = 16 * 1024 * 1024;

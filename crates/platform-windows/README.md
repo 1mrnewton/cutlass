@@ -95,6 +95,8 @@ What has not been done: none of these tests were run for this README (they need 
 | Sample rate | 192 kHz |
 | One slice given to the output queue | 64 KiB |
 
+A still over the size limits declines with `Unsupported`, not `Limit`, so a later opener with a larger cap can still run: a photo over 16,777,216 pixels goes to `cutlass-jpeg` or `cutlass-png`, which take up to 67,108,864.
+
 - Only H.264, HEVC, AAC, JPEG and PNG are wired. AV1, VP9, MPEG-2, MP3 and WebP, GIF or HEIC stills do not go through Windows.
 - A decoded picture is always copied back to CPU memory. The Direct3D surface is not handed to the renderer, and a platform frame token given to the encoder is `Unsupported`.
 - The output queue only replaces its slice. It has no way to append a stream or report how many frames have played, which the Apple queue has, and it is fixed at 48 kHz stereo.

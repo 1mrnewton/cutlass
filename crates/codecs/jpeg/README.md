@@ -67,7 +67,7 @@ fn decode(file: Vec<u8>) -> Result<StillImage, CodecError> {
 `cargo test -p cutlass-jpeg` runs the tests in `src/tests.rs`:
 
 - Hand-built streams with exact expected samples: a zero block, DC and AC coefficients, SOF1, 4:2:0 MCU padding, progressive AC, successive-approximation DC and AC, and a restart interval.
-- All eight EXIF orientations, a broken EXIF block, every refusal in the table above, hostile headers (65535 by 65535, 4097 markers, a zero-length segment, a scan before the frame), and the factory and encoder calls.
+- All eight EXIF orientations, a broken EXIF block, every refusal in the table above, hostile headers (65535 by 65535, 4097 markers, a zero-length segment, a scan before the frame), frame headers at camera sizes (6000 by 4000 up to 8192 by 8192) that pass the size check and one at 8192 by 8193 that does not, and the factory and encoder calls.
 - Encoder round trips through this decoder, and the reciprocal quantizer against plain division for every step from 1 to 255.
 - With `cjpeg` and `djpeg` on `PATH`: a 67 by 45 picture in ten `cjpeg` layouts (four samplings, gray, restart, progressive, optimized tables, quality 100 and 5) must decode to exactly the bytes of `djpeg -dct int`.
 - With `ffmpeg` on `PATH`: FFmpeg must decode this encoder's quality-90 gradient with a mean absolute error of at most 20, and an FFmpeg-made JPEG must decode to the right size. FFmpeg is a separate program started by the tests; the crate does not link it.
@@ -109,7 +109,7 @@ Limits, in `src/limits.rs` and `src/image.rs`:
 | Limit | Value | Error past it |
 | --- | --- | --- |
 | Longest edge | 16 384 pixels | `Limit` `jpeg size` |
-| Pixels in one picture | 16 777 216 | `Limit` `jpeg size` |
+| Pixels in one picture | 67 108 864 (8192 by 8192) | `Limit` `jpeg size` |
 | Input bytes | 64 MiB | `Limit` `jpeg bytes` |
 | Marker segments in one image | 4 096 | `Limit` `jpeg markers` |
 | Blocks in one MCU, baseline | 10 | `Malformed` `mcu` |
@@ -119,12 +119,11 @@ The size check runs on the frame header, before any plane is allocated, and plan
 
 Gaps:
 
-- The pixel limit refuses pictures larger than 4096 by 4096 in area, which includes common camera sizes such as 6000 by 4000.
 - No arithmetic, lossless, differential, hierarchical, JPEG-LS, 12-bit, or CMYK decoding.
 - The encoder writes no progressive scans, no SOF1, no optimized Huffman tables, and no EXIF.
 - ICC profiles and embedded thumbnails are not read.
 - A JPEG image with no Huffman tables fails here. `cutlass-mjpeg` supplies the default tables for Motion JPEG through `Tables::standard_huffman`.
-- Decoded stills are stored one `u16` per 8-bit sample.
+- Decoded stills are stored one `u16` per 8-bit sample. A 48-megapixel photo (8064 by 6048) peaks at about 520 MB while it decodes, and at about 670 MB when its EXIF orientation turns it.
 
 ## Specifications
 

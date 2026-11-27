@@ -1233,3 +1233,24 @@ fn an_avi1_segment_names_its_field_polarity() {
     assert_eq!(with_app0(b"AVI1"), None);
     assert_eq!(with_app0(b"AVI2\x01"), None);
 }
+
+#[test]
+fn camera_sized_frames_pass_the_size_check_and_past_64_megapixels_do_not() {
+    // 6000 by 4000, 8064 by 6048 and 9504 by 6336 are camera and phone
+    // photos. Their frame header passes, and the missing scan is what fails.
+    for (width, height) in [(6000, 4000), (8064, 6048), (9504, 6336), (8192, 8192)] {
+        let mut stream = vec![0xff, 0xd8];
+        stream.extend(sof(0xc0, width, height, &[(1, 0x11, 0)]));
+        match decode(&stream) {
+            Err(CodecError::Limit { what }) => panic!("{width}x{height}: limit {what}"),
+            Err(_) => {}
+            Ok(_) => panic!("{width}x{height}: a frame with no scan decoded"),
+        }
+    }
+    let mut stream = vec![0xff, 0xd8];
+    stream.extend(sof(0xc0, 8192, 8193, &[(1, 0x11, 0)]));
+    assert!(matches!(
+        decode(&stream),
+        Err(CodecError::Limit { what: "jpeg size" })
+    ));
+}

@@ -257,7 +257,7 @@ fn outputs(decoder: &mut MjpegDecoder, data: &[u8]) -> Result<Vec<u8>, String> {
     let picture = decoder.decode(data).map_err(|error| error.to_string())?;
     let (width, height) = (picture.width, picture.height);
     assert!(width > 0 && height > 0, "an accepted picture is empty");
-    assert!(u64::from(width) * u64::from(height) <= 16_777_216);
+    assert!(u64::from(width) * u64::from(height) <= cutlass_jpeg::MAX_PIXELS);
     let mut rgba = Vec::new();
     picture
         .to_rgba(&mut rgba)

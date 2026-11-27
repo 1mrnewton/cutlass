@@ -9,9 +9,11 @@ use cutlass_container::Limits;
 /// Largest still file this crate will accept.
 ///
 /// One JPEG, PNG, or still WebP is one packet, so this is also the largest
-/// packet. GIF and animated WebP frames share the same budget. 32 MiB covers
-/// a large photograph and stops a declared-size allocation.
-pub const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
+/// packet. GIF and animated WebP frames share the same budget. 128 MiB is
+/// the PNG decoder's cap on image data, and holds a photograph up to the
+/// decoders' 64 megapixels: a 24-megapixel photo saved as PNG is about
+/// 40 MiB. It still stops a declared-size allocation.
+pub const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Most frames one GIF or animated WebP may contain.
 ///

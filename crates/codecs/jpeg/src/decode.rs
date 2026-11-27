@@ -36,23 +36,32 @@ pub fn read_jpeg_info(bytes: &[u8]) -> Result<JpegInfo, CodecError> {
 
 /// Decode the picture and turn it upright by its EXIF orientation.
 pub(crate) fn decode_jpeg(bytes: &[u8]) -> Result<StillImage, CodecError> {
-    let decoded = decode_image(bytes, &mut Tables::new())?;
-    let image = decoded.image;
+    let image = decode_image(bytes, &mut Tables::new())?.image;
     let (color, channels) = match image.color {
         ColorModel::Gray => (ColorType::Gray, 1),
         ColorModel::Rgb | ColorModel::YCbCr => (ColorType::Rgb, 3),
     };
-    let samples: Vec<u16> = image.to_rgb()?.into_iter().map(u16::from).collect();
-    let (width, height, samples) = match image.orientation {
-        Some(tag) => upright(
-            Orientation::from_tag(u32::from(tag)),
-            image.width,
-            image.height,
-            channels,
-            &samples,
-        )?,
-        None => (image.width, image.height, samples),
+    let (width, height) = (image.width, image.height);
+    let turn = image
+        .orientation
+        .map(|tag| Orientation::from_tag(u32::from(tag)))
+        .filter(|turn| turn.tag() != 1);
+    // A still holds two bytes a sample, so the planes are let go and the
+    // picture is turned while it is one byte a sample: a 48-megapixel photo
+    // is 290 MB once widened, and no more than that and its bytes are held
+    // at once.
+    let rgb = image.to_rgb()?;
+    drop(image);
+    let (width, height, rgb) = match turn {
+        Some(turn) => upright(turn, width, height, channels, &rgb)?,
+        None => (width, height, rgb),
     };
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(rgb.len())
+        .map_err(|_| CodecError::Limit { what: "jpeg size" })?;
+    samples.extend(rgb.iter().map(|&sample| u16::from(sample)));
+    drop(rgb);
     StillImage::from_samples(width, height, color, BitDepth::Eight, samples)
         .checked()
         .map_err(|_| CodecError::Malformed {

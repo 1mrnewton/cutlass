@@ -42,6 +42,7 @@ A factory asks openers in the order they were registered and takes the first tha
 
 - AAC packets are raw access units. The configuration is an AudioSpecificConfig; an `esds` is accepted too.
 - The decoder gives interleaved `f32` or `i16`.
+- The decoder holds the last frame back until it is drained. The engine drains it once at the end of a stream, so a file's last 1024 samples are heard.
 - The encoder takes 44.1 or 48 kHz in mono, stereo or 5.1, at the nearest of 96, 128, 160 or 192 kbit/s. Any other rate or layout declines, so the Rust AAC encoder takes it. Its packets carry no `SideData::Gapless`.
 
 ### Stills
@@ -94,6 +95,8 @@ What has not been done: none of these tests were run for this README (they need 
 | Sound channels | 8 |
 | Sample rate | 192 kHz |
 | One slice given to the output queue | 64 KiB |
+
+A still over the size limits declines with `Unsupported`, not `Limit`, so a later opener with a larger cap can still run: a photo over 16,777,216 pixels goes to `cutlass-jpeg` or `cutlass-png`, which take up to 67,108,864.
 
 - Only H.264, HEVC, AAC, JPEG and PNG are wired. AV1, VP9, MPEG-2, MP3 and WebP, GIF or HEIC stills do not go through Windows.
 - A decoded picture is always copied back to CPU memory. The Direct3D surface is not handed to the renderer, and a platform frame token given to the encoder is `Unsupported`.

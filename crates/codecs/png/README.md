@@ -64,7 +64,7 @@ let png = &packets[0].data;
 `cargo test -p cutlass-png` runs:
 
 - Hand-built files with stored zlib blocks and hand-computed filters: gray at 1, 8 and 16 bits, RGBA, 8-bit indexed color with `tRNS`, the Sub, Up, Average and Paeth filters, Adam7 placement at 1, 2, 4 and 8 bits, metadata, one-byte `IDAT` chunks, and the animation chunks.
-- Malformed files: bad CRC, truncation, bad signature, filter type 5, filter method 64, a zero edge, an edge of 20 000, trailing bytes, a chunk between two `IDAT` chunks, an unknown critical chunk, and palette and `tRNS` placement.
+- Malformed files: bad CRC, truncation, bad signature, filter type 5, filter method 64, a zero edge, an edge of 20 000, camera sizes (6000 by 4000 up to 8192 by 8192) that pass the size check and 8192 by 8193 that does not, trailing bytes, a chunk between two `IDAT` chunks, an unknown critical chunk, and palette and `tRNS` placement.
 - Round trips through the encoder: gray, RGB, gray with alpha and RGBA at every depth they allow, with and without Adam7; 2-bit indexed color; and 24 small random pictures. 48 random buffers must all fail.
 - FFmpeg, both ways, exact samples: it decodes this encoder's RGB, RGBA, gray with alpha, 16-bit gray, 16-bit RGB and 8-bit indexed files, and this decoder reads its RGB (default and `-pred mixed`), RGBA, gray with alpha, 8-bit indexed and 1-bit gray files and its 16-bit gray, gray with alpha, RGB and RGBA files.
 - ImageMagick: this decoder reads its 2-bit and 4-bit gray files and its Adam7 gray file, and it reads this encoder's Adam7 gray file, exact samples.
@@ -109,7 +109,7 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 | Limit | Value |
 | --- | --- |
 | Longest edge | 16 384 pixels |
-| Pixels in one picture | 16 777 216 |
+| Pixels in one picture | 67 108 864 (8192 by 8192) |
 | One chunk | 16 MiB |
 | All `IDAT` data together | 128 MiB |
 | One text or ICC profile after inflating | 1 MiB |

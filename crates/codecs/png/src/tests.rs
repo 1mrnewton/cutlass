@@ -1125,3 +1125,22 @@ fn local_png() -> Option<PathBuf> {
     let path = checkout.join("../local-files/04-motion-graphics.png");
     path.is_file().then_some(path)
 }
+
+#[test]
+fn camera_sized_pictures_pass_the_size_check_and_past_64_megapixels_do_not() {
+    // 6000 by 4000, 8064 by 6048 and 9504 by 6336 are camera and phone
+    // photos. Their header passes, and the short image data is what fails.
+    for (width, height) in [(6000, 4000), (8064, 6048), (9504, 6336), (8192, 8192)] {
+        let err = decode_bytes(&png_of(ihdr(width, height, 8, 2, 0), &[0, 1], &[]))
+            .expect_err("short image data");
+        assert!(
+            !matches!(err, cutlass_decode::CodecError::Limit { .. }),
+            "{width}x{height}: {err:?}"
+        );
+    }
+    let err = decode_bytes(&png_of(ihdr(8192, 8193, 8, 2, 0), &[0, 1], &[])).expect_err("size");
+    assert!(matches!(
+        err,
+        cutlass_decode::CodecError::Limit { what: "png image" }
+    ));
+}

@@ -1,8 +1,14 @@
 //! ImageIO stills. One packet is one file. GIF may hold several pictures.
 //!
-//! Samples come back as 8-bit straight RGBA, upright. A 16-bit or indexed
-//! still is declined so a software codec can keep that coded domain when it
-//! is registered after this opener.
+//! Samples come back as 8 bits, upright: RGB when every pixel is opaque, as
+//! `cutlass-jpeg` and `cutlass-png` return a photo, and straight RGBA
+//! otherwise. A 16-bit or indexed still is declined so a software codec can
+//! keep that coded domain when it is registered after this opener.
+//!
+//! Stills have their own caps, [`still_ok`] and [`still_packet_ok`]: a photo
+//! of up to 64 megapixels, in a file of up to 128 MiB, is drawn through its
+//! colour profile here rather than going to a software decoder that reads
+//! no profile.
 
 use std::ptr;
 use std::sync::Arc;
@@ -16,7 +22,7 @@ use cutlass_encode::{AudioInput, Encoder, FrameInput, Packet as Encoded, Picture
 
 use super::cf::{self, Cf};
 use super::sys;
-use crate::limits::{packet_ok, picture_ok};
+use crate::limits::{picture_ok, still_ok, still_packet_ok};
 use cutlass_decode::orient::{self, Orientation};
 
 pub struct StillDecoder {
@@ -37,7 +43,7 @@ pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError
         return Err(CodecError::Unsupported { what: "imageio" });
     }
     if params.width != 0 || params.height != 0 {
-        match picture_ok(params.width, params.height) {
+        match still_ok(params.width, params.height) {
             Err(CodecError::Limit { .. }) => {
                 return Err(CodecError::Unsupported {
                     what: "picture edge",
@@ -102,7 +108,7 @@ impl Decoder for StillDecoder {
     fn reset(&mut self) {}
 
     fn decode_picture(&mut self, packet: &Packet) -> Result<Vec<StillOutput>, CodecError> {
-        packet_ok(packet.data.len())?;
+        still_packet_ok(packet.data.len())?;
         let images = decode_bytes(&packet.data)?;
         Ok(images
             .into_iter()
@@ -190,7 +196,7 @@ fn still_packet(data: Vec<u8>) -> Encoded {
 }
 
 pub fn decode_bytes(bytes: &[u8]) -> Result<Vec<StillImage>, CodecError> {
-    packet_ok(bytes.len())?;
+    still_packet_ok(bytes.len())?;
     let data = cf::data(bytes)?;
     // SAFETY: `data` is a live `CFData` the source retains; null options are
     // allowed. The returned source is owned (Create rule) and goes to `Cf`.
@@ -208,31 +214,36 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Vec<StillImage>, CodecError> {
             what: "imageio",
         });
     }
+    // The picture is drawn once, so ImageIO keeps no decoded copy of its own
+    // beside the one drawn here: a 48-megapixel photo is 195 MB of it.
+    // SAFETY: the key is ImageIO's constant string, set before any code here
+    // runs and never written.
+    let cache_key = unsafe { sys::kCGImageSourceShouldCache };
+    let no_cache = cf::dictionary(&[cache_key], &[cf::boolean(false)])?;
     let mut images = Vec::with_capacity(count);
     for index in 0..count {
-        // SAFETY: `source` is a live `CGImageSource` and `index` is below its
-        // count. The returned image is owned (Create rule) and goes to `Cf`.
+        // SAFETY: `source` is a live `CGImageSource`, `index` is below its
+        // count and `no_cache` is a live `CFDictionary`. The returned image is
+        // owned (Create rule) and goes to `Cf`.
         let image = Cf::from_owned(unsafe {
-            sys::CGImageSourceCreateImageAtIndex(source.as_ptr(), index, ptr::null())
+            sys::CGImageSourceCreateImageAtIndex(source.as_ptr(), index, no_cache.as_ptr())
         })
         .ok_or(CodecError::Malformed {
             at_bit: 0,
             what: "imageio frame",
         })?;
         let orientation = orientation_at(&source, index);
-        let (width, height, rgba) = draw_rgba(&image)?;
-        let (width, height, mut rgba) = orient::upright(orientation, width, height, 4, &rgba)?;
+        let drawn = draw_rgba(&image);
+        drop(image);
+        let (width, height, rgba) = drawn?;
+        let (width, height, mut rgba) = if orientation.tag() == 1 {
+            (width, height, rgba)
+        } else {
+            orient::upright(orientation, width, height, 4, &rgba)?
+        };
         unpremultiply(&mut rgba);
-        let samples = rgba.iter().map(|byte| u16::from(*byte)).collect::<Vec<_>>();
-        picture_ok(width, height)?;
-        let still =
-            StillImage::from_samples(width, height, ColorType::Rgba, BitDepth::Eight, samples)
-                .checked()
-                .map_err(|_| CodecError::Malformed {
-                    at_bit: 0,
-                    what: "imageio samples",
-                })?;
-        images.push(still);
+        still_ok(width, height)?;
+        images.push(still_from_rgba(width, height, &rgba)?);
     }
     Ok(images)
 }
@@ -254,6 +265,33 @@ fn orientation_at(source: &Cf, index: usize) -> Orientation {
     Orientation::from_tag(u32::try_from(cf::read_i32(value).unwrap_or(1)).unwrap_or(1))
 }
 
+/// Straight RGBA as a still: RGB when every pixel is opaque, which is two
+/// bytes a pixel less to hold, and RGBA otherwise.
+fn still_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<StillImage, CodecError> {
+    let pixels = rgba.as_chunks::<4>().0;
+    let opaque = pixels.iter().all(|pixel| pixel[3] == 255);
+    let (color, channels) = if opaque {
+        (ColorType::Rgb, 3)
+    } else {
+        (ColorType::Rgba, 4)
+    };
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(pixels.len().saturating_mul(channels))
+        .map_err(|_| CodecError::Limit {
+            what: "picture bytes",
+        })?;
+    for pixel in pixels {
+        samples.extend(pixel.iter().take(channels).map(|byte| u16::from(*byte)));
+    }
+    StillImage::from_samples(width, height, color, BitDepth::Eight, samples)
+        .checked()
+        .map_err(|_| CodecError::Malformed {
+            at_bit: 0,
+            what: "imageio samples",
+        })
+}
+
 fn draw_rgba(image: &Cf) -> Result<(u32, u32, Vec<u8>), CodecError> {
     // SAFETY: callers pass a live `CGImage`.
     let width = unsafe { sys::CGImageGetWidth(image.as_ptr()) };
@@ -265,7 +303,7 @@ fn draw_rgba(image: &Cf) -> Result<(u32, u32, Vec<u8>), CodecError> {
     let height_u = u32::try_from(height).map_err(|_| CodecError::Limit {
         what: "picture edge",
     })?;
-    picture_ok(width_u, height_u)?;
+    still_ok(width_u, height_u)?;
     let row = width.checked_mul(4).ok_or(CodecError::Limit {
         what: "picture bytes",
     })?;
@@ -620,7 +658,22 @@ mod tests {
         assert!(bytes.starts_with(b"\x89PNG"));
         let decoded = decode_file(&bytes).expect("decode");
         assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].samples, rgba(2, 2, [10, 20, 30, 255]).samples);
+        assert_eq!(decoded[0].color, ColorType::Rgb);
+        assert_eq!(decoded[0].samples, [10_u16, 20, 30].repeat(4));
+    }
+
+    #[test]
+    fn a_translucent_png_stays_rgba_and_an_opaque_one_is_rgb() {
+        let pixels = [
+            10u8, 20, 30, 255, 40, 50, 60, 128, 70, 80, 90, 255, 0, 0, 0, 0,
+        ];
+        let bytes = encode_file("public.png", 2, 2, &pixels).expect("encode");
+        let decoded = decode_file(&bytes).expect("decode");
+        assert_eq!(decoded[0].color, ColorType::Rgba);
+        assert_eq!(decoded[0].samples.len(), 16);
+        assert_eq!(&decoded[0].samples[..4], &[10, 20, 30, 255]);
+        assert_eq!(decoded[0].samples[7], 128);
+        assert_eq!(&decoded[0].samples[12..], &[0, 0, 0, 0]);
     }
 
     #[test]
@@ -648,7 +701,8 @@ mod tests {
             .expect("decode");
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].pts, 3);
-        assert_eq!(decoded[0].image.samples, image.samples);
+        assert_eq!(decoded[0].image.color, ColorType::Rgb);
+        assert_eq!(decoded[0].image.samples, [10_u16, 20, 30].repeat(4));
         assert!(decoder.drain().expect("drain").is_empty());
         assert!(encoder.drain().expect("drain").is_empty());
     }
@@ -750,7 +804,8 @@ mod tests {
         assert_eq!(decoded[0].image.height, 16);
         let mut red = 0u64;
         let mut green = 0u64;
-        for sample in decoded[0].image.samples.as_chunks::<4>().0 {
+        let channels = decoded[0].image.color.channels();
+        for sample in decoded[0].image.samples.chunks(channels) {
             red += u64::from(sample[0]);
             green += u64::from(sample[1]);
         }

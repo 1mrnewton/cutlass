@@ -5,7 +5,7 @@
 use cutlass_decode::{CodecError, CodecId, CodecParams, DecodeFactory, Decoder};
 use cutlass_encode::{EncodeFactory, Encoder};
 
-use crate::limits::{self, audio_ok, even_picture, packet_ok, picture_ok};
+use crate::limits::{self, audio_ok, even_picture, packet_ok, picture_ok, still_ok};
 use crate::status::{self, open_status, unit_status};
 
 const VIDEO: [CodecId; 9] = [
@@ -121,11 +121,16 @@ fn audio_limits(params: &CodecParams) -> Result<(), CodecError> {
     audio_ok(params.sample_rate, layout.len())
 }
 
-fn still_limits(params: &CodecParams) -> Result<(), CodecError> {
+/// The decoder takes a still inside the still caps, as ImageIO does; the
+/// encoder a picture inside the picture caps.
+fn still_limits(
+    params: &CodecParams,
+    fits: fn(u32, u32) -> Result<(), CodecError>,
+) -> Result<(), CodecError> {
     if params.width == 0 && params.height == 0 {
         return Ok(());
     }
-    match picture_ok(params.width, params.height) {
+    match fits(params.width, params.height) {
         Err(CodecError::Limit { .. }) => Err(CodecError::Unsupported {
             what: "picture edge",
         }),
@@ -154,11 +159,11 @@ fn open_audio_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecErr
 }
 
 fn open_still_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
-    still_limits(params)?;
+    still_limits(params, still_ok)?;
     Err(decline(status::NO_VIDEO_DECODER, "imageio"))
 }
 
 fn open_still_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
-    still_limits(params)?;
+    still_limits(params, picture_ok)?;
     Err(decline(status::NO_VIDEO_DECODER, "imageio"))
 }

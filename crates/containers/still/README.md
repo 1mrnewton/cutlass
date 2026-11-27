@@ -23,11 +23,11 @@ The stream carries the picture size (`FrameSize`): the first SOF segment of a JP
 What is refused:
 
 - Any other signature: `OpenError::Unrecognized`. `probe` refuses a movie header (`ftyp`, EBML, RIFF `AVI ` or `WAVE`) within the first 12 bytes.
-- A file above 32 MiB, a JPEG segment, PNG chunk, RIFF chunk, or GIF sub-block whose size runs past the remaining bytes, more than 4096 frames, or WebP chunks nested deeper than the children of `ANMF`: `OpenError::HostileSize`.
+- A file above 128 MiB, a JPEG segment, PNG chunk, RIFF chunk, or GIF sub-block whose size runs past the remaining bytes, more than 4096 frames, or WebP chunks nested deeper than the children of `ANMF`: `OpenError::HostileSize`.
 - A cut-off signature or body: `OpenError::Truncated`.
 - A PNG chunk with a wrong CRC-32: `OpenError::Source`.
 - A failed open returns only the error. No stream list and no packets are published.
-- In the muxer: a second stream (`MuxError::TooManyTracks`), a codec that is not one of the four (`MuxError::UnknownCodec`), a total above 32 MiB or 4096 packets (`MuxError::HostileSize`), and a track duration that does not match the packets (`MuxError::DurationMismatch`).
+- In the muxer: a second stream (`MuxError::TooManyTracks`), a codec that is not one of the four (`MuxError::UnknownCodec`), a total above 128 MiB or 4096 packets (`MuxError::HostileSize`), and a track duration that does not match the packets (`MuxError::DurationMismatch`).
 
 ## Using it
 
@@ -74,12 +74,12 @@ Not measured. A still file is one packet, or one packet per picture for a GIF or
 
 | Limit | Value |
 | --- | --- |
-| File, and so one packet (`MAX_FILE_BYTES`) | 32 MiB |
+| File, and so one packet (`MAX_FILE_BYTES`) | 128 MiB |
 | Frames in a GIF or animated WebP (`MAX_FRAMES`) | 4096 |
 | WebP chunk nesting (`MAX_CHUNK_DEPTH`) | 2 |
 | Probe window | 12 bytes |
 
-The demuxer reads the whole file into memory at open and keeps it. Each packet read copies its bytes out of that buffer. The muxer also holds every packet in memory. A picture file above 32 MiB does not open at all.
+The demuxer reads the whole file into memory at open and keeps it. Each packet read copies its bytes out of that buffer. The muxer also holds every packet in memory. A picture file above 128 MiB does not open at all.
 
 Gaps, also listed in the `UNSUPPORTED` constant:
 

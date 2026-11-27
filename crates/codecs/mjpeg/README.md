@@ -123,7 +123,7 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 | --- | --- |
 | Packet | 64 MiB (`MAX_PACKET`), checked before the packet is read |
 | Frame edge | 16 384 pixels |
-| Pixels per frame | 16 777 216 |
+| Pixels per frame | 67 108 864 (8192 by 8192) |
 | Marker segments per image | 4 096 |
 | Queued input or output | None: a packet is decoded when pushed, and the encoder has no delay |
 

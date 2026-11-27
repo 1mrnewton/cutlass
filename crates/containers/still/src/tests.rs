@@ -36,7 +36,7 @@ fn the_support_matrix_names_the_clock_the_bounds_and_what_is_left_out() {
     assert_eq!(GIF_DEFAULT_DELAY, 10);
     assert_eq!(WEBP_TIMESCALE, 1000);
     assert_eq!(WEBP_DEFAULT_DELAY_MS, 100);
-    assert_eq!(MAX_FILE_BYTES, 32 * 1024 * 1024);
+    assert_eq!(MAX_FILE_BYTES, 128 * 1024 * 1024);
     assert_eq!(MAX_FRAMES, 4096);
     assert_eq!(MAX_CHUNK_DEPTH, 2);
     assert_eq!(PROBE_BYTES, 12);

@@ -7,8 +7,12 @@
 /// Longest edge this codec will decode or encode.
 pub const MAX_EDGE: u32 = 16_384;
 
-/// Most pixels in one still.
-pub const MAX_PIXELS: u64 = 16_777_216;
+/// Most pixels in one still: 8192 by 8192, 64 megapixels.
+///
+/// Cameras and phones save 24 to 61 megapixels (6000 by 4000, 8064 by 6048,
+/// 9504 by 6336), so this leaves room for them. The WebP decoder has the same
+/// cap.
+pub const MAX_PIXELS: u64 = 67_108_864;
 
 /// Largest accepted bitstream. The caller owns the bytes; this stops a scan
 /// of a buffer that cannot be a still under [`MAX_PIXELS`].

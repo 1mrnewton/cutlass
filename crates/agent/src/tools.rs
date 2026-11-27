@@ -1482,6 +1482,14 @@ fn check_imports(media: &mut impl Media, requests: &[Request]) -> Result<(), Too
                     cutlass_session::ImportedMedium::Audio(audio) => {
                         (&audio.path, audio.duration.0)
                     }
+                    // A template brings a whole draft with files of its
+                    // own; only the app places one.
+                    cutlass_session::ImportedMedium::Template(_) => {
+                        return Err(ToolError::BadArguments(format!(
+                            "request {index} import: a template is placed from the Templates \
+                             shelf, not imported"
+                        )));
+                    }
                 };
                 if !path.trim().is_empty() {
                     check_file(media, index, "import", path, Some(duration))?;

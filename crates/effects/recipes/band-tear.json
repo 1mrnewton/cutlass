@@ -1,0 +1,63 @@
+{
+  "version": 4,
+  "id": "band-tear",
+  "name": "Band Tear",
+  "category": "Glitch",
+  "preview": "dancer",
+  "poster": 0.25,
+  "controls": [
+    {
+      "id": "speed",
+      "name": "Speed",
+      "default": 1,
+      "min": 0.25,
+      "max": 3,
+      "unit": "times",
+      "speed": true
+    },
+    {
+      "id": "intensity",
+      "name": "Intensity",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "amount"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "band_tear",
+      "params": {
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "amount": 1,
+        "progress": {
+          "keys": [
+            [
+              0,
+              0
+            ],
+            [
+              0.5,
+              1
+            ],
+            [
+              1.2,
+              1
+            ]
+          ],
+          "repeat": 1.6
+        }
+      }
+    }
+  ]
+}

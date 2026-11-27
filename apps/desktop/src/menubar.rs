@@ -26,6 +26,7 @@ const fn item(id: &'static str, label: &'static str) -> Option<Item> {
 /// Commands the window runs itself, apart from the shortcut actions.
 pub const OPEN: &str = "open";
 pub const SAVE: &str = "save";
+pub const SAVE_TEMPLATE: &str = "save_template";
 pub const IMPORT: &str = "import";
 pub const EXPORT: &str = "export";
 pub const PROJECTS: &str = "projects";
@@ -44,6 +45,7 @@ pub const MENUS: &[Menu] = &[
             item(PROJECTS, "Projects"),
             None,
             item(SAVE, "Save"),
+            item(SAVE_TEMPLATE, "Save as template…"),
             item(IMPORT, "Import…"),
             item(EXPORT, "Export…"),
             None,
@@ -124,6 +126,7 @@ pub fn is_window_command(id: &str) -> bool {
     [
         OPEN,
         SAVE,
+        SAVE_TEMPLATE,
         IMPORT,
         EXPORT,
         PROJECTS,

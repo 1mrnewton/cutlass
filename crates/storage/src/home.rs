@@ -1,6 +1,6 @@
 //! The one folder everything Cutlass writes lives under.
 //!
-//! A shell names the root and nothing else. The projects, the cache, the
+//! A shell names the root and nothing else. The projects, the templates, the cache, the
 //! downloads, the proxies, the models, the logs, and the settings file are
 //! laid out here, the same on every platform. Bundled resources are not under
 //! the root: they ship read-only inside the app package.
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use crate::StorageError;
 
 const PROJECTS: &str = "Projects";
+const TEMPLATES: &str = "Templates";
 const CACHE: &str = "Cache";
 const RENDERS: &str = "Renders";
 const UPDATES: &str = "Updates";
@@ -78,6 +79,14 @@ impl Home {
     #[must_use]
     pub fn projects(&self) -> PathBuf {
         self.root.join(PROJECTS)
+    }
+
+    /// One folder per project template the user saved. A template is a
+    /// project folder with some clips marked; the bundled ones ship
+    /// read-only inside the app package instead.
+    #[must_use]
+    pub fn templates(&self) -> PathBuf {
+        self.root.join(TEMPLATES)
     }
 
     /// Previews, thumbnails, and the index. Eviction may empty it.
@@ -298,6 +307,7 @@ mod tests {
             root.join("Presets").join("text.json")
         );
         assert_eq!(home.fonts(), root.join("Fonts"));
+        assert_eq!(home.templates(), root.join("Templates"));
     }
 
     #[test]

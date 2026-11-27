@@ -5514,6 +5514,94 @@ public func FfiConverterTypeStickerChoice_lower(_ value: StickerChoice) -> RustB
 
 
 /**
+ * One project template in the gallery. `modified_ms` is milliseconds
+ * since 1970.
+ */
+public struct TemplateSummary: Equatable, Hashable {
+    public var path: String
+    public var name: String
+    public var category: String
+    public var durationUs: Int64
+    /**
+     * How many photos or videos it takes.
+     */
+    public var slots: UInt32
+    public var width: Int32
+    public var height: Int32
+    public var modifiedMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, name: String, category: String, durationUs: Int64, 
+        /**
+         * How many photos or videos it takes.
+         */slots: UInt32, width: Int32, height: Int32, modifiedMs: Int64) {
+        self.path = path
+        self.name = name
+        self.category = category
+        self.durationUs = durationUs
+        self.slots = slots
+        self.width = width
+        self.height = height
+        self.modifiedMs = modifiedMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TemplateSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTemplateSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TemplateSummary {
+        return
+            try TemplateSummary(
+                path: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                category: FfiConverterString.read(from: &buf), 
+                durationUs: FfiConverterInt64.read(from: &buf), 
+                slots: FfiConverterUInt32.read(from: &buf), 
+                width: FfiConverterInt32.read(from: &buf), 
+                height: FfiConverterInt32.read(from: &buf), 
+                modifiedMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TemplateSummary, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.category, into: &buf)
+        FfiConverterInt64.write(value.durationUs, into: &buf)
+        FfiConverterUInt32.write(value.slots, into: &buf)
+        FfiConverterInt32.write(value.width, into: &buf)
+        FfiConverterInt32.write(value.height, into: &buf)
+        FfiConverterInt64.write(value.modifiedMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTemplateSummary_lift(_ buf: RustBuffer) throws -> TemplateSummary {
+    return try FfiConverterTypeTemplateSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTemplateSummary_lower(_ value: TemplateSummary) -> RustBuffer {
+    return FfiConverterTypeTemplateSummary.lower(value)
+}
+
+
+/**
  * What a text clip says, the face it says it in, and how it looks.
  */
 public struct TextInfo: Equatable, Hashable {
@@ -8277,6 +8365,31 @@ fileprivate struct FfiConverterSequenceTypeStickerChoice: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeTemplateSummary: FfiConverterRustBuffer {
+    typealias SwiftType = [TemplateSummary]
+
+    public static func write(_ value: [TemplateSummary], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTemplateSummary.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TemplateSummary] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TemplateSummary]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTemplateSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeTick: FfiConverterRustBuffer {
     typealias SwiftType = [Tick]
 
@@ -8485,6 +8598,18 @@ public func deleteProject(root: String, project: String)throws   {try rustCallWi
 }
 }
 /**
+ * Delete template `template` in the Cutlass folder at `root`. A folder
+ * that holds no template is refused.
+ */
+public func deleteTemplate(root: String, template: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_delete_template(
+        FfiConverterString.lower(root),
+        FfiConverterString.lower(template),uniffiCallStatus
+    )
+}
+}
+/**
  * Copy project `project` in the Cutlass folder at `root`, media and all,
  * as "… copy", and return the copy's folder.
  */
@@ -8599,6 +8724,18 @@ public func listProjects(root: String) -> [ProjectSummary]  {
 })
 }
 /**
+ * The templates the user saved in the Cutlass folder at `root`, newest
+ * first. A missing root lists nothing.
+ */
+public func listTemplates(root: String) -> [TemplateSummary]  {
+    return try!  FfiConverterSequenceTypeTemplateSummary.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_list_templates(
+        FfiConverterString.lower(root),uniffiCallStatus
+    )
+})
+}
+/**
  * Every mask shape in the order the Mask panel shows them.
  */
 public func maskShapes() -> [MaskShapeChoice]  {
@@ -8641,6 +8778,22 @@ public func renameProject(root: String, project: String, name: String)throws   {
         FfiConverterString.lower(name),uniffiCallStatus
     )
 }
+}
+/**
+ * Save project `project` in the Cutlass folder at `root` as a template
+ * named `name` under `category`, and return the template's folder. A
+ * project with no clip marked as a slot is refused.
+ */
+public func saveAsTemplate(root: String, project: String, name: String, category: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_save_as_template(
+        FfiConverterString.lower(root),
+        FfiConverterString.lower(project),
+        FfiConverterString.lower(name),
+        FfiConverterString.lower(category),uniffiCallStatus
+    )
+})
 }
 /**
  * Every shape, in shelf order.
@@ -8775,6 +8928,21 @@ public func transitionChoices() -> [TransitionChoice]  {
 })
 }
 /**
+ * Start a new project from template `template` in the Cutlass folder at
+ * `root`, and return the new project's folder. The project holds one
+ * thing: the template as a single closed clip, which is never opened or
+ * ungrouped. The template is not changed.
+ */
+public func useTemplate(root: String, template: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_use_template(
+        FfiConverterString.lower(root),
+        FfiConverterString.lower(template),uniffiCallStatus
+    )
+})
+}
+/**
  * The gain at volume slider `position`, 0 to 1. Unity is the middle and
  * the right end is ten times.
  */
@@ -8837,6 +9005,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_delete_project() != 11651) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_delete_template() != 30525) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_duplicate_project() != 36546) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8867,6 +9038,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 22684) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_list_templates() != 6958) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_mask_shapes() != 62227) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8877,6 +9051,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_rename_project() != 53408) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_save_as_template() != 47188) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_shape_choices() != 6033) {
@@ -8913,6 +9090,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_transition_choices() != 11507) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_use_template() != 253) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_volume_at() != 31091) {

@@ -446,6 +446,14 @@ impl MaterialVideo {
             ..Self::default()
         }
     }
+
+    /// The material is one still picture: a photo, or an image such as a
+    /// PNG or WebP. A still plays as long as its clip does. A GIF moves,
+    /// so it is not one.
+    #[must_use]
+    pub fn is_still(&self) -> bool {
+        self.kind == crate::MetaType::Photo.as_str() || self.kind == crate::MetaType::Image.as_str()
+    }
 }
 
 impl Default for MaterialVideo {
@@ -475,6 +483,16 @@ impl Default for MaterialVideo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_photo_and_an_image_are_stills_and_a_video_and_a_gif_are_not() {
+        let kind = |kind: &str| MaterialVideo {
+            kind: kind.to_owned(),
+            ..MaterialVideo::new("m")
+        };
+        assert!(kind("photo").is_still() && kind("image").is_still());
+        assert!(!kind("video").is_still() && !kind("gif").is_still() && !kind("").is_still());
+    }
 
     #[test]
     fn construction_matches_a_missing_object_and_not_the_mapping_duration() {

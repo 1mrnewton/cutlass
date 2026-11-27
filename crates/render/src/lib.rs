@@ -23,6 +23,7 @@ mod blur;
 mod colour;
 mod cross;
 mod cut;
+mod drawn;
 mod effect;
 mod frame;
 mod keep;

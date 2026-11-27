@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "corner-burn",
+  "name": "Corner Burn",
+  "category": "Light",
+  "duration": 1.8,
+  "cross": {
+    "kind": 21,
+    "x": -0.5,
+    "y": 0.5,
+    "seed": 7,
+    "rough": 1.3
+  }
+}

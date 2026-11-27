@@ -27,12 +27,14 @@ pub(crate) struct Outer {
 
 impl Shell {
     /// The selected clip plays a compound draft: its material and inside.
+    /// A template clip is not one: it is closed, and is never opened or
+    /// ungrouped.
     fn selected_compound(&self) -> Option<(SegmentId, MaterialId, Draft)> {
         let draft = self.draft()?;
         let id = self.selected()?;
         let (segment, _) = locate(draft, id)?;
         match draft.materials.get(segment.material_id.as_str())? {
-            MaterialRef::Draft(material) => Some((
+            MaterialRef::Draft(material) if !material.template => Some((
                 segment.id.clone(),
                 material.id.clone(),
                 material.draft.as_deref()?.clone(),

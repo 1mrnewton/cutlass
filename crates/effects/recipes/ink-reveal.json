@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "id": "ink-reveal",
+  "name": "Ink Reveal",
+  "category": "Reveal",
+  "preview": "flowers",
+  "poster": 0.5,
+  "controls": [
+    {
+      "id": "speed",
+      "name": "Speed",
+      "default": 1,
+      "min": 0.25,
+      "max": 3,
+      "unit": "times",
+      "speed": true
+    }
+  ],
+  "passes": [
+    {
+      "block": "reveal",
+      "params": {
+        "progress": {
+          "keys": [
+            [
+              0,
+              0
+            ],
+            [
+              1.4,
+              1
+            ]
+          ]
+        },
+        "kind": 8
+      }
+    }
+  ]
+}

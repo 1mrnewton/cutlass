@@ -869,6 +869,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_cutlass_license(RustCallStatus *_
 void uniffi_cutlass_ffi_bindings_fn_func_delete_project(RustBuffer root, RustBuffer project, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_DELETE_TEMPLATE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_DELETE_TEMPLATE
+void uniffi_cutlass_ffi_bindings_fn_func_delete_template(RustBuffer root, RustBuffer template, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_DUPLICATE_PROJECT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_DUPLICATE_PROJECT
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_duplicate_project(RustBuffer root, RustBuffer project, RustCallStatus *_Nonnull out_status
@@ -924,6 +929,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_graph_curves(RustCallStatus *_Non
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_list_projects(RustBuffer root, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_TEMPLATES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_TEMPLATES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_list_templates(RustBuffer root, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_MASK_SHAPES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_MASK_SHAPES
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_mask_shapes(RustCallStatus *_Nonnull out_status
@@ -944,6 +954,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_notices(RustCallStatus *_Nonnull 
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_RENAME_PROJECT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_RENAME_PROJECT
 void uniffi_cutlass_ffi_bindings_fn_func_rename_project(RustBuffer root, RustBuffer project, RustBuffer name, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SAVE_AS_TEMPLATE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SAVE_AS_TEMPLATE
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_save_as_template(RustBuffer root, RustBuffer project, RustBuffer name, RustBuffer category, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SHAPE_CHOICES
@@ -1011,6 +1026,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_transition_categories(RustCallSta
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_TRANSITION_CHOICES
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_transition_choices(RustCallStatus *_Nonnull out_status
     
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_USE_TEMPLATE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_USE_TEMPLATE
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_use_template(RustBuffer root, RustBuffer template, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_VOLUME_AT
@@ -1331,6 +1351,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_delete_project(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_DELETE_TEMPLATE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_DELETE_TEMPLATE
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_delete_template(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_DUPLICATE_PROJECT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_DUPLICATE_PROJECT
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_duplicate_project(void
@@ -1391,6 +1417,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_list_projects(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_TEMPLATES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_TEMPLATES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_list_templates(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_MASK_SHAPES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_MASK_SHAPES
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_mask_shapes(void
@@ -1412,6 +1444,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_notices(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_RENAME_PROJECT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_RENAME_PROJECT
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_rename_project(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_SAVE_AS_TEMPLATE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_SAVE_AS_TEMPLATE
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_save_as_template(void
     
 );
 #endif
@@ -1484,6 +1522,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_transition_categories(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_TRANSITION_CHOICES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_TRANSITION_CHOICES
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_transition_choices(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_USE_TEMPLATE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_USE_TEMPLATE
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_use_template(void
     
 );
 #endif

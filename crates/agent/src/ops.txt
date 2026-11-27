@@ -191,7 +191,7 @@ set_text_bubble: Shape a title's background as bubble pill, speech, thought, bur
 set_caption_style: Draw a caption in style classic, karaoke, highlight, pop, word-by-word, one-word, neon, bold-box, fade or rise, or empty for plain.
 {"op":"set_caption_style","segment_id":"cap-1","style":"karaoke"}
 
-set_caption_template: Record which caption template a caption uses, by resource_id (such as cutlass-caption-karaoke) and name, or empty resource_id to clear the record; it does not change the look by itself.
+set_caption_template: Record which caption preset a caption uses, by resource_id (such as cutlass-caption-karaoke) and name, or empty resource_id to clear the record; it does not change the look by itself.
 {"op":"set_caption_template","segment_id":"cap-1","resource_id":"cutlass-caption-karaoke","name":"Karaoke"}
 
 set_caption_keyword: Mark word number word (from 0) of a caption as a keyword drawn in the style's spoken look (on true), or unmark it; a word the caption does not have is refused.
@@ -235,6 +235,9 @@ set_blend: Blend a clip with the picture below by mode blend-multiply, blend-scr
 
 set_blend_on: Turn a clip's Blend switch on or off; off draws it solid and mixed normally, keeping its opacity and blend mode for when it is on again.
 {"op":"set_blend_on","segment_id":"a","on":false}
+
+set_template_mark: Mark a clip for a project template, or take its mark off with mark null. {"role":"slot","takes":"either"|"video"|"photo"} on a photo or video clip makes it a slot someone using the template fills with their own media; {"role":"text"} on a text clip lets them change its words; {"role":"music"} on a sound clip lets them swap it, and moves the music mark off any other clip. A mark that does not fit the clip is refused.
+{"op":"set_template_mark","segment_id":"a","mark":{"role":"slot","takes":"either"}}
 
 add_adjustment: Place an adjustment layer from start for duration (microseconds) on adjust lane track_id, made when missing, with new ids segment_id and material_id; set its sliders with set_adjust; it acts on every picture below.
 {"op":"add_adjustment","track_id":"adjust-1","segment_id":"adj-2","material_id":"adj-2-adjust","start":5000000,"duration":3000000}

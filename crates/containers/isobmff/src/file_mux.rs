@@ -1064,6 +1064,222 @@ mod tests {
         assert_eq!(edit.duration(), 2000);
     }
 
+    /// An M4A with one sound track of `packets` 1024-tick packets and no
+    /// edit list, as `afconvert` writes it. `note` is the text of an
+    /// `iTunSMPB` item in `moov/udta/meta/ilst`, the only place such a file
+    /// states its priming.
+    fn noted_m4a(codec: Id, packets: i64, tracks: usize, note: Option<&str>) -> Vec<u8> {
+        let mut mux = Mp4Mux::with_options(Cursor::new(Vec::new()), index_last());
+        let sounds: Vec<_> = (0..tracks)
+            .map(|_| {
+                let extradata = if codec == Id::Aac {
+                    vec![0x11, 0x90]
+                } else {
+                    Vec::new()
+                };
+                mux.add_stream(NewStream {
+                    params: StreamParams::try_audio(
+                        StreamCodec::Known(codec),
+                        48_000,
+                        2,
+                        extradata,
+                    )
+                    .unwrap(),
+                    timescale: Timescale::new(48_000),
+                    language: None,
+                })
+                .unwrap()
+            })
+            .collect();
+        let mut ends = Vec::new();
+        for sound in sounds {
+            for index in 0..packets {
+                let data = vec![0x0B, 0x77, 0x21];
+                mux.write_packet(&packet(sound.get(), data, index * 1024, 1024, 48_000))
+                    .unwrap();
+            }
+            ends.push(TrackDuration {
+                track: sound,
+                timescale: Timescale::new(48_000),
+                ticks: packets * 1024,
+            });
+        }
+        mux.finish(&ends).unwrap();
+        let bytes = mux.into_writer().unwrap().into_inner();
+        match note {
+            Some(note) => with_user_data(bytes, &smpb_udta(note)),
+            None => bytes,
+        }
+    }
+
+    /// An M4A whose `moov` is the last box, so user data can be added to it
+    /// without moving a chunk.
+    fn index_last() -> super::Mp4Options {
+        super::Mp4Options {
+            brand: FileBrand::M4a,
+            fast_start: false,
+            recoverable: false,
+            creation_time: None,
+        }
+    }
+
+    fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = u32::try_from(payload.len() + 8)
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
+        out.extend(kind);
+        out.extend(payload);
+        out
+    }
+
+    /// `udta/meta/ilst/----` with `mean`, `name` and `data`, as iTunes and
+    /// `afconvert` lay out the `iTunSMPB` item.
+    fn smpb_udta(note: &str) -> Vec<u8> {
+        let mut item = boxed(b"mean", b"\0\0\0\0com.apple.iTunes");
+        item.extend(boxed(b"name", b"\0\0\0\0iTunSMPB"));
+        let mut data = b"\0\0\0\x01\0\0\0\0".to_vec();
+        data.extend(note.as_bytes());
+        item.extend(boxed(b"data", &data));
+        let mut hdlr = vec![0; 8];
+        hdlr.extend(b"mdirappl");
+        hdlr.extend([0; 9]);
+        let mut meta = vec![0; 4];
+        meta.extend(boxed(b"hdlr", &hdlr));
+        meta.extend(boxed(b"ilst", &boxed(b"----", &item)));
+        boxed(b"udta", &boxed(b"meta", &meta))
+    }
+
+    /// `bytes` with `udta` as the last child of its `moov`. The movie box
+    /// is the file's last, so no chunk offset moves.
+    fn with_user_data(mut bytes: Vec<u8>, udta: &[u8]) -> Vec<u8> {
+        let mut at = 0;
+        loop {
+            let mut size = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            if size == 1 {
+                // A 64-bit size, as the media box has.
+                let large = u64::from_be_bytes(bytes[at + 8..at + 16].try_into().unwrap());
+                size = usize::try_from(large).unwrap();
+            }
+            if &bytes[at + 4..at + 8] == b"moov" {
+                assert_eq!(at + size, bytes.len(), "moov is not last");
+                let grown = u32::try_from(size + udta.len()).unwrap();
+                bytes[at..at + 4].copy_from_slice(&grown.to_be_bytes());
+                bytes.extend(udta);
+                return bytes;
+            }
+            at += size;
+        }
+    }
+
+    /// The note `afconvert` writes for 2112 priming samples, 704 of padding
+    /// and `valid` between them.
+    fn smpb(valid: u64) -> String {
+        format!(" 00000000 00000840 000002C0 {valid:016X} 00000000 00000000")
+    }
+
+    /// An AAC track with no edit list takes its priming and padding from
+    /// the `iTunSMPB` note: an edit over the valid samples and the same
+    /// counts as trim. Packet times stay the file's.
+    #[test]
+    fn an_itunsmpb_note_is_the_edit_of_an_aac_track_without_one() {
+        // Eight packets: 2112 priming, 5376 valid, 704 padding.
+        let plain = noted_m4a(Id::Aac, 8, 1, None);
+        let file = crate::IsoBmffFile::open(Cursor::new(plain.clone())).unwrap();
+        let stream = &cutlass_container::Demux::streams(&file)[0];
+        assert!(stream.edits().is_empty());
+        assert_eq!(stream.trim(), Trim::default());
+
+        let noted = noted_m4a(Id::Aac, 8, 1, Some(&smpb(5_376)));
+        let file = crate::IsoBmffFile::open(Cursor::new(noted.clone())).unwrap();
+        let stream = &cutlass_container::Demux::streams(&file)[0];
+        assert_eq!(stream.edits().len(), 1);
+        let edit = stream.edits()[0];
+        assert_eq!(edit.media_time(), Some(2_112));
+        assert_eq!(edit.duration(), 5_376);
+        assert_eq!(edit.rate_numerator(), edit.rate_denominator());
+        assert_eq!(stream.trim(), Trim::new(Some(2_112), Some(704)));
+        assert_eq!(
+            cutlass_container::Demux::indexed_end(&file, stream.id()),
+            Some(8 * 1024)
+        );
+        assert_eq!(packets(noted), packets(plain));
+    }
+
+    /// A note that does not add up to the track's samples is stale, a note
+    /// beside two sound tracks names neither, and FFmpeg skips priming for
+    /// AAC alone: each leaves the track as the file has it. Broken user
+    /// data never stops the file from opening.
+    #[test]
+    fn an_itunsmpb_note_that_does_not_fit_is_left_alone() {
+        let untouched = |bytes: Vec<u8>| {
+            let file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+            for stream in cutlass_container::Demux::streams(&file) {
+                assert!(stream.edits().is_empty());
+                assert_eq!(stream.trim(), Trim::default());
+            }
+        };
+        untouched(noted_m4a(Id::Aac, 8, 1, Some(&smpb(5_375))));
+        untouched(noted_m4a(Id::Aac, 8, 1, Some(&smpb(u64::MAX))));
+        untouched(noted_m4a(Id::Aac, 8, 2, Some(&smpb(5_376))));
+        untouched(noted_m4a(Id::Ac3, 8, 1, Some(&smpb(5_376))));
+        untouched(noted_m4a(Id::Aac, 8, 1, Some(" 00000000 0000zz40")));
+        // A count that trims nothing is no edit.
+        let zeros = format!(" 00000000 00000000 00000000 {:016X}", 8 * 1024);
+        untouched(noted_m4a(Id::Aac, 8, 1, Some(&zeros)));
+        // User data cut short inside the note.
+        let plain = noted_m4a(Id::Aac, 8, 1, None);
+        let mut udta = smpb_udta(&smpb(5_376));
+        udta.truncate(udta.len() - 30);
+        let size = u32::try_from(udta.len()).unwrap();
+        udta[..4].copy_from_slice(&size.to_be_bytes());
+        untouched(with_user_data(plain, &udta));
+    }
+
+    /// A track that has an edit list keeps it: the note beside it is not
+    /// read into the track.
+    #[test]
+    fn an_edit_list_wins_over_an_itunsmpb_note() {
+        let mut mux = Mp4Mux::with_options(Cursor::new(Vec::new()), index_last());
+        let sound = mux
+            .add_stream(NewStream {
+                params: StreamParams::try_audio(
+                    StreamCodec::Known(Id::Aac),
+                    48_000,
+                    2,
+                    vec![0x11, 0x90],
+                )
+                .unwrap(),
+                timescale: Timescale::new(48_000),
+                language: None,
+            })
+            .unwrap();
+        mux.set_trim(sound, Trim::new(Some(1_024), Some(96)))
+            .unwrap();
+        for index in 0..8 {
+            let data = vec![0x0B, 0x77, 0x21];
+            mux.write_packet(&packet(sound.get(), data, index * 1024, 1024, 48_000))
+                .unwrap();
+        }
+        mux.finish(&[TrackDuration {
+            track: sound,
+            timescale: Timescale::new(48_000),
+            ticks: 8 * 1024,
+        }])
+        .unwrap();
+        let plain = mux.into_writer().unwrap().into_inner();
+        let edits = |bytes: Vec<u8>| {
+            let file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+            let stream = &cutlass_container::Demux::streams(&file)[0];
+            (stream.edits().to_vec(), stream.trim())
+        };
+        let (before, trim) = edits(plain.clone());
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].media_time(), Some(1_024));
+        let noted = with_user_data(plain, &smpb_udta(&smpb(5_376)));
+        assert_eq!(edits(noted), (before, trim));
+    }
+
     /// AC-3 and E-AC-3 frame durations include the encoder delay and the
     /// trailing padding. The edit starts after the delay and ends before
     /// the padding. A later trim replaces an earlier one.

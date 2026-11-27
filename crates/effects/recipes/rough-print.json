@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "id": "rough-print",
+  "name": "Rough Print",
+  "category": "Retro",
+  "preview": "portrait",
+  "controls": [
+    {
+      "id": "size",
+      "name": "Dots",
+      "default": 1,
+      "min": 0.25,
+      "max": 3,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "size"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "halftone",
+      "params": {
+        "size": 0.012,
+        "contrast": 1.25,
+        "lift": 0.12,
+        "rough": 1.2
+      }
+    },
+    {
+      "block": "paper",
+      "params": {
+        "amount": 0.5,
+        "red": 0.93,
+        "green": 0.9,
+        "blue": 0.82
+      }
+    }
+  ]
+}

@@ -2,8 +2,8 @@
 //!
 //! A recipe is JSON. It names up to [`MAX_PASSES`] passes; each pass is one
 //! [`Block`] and values for that block's parameters. A value is a number or
-//! a curve over the effect's own time: keyframes, a wave, or a held random
-//! step. The GPU runs the blocks; a recipe never carries shader code, so a
+//! a curve over the effect's own time: keyframes, a wave, a held random
+//! step, or a clock that counts the seconds. The GPU runs the blocks; a recipe never carries shader code, so a
 //! recipe from anywhere can only ask for what the blocks already do.
 //!
 //! A pass may keep its result under a name (`"save"`), and a [`Block::Blend`]
@@ -26,12 +26,14 @@ use serde::{Deserialize, Serialize};
 
 /// The recipe format this app reads. A recipe with a higher version needs
 /// blocks or fields this app does not have. Version 2 added eased keys,
-/// version 3 kept pictures and [`Block::Blend`].
-pub const RECIPE_VERSION: u32 = 3;
+/// version 3 kept pictures and [`Block::Blend`], version 4 the clock curve.
+pub const RECIPE_VERSION: u32 = 4;
 /// The first version whose keys may name an [`Ease`].
 pub const EASE_VERSION: u32 = 2;
 /// The first version whose passes may save and blend pictures.
 pub const PICTURE_VERSION: u32 = 3;
+/// The first version whose values may be a clock.
+pub const CLOCK_VERSION: u32 = 4;
 /// The most names one list of passes may save pictures under.
 pub const MAX_SAVED: usize = 3;
 /// The picture as it entered the effect, which a blend may always read.
@@ -43,7 +45,7 @@ pub const MAX_KEYS: usize = 64;
 /// The largest recipe file read.
 pub const MAX_RECIPE_BYTES: usize = 64 * 1024;
 /// The most values one block takes.
-pub const MAX_VALUES: usize = 12;
+pub const MAX_VALUES: usize = 16;
 /// The fastest a held random value may change, in steps per second.
 pub const MAX_JITTER_RATE: f32 = 120.0;
 /// The effect id a recipe is stored under on a draft's effect material.
@@ -141,6 +143,76 @@ pub enum Block {
     /// Lay a kept picture over the picture so far: added, screened,
     /// multiplied, the lighter of the two, or mixed in.
     Blend,
+    /// Light spilling in from one edge of the frame, drifting and breathing:
+    /// deep red where it is faint, through orange and yellow to white where
+    /// it is strong, with a second, pinker light beside it.
+    Leak,
+    /// A film burn: a ragged wall of light crosses the frame, the whole
+    /// picture goes white in the middle, then the light leaves by the far
+    /// side, flickering and slipping from frame to frame.
+    Burn,
+    /// The soft discs far lights turn into when they are out of focus:
+    /// three depths of them, drifting and breathing.
+    Bokeh,
+    /// A lens flare: a bright light with its glow, a long streak, rays, a
+    /// faint ring, and coloured ghosts on the line from the light through
+    /// the middle of the frame.
+    Flare,
+    /// Dust in the air: slow motes drifting at four depths, the near ones
+    /// big and out of focus, optionally lit only inside a slanting shaft of
+    /// light.
+    Motes,
+    /// Glowing bits rising from below, swaying and flickering in hot air,
+    /// thicker near the bottom of the frame.
+    Embers,
+    /// Snow falling at four depths, swaying as it falls, the near flakes big
+    /// and soft.
+    Snow,
+    /// Rain: thin slanting streaks at three depths, the near ones longer,
+    /// faster and fainter.
+    Rain,
+    /// A burst of sparks thrown from one point: each a short streak that
+    /// flies out, is pulled down, cools from white to red and dies.
+    Sparks,
+    /// Slow banks of mist that drift with the wind and fold into each
+    /// other, everywhere or lying along the bottom of the frame.
+    Fog,
+    /// A plume of smoke rising from one point, swaying, curling and
+    /// thinning out as it climbs.
+    Smoke,
+    /// Film grain: specks of two sizes, new on every frame, that lift and
+    /// lower the picture and fade out by themselves in pure black and white.
+    FilmGrain,
+    /// The bright dirt on an old print: dust and lint, curled hairs, short
+    /// nicks, and long scratches running down the reel. A mark is on one
+    /// frame and gone on the next; only the long scratches stay a while.
+    FilmDamage,
+    /// The dark dirt on an old print: water stains with a darker rim and
+    /// grime along the frame's edges, which stay put, and dark dust and the
+    /// odd big blotch, which come and go.
+    Grime,
+    /// Projector flicker: the picture dips a little on some frames, with a
+    /// soft band of shade rolling up it. It only ever darkens.
+    Flicker,
+    /// The faults of an old video tape: lines that jitter sideways, a band
+    /// that rolls up the frame tearing and snowing as it goes, a torn strip
+    /// along the bottom where the heads switch, scan lines and dropouts.
+    Tape,
+    /// A burst of digital tearing: the frame is cut into bands that jump
+    /// every couple of frames, a few of them shoved sideways, with the
+    /// colours pulled apart. It swells and dies as `progress` goes 0 to 1.
+    BandTear,
+    /// The picture printed on a sheet of paper: fine tooth, long fibres,
+    /// small dark specks, soft clouds and fold lines. It does not move.
+    Paper,
+    /// Paper that was crumpled into a ball and flattened out again: flat
+    /// facets that each catch the light differently, with sharp creases
+    /// between them.
+    Crumple,
+    /// The picture burnt away: fire spreads out from a point with a ragged
+    /// front and holes opening ahead of it. The picture chars brown then
+    /// black, a glowing rim eats it, and what is burnt is gone.
+    BurnAway,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -186,7 +258,12 @@ const FLASH: &[Param] = &[
     param("green", 1.0, 0.0, 1.0),
     param("blue", 1.0, 0.0, 1.0),
 ];
-const VIGNETTE: &[Param] = &[param("amount", 0.0, 0.0, 1.0), param("size", 0.6, 0.0, 1.5)];
+/// `round` 0 darkens in the frame's own shape, 1 in a true circle.
+const VIGNETTE: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("size", 0.6, 0.0, 1.5),
+    param("round", 0.0, 0.0, 1.0),
+];
 const NOISE: &[Param] = &[
     param("amount", 0.0, 0.0, 1.0),
     param("seed", 0.0, 0.0, 1000.0),
@@ -301,12 +378,19 @@ const SPOTLIGHT: &[Param] = &[
 /// across, one colour then the other, and 7 dissolves in fine grains.
 /// `angle` 0 runs left to right; `soft` is the edge, as a fraction of the
 /// run.
+///
+/// Three kinds are drawn: 8 is an ink blot that splashes in the middle and
+/// creeps out, 9 is `count` brush strokes tilted by `angle`, and 10 is a
+/// paper tear travelling along `angle`. `seed` picks the shape and `rough`
+/// is how far its edge wanders, or how dry the brush is.
 const REVEAL: &[Param] = &[
     param("progress", 1.0, 0.0, 1.0),
-    param("kind", 0.0, 0.0, 7.0),
+    param("kind", 0.0, 0.0, 10.0),
     param("angle", 0.0, -180.0, 180.0),
     param("soft", 0.02, 0.0, 0.5),
     param("count", 8.0, 1.0, 64.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("rough", 1.0, 0.0, 3.0),
 ];
 /// `black` 1 leaves black where the shrunk picture no longer reaches;
 /// 0 reflects it, as the other moving blocks do.
@@ -396,7 +480,9 @@ const FOCUS: &[Param] = &[
 /// fractions of the shorter side and shrink with `scale`. `shadow` is how
 /// soft the print's shadow is, none at 0. `back` fills the rest of the
 /// frame with a copy of the picture blurred that far, as a fraction of the
-/// shorter side, and darkened by `dim`; at 0 the rest is clear.
+/// shorter side, and darkened by `dim`; at 0 the rest is clear. `torn`
+/// tears the print's edge instead of cutting it, wandering that far, and
+/// `seed` picks the tear.
 const PLACE: &[Param] = &[
     param("scale", 1.0, 0.0, 4.0),
     param("x", 0.0, -2.0, 2.0),
@@ -410,20 +496,348 @@ const PLACE: &[Param] = &[
     param("back", 0.0, 0.0, 0.1),
     param("dim", 0.0, 0.0, 1.0),
     param("shadow", 0.0, 0.0, 0.1),
+    param("torn", 0.0, 0.0, 2.0),
+    param("seed", 1.0, 0.0, 1000.0),
 ];
+/// `angle` is the slant of the rows of dots, in degrees. `contrast` and
+/// `lift` change the picture before it is printed, `lift` making the whole
+/// print lighter. `rough` inks the dots unevenly, so they are not perfect
+/// circles.
 const HALFTONE: &[Param] = &[
     param("size", 0.0, 0.0, 0.1),
     param("amount", 1.0, 0.0, 1.0),
     param("color", 0.0, 0.0, 1.0),
+    param("angle", 45.0, 0.0, 90.0),
+    param("contrast", 1.0, 0.0, 3.0),
+    param("lift", 0.0, -0.5, 0.5),
+    param("rough", 0.0, 0.0, 2.0),
 ];
 /// `mode` 0 adds the kept picture's light, 1 screens it, 2 multiplies by
 /// it, 3 keeps the lighter of the two and 4 mixes toward it. `amount` 0
 /// leaves the picture so far and 1 is the mode's whole result.
 const BLEND: &[Param] = &[param("mode", 0.0, 0.0, 4.0), param("amount", 1.0, 0.0, 1.0)];
 
+/// `time` moves the light; `side` is the edge it comes from, in turns (0
+/// right, 0.25 bottom, 0.5 left, 0.75 top), or under 0 to let the seed
+/// pick. `second` is how much of the second light shows, in its own
+/// colour (`red2`, `green2`, `blue2`).
+const LEAK: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("side", -1.0, -1.0, 1.0),
+    param("second", 0.6, 0.0, 1.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.4, 0.0, 1.0),
+    param("blue", 0.11, 0.0, 1.0),
+    param("red2", 1.0, 0.0, 1.0),
+    param("green2", 0.16, 0.0, 1.0),
+    param("blue2", 0.42, 0.0, 1.0),
+];
+
+/// `progress` 0 to 1 carries the light across: white at 0.5, gone at
+/// both ends. `side` is as for the leak. `rough` is how ragged the wall
+/// is, `flicker` how much it jumps from frame to frame.
+const BURN: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("progress", 0.0, 0.0, 1.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("side", -1.0, -1.0, 1.0),
+    param("rough", 1.0, 0.0, 2.0),
+    param("flicker", 0.35, 0.0, 1.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.36, 0.0, 1.0),
+    param("blue", 0.09, 0.0, 1.0),
+];
+
+/// `fill` is how many cells hold a disc, `size` how big the discs are,
+/// `colours` how far each strays from the tint to a colour of its own.
+const BOKEH: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("fill", 1.0, 0.0, 2.0),
+    param("size", 1.0, 0.2, 3.0),
+    param("colours", 0.35, 0.0, 1.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.8, 0.0, 1.0),
+    param("blue", 0.52, 0.0, 1.0),
+];
+
+/// The light travels from (`from_x`, `from_y`) to (`to_x`, `to_y`), as
+/// shares of the frame from its top left, as `progress` goes 0 to 1, so
+/// the ghosts slide the other way.
+const FLARE: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("progress", 0.0, 0.0, 1.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("from_x", 0.12, -0.5, 1.5),
+    param("from_y", 0.2, -0.5, 1.5),
+    param("to_x", 0.42, -0.5, 1.5),
+    param("to_y", 0.14, -0.5, 1.5),
+    param("streak", 1.0, 0.0, 2.0),
+    param("rays", 1.0, 0.0, 2.0),
+    param("ghosts", 1.0, 0.0, 2.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.86, 0.0, 1.0),
+    param("blue", 0.62, 0.0, 1.0),
+];
+
+/// `count` is how many motes there are; `drift_x` and `drift_y` are the
+/// way the air moves, in shorter sides a second. `beam` 1 lights the
+/// dust only in a shaft `beam_width` wide at `beam_angle` radians.
+const MOTES: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("drift_x", 0.012, -0.5, 0.5),
+    param("drift_y", -0.006, -0.5, 0.5),
+    param("beam", 0.0, 0.0, 1.0),
+    param("beam_angle", 0.55, -3.2, 3.2),
+    param("beam_width", 0.35, 0.02, 2.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.93, 0.0, 1.0),
+    param("blue", 0.8, 0.0, 1.0),
+];
+
+/// `rise` is how fast they climb, in shorter sides a second; `sway` how
+/// much the air pushes them about; `height` how far up the frame they
+/// reach before thinning out.
+const EMBERS: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("rise", 0.16, 0.0, 1.0),
+    param("sway", 1.0, 0.0, 3.0),
+    param("height", 1.0, 0.0, 1.5),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.36, 0.0, 1.0),
+    param("blue", 0.07, 0.0, 1.0),
+];
+
+/// `fall` and `wind` are in shorter sides a second; a negative `wind`
+/// blows left.
+const SNOW: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("fall", 0.22, 0.0, 2.0),
+    param("wind", 0.06, -1.0, 1.0),
+    param("red", 0.93, 0.0, 1.0),
+    param("green", 0.96, 0.0, 1.0),
+    param("blue", 1.0, 0.0, 1.0),
+];
+
+/// `fall` is in shorter sides a second; `slant` leans the rain, 0
+/// straight down.
+const RAIN: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("fall", 2.2, 0.0, 6.0),
+    param("slant", 0.18, -1.0, 1.0),
+    param("red", 0.78, 0.0, 1.0),
+    param("green", 0.84, 0.0, 1.0),
+    param("blue", 0.92, 0.0, 1.0),
+];
+
+/// `x` and `y` are where they fly from, as shares of the frame from its
+/// top left. `aim` is the middle of the throw and `fan` its width, in
+/// turns (aim 0 right, -0.25 up). `every` above 0 throws a new burst
+/// that many seconds apart.
+const SPARKS: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("x", 0.5, -0.5, 1.5),
+    param("y", 0.6, -0.5, 1.5),
+    param("count", 70.0, 1.0, 120.0),
+    param("speed", 1.0, 0.0, 3.0),
+    param("gravity", 1.0, -2.0, 3.0),
+    param("life", 1.1, 0.1, 5.0),
+    param("aim", -0.25, -1.0, 1.0),
+    param("fan", 0.5, 0.0, 1.0),
+    param("every", 0.0, 0.0, 10.0),
+];
+
+/// `fill` is how much of the frame the fog covers, `scale` the size of
+/// its banks, `ground` 1 lays it along the bottom.
+const FOG: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("fill", 1.0, 0.0, 2.0),
+    param("scale", 1.0, 0.25, 4.0),
+    param("wind_x", 1.0, -3.0, 3.0),
+    param("wind_y", 0.0, -3.0, 3.0),
+    param("ground", 0.0, 0.0, 1.0),
+    param("red", 0.86, 0.0, 1.0),
+    param("green", 0.89, 0.0, 1.0),
+    param("blue", 0.93, 0.0, 1.0),
+];
+
+/// `x` and `y` are where it starts, as shares of the frame from its top
+/// left. `width` is the plume's width there and `spread` how fast it
+/// widens, `height` how far up it reaches, all in shorter sides.
+const SMOKE: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("x", 0.5, -0.5, 1.5),
+    param("y", 1.0, -0.5, 1.5),
+    param("width", 0.05, 0.005, 0.5),
+    param("spread", 0.3, 0.0, 2.0),
+    param("height", 1.0, 0.1, 3.0),
+    param("rise", 1.0, 0.0, 4.0),
+    param("curl", 1.0, 0.0, 3.0),
+    param("red", 0.82, 0.0, 1.0),
+    param("green", 0.82, 0.0, 1.0),
+    param("blue", 0.84, 0.0, 1.0),
+];
+
+/// `amount` is how far the specks push the picture (0.13 is ordinary
+/// film); `size` is a speck's size in the pixels of a 1080 frame;
+/// `clump` mixes in bigger, softer clumps; `colour` 1 gives each colour
+/// layer its own grain.
+const FILM_GRAIN: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("size", 1.5, 0.5, 8.0),
+    param("clump", 0.6, 0.0, 1.0),
+    param("colour", 0.3, 0.0, 1.0),
+];
+
+/// `amount` is how bright the marks are and `count` how many there are;
+/// `hold` is how many frames a pattern lasts (1 a projector, 4 or 5
+/// stop-motion grit). `specks`, `hairs`, `scratches` and `lines` set
+/// each kind; `clumps` gathers the dust in patches; `size` 2 doubles
+/// every mark.
+const FILM_DAMAGE: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("hold", 1.0, 1.0, 12.0),
+    param("specks", 1.0, 0.0, 2.0),
+    param("hairs", 1.0, 0.0, 2.0),
+    param("scratches", 1.0, 0.0, 2.0),
+    param("lines", 1.0, 0.0, 2.0),
+    param("clumps", 0.6, 0.0, 1.0),
+    param("size", 1.0, 0.5, 4.0),
+];
+
+/// `amount` is how dark the dirt is and `count` how much dust and
+/// blotching there is; `hold` is how many frames the dust lasts.
+/// `stains`, `edges`, `specks` and `blotches` set each kind; the
+/// colour is the dirt's.
+const GRIME: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.4),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("count", 1.0, 0.0, 2.0),
+    param("hold", 2.0, 1.0, 12.0),
+    param("stains", 1.0, 0.0, 2.0),
+    param("edges", 1.0, 0.0, 2.0),
+    param("specks", 1.0, 0.0, 2.0),
+    param("blotches", 1.0, 0.0, 2.0),
+    param("red", 0.42, 0.0, 1.0),
+    param("green", 0.33, 0.0, 1.0),
+    param("blue", 0.22, 0.0, 1.0),
+];
+
+/// `amount` is the deepest dip, as a share of the brightness; `hold` is
+/// how many frames each brightness lasts; `band` is the rolling shade
+/// and `pulse` a slow swell under the quick flicker.
+const FLICKER: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("hold", 1.0, 1.0, 12.0),
+    param("band", 0.5, 0.0, 1.0),
+    param("pulse", 0.3, 0.0, 1.0),
+];
+
+/// `wobble` is the line jitter and slow bend, `tracking` the rolling
+/// band, `switching` the bottom strip, `scan` the scan lines and `snow`
+/// the dropouts and static.
+const TAPE: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("wobble", 1.0, 0.0, 3.0),
+    param("tracking", 1.0, 0.0, 2.0),
+    param("switching", 1.0, 0.0, 2.0),
+    param("scan", 1.0, 0.0, 2.0),
+    param("snow", 1.0, 0.0, 3.0),
+];
+
+/// `push` is the furthest a band is shoved and `split` how far red and
+/// blue come apart, in the pixels of a 1080 frame; `torn` is the share
+/// of bands that tear; `hold` the frames a pattern lasts; `blocks`
+/// adds small squares that jump.
+const BAND_TEAR: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("progress", 0.0, 0.0, 1.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("push", 90.0, 0.0, 300.0),
+    param("split", 14.0, 0.0, 60.0),
+    param("torn", 0.35, 0.0, 1.0),
+    param("hold", 2.0, 1.0, 12.0),
+    param("blocks", 0.5, 0.0, 2.0),
+];
+
+/// `scale` 2 makes every fibre and speck twice as big; `tooth`,
+/// `fibres`, `mottle`, `specks` and `creases` set each part; the colour
+/// is the sheet's.
+const PAPER: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("scale", 1.0, 0.25, 4.0),
+    param("tooth", 1.0, 0.0, 3.0),
+    param("fibres", 1.0, 0.0, 3.0),
+    param("mottle", 0.15, 0.0, 2.0),
+    param("specks", 1.0, 0.0, 3.0),
+    param("creases", 0.0, 0.0, 3.0),
+    param("red", 0.955, 0.0, 1.0),
+    param("green", 0.94, 0.0, 1.0),
+    param("blue", 0.905, 0.0, 1.0),
+];
+
+/// `amount` is how strong the light and shade are; `facets` 2 gives
+/// twice as many at half the size; `base` is the grey of flat paper (1
+/// white); `light` is where the light comes from, in radians.
+const CRUMPLE: &[Param] = &[
+    param("amount", 0.0, 0.0, 3.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("facets", 1.0, 0.25, 4.0),
+    param("base", 0.86, 0.0, 1.0),
+    param("light", 2.2, -3.2, 3.2),
+];
+
+/// `progress` 0 is the whole picture and 1 none of it. `x` and `y` are
+/// where the fire starts, from the middle, in frames. `seed` picks the
+/// fire and `rough` is how ragged its front is. `clear` 1 leaves the
+/// burnt part see-through, 0 leaves it black.
+const BURN_AWAY: &[Param] = &[
+    param("progress", 0.0, 0.0, 1.0),
+    param("x", 0.0, -1.0, 1.0),
+    param("y", 0.0, -1.0, 1.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("rough", 1.0, 0.0, 3.0),
+    param("clear", 1.0, 0.0, 1.0),
+];
+
 impl Block {
     /// Every block, in the order of their codes.
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 58] = [
         Self::Transform,
         Self::RgbSplit,
         Self::Slices,
@@ -462,6 +876,26 @@ impl Block {
         Self::Focus,
         Self::Place,
         Self::Blend,
+        Self::Leak,
+        Self::Burn,
+        Self::Bokeh,
+        Self::Flare,
+        Self::Motes,
+        Self::Embers,
+        Self::Snow,
+        Self::Rain,
+        Self::Sparks,
+        Self::Fog,
+        Self::Smoke,
+        Self::FilmGrain,
+        Self::FilmDamage,
+        Self::Grime,
+        Self::Flicker,
+        Self::Tape,
+        Self::BandTear,
+        Self::Paper,
+        Self::Crumple,
+        Self::BurnAway,
     ];
 
     /// The parameters in the order the shader reads them.
@@ -506,6 +940,26 @@ impl Block {
             Self::Focus => FOCUS,
             Self::Place => PLACE,
             Self::Blend => BLEND,
+            Self::Leak => LEAK,
+            Self::Burn => BURN,
+            Self::Bokeh => BOKEH,
+            Self::Flare => FLARE,
+            Self::Motes => MOTES,
+            Self::Embers => EMBERS,
+            Self::Snow => SNOW,
+            Self::Rain => RAIN,
+            Self::Sparks => SPARKS,
+            Self::Fog => FOG,
+            Self::Smoke => SMOKE,
+            Self::FilmGrain => FILM_GRAIN,
+            Self::FilmDamage => FILM_DAMAGE,
+            Self::Grime => GRIME,
+            Self::Flicker => FLICKER,
+            Self::Tape => TAPE,
+            Self::BandTear => BAND_TEAR,
+            Self::Paper => PAPER,
+            Self::Crumple => CRUMPLE,
+            Self::BurnAway => BURN_AWAY,
         }
     }
 
@@ -551,6 +1005,26 @@ impl Block {
             Self::Focus => 35,
             Self::Place => 36,
             Self::Blend => 37,
+            Self::Leak => 38,
+            Self::Burn => 39,
+            Self::Bokeh => 40,
+            Self::Flare => 41,
+            Self::Motes => 42,
+            Self::Embers => 43,
+            Self::Snow => 44,
+            Self::Rain => 45,
+            Self::Sparks => 46,
+            Self::Fog => 47,
+            Self::Smoke => 48,
+            Self::FilmGrain => 49,
+            Self::FilmDamage => 50,
+            Self::Grime => 51,
+            Self::Flicker => 52,
+            Self::Tape => 53,
+            Self::BandTear => 54,
+            Self::Paper => 55,
+            Self::Crumple => 56,
+            Self::BurnAway => 57,
         }
     }
 }
@@ -579,6 +1053,12 @@ pub enum Curve {
     /// A random value between `from` and `to`, held for `1 / rate` seconds.
     Jitter {
         jitter: Jitter,
+    },
+    /// The effect's own seconds, counted on from `from` at `rate` a
+    /// second: what a block that drifts or falls without end moves by. It
+    /// stops at the end of its parameter's range.
+    Clock {
+        clock: Clock,
     },
 }
 
@@ -742,6 +1222,18 @@ pub struct Jitter {
     pub seed: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Clock {
+    pub rate: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub from: f32,
+}
+
+fn is_zero_f32(value: &f32) -> bool {
+    *value == 0.0
+}
+
 /// How a control's value reads in the inspector.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -883,7 +1375,15 @@ pub struct Recipe {
 
 /// The effects shelf's categories, in the order the shelf lists them.
 pub const EFFECT_CATEGORIES: &[&str] = &[
-    "Basic", "Motion", "Reveal", "Blur", "Glitch", "Retro", "Light", "Distort",
+    "Basic",
+    "Motion",
+    "Reveal",
+    "Blur",
+    "Glitch",
+    "Retro",
+    "Light",
+    "Atmosphere",
+    "Distort",
 ];
 
 /// One block with every value worked out for one moment.
@@ -1259,6 +1759,14 @@ pub(crate) fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<
             range(jitter.from)?;
             range(jitter.to)
         }
+        // Where it starts is checked; where it goes is held to the range
+        // when the value is worked out, since a clock has no end.
+        Curve::Clock { clock } => {
+            if !clock.rate.is_finite() || clock.rate == 0.0 {
+                return Err(broken());
+            }
+            range(clock.from)
+        }
     }
 }
 
@@ -1276,10 +1784,15 @@ pub(crate) fn to_json<T: Serialize>(recipe: &T) -> Result<String, RecipeError> {
 
 /// The lowest format version that can hold `curves`.
 pub(crate) fn least_version<'a>(curves: impl IntoIterator<Item = &'a Curve>) -> u32 {
-    let eased = curves
+    curves
         .into_iter()
-        .any(|curve| matches!(curve, Curve::Keys { ease, .. } if !ease.is_empty()));
-    if eased { EASE_VERSION } else { 1 }
+        .map(|curve| match curve {
+            Curve::Clock { .. } => CLOCK_VERSION,
+            Curve::Keys { ease, .. } if !ease.is_empty() => EASE_VERSION,
+            _ => 1,
+        })
+        .max()
+        .unwrap_or(1)
 }
 
 /// The lowest format version that can hold `passes`' kept pictures.
@@ -1420,6 +1933,7 @@ impl Curve {
                 let unit = unit_hash(u64::from(jitter.seed), step);
                 jitter.from + (jitter.to - jitter.from) * unit
             }
+            Self::Clock { clock } => clock.from + seconds * clock.rate,
         }
     }
 }
@@ -1466,7 +1980,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 205] = [
+const BUNDLED_FILES: [&str; 242] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -1672,6 +2186,43 @@ const BUNDLED_FILES: [&str; 205] = [
     include_str!("../recipes/ghost.json"),
     include_str!("../recipes/neon-trace.json"),
     include_str!("../recipes/watercolor.json"),
+    include_str!("../recipes/film-leak.json"),
+    include_str!("../recipes/leak-wash.json"),
+    include_str!("../recipes/burn-through.json"),
+    include_str!("../recipes/bokeh-lights.json"),
+    include_str!("../recipes/color-bokeh.json"),
+    include_str!("../recipes/lens-flare.json"),
+    include_str!("../recipes/streak-flare.json"),
+    include_str!("../recipes/dust.json"),
+    include_str!("../recipes/dust-beam.json"),
+    include_str!("../recipes/embers.json"),
+    include_str!("../recipes/snowfall.json"),
+    include_str!("../recipes/blizzard.json"),
+    include_str!("../recipes/rain.json"),
+    include_str!("../recipes/downpour.json"),
+    include_str!("../recipes/sparks.json"),
+    include_str!("../recipes/fog.json"),
+    include_str!("../recipes/ground-mist.json"),
+    include_str!("../recipes/smoke.json"),
+    include_str!("../recipes/real-grain.json"),
+    include_str!("../recipes/heavy-grain.json"),
+    include_str!("../recipes/scratched-film.json"),
+    include_str!("../recipes/stop-motion-grit.json"),
+    include_str!("../recipes/stained-print.json"),
+    include_str!("../recipes/projector.json"),
+    include_str!("../recipes/worn-print.json"),
+    include_str!("../recipes/tape-tracking.json"),
+    include_str!("../recipes/band-tear.json"),
+    include_str!("../recipes/paper-print.json"),
+    include_str!("../recipes/old-paper.json"),
+    include_str!("../recipes/crumpled-paper.json"),
+    include_str!("../recipes/rough-print.json"),
+    include_str!("../recipes/torn-photo.json"),
+    include_str!("../recipes/ink-reveal.json"),
+    include_str!("../recipes/brush-reveal.json"),
+    include_str!("../recipes/tear-reveal.json"),
+    include_str!("../recipes/burn-out.json"),
+    include_str!("../recipes/burn-from-corner.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.
@@ -2120,6 +2671,64 @@ mod tests {
         );
     }
 
+    fn clocked(version: u32, clock: &str, controls: &str) -> Result<Recipe, RecipeError> {
+        read(&format!(
+            r#"{{"version":{version},"id":"a","name":"A","controls":[{controls}],
+            "passes":[{{"block":"transform","params":{{"rotate":{{"clock":{clock}}}}}}}]}}"#
+        ))
+    }
+
+    #[test]
+    fn a_clock_counts_seconds_and_stops_at_its_range() {
+        let recipe = clocked(4, r#"{"rate":10}"#, "").unwrap();
+        let rotate = |seconds: f64| recipe.steps_at(Micros((seconds * 1e6) as i64))[0].values[3];
+        assert_eq!(rotate(0.0), 0.0);
+        assert!((rotate(2.0) - 20.0).abs() < 1e-4);
+        assert!((rotate(2.5) - 25.0).abs() < 1e-4);
+        // Rotate ends at 180: the clock holds there and never leaves it.
+        assert_eq!(rotate(18.0), 180.0);
+        assert_eq!(rotate(4000.0), 180.0);
+        let back = clocked(4, r#"{"rate":-10,"from":5}"#, "").unwrap();
+        let step = back.steps_at(Micros(1_000_000));
+        assert!((step[0].values[3] + 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_speed_control_runs_a_clock_faster() {
+        let speed = r#"{"id":"speed","name":"Speed","default":1,"min":0.5,"max":3,"speed":true}"#;
+        let recipe = clocked(4, r#"{"rate":10}"#, speed).unwrap();
+        let twice = std::collections::BTreeMap::from([("speed".to_owned(), 2.0)]);
+        let step = recipe.steps_with(Micros(1_000_000), &twice);
+        assert!((step[0].values[3] - 20.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_clock_needs_version_four_and_usable_numbers() {
+        assert!(matches!(
+            clocked(3, r#"{"rate":10}"#, ""),
+            Err(RecipeError::Shape(_))
+        ));
+        let recipe = clocked(4, r#"{"rate":10}"#, "").unwrap();
+        let json = recipe.to_json().unwrap();
+        assert!(json.contains("\"version\": 4"), "{json}");
+        assert!(!json.contains("from"), "{json}");
+        assert_eq!(read(&json).unwrap(), recipe);
+        for clock in [r#"{"rate":0}"#, r#"{"rate":1e40}"#] {
+            assert!(
+                matches!(clocked(4, clock, ""), Err(RecipeError::Curve { .. })),
+                "{clock}"
+            );
+        }
+        assert!(matches!(
+            clocked(4, r#"{"rate":1,"from":500}"#, ""),
+            Err(RecipeError::Range { .. })
+        ));
+        assert!(matches!(
+            clocked(4, r#"{"rate":1,"wrap":2}"#, ""),
+            Err(RecipeError::Shape(_))
+        ));
+    }
+
     #[test]
     fn a_recipe_that_would_not_read_back_is_not_written() {
         let mut recipe =
@@ -2140,8 +2749,8 @@ mod tests {
     #[test]
     fn a_newer_recipe_asks_for_an_update_even_with_blocks_this_app_lacks() {
         assert_eq!(
-            read(r#"{"version":4,"id":"a","name":"A","passes":[{"block":"bloom"}]}"#),
-            Err(RecipeError::Newer(4))
+            read(r#"{"version":5,"id":"a","name":"A","passes":[{"block":"bloom"}]}"#),
+            Err(RecipeError::Newer(5))
         );
         assert!(matches!(
             read(r#"{"id":"a","name":"A","passes":[{"block":"blur"}]}"#),

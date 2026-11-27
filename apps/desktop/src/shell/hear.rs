@@ -3,8 +3,9 @@
 //! line each: start and end in microseconds, then the word.
 
 use cutlass_model::TrackAttribute;
-use cutlass_transcription::{FileSource, HeardClip};
+use cutlass_transcription::HeardClip;
 
+use super::sound::MediaSource;
 use super::{Shell, ShellError, heard_words_or_silence, load_speech, speech_model};
 
 /// One word a hearing answers with: where it starts and ends on the
@@ -109,6 +110,7 @@ impl Shell {
         self.hearings = self.hearings.saturating_add(1);
         let id = format!("speech-{}", self.hearings);
         let landed = id.clone();
+        let readers = self.readers.clone();
         self.start_job("Transcribe", move |progress| {
             let recognizer = match loaded {
                 Some(recognizer) => Ok(recognizer),
@@ -123,7 +125,11 @@ impl Shell {
                 progress.stage("Listening");
                 for (clip, file) in &clips {
                     let base = clip.target.start.0;
-                    match heard_words_or_silence(recognizer, &mut FileSource::new(file), clip) {
+                    match heard_words_or_silence(
+                        recognizer,
+                        &mut MediaSource::new(&readers, file),
+                        clip,
+                    ) {
                         Ok(Some(heard)) => {
                             for ((start, end_ms), text) in
                                 heard.start_time.iter().zip(&heard.end_time).zip(heard.text)

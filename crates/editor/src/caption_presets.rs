@@ -1,8 +1,8 @@
-//! Caption templates every shell offers: a caption style, the caption
+//! Caption presets every shell offers: a caption style, the caption
 //! animation that plays in the loop slot, a letter stagger, and the base
 //! look of the words. A keyword is drawn in the style's spoken look.
 //!
-//! A template is the app's own; the reference editor's templates are
+//! A preset is the app's own; the reference editor's presets are
 //! downloaded packages. Picking one records it on the caption as its
 //! `caption_template_info`.
 
@@ -11,10 +11,10 @@ use cutlass_session::Request;
 
 use crate::caption_list::{caption_rows, main_caption_lane};
 
-/// One caption template.
+/// One caption preset.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CaptionTemplate {
-    /// Stored as the caption's template resource id.
+pub struct CaptionPreset {
+    /// Stored as the caption's preset resource id.
     pub id: &'static str,
     pub name: &'static str,
     /// A key of [`cutlass_model::CAPTION_STYLE_KEYS`].
@@ -27,8 +27,8 @@ pub struct CaptionTemplate {
     pub color: &'static str,
     /// The outline color and width in ems; an empty color has none.
     pub outline: (&'static str, f64),
-    /// The groups the Templates page files it under, as
-    /// [`TEMPLATE_CATEGORIES`] names them.
+    /// The groups the Presets page files it under, as
+    /// [`PRESET_CATEGORIES`] names them.
     pub categories: &'static [&'static str],
 }
 
@@ -40,8 +40,8 @@ const LIME: &str = "#B6FF3B";
 const CYAN: &str = "#3EE6FF";
 const ORANGE: &str = "#FF8A00";
 
-/// The groups the Templates page offers, in its order.
-pub const TEMPLATE_CATEGORIES: &[&str] = &[
+/// The groups the Presets page offers, in its order.
+pub const PRESET_CATEGORIES: &[&str] = &[
     "Trending",
     "Classic",
     "Word",
@@ -51,9 +51,9 @@ pub const TEMPLATE_CATEGORIES: &[&str] = &[
     "Soft",
 ];
 
-/// The templates, in the order the Templates page shows them.
-pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
-    CaptionTemplate {
+/// The presets, in the order the Presets page shows them.
+pub const CAPTION_PRESETS: &[CaptionPreset] = &[
+    CaptionPreset {
         id: "cutlass-caption-clean",
         name: "Clean",
         style: "classic",
@@ -63,7 +63,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.06),
         categories: &["Trending", "Classic"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-karaoke",
         name: "Sing along",
         style: "karaoke",
@@ -73,7 +73,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.08),
         categories: &["Trending", "Highlight"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-marker",
         name: "Marker",
         style: "highlight",
@@ -83,7 +83,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: ("", 0.0),
         categories: &["Highlight"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-pop",
         name: "Pop up",
         style: "pop",
@@ -93,7 +93,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.1),
         categories: &["Trending", "Bold"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-reveal",
         name: "Reveal",
         style: "word-by-word",
@@ -103,7 +103,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.06),
         categories: &["Word"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-neon",
         name: "Neon float",
         style: "neon",
@@ -113,7 +113,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: ("", 0.0),
         categories: &["Glow"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-punch",
         name: "Punch",
         style: "bold-box",
@@ -123,7 +123,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.08),
         categories: &["Bold"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-glide",
         name: "Glide",
         style: "rise",
@@ -133,7 +133,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.06),
         categories: &["Soft"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-sunny",
         name: "Sunny",
         style: "classic",
@@ -143,7 +143,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.08),
         categories: &["Trending", "Classic"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-subtitle",
         name: "Subtitle",
         style: "classic",
@@ -153,7 +153,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: ("", 0.0),
         categories: &["Classic", "Soft"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-headline",
         name: "Headline",
         style: "one-word",
@@ -163,7 +163,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.12),
         categories: &["Word", "Bold"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-spotlight",
         name: "Spotlight",
         style: "one-word",
@@ -173,7 +173,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.1),
         categories: &["Trending", "Word"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-typewriter",
         name: "Typewriter",
         style: "word-by-word",
@@ -183,7 +183,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: ("", 0.0),
         categories: &["Word", "Soft"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-duet",
         name: "Duet",
         style: "karaoke",
@@ -193,7 +193,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.08),
         categories: &["Highlight"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-chorus",
         name: "Chorus",
         style: "karaoke",
@@ -203,7 +203,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.08),
         categories: &["Highlight"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-ink-marker",
         name: "Ink marker",
         style: "highlight",
@@ -213,7 +213,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: ("", 0.0),
         categories: &["Highlight", "Classic"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-night-glow",
         name: "Night glow",
         style: "neon",
@@ -223,7 +223,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: ("", 0.0),
         categories: &["Trending", "Glow"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-flicker",
         name: "Flicker",
         style: "neon",
@@ -233,7 +233,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: ("", 0.0),
         categories: &["Glow"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-bounce",
         name: "Bounce",
         style: "pop",
@@ -243,7 +243,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.1),
         categories: &["Bold"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-block",
         name: "Block",
         style: "bold-box",
@@ -253,7 +253,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.06),
         categories: &["Bold", "Classic"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-drift",
         name: "Drift",
         style: "fade",
@@ -263,7 +263,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: ("", 0.0),
         categories: &["Soft"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-whisper",
         name: "Whisper",
         style: "fade",
@@ -273,7 +273,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.04),
         categories: &["Soft"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-lift",
         name: "Lift",
         style: "rise",
@@ -283,7 +283,7 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
         outline: (INK, 0.08),
         categories: &["Word"],
     },
-    CaptionTemplate {
+    CaptionPreset {
         id: "cutlass-caption-swing",
         name: "Swing",
         style: "pop",
@@ -295,15 +295,15 @@ pub const CAPTION_TEMPLATES: &[CaptionTemplate] = &[
     },
 ];
 
-/// The template stored as `id`, if it is one.
+/// The preset stored as `id`, if it is one.
 #[must_use]
-pub fn caption_template(id: &str) -> Option<&'static CaptionTemplate> {
-    CAPTION_TEMPLATES.iter().find(|template| template.id == id)
+pub fn caption_preset(id: &str) -> Option<&'static CaptionPreset> {
+    CAPTION_PRESETS.iter().find(|preset| preset.id == id)
 }
 
-/// The requests that style one caption as `template`.
-fn styled(segment_id: &SegmentId, template: &CaptionTemplate) -> Vec<Request> {
-    let duration = template
+/// The requests that style one caption as `preset`.
+fn styled(segment_id: &SegmentId, preset: &CaptionPreset) -> Vec<Request> {
+    let duration = preset
         .animation
         .and_then(|id| {
             ANIMATION_PRESETS
@@ -314,44 +314,44 @@ fn styled(segment_id: &SegmentId, template: &CaptionTemplate) -> Vec<Request> {
     vec![
         Request::SetCaptionStyle {
             segment_id: segment_id.clone(),
-            style: template.style.to_owned(),
+            style: preset.style.to_owned(),
         },
         Request::SetCaptionStagger {
             segment_id: segment_id.clone(),
-            millis: template.stagger_ms,
+            millis: preset.stagger_ms,
         },
         Request::SetTextColor {
             segment_id: segment_id.clone(),
-            color: template.color.to_owned(),
+            color: preset.color.to_owned(),
             face: String::new(),
         },
         Request::SetTextOutline {
             segment_id: segment_id.clone(),
-            color: template.outline.0.to_owned(),
-            width: template.outline.1,
+            color: preset.outline.0.to_owned(),
+            width: preset.outline.1,
         },
         Request::SetAnimation {
             segment_id: segment_id.clone(),
             kind: AnimType::Caption,
-            animation: template.animation.map(str::to_owned),
+            animation: preset.animation.map(str::to_owned),
             duration,
         },
         Request::SetCaptionTemplate {
             segment_id: segment_id.clone(),
-            resource_id: template.id.to_owned(),
-            name: template.name.to_owned(),
+            resource_id: preset.id.to_owned(),
+            name: preset.name.to_owned(),
         },
     ]
 }
 
-/// The requests that style caption `segment_id` as `template`, as one undo
+/// The requests that style caption `segment_id` as `preset`, as one undo
 /// step. With `all` and the caption on a subtitle lane, every caption on
 /// that lane takes it.
 #[must_use]
-pub fn caption_template_requests(
+pub fn caption_preset_requests(
     draft: &Draft,
     segment_id: &SegmentId,
-    template: &CaptionTemplate,
+    preset: &CaptionPreset,
     all: bool,
 ) -> Vec<Request> {
     let clips: Vec<SegmentId> = if all && main_caption_lane(draft, segment_id).is_some() {
@@ -362,13 +362,10 @@ pub fn caption_template_requests(
     } else {
         vec![segment_id.clone()]
     };
-    clips
-        .iter()
-        .flat_map(|clip| styled(clip, template))
-        .collect()
+    clips.iter().flat_map(|clip| styled(clip, preset)).collect()
 }
 
-/// The requests that take caption `segment_id`'s template off: the plain
+/// The requests that take caption `segment_id`'s preset off: the plain
 /// style, no stagger and no caption animation. The letters keep their
 /// color and outline. With `all` and the caption on a subtitle lane, every
 /// caption on that lane is plain again.
@@ -410,9 +407,9 @@ pub fn plain_caption_requests(draft: &Draft, segment_id: &SegmentId, all: bool) 
         .collect()
 }
 
-/// The template caption `segment_id` was styled with, by its id.
+/// The preset caption `segment_id` was styled with, by its id.
 #[must_use]
-pub fn caption_template_of(draft: &Draft, segment_id: &SegmentId) -> Option<String> {
+pub fn caption_preset_of(draft: &Draft, segment_id: &SegmentId) -> Option<String> {
     let segment = draft
         .tracks
         .iter()
@@ -470,16 +467,12 @@ mod tests {
     }
 
     #[test]
-    fn every_template_names_a_style_and_a_loop_preset_once() {
+    fn every_preset_names_a_style_and_a_loop_animation_once() {
         let mut ids = HashSet::new();
-        for template in CAPTION_TEMPLATES {
-            assert!(ids.insert(template.id), "{}", template.id);
-            assert!(
-                CAPTION_STYLE_KEYS.contains(&template.style),
-                "{}",
-                template.id
-            );
-            if let Some(animation) = template.animation {
+        for preset in CAPTION_PRESETS {
+            assert!(ids.insert(preset.id), "{}", preset.id);
+            assert!(CAPTION_STYLE_KEYS.contains(&preset.style), "{}", preset.id);
+            if let Some(animation) = preset.animation {
                 assert!(
                     ANIMATION_PRESETS
                         .iter()
@@ -487,23 +480,23 @@ mod tests {
                     "{animation}"
                 );
             }
-            assert!((0..=cutlass_session::MAX_CAPTION_STAGGER_MS).contains(&template.stagger_ms));
-            assert_eq!(caption_template(template.id), Some(template));
+            assert!((0..=cutlass_session::MAX_CAPTION_STAGGER_MS).contains(&preset.stagger_ms));
+            assert_eq!(caption_preset(preset.id), Some(preset));
         }
-        assert_eq!(caption_template("nope"), None);
+        assert_eq!(caption_preset("nope"), None);
     }
 
     #[test]
-    fn a_template_styles_every_main_caption_in_one_step() {
+    fn a_preset_styles_every_main_caption_in_one_step() {
         let mut session = session();
         let ids = clips(&session);
         let before = session.draft().clone();
-        let pop = caption_template("cutlass-caption-pop").unwrap();
-        let requests = caption_template_requests(session.draft(), &ids[0], pop, true);
+        let pop = caption_preset("cutlass-caption-pop").unwrap();
+        let requests = caption_preset_requests(session.draft(), &ids[0], pop, true);
         session.apply(1, &requests).unwrap();
         let draft = session.draft();
         for id in &ids {
-            assert_eq!(caption_template_of(draft, id).as_deref(), Some(pop.id));
+            assert_eq!(caption_preset_of(draft, id).as_deref(), Some(pop.id));
             let segment = draft
                 .tracks
                 .iter()
@@ -526,35 +519,32 @@ mod tests {
         session.undo().unwrap();
         assert_eq!(session.draft(), &before);
 
-        // One at a time, a template reaches its own caption only; one with
+        // One at a time, a preset reaches its own caption only; one with
         // no animation takes a caption animation off.
-        let requests = caption_template_requests(session.draft(), &ids[0], pop, false);
+        let requests = caption_preset_requests(session.draft(), &ids[0], pop, false);
         session.apply(session.revision(), &requests).unwrap();
-        let clean = caption_template("cutlass-caption-clean").unwrap();
-        let requests = caption_template_requests(session.draft(), &ids[0], clean, false);
+        let clean = caption_preset("cutlass-caption-clean").unwrap();
+        let requests = caption_preset_requests(session.draft(), &ids[0], clean, false);
         session.apply(session.revision(), &requests).unwrap();
         let draft = session.draft();
-        assert_eq!(
-            caption_template_of(draft, &ids[0]).as_deref(),
-            Some(clean.id)
-        );
-        assert_eq!(caption_template_of(draft, &ids[1]), None);
+        assert_eq!(caption_preset_of(draft, &ids[0]).as_deref(), Some(clean.id));
+        assert_eq!(caption_preset_of(draft, &ids[1]), None);
         assert!(draft.materials.material_animations.is_empty());
     }
 
     #[test]
-    fn none_takes_the_template_off_and_keeps_the_letters() {
+    fn none_takes_the_preset_off_and_keeps_the_letters() {
         let mut session = session();
         let ids = clips(&session);
-        let pop = caption_template("cutlass-caption-pop").unwrap();
+        let pop = caption_preset("cutlass-caption-pop").unwrap();
         let revision = session.revision();
-        let requests = caption_template_requests(session.draft(), &ids[0], pop, true);
+        let requests = caption_preset_requests(session.draft(), &ids[0], pop, true);
         session.apply(revision, &requests).unwrap();
         let revision = session.revision();
         let requests = plain_caption_requests(session.draft(), &ids[0], true);
         session.apply(revision, &requests).unwrap();
         for id in &ids {
-            assert_eq!(caption_template_of(session.draft(), id), None);
+            assert_eq!(caption_preset_of(session.draft(), id), None);
             let segment = session
                 .draft()
                 .tracks

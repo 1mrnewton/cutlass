@@ -18,6 +18,8 @@ cutlass-session = { path = "../session", version = "0.8.0" }
 # The CPU backend everywhere. `fusion` and `autotune` only change GPU work.
 burn = { version = "=0.22.1", default-features = false, features = ["std", "flex", "fusion", "autotune"] }
 burn-store = "=0.22.1"
+# The spectrogram the beat model hears.
+rustfft = "6.4.1"
 # PNG: a photo's matte is one picture.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 

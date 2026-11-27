@@ -1,0 +1,60 @@
+{
+  "version": 4,
+  "id": "burn-through",
+  "name": "Burn Through",
+  "category": "Light",
+  "preview": "road",
+  "poster": 0.35,
+  "controls": [
+    {
+      "id": "speed",
+      "name": "Speed",
+      "default": 1,
+      "min": 0.25,
+      "max": 3,
+      "unit": "times",
+      "speed": true
+    },
+    {
+      "id": "intensity",
+      "name": "Intensity",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "amount"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "burn",
+      "params": {
+        "amount": 1,
+        "progress": {
+          "keys": [
+            [
+              0,
+              0
+            ],
+            [
+              1.5,
+              1
+            ]
+          ],
+          "repeat": 3
+        },
+        "time": {
+          "clock": {
+            "rate": 1
+          }
+        },
+        "seed": 2
+      }
+    }
+  ]
+}

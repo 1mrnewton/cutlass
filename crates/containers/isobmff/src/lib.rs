@@ -20,6 +20,7 @@ mod mux;
 mod opus;
 mod parse;
 mod shared;
+mod smpb;
 mod stsd;
 
 pub use brand::probe;
@@ -32,8 +33,9 @@ pub use mux::{
 };
 
 pub use legacy::{
-    AudioParams, CodecId, ColorTags, Demux, Edit, Error, FileSource, MediaKind, Mux, Packet,
-    SampleFormat, SeekAt, SliceSource, Source, Stream, StreamParams, Timescale, VideoParams,
+    AudioParams, CodecId, ColorTags, Demux, Edit, Error, FileSource, Gapless, MediaKind, Mux,
+    Packet, SampleFormat, SeekAt, SliceSource, Source, Stream, StreamParams, Timescale,
+    VideoParams,
 };
 
 #[cfg(test)]

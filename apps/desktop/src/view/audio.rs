@@ -83,6 +83,7 @@ pub(super) fn audio_panel(
 
 fn basic_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
     sound_section(shell, ui, state, inspection);
+    super::template::template_section(shell, ui, state, super::template::MarkKind::Sound);
     later_section(
         ui,
         state,

@@ -18,6 +18,12 @@ use crate::prepare::{Pcm, PcmSource, PrepareError};
 ///
 /// This is the reader until `container` and `decode` can return PCM for a
 /// range. Callers keep using [`PcmSource`] either way.
+///
+/// It plays a decoder's start-up samples and does not follow an MP4 edit
+/// list, so sound from an AAC or MP3 file can come back later than it
+/// plays: 1,024 samples for the AAC and 1,058 for the MP3 this workspace
+/// exports. It has no Opus decoder. The desktop reads a clip's sound
+/// through the engine, as the player does; use this for PCM files.
 #[derive(Clone, Debug)]
 pub struct FileSource {
     path: PathBuf,

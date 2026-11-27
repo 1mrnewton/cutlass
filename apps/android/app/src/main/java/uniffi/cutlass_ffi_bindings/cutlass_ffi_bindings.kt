@@ -713,6 +713,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_delete_project(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_delete_template(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_duplicate_project(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_effect_choices(
@@ -733,6 +735,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_list_projects(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_list_templates(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_mask_shapes(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_notice_text(
@@ -740,6 +744,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_cutlass_ffi_bindings_checksum_func_notices(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_rename_project(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_save_as_template(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_shape_choices(
     ): Int
@@ -764,6 +770,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_cutlass_ffi_bindings_checksum_func_transition_categories(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_transition_choices(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_use_template(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_volume_at(
     ): Int
@@ -1248,6 +1256,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_delete_project(`root`: RustBuffer.ByValue,`project`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_func_delete_template(`root`: RustBuffer.ByValue,`template`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_func_duplicate_project(`root`: RustBuffer.ByValue,`project`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_effect_choices(uniffi_out_err: UniffiRustCallStatus, 
@@ -1268,6 +1278,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_list_projects(`root`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_list_templates(`root`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_mask_shapes(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_notice_text(`index`: Int,uniffi_out_err: UniffiRustCallStatus, 
@@ -1276,6 +1288,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_rename_project(`root`: RustBuffer.ByValue,`project`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_func_save_as_template(`root`: RustBuffer.ByValue,`project`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`category`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_shape_choices(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_shape_style_ranges(uniffi_out_err: UniffiRustCallStatus, 
@@ -1299,6 +1313,8 @@ internal object UniffiLib {
     external fun uniffi_cutlass_ffi_bindings_fn_func_transition_categories(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_transition_choices(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_use_template(`root`: RustBuffer.ByValue,`template`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_volume_at(`position`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): Double
@@ -1447,6 +1463,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_delete_project() and 0xFFFF) != 11651) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_delete_template() and 0xFFFF) != 30525) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_duplicate_project() and 0xFFFF) != 36546) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1477,6 +1496,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_list_projects() and 0xFFFF) != 22684) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_list_templates() and 0xFFFF) != 6958) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_mask_shapes() and 0xFFFF) != 62227) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1487,6 +1509,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_rename_project() and 0xFFFF) != 53408) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_save_as_template() and 0xFFFF) != 47188) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_shape_choices() and 0xFFFF) != 6033) {
@@ -1523,6 +1548,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_transition_choices() and 0xFFFF) != 11507) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_use_template() and 0xFFFF) != 253) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_volume_at() and 0xFFFF) != 31091) {
@@ -7421,6 +7449,81 @@ public object FfiConverterTypeStickerChoice: FfiConverterRustBuffer<StickerChoic
 
 
 /**
+ * One project template in the gallery. `modified_ms` is milliseconds
+ * since 1970.
+ */
+data class TemplateSummary (
+    var `path`: kotlin.String
+    , 
+    var `name`: kotlin.String
+    , 
+    var `category`: kotlin.String
+    , 
+    var `durationUs`: kotlin.Long
+    , 
+    /**
+     * How many photos or videos it takes.
+     */
+    var `slots`: kotlin.UInt
+    , 
+    var `width`: kotlin.Int
+    , 
+    var `height`: kotlin.Int
+    , 
+    var `modifiedMs`: kotlin.Long
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTemplateSummary: FfiConverterRustBuffer<TemplateSummary> {
+    override fun read(buf: ByteBuffer): TemplateSummary {
+        return TemplateSummary(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterInt.read(buf),
+            FfiConverterInt.read(buf),
+            FfiConverterLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TemplateSummary) = (
+            FfiConverterString.allocationSize(value.`path`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterString.allocationSize(value.`category`) +
+            FfiConverterLong.allocationSize(value.`durationUs`) +
+            FfiConverterUInt.allocationSize(value.`slots`) +
+            FfiConverterInt.allocationSize(value.`width`) +
+            FfiConverterInt.allocationSize(value.`height`) +
+            FfiConverterLong.allocationSize(value.`modifiedMs`)
+    )
+
+    override fun write(value: TemplateSummary, buf: ByteBuffer) {
+            FfiConverterString.write(value.`path`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterString.write(value.`category`, buf)
+            FfiConverterLong.write(value.`durationUs`, buf)
+            FfiConverterUInt.write(value.`slots`, buf)
+            FfiConverterInt.write(value.`width`, buf)
+            FfiConverterInt.write(value.`height`, buf)
+            FfiConverterLong.write(value.`modifiedMs`, buf)
+    }
+}
+
+
+
+/**
  * What a text clip says, the face it says it in, and how it looks.
  */
 data class TextInfo (
@@ -9999,6 +10102,34 @@ public object FfiConverterSequenceTypeStickerChoice: FfiConverterRustBuffer<List
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeTemplateSummary: FfiConverterRustBuffer<List<TemplateSummary>> {
+    override fun read(buf: ByteBuffer): List<TemplateSummary> {
+        val len = buf.getInt()
+        return List<TemplateSummary>(len) {
+            FfiConverterTypeTemplateSummary.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<TemplateSummary>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeTemplateSummary.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<TemplateSummary>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeTemplateSummary.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeTick: FfiConverterRustBuffer<List<Tick>> {
     override fun read(buf: ByteBuffer): List<Tick> {
         val len = buf.getInt()
@@ -10245,6 +10376,22 @@ public object FfiConverterSequenceTypeWave: FfiConverterRustBuffer<List<Wave>> {
     
 
         /**
+         * Delete template `template` in the Cutlass folder at `root`. A folder
+         * that holds no template is refused.
+         */
+    @Throws(EditorException::class) fun `deleteTemplate`(`root`: kotlin.String, `template`: kotlin.String)
+        = 
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_delete_template(
+    
+        
+        FfiConverterString.lower(`root`),
+        FfiConverterString.lower(`template`),_status)
+}
+    
+    
+
+        /**
          * Copy project `project` in the Cutlass folder at `root`, media and all,
          * as "… copy", and return the copy's folder.
          */
@@ -10390,6 +10537,21 @@ public object FfiConverterSequenceTypeWave: FfiConverterRustBuffer<List<Wave>> {
     
 
         /**
+         * The templates the user saved in the Cutlass folder at `root`, newest
+         * first. A missing root lists nothing.
+         */ fun `listTemplates`(`root`: kotlin.String): List<TemplateSummary> {
+            return FfiConverterSequenceTypeTemplateSummary.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_list_templates(
+    
+        
+        FfiConverterString.lower(`root`),_status)
+}
+    )
+    }
+    
+
+        /**
          * Every mask shape in the order the Mask panel shows them.
          */ fun `maskShapes`(): List<MaskShapeChoice> {
             return FfiConverterSequenceTypeMaskShapeChoice.lift(
@@ -10444,6 +10606,26 @@ public object FfiConverterSequenceTypeWave: FfiConverterRustBuffer<List<Wave>> {
         FfiConverterString.lower(`name`),_status)
 }
     
+    
+
+        /**
+         * Save project `project` in the Cutlass folder at `root` as a template
+         * named `name` under `category`, and return the template's folder. A
+         * project with no clip marked as a slot is refused.
+         */
+    @Throws(EditorException::class) fun `saveAsTemplate`(`root`: kotlin.String, `project`: kotlin.String, `name`: kotlin.String, `category`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_save_as_template(
+    
+        
+        FfiConverterString.lower(`root`),
+        FfiConverterString.lower(`project`),
+        FfiConverterString.lower(`name`),
+        FfiConverterString.lower(`category`),_status)
+}
+    )
+    }
     
 
         /**
@@ -10610,6 +10792,25 @@ public object FfiConverterSequenceTypeWave: FfiConverterRustBuffer<List<Wave>> {
     UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_transition_choices(
     
         _status)
+}
+    )
+    }
+    
+
+        /**
+         * Start a new project from template `template` in the Cutlass folder at
+         * `root`, and return the new project's folder. The project holds one
+         * thing: the template as a single closed clip, which is never opened or
+         * ungrouped. The template is not changed.
+         */
+    @Throws(EditorException::class) fun `useTemplate`(`root`: kotlin.String, `template`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_use_template(
+    
+        
+        FfiConverterString.lower(`root`),
+        FfiConverterString.lower(`template`),_status)
 }
     )
     }

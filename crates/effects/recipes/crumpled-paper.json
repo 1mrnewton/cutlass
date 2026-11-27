@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "id": "crumpled-paper",
+  "name": "Crumpled Paper",
+  "category": "Retro",
+  "preview": "flowers",
+  "controls": [
+    {
+      "id": "intensity",
+      "name": "Intensity",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "amount"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "crumple",
+      "params": {
+        "amount": 1
+      }
+    },
+    {
+      "block": "paper",
+      "params": {
+        "amount": 0.4
+      }
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "brush-swipe",
+  "name": "Brush Swipe",
+  "category": "Wipe",
+  "duration": 0.9,
+  "cross": {
+    "kind": 19,
+    "count": 2,
+    "angle": -8,
+    "seed": 4,
+    "rough": 1.4
+  }
+}

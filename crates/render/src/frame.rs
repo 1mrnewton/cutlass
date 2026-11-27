@@ -251,10 +251,11 @@ mod tests {
         let Some(renderer) = renderer() else {
             return;
         };
-        let invert = cutlass_effects::Step::new(
-            cutlass_effects::Block::Invert,
-            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        );
+        let invert = cutlass_effects::Step::new(cutlass_effects::Block::Invert, {
+            let mut values = [0.0; cutlass_effects::MAX_VALUES];
+            values[0] = 1.0;
+            values
+        });
         let frame = FrameLayers {
             width: 4,
             height: 2,
@@ -282,10 +283,11 @@ mod tests {
             return;
         };
         let (width, height) = (48u32, 32u32);
-        let invert = cutlass_effects::Step::new(
-            cutlass_effects::Block::Invert,
-            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        );
+        let invert = cutlass_effects::Step::new(cutlass_effects::Block::Invert, {
+            let mut values = [0.0; cutlass_effects::MAX_VALUES];
+            values[0] = 1.0;
+            values
+        });
         let grey: Vec<u8> = [200, 200, 200, 255].repeat((width * height) as usize);
         // Canvas pixels to the frame a full-canvas layer has: -1 to 1 across,
         // 1 at the top to -1 at the bottom.

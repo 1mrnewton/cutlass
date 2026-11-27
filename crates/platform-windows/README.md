@@ -42,6 +42,7 @@ A factory asks openers in the order they were registered and takes the first tha
 
 - AAC packets are raw access units. The configuration is an AudioSpecificConfig; an `esds` is accepted too.
 - The decoder gives interleaved `f32` or `i16`.
+- The decoder holds the last frame back until it is drained. The engine drains it once at the end of a stream, so a file's last 1024 samples are heard.
 - The encoder takes 44.1 or 48 kHz in mono, stereo or 5.1, at the nearest of 96, 128, 160 or 192 kbit/s. Any other rate or layout declines, so the Rust AAC encoder takes it. Its packets carry no `SideData::Gapless`.
 
 ### Stills

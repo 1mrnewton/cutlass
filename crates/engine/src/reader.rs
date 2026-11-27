@@ -246,6 +246,10 @@ struct Pipe {
     /// time line, when the container states padding after the last valid
     /// sample. A decoder that does not cut that padding itself returns it.
     valid_end: Option<(u32, i64)>,
+    /// Where the sound packets pushed since open or the last reset end, as
+    /// (ticks per second, ticks) on the packets' clock. Sound a drain
+    /// releases past it is not the stream's.
+    sound_end: Option<(u32, i64)>,
     /// No packet has been pushed since open or the last reset.
     fresh: bool,
     /// The colour the container states, for what a picture leaves unspecified.
@@ -267,6 +271,7 @@ impl Pipe {
             gapless: None,
             lead_samples: None,
             valid_end: None,
+            sound_end: None,
             fresh: true,
             color: StreamColor::default(),
         }
@@ -293,36 +298,46 @@ impl Pipe {
     /// The sample on the stream's own time line where `output` starts, before
     /// any samples the decoder marked to skip.
     fn first_sample(&self, output: &AudioOutput) -> i64 {
-        let rate = i64::from(output.pcm.rate);
-        let per_second = i64::from(output.timescale.max(1));
+        self.sample_on_line(output.pts, output.timescale, output.pcm.rate)
+    }
+
+    /// The sample at `rate` on the stream's own time line that `pts`, in
+    /// `timescale` ticks per second, stands for.
+    fn sample_on_line(&self, pts: i64, timescale: u32, rate: u32) -> i64 {
+        let per_second = i64::from(timescale.max(1));
         if let Some((exact_rate, samples)) = self.lead_samples
-            && exact_rate == output.pcm.rate
+            && exact_rate == rate
         {
-            return output
-                .pts
-                .checked_mul(rate)
+            return pts
+                .checked_mul(i64::from(rate))
                 .and_then(|value| value.checked_div(per_second))
                 .unwrap_or(0)
                 .saturating_sub(samples);
         }
-        output
-            .pts
-            .saturating_sub(self.lead_in(output.timescale))
-            .checked_mul(rate)
+        pts.saturating_sub(self.lead_in(timescale))
+            .checked_mul(i64::from(rate))
             .and_then(|value| value.checked_div(per_second))
             .unwrap_or(0)
     }
 
     /// `output` with what it holds past the stream's last valid sample
     /// marked as skipped, or [`None`] when all of it is past that sample.
-    fn within_end(&self, mut output: AudioOutput) -> Option<AudioOutput> {
+    fn within_end(&self, output: AudioOutput) -> Option<AudioOutput> {
         let Some((rate, end)) = self.valid_end else {
             return Some(output);
         };
         // The decoder may run at another rate than the stream names.
         let end = i128::from(end) * i128::from(output.pcm.rate) / i128::from(rate.max(1));
+        let start = self.first_sample(&output);
+        Self::cut_after(output, start, end)
+    }
+
+    /// `output`, which starts at sample `start`, with what it holds from
+    /// sample `end` on marked as skipped, or [`None`] when nothing before
+    /// `end` is left.
+    fn cut_after(mut output: AudioOutput, start: i64, end: i128) -> Option<AudioOutput> {
         let frames = i128::from(output.pcm.samples);
-        let over = i128::from(self.first_sample(&output)) + frames - end;
+        let over = i128::from(start) + frames - end;
         if over <= 0 {
             return Some(output);
         }
@@ -341,7 +356,43 @@ impl Pipe {
         self.lengths.clear();
         self.heard.clear();
         self.drained = false;
+        self.sound_end = None;
         self.fresh = true;
+    }
+
+    /// Note that a sound packet ending at `end`, in `timescale` ticks per
+    /// second, was pushed.
+    fn note_sound(&mut self, end: i64, timescale: u32) {
+        self.sound_end = Some(match self.sound_end {
+            Some((held, last)) if held == timescale => (held, last.max(end)),
+            _ => (timescale, end),
+        });
+    }
+
+    /// At the end of the stream, the sound the decoder still holds, once.
+    /// A decoder that answers each packet with the one before, as Media
+    /// Foundation's AAC decoder does, gives its last buffer up here. Sound
+    /// past the last packet's end, such as the overlap tail the Rust AAC
+    /// decoder flushes, is not the stream's and is left out, as is all of
+    /// it when the packets carried no time. A drain that fails ends the
+    /// sound where it is.
+    fn drain_sound(&mut self) -> Option<AudioOutput> {
+        if std::mem::replace(&mut self.drained, true) {
+            return None;
+        }
+        let (timescale, tick) = self.sound_end?;
+        let outputs = self.decoder.drain().unwrap_or_default();
+        for output in outputs {
+            let Output::Audio(audio) = output else {
+                continue;
+            };
+            let start = self.first_sample(&audio);
+            let end = self.sample_on_line(tick, timescale, audio.pcm.rate);
+            if let Some(audio) = Self::cut_after(audio, start, i128::from(end)) {
+                self.heard.push_back(audio);
+            }
+        }
+        self.heard.pop_front()
     }
 
     /// Note a picture packet's timestamp and duration.
@@ -1223,7 +1274,9 @@ impl Media {
     }
 
     /// The next decoded audio buffer with its timestamp. A packet that
-    /// returns several keeps the rest for the next call.
+    /// returns several keeps the rest for the next call. At the end of the
+    /// stream the decoder is drained once, so a buffer it still holds is
+    /// not lost.
     fn next_decoded(&mut self) -> Result<Option<AudioOutput>, EngineError> {
         let Some(track) = self.audio.as_ref().map(|pipe| pipe.track) else {
             return Ok(None);
@@ -1239,7 +1292,7 @@ impl Media {
                 return Err(EngineError::DecodeLimit);
             }
             let Some(packet) = self.demux.read_packet().map_err(from_read)? else {
-                return Ok(None);
+                return Ok(self.audio.as_mut().and_then(Pipe::drain_sound));
             };
             if packet.stream() != track {
                 if others == OTHER_STREAM_PACKETS {
@@ -1252,6 +1305,13 @@ impl Media {
             let Some(pipe) = self.audio.as_mut() else {
                 return Ok(None);
             };
+            let time = packet.timestamp();
+            if let (Some(pts), Some(duration)) = (time.presentation_or_decode(), time.duration()) {
+                pipe.note_sound(
+                    pts.saturating_add(duration),
+                    packet.timescale().ticks_per_second(),
+                );
+            }
             let access = pipe.access(&packet);
             let outputs = match pipe.decoder.push(&access) {
                 Ok(outputs) => outputs,

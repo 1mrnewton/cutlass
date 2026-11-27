@@ -204,6 +204,7 @@ struct Effect {
     a: vec4<f32>,
     b: vec4<f32>,
     c: vec4<f32>,
+    d: vec4<f32>,
 };
 
 @group(0) @binding(0) var source: texture_2d<f32>;
@@ -1072,7 +1073,7 @@ fn kernel(uv: vec2<f32>) -> vec4<f32> {
 ";
 
 /// Bytes in one draw's uniform block.
-const PARAMS: u64 = 64;
+const PARAMS: u64 = 16 + 4 * MAX_VALUES as u64;
 
 /// A picture one draw of a block reads or writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1102,7 +1103,7 @@ pub(crate) struct Draw {
     pub(crate) other: Option<Picture>,
     /// The picture drawn.
     pub(crate) write: Picture,
-    /// The kernel's twelve values.
+    /// The kernel's values, four to each of `a`, `b`, `c` and `d`.
     pub(crate) values: [f32; MAX_VALUES],
 }
 

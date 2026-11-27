@@ -45,7 +45,7 @@ pub const MAX_KEYS: usize = 64;
 /// The largest recipe file read.
 pub const MAX_RECIPE_BYTES: usize = 64 * 1024;
 /// The most values one block takes.
-pub const MAX_VALUES: usize = 12;
+pub const MAX_VALUES: usize = 16;
 /// The fastest a held random value may change, in steps per second.
 pub const MAX_JITTER_RATE: f32 = 120.0;
 /// The effect id a recipe is stored under on a draft's effect material.

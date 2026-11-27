@@ -6,8 +6,9 @@
 
 use cutlass_audio::{Envelope, align};
 use cutlass_model::{SegmentId, TimeRange, TrackId};
-use cutlass_transcription::{FileSource, HeardClip, PcmSource};
+use cutlass_transcription::{HeardClip, PcmSource};
 
+use super::sound::MediaSource;
 use super::{Shell, ShellError};
 use crate::jobs::Progress;
 
@@ -104,18 +105,24 @@ impl Shell {
             ));
         }
         let anchor = plan.reference.clone();
+        let readers = self.readers.clone();
         self.start_job("Sync", move |progress| {
             progress.stage("Listening to the video");
             let total = others.len() as f32 + 1.0;
-            let lead = clip_envelope(&mut FileSource::new(&reference.1), &reference.0, progress);
+            let lead = clip_envelope(
+                &mut MediaSource::new(&readers, &reference.1),
+                &reference.0,
+                progress,
+            );
             let mut shifts: Vec<(SegmentId, i64)> = Vec::new();
             let mut unmatched = 0_usize;
             if let Some(lead) = &lead {
                 for (index, (clip, file)) in others.iter().enumerate() {
                     progress.fraction((index as f32 + 1.0) / total);
                     progress.stage("Matching the sound");
-                    let found = clip_envelope(&mut FileSource::new(file), clip, progress)
-                        .and_then(|envelope| align(lead, &envelope));
+                    let found =
+                        clip_envelope(&mut MediaSource::new(&readers, file), clip, progress)
+                            .and_then(|envelope| align(lead, &envelope));
                     match found {
                         Some(found) => shifts.push((clip.source_id.clone(), found.micros())),
                         None => unmatched += 1,

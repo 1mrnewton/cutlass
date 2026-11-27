@@ -26,6 +26,7 @@
 //! then holds, and the chain goes on in a new texture. The picture as it
 //! entered the effect is always kept, as the canvas bytes it came in.
 
+use crate::drawn::{DRAWN, NOISE};
 use crate::pool::{Bind, TextureKey};
 use cutlass_effects::{Block, MAX_SAVED, MAX_VALUES, Step};
 
@@ -91,7 +92,8 @@ pub(crate) const fn space(block: Block) -> Option<Space> {
         | Block::Halftone
         | Block::Prints
         | Block::Rays
-        | Block::Place => Some(Space::Display),
+        | Block::Place
+        | Block::Leak => Some(Space::Display),
     }
 }
 
@@ -1061,6 +1063,7 @@ fn kernel(uv: vec2<f32>) -> vec4<f32> {
         case 35u: { return focus(uv); }
         case 36u: { return place(uv); }
         case 37u: { return blend(uv); }
+        case 38u: { return leak(uv); }
         case 100u: { return gauss(uv); }
         case 101u: { return halve(uv); }
         case 102u: { return smooth_up(uv); }
@@ -1421,7 +1424,7 @@ impl Effects {
     pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render effect"),
-            source: wgpu::ShaderSource::Wgsl(format!("{LIGHT}{SHADER}").into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{LIGHT}{SHADER}{NOISE}{DRAWN}").into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cutlass-render effect"),
@@ -1907,8 +1910,57 @@ mod tests {
             step(Block::Rays, &[]),
             step(Block::Focus, &[]),
             step(Block::Place, &[]),
+            step(Block::Leak, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
+    }
+
+    /// A flat mid grey picture, opaque.
+    fn grey(size: (u32, u32)) -> Vec<u8> {
+        [128, 128, 128, 255].repeat((size.0 * size.1) as usize)
+    }
+
+    fn mean(bytes: &[u8]) -> f64 {
+        let colour = bytes.chunks(4).flat_map(|pixel| &pixel[..3]);
+        colour.map(|byte| f64::from(*byte)).sum::<f64>() / (bytes.len() / 4 * 3) as f64
+    }
+
+    /// Blocks that draw light over the picture, each with the values that
+    /// turn it on: `amount` first, then a `time` for the ones that move.
+    const LIGHTS: &[(Block, &[(usize, f32)])] = &[(Block::Leak, &[(0, 1.5), (1, 1.3)])];
+
+    #[test]
+    fn drawn_light_only_brightens_and_draws_the_same_each_time() {
+        let Some(renderer) = renderer() else { return };
+        let size = (64, 36);
+        let flat = grey(size);
+        for (block, set) in LIGHTS {
+            let lit = draw(&renderer, &flat, size, &[step(*block, set)]);
+            assert!(
+                lit.chunks(4)
+                    .all(|pixel| pixel[..3].iter().all(|byte| *byte >= 127) && pixel[3] == 255),
+                "{block:?} darkened a pixel"
+            );
+            assert!(mean(&lit) > 129.0, "{block:?} drew nothing: {}", mean(&lit));
+            let again = draw(&renderer, &flat, size, &[step(*block, set)]);
+            assert_eq!(lit, again, "{block:?}");
+        }
+    }
+
+    #[test]
+    fn drawn_light_is_as_bright_at_twice_the_size_and_on_a_tall_frame() {
+        let Some(renderer) = renderer() else { return };
+        for (block, set) in LIGHTS {
+            let small = draw(&renderer, &grey((64, 36)), (64, 36), &[step(*block, set)]);
+            let large = draw(&renderer, &grey((128, 72)), (128, 72), &[step(*block, set)]);
+            let (small, large) = (mean(&small), mean(&large));
+            assert!((small - large).abs() < 4.0, "{block:?}: {small} vs {large}");
+            let tall = draw(&renderer, &grey((36, 64)), (36, 64), &[step(*block, set)]);
+            assert!(
+                mean(&tall) > 129.0,
+                "{block:?} drew nothing on a tall frame"
+            );
+        }
     }
 
     #[test]

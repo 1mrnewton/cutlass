@@ -143,6 +143,10 @@ pub enum Block {
     /// Lay a kept picture over the picture so far: added, screened,
     /// multiplied, the lighter of the two, or mixed in.
     Blend,
+    /// Light spilling in from one edge of the frame, drifting and breathing:
+    /// deep red where it is faint, through orange and yellow to white where
+    /// it is strong, with a second, pinker light beside it.
+    Leak,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -423,9 +427,27 @@ const HALFTONE: &[Param] = &[
 /// leaves the picture so far and 1 is the mode's whole result.
 const BLEND: &[Param] = &[param("mode", 0.0, 0.0, 4.0), param("amount", 1.0, 0.0, 1.0)];
 
+/// `time` moves the light; `side` is the edge it comes from, in turns (0
+/// right, 0.25 bottom, 0.5 left, 0.75 top), or under 0 to let the seed
+/// pick. `second` is how much of the second light shows, in its own
+/// colour (`red2`, `green2`, `blue2`).
+const LEAK: &[Param] = &[
+    param("amount", 0.0, 0.0, 2.0),
+    param("time", 0.0, 0.0, 86_400.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("side", -1.0, -1.0, 1.0),
+    param("second", 0.6, 0.0, 1.0),
+    param("red", 1.0, 0.0, 1.0),
+    param("green", 0.4, 0.0, 1.0),
+    param("blue", 0.11, 0.0, 1.0),
+    param("red2", 1.0, 0.0, 1.0),
+    param("green2", 0.16, 0.0, 1.0),
+    param("blue2", 0.42, 0.0, 1.0),
+];
+
 impl Block {
     /// Every block, in the order of their codes.
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 39] = [
         Self::Transform,
         Self::RgbSplit,
         Self::Slices,
@@ -464,6 +486,7 @@ impl Block {
         Self::Focus,
         Self::Place,
         Self::Blend,
+        Self::Leak,
     ];
 
     /// The parameters in the order the shader reads them.
@@ -508,6 +531,7 @@ impl Block {
             Self::Focus => FOCUS,
             Self::Place => PLACE,
             Self::Blend => BLEND,
+            Self::Leak => LEAK,
         }
     }
 
@@ -553,6 +577,7 @@ impl Block {
             Self::Focus => 35,
             Self::Place => 36,
             Self::Blend => 37,
+            Self::Leak => 38,
         }
     }
 }
@@ -1500,7 +1525,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 205] = [
+const BUNDLED_FILES: [&str; 207] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -1706,6 +1731,8 @@ const BUNDLED_FILES: [&str; 205] = [
     include_str!("../recipes/ghost.json"),
     include_str!("../recipes/neon-trace.json"),
     include_str!("../recipes/watercolor.json"),
+    include_str!("../recipes/film-leak.json"),
+    include_str!("../recipes/leak-wash.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.

@@ -1374,23 +1374,7 @@ impl Decoder for Ramp {
                 what: "marked packet",
             });
         }
-        let samples = (0..RAMP_FRAMES)
-            .map(|index| ramp_at(packet.pts + index))
-            .collect();
-        let pcm = cutlass_codec::access::Pcm::from_f32(
-            48_000,
-            cutlass_codec::access::ChannelLayout::mono(),
-            samples,
-        )
-        .map_err(|_| CodecError::Limit { what: "pcm" })?;
-        Ok(vec![Output::Audio(cutlass_decode::AudioOutput {
-            pcm,
-            pts: packet.pts,
-            timescale: packet.timescale,
-            skip_leading: 0,
-            skip_trailing: 0,
-            concealed: false,
-        })])
+        Ok(vec![ramp_buffer(packet.pts, packet.timescale)?])
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
@@ -1402,6 +1386,63 @@ impl Decoder for Ramp {
 
 fn ramp_at(tick: i64) -> f32 {
     tick as f32 / 100_000.0
+}
+
+/// One packet's worth of the ramp from stream tick `pts`.
+fn ramp_buffer(pts: i64, timescale: u32) -> Result<Output, CodecError> {
+    let samples = (0..RAMP_FRAMES).map(|index| ramp_at(pts + index)).collect();
+    let pcm = cutlass_codec::access::Pcm::from_f32(
+        48_000,
+        cutlass_codec::access::ChannelLayout::mono(),
+        samples,
+    )
+    .map_err(|_| CodecError::Limit { what: "pcm" })?;
+    Ok(Output::Audio(cutlass_decode::AudioOutput {
+        pcm,
+        pts,
+        timescale,
+        skip_leading: 0,
+        skip_trailing: 0,
+        concealed: false,
+    }))
+}
+
+/// A ramp decoder that answers each packet with the one before it, as
+/// Media Foundation's AAC decoder holds one frame back. A drain gives the
+/// held packet and then one packet past it, as the Rust AAC decoder flushes
+/// its overlap after the last frame.
+struct Lagging(Option<(i64, u32)>);
+
+impl Decoder for Lagging {
+    fn codec(&self) -> CodecId {
+        CodecId::Pcm
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        self.0
+            .replace((packet.pts, packet.timescale))
+            .map(|(pts, timescale)| ramp_buffer(pts, timescale))
+            .into_iter()
+            .collect()
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        let Some((pts, timescale)) = self.0.take() else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![
+            ramp_buffer(pts, timescale)?,
+            ramp_buffer(pts + RAMP_FRAMES, timescale)?,
+        ])
+    }
+
+    fn reset(&mut self) {
+        self.0 = None;
+    }
+}
+
+fn open_lagging_decoder(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(Lagging(None)))
 }
 
 fn open_ramp_decoder(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
@@ -1627,6 +1668,44 @@ fn sound_with_no_stated_padding_or_no_index_plays_to_its_last_packet() {
         let whole = media.audio_from(Micros(0), 7_200).expect("window");
         assert_eq!(whole.as_f32().expect("f32"), &ramp(600, 4_800)[..]);
     }
+}
+
+/// A decoder that holds the last packet's sound back, as Media
+/// Foundation's AAC decoder does, gives it up at the end of the stream: the
+/// last packet is heard in one window, packet by packet, in joined windows
+/// and after a seek, and the stated padding is still cut from it. What the
+/// drain flushes past the last packet is not heard.
+#[test]
+fn a_decoder_that_holds_the_last_packet_back_gives_it_up_at_the_end() {
+    let path = fixture("pattern.jpg");
+    let readers = primed_readers(open_primed_unpadded, open_lagging_decoder);
+    let mut media = readers.open(&path).expect("open");
+    let whole = media.audio_from(Micros(0), 7_200).expect("window");
+    assert_eq!(whole.as_f32().expect("f32"), &ramp(600, 4_800)[..]);
+    // A seek back after the drain decodes again from the start.
+    let again = media.audio_from(Micros(0), 480).expect("seek back");
+    assert_eq!(again.as_f32().expect("f32"), &ramp(600, 1_080)[..]);
+
+    let mut media = readers.open(&path).expect("open");
+    let mut pulled = Vec::new();
+    while let Some(ready) = media.pull_audio().expect("pull") {
+        pulled.extend_from_slice(ready.pcm.as_f32().expect("f32"));
+    }
+    assert_eq!(pulled, ramp(0, 4_800));
+
+    let readers = primed_readers(open_primed, open_lagging_decoder);
+    let mut media = readers.open(&path).expect("open");
+    let mut joined = Vec::new();
+    for window in 0..8_i64 {
+        let pcm = media
+            .audio_from(Micros(window * 10_000), 480)
+            .expect("window");
+        joined.extend_from_slice(pcm.as_f32().expect("f32"));
+    }
+    assert_eq!(joined, ramp(600, 4_400));
+    let mut media = readers.open(&path).expect("open");
+    let tail = media.audio_from(Micros(77_000), 480).expect("seek");
+    assert_eq!(tail.as_f32().expect("f32"), &ramp(4_296, 4_400)[..]);
 }
 
 /// A decoder whose first packet after open or a reset comes out wrong, as

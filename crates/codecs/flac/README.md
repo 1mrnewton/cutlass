@@ -55,7 +55,7 @@ assert_eq!(decoder.md5_check(), Md5Check::Match);
 Other public items:
 
 - `Settings` holds the block size, the highest LPC order, the partition order range, the stereo search, and the apodization windows (`Apodization`). `FlacEncoder::open_with` takes engine parameters and explicit settings.
-- `StreamInfo` parses and writes the 34-byte STREAMINFO body. `CodecParams.extra` may be empty, that body, or `fLaC` followed by a STREAMINFO block.
+- `StreamInfo` parses and writes the 34-byte STREAMINFO body. `CodecParams.extra` may be empty, that body, `fLaC` followed by a STREAMINFO block, or the body of a `dfLa` box: a version and flags, all zero, then the blocks. The last is what `cutlass-isobmff` hands over for an MP4 `fLaC` entry, so FLAC in MP4 opens. Blocks after STREAMINFO are ignored.
 - `FrameHeader` parses and writes a frame header. `crc` and `md5` are the checksums. `layout` gives the RFC channel order for a channel count.
 - Through the `Encoder` trait, the first packet carries the opening STREAMINFO as `SideData::Config`. The last packet from `drain` carries the final one, with the sample count, frame sizes, and MD5, for a muxer to write back.
 - `md5_check` reports `Match` or `Mismatch` only after every sample was decoded in order from the first. Otherwise it is `Incomplete`, or `Unknown` when there is no signature.
@@ -109,11 +109,11 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 - The code is single-threaded and has no SIMD.
 - Through the traits, 32-bit sound is rounded to `f32`. `FlacDecoder::decode` and `FlacEncoder::encode` are exact at every depth.
 - `md5_check` is `Incomplete`, not `Unknown`, for a STREAMINFO that has a signature but no sample count.
-- FLAC in MP4 does not open: `StreamInfo::from_extra` does not accept a `dfLa` box body, which is what `cutlass-isobmff` hands over for a `fLaC` sample entry.
 - Ogg FLAC does not open: `cutlass-ogg` reports it as an unknown codec.
 - The app's export writes 16-bit FLAC: the mix is clipped to 16 bits before it reaches the encoder.
 
 ## Specifications
 
 - RFC 9639, Free Lossless Audio Codec (FLAC).
+- Encapsulation of FLAC in ISO Base Media File Format (Xiph.Org), for the `dfLa` box body.
 - RFC 1321, the MD5 Message-Digest Algorithm, for the STREAMINFO signature.

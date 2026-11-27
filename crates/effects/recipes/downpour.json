@@ -34,7 +34,7 @@
     {
       "block": "rain",
       "params": {
-        "amount": 2.0,
+        "amount": 1.7,
         "time": {
           "clock": {
             "rate": 1

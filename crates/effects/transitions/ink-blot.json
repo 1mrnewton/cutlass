@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "ink-blot",
+  "name": "Ink Blot",
+  "category": "Shape",
+  "duration": 1.4,
+  "cross": {
+    "kind": 18
+  }
+}

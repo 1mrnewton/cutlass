@@ -3,6 +3,7 @@
 //! shape opening from a point, a fade, brightness, or one laid over the
 //! other. An `edge` lays a coloured band along the swapping line.
 
+use crate::drawn::{MATTES, NOISE};
 use crate::pool::Bind;
 use cutlass_effects::Crossing;
 
@@ -16,6 +17,7 @@ struct Cross {
     b: vec4<f32>,
     // red, green, blue, close
     c: vec4<f32>,
+    // width, height, seed, rough
     size: vec4<f32>,
 };
 
@@ -137,6 +139,31 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let size = cx.size.xy;
     let short = min(size.x, size.y);
     let uv = position.xy / size;
+    if (kind >= 18u) {
+        // The drawn mattes: ink, a brush, a paper tear.
+        let shape = size / short;
+        let middle = (uv - vec2<f32>(0.5)) * shape;
+        let one = 1.0 / short;
+        let tilt = radians(cx.a.z);
+        if (kind == 18u) {
+            let landing = vec2<f32>(cx.b.y, cx.b.z) * shape;
+            let far = length(abs(landing) + shape * 0.5);
+            let ink = ink_matte(middle - landing, cx.a.x, cx.size.z, cx.size.w, far, one);
+            return mix(a, b, ink);
+        }
+        if (kind == 19u) {
+            let paint = brush_matte(middle, shape, cx.a.x, cx.size.z, cx.b.x, tilt, 0.6 * cx.size.w);
+            return mix(a, b, paint);
+        }
+        let torn = tear_matte(middle, shape, cx.a.x, cx.size.z, cx.size.w, vec2<f32>(cos(tilt), -sin(tilt)), one);
+        let under = mix(a, b, torn.x);
+        // The paper's white core along the tear, while it is on its way.
+        var core = torn.y;
+        if (cx.a.x <= 0.0 || cx.a.x >= 1.0) {
+            core = 0.0;
+        }
+        return mix(under, vec4<f32>(0.97, 0.96, 0.93, 1.0), core);
+    }
     let turn = radians(cx.a.z);
     let along = vec2<f32>(cos(turn), -sin(turn));
     let spread = (abs(along.x) + abs(along.y)) * 0.5;
@@ -236,7 +263,7 @@ impl Cross {
     pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render cross"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{SHADER}{NOISE}{MATTES}").into()),
         });
         let texture = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -317,8 +344,11 @@ impl Cross {
         size: (u32, u32),
     ) {
         let mut values = [0.0f32; 16];
-        // In the order of `CROSS`: four to a vec4, the colour and close third.
-        values[..12].copy_from_slice(&crossing.cross);
+        // In the order of `CROSS`: four to a vec4, the colour and close
+        // third; the seed and roughness ride after the size.
+        values[..12].copy_from_slice(&crossing.cross[..12]);
+        values[14] = crossing.cross[12];
+        values[15] = crossing.cross[13];
         #[allow(clippy::cast_precision_loss)]
         {
             values[12] = size.0 as f32;

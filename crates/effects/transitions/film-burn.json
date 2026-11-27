@@ -1,0 +1,74 @@
+{
+  "version": 4,
+  "id": "film-burn",
+  "name": "Film Burn",
+  "category": "Light",
+  "duration": 1.2,
+  "outgoing": [
+    {
+      "block": "burn",
+      "params": {
+        "amount": 1,
+        "progress": {
+          "keys": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "time": {
+          "clock": {
+            "rate": 1.2
+          }
+        },
+        "seed": 2
+      }
+    }
+  ],
+  "incoming": [
+    {
+      "block": "burn",
+      "params": {
+        "amount": 1,
+        "progress": {
+          "keys": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "time": {
+          "clock": {
+            "rate": 1.2
+          }
+        },
+        "seed": 2
+      }
+    }
+  ],
+  "cross": {
+    "kind": 8,
+    "progress": {
+      "keys": [
+        [
+          0.499,
+          0
+        ],
+        [
+          0.501,
+          1
+        ]
+      ]
+    }
+  }
+}

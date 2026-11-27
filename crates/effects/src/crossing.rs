@@ -79,11 +79,22 @@ pub enum CrossKind {
     /// side, opens a gap of the `red`, `green`, `blue` colour between the
     /// cards, which also shows behind a turning card.
     Cards,
+    /// An ink blot that splashes at `x`, `y` and creeps out with a
+    /// wandering edge. `seed` picks the blot and `rough` is how far its
+    /// edge wanders.
+    Ink,
+    /// `count` brush strokes, each the opposite way to the last, tilted by
+    /// `angle`. `rough` is how dry the brush is.
+    Brush,
+    /// The outgoing picture torn away like a sheet of paper, the tear
+    /// travelling along `angle` with the paper's white core showing along
+    /// it. `rough` is how ragged the tear is.
+    Tear,
 }
 
 impl CrossKind {
     /// Every kind, in the order of its number.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 21] = [
         Self::Wipe,
         Self::Circle,
         Self::Blinds,
@@ -102,6 +113,9 @@ impl CrossKind {
         Self::Squares,
         Self::Zip,
         Self::Cards,
+        Self::Ink,
+        Self::Brush,
+        Self::Tear,
     ];
 }
 
@@ -119,10 +133,11 @@ const fn param(name: &'static str, default: f32, min: f32, max: f32) -> Param {
 /// `progress` is `t`. `edge` lays a band of the `red`, `green`, `blue`
 /// colour along the swapping line, as wide as that part of the run.
 /// `close` runs the swap the other way: a shape closes in on the
-/// outgoing picture instead of opening out of it.
+/// outgoing picture instead of opening out of it. `seed` and `rough` shape
+/// the drawn kinds: ink, brush and tear.
 pub const CROSS: &[Param] = &[
     param("progress", 0.0, 0.0, 1.0),
-    param("kind", 8.0, 0.0, 17.0),
+    param("kind", 8.0, 0.0, 20.0),
     param("angle", 0.0, -360.0, 360.0),
     param("soft", 0.02, 0.0, 1.0),
     param("count", 8.0, 1.0, 64.0),
@@ -133,6 +148,8 @@ pub const CROSS: &[Param] = &[
     param("green", 1.0, 0.0, 1.0),
     param("blue", 1.0, 0.0, 1.0),
     param("close", 0.0, 0.0, 1.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("rough", 1.0, 0.0, 3.0),
 ];
 
 /// A transition as data.
@@ -166,7 +183,7 @@ pub struct TransitionRecipe {
 pub struct Crossing {
     pub outgoing: Vec<Step>,
     pub incoming: Vec<Step>,
-    pub cross: [f32; 12],
+    pub cross: [f32; 14],
 }
 
 impl Crossing {
@@ -320,7 +337,7 @@ impl TransitionRecipe {
             }
             .steps_at(time)
         };
-        let mut cross = [0.0; 12];
+        let mut cross = [0.0; 14];
         for (slot, param) in cross.iter_mut().zip(CROSS) {
             *slot = self.cross.get(param.name).map_or(
                 if param.name == "progress" {
@@ -393,7 +410,7 @@ pub fn transition_preview_t(elapsed: Micros) -> f32 {
 }
 
 /// The transition recipes the app ships, in shelf order.
-const BUNDLED_FILES: [&str; 182] = [
+const BUNDLED_FILES: [&str; 189] = [
     include_str!("../transitions/flash.json"),
     include_str!("../transitions/quick-flash.json"),
     include_str!("../transitions/red-flash.json"),
@@ -576,6 +593,13 @@ const BUNDLED_FILES: [&str; 182] = [
     include_str!("../transitions/shockwave.json"),
     include_str!("../transitions/black-hole.json"),
     include_str!("../transitions/lens-warp.json"),
+    include_str!("../transitions/ink-blot.json"),
+    include_str!("../transitions/ink-splash.json"),
+    include_str!("../transitions/brush-strokes.json"),
+    include_str!("../transitions/brush-swipe.json"),
+    include_str!("../transitions/paper-tear.json"),
+    include_str!("../transitions/paper-rip-down.json"),
+    include_str!("../transitions/film-burn.json"),
 ];
 
 /// Every bundled transition recipe, read once.
@@ -652,7 +676,7 @@ mod tests {
         assert_eq!(at.outgoing[0].block, Block::Blur);
         assert!((at.outgoing[0].values[0] - 0.05).abs() < 1e-6);
         assert_eq!(late.at(f32::NAN).cross[0], 0.0);
-        assert_eq!(CROSS.len(), 12);
+        assert_eq!(CROSS.len(), 14);
     }
 
     #[test]
@@ -696,13 +720,13 @@ mod tests {
         assert!(half.outgoing.is_empty() && half.incoming.is_empty());
         // The last kind reads; one past it does not.
         assert_eq!(
-            read(r#"{"version":1,"id":"a","name":"A","cross":{"kind":17}}"#)
+            read(r#"{"version":1,"id":"a","name":"A","cross":{"kind":20}}"#)
                 .at(0.5)
                 .kind(),
-            CrossKind::Cards
+            CrossKind::Tear
         );
         assert!(
-            TransitionRecipe::read(br#"{"version":1,"id":"a","name":"A","cross":{"kind":18}}"#)
+            TransitionRecipe::read(br#"{"version":1,"id":"a","name":"A","cross":{"kind":21}}"#)
                 .is_err()
         );
     }

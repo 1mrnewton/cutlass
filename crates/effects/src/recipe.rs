@@ -374,12 +374,19 @@ const SPOTLIGHT: &[Param] = &[
 /// across, one colour then the other, and 7 dissolves in fine grains.
 /// `angle` 0 runs left to right; `soft` is the edge, as a fraction of the
 /// run.
+///
+/// Three kinds are drawn: 8 is an ink blot that splashes in the middle and
+/// creeps out, 9 is `count` brush strokes tilted by `angle`, and 10 is a
+/// paper tear travelling along `angle`. `seed` picks the shape and `rough`
+/// is how far its edge wanders, or how dry the brush is.
 const REVEAL: &[Param] = &[
     param("progress", 1.0, 0.0, 1.0),
-    param("kind", 0.0, 0.0, 7.0),
+    param("kind", 0.0, 0.0, 10.0),
     param("angle", 0.0, -180.0, 180.0),
     param("soft", 0.02, 0.0, 0.5),
     param("count", 8.0, 1.0, 64.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("rough", 1.0, 0.0, 3.0),
 ];
 /// `black` 1 leaves black where the shrunk picture no longer reaches;
 /// 0 reflects it, as the other moving blocks do.
@@ -1953,7 +1960,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 237] = [
+const BUNDLED_FILES: [&str; 240] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -2191,6 +2198,9 @@ const BUNDLED_FILES: [&str; 237] = [
     include_str!("../recipes/crumpled-paper.json"),
     include_str!("../recipes/rough-print.json"),
     include_str!("../recipes/torn-photo.json"),
+    include_str!("../recipes/ink-reveal.json"),
+    include_str!("../recipes/brush-reveal.json"),
+    include_str!("../recipes/tear-reveal.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.

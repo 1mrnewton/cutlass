@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "brush-strokes",
+  "name": "Brush Strokes",
+  "category": "Wipe",
+  "duration": 1.2,
+  "cross": {
+    "kind": 19,
+    "count": 4,
+    "angle": -4
+  }
+}

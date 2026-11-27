@@ -26,7 +26,7 @@
 //! then holds, and the chain goes on in a new texture. The picture as it
 //! entered the effect is always kept, as the canvas bytes it came in.
 
-use crate::drawn::{DRAWN, NOISE};
+use crate::drawn::{DRAWN, MATTES, NOISE};
 use crate::pool::{Bind, TextureKey};
 use cutlass_effects::{Block, MAX_SAVED, MAX_VALUES, Step};
 
@@ -720,6 +720,19 @@ fn reveal(uv: vec2<f32>) -> vec4<f32> {
     } else if (kind == 7u) {
         let grain = vec2<u32>(uv * fx.size / 3.0);
         run = rand(grain.x, grain.y, 7u);
+    } else if (kind >= 8u) {
+        // The drawn mattes: ink from the middle, a brush, a paper tear.
+        let shape = half * 2.0;
+        let one = 1.0 / min(fx.size.x, fx.size.y);
+        var matte = 0.0;
+        if (kind == 8u) {
+            matte = ink_matte(p, progress, fx.b.y, fx.b.z, length(half), one);
+        } else if (kind == 9u) {
+            matte = brush_matte(p, shape, progress, fx.b.y, fx.b.x, turn, 0.6 * fx.b.z);
+        } else {
+            matte = tear_matte(p, shape, progress, fx.b.y, fx.b.z, along, one).x;
+        }
+        return vec4<f32>(c.rgb * matte, c.a);
     } else {
         let reach = (abs(along.x) + abs(along.y)) * 0.5;
         run = dot(uv - vec2<f32>(0.5), along) / reach * 0.5 + 0.5;
@@ -1478,7 +1491,9 @@ impl Effects {
     pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render effect"),
-            source: wgpu::ShaderSource::Wgsl(format!("{LIGHT}{SHADER}{NOISE}{DRAWN}").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{LIGHT}{SHADER}{NOISE}{MATTES}{DRAWN}").into(),
+            ),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cutlass-render effect"),
@@ -2114,6 +2129,28 @@ mod tests {
         let (inside, outside) = (covered(&torn, 56), covered(&torn, 52));
         assert!(inside < 120 || outside > 0, "{inside} {outside}");
         assert!(inside + outside > 20, "{inside} {outside}");
+    }
+
+    #[test]
+    fn the_drawn_reveals_show_nothing_then_part_then_all_of_the_picture() {
+        let Some(renderer) = renderer() else { return };
+        let size = (96, 64);
+        let flat = grey(size);
+        for kind in [8.0, 9.0, 10.0] {
+            let reveal = |progress: f32| {
+                let set = [(0, progress), (1, kind), (4, 3.0)];
+                draw(&renderer, &flat, size, &[step(Block::Reveal, &set)])
+            };
+            assert!(mean(&reveal(0.0)) < 1.0, "kind {kind} starts shown");
+            assert_eq!(reveal(1.0), flat, "kind {kind}");
+            let half = reveal(0.5);
+            assert_eq!(half, reveal(0.5), "kind {kind}");
+            assert!(
+                mean(&half) > 10.0 && mean(&half) < 118.0,
+                "kind {kind} at half: {}",
+                mean(&half)
+            );
+        }
     }
 
     #[test]

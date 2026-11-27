@@ -111,6 +111,157 @@ fn turn(p: vec2<f32>, a: f32) -> vec2<f32> {
 }
 ";
 
+/// Mattes that grow with a `progress` of 0 to 1: 0 where nothing has been
+/// reached yet, 1 where it has. A transition swaps its two pictures by
+/// one, and the reveal block shows its picture through one. They need
+/// [`NOISE`] and nothing else, so each shader passes in the frame's shape.
+pub(crate) const MATTES: &str = r"
+// Ink: a blot lands with a splash of spikes and flung drops, then creeps
+// out with a wandering edge until it covers the frame.
+//
+// q: the pixel from the blot's middle, in shorter sides. far: how far the
+// frame's farthest corner is from there. one: a pixel, in shorter sides.
+fn ink_matte(q: vec2<f32>, progress: f32, seed: f32, rough: f32, far: f32, one: f32) -> f32 {
+    if (progress <= 0.0) {
+        return 0.0;
+    }
+    let since = progress * 3.0;
+    let sd = seed * 3.1;
+    let splash = 0.2;
+    let burst = 1.0 - exp(-since * 11.0);
+    let creep = pow(clamp(progress, 0.0, 1.0), 1.7);
+    let radius = splash * burst + max(far * 1.5 - splash, 0.0) * creep;
+    // The edge wanders: the whole shape is pushed about by slow clouds.
+    var w = q + (vec2<f32>(
+        fbm3(vec3<f32>(q * 2.1 + sd, since * 0.12), 4),
+        fbm3(vec3<f32>(q * 2.1 + sd + 40.0, since * 0.12), 4),
+    ) - 0.5) * 0.42 * rough * (0.35 + radius);
+    w = w + (vec2<f32>(fbm(q * 9.0 + sd, 3), fbm(q * 9.0 + sd + 80.0, 3)) - 0.5) * 0.05 * rough;
+    let d = length(w);
+    let ray = normalize(q + vec2<f32>(0.00001));
+    // Spikes: thin tongues, long and short, where the splash threw them.
+    let tongue = pow(vnoise(ray * 8.0 + sd), 5.0) * 1.1 + pow(vnoise(ray * 21.0 + sd + 9.0), 7.0) * 0.9;
+    let lobes = (vnoise(ray * 2.5 + sd + 30.0) - 0.5) * 0.35 * rough;
+    let edge_r = radius * (1.0 + lobes) + splash * burst * tongue;
+    let soft = max(0.0025, one);
+    var ink = smoothstep(-soft, soft, edge_r - d);
+    // Droplets: small drops flung past the edge, a touch longer along
+    // the line of flight.
+    for (var j = 0; j < 26; j = j + 1) {
+        let fj = f32(j);
+        let h = hash22(vec2<f32>(fj * 3.7 + 1.0, sd + 5.0));
+        let h2 = hash22(vec2<f32>(fj * 9.1 + 4.0, sd + 11.0));
+        if (h2.y > 0.8) {
+            continue;
+        }
+        let a = h.x * TAU;
+        let fly = vec2<f32>(cos(a), sin(a));
+        let out = splash * (1.2 + 2.3 * h.y * h.y);
+        let fat = splash * (0.02 + 0.1 * h2.x * h2.x) * smoothstep(0.02 + 0.1 * h.y, 0.1 + 0.16 * h.y, since);
+        let o = q - fly * out;
+        let e = vec2<f32>(dot(o, fly) / 1.5, dot(o, vec2<f32>(-fly.y, fly.x)));
+        let wob = (vnoise(o * 90.0 + fj) - 0.5) * fat * 0.5;
+        ink = max(ink, smoothstep(-soft, soft, fat - length(e) + wob));
+    }
+    // Whatever the edge left dry fills in at the very end.
+    return max(ink, smoothstep(0.9, 1.0, progress));
+}
+
+// A brush: strokes laid one under the other, each the opposite way to
+// the last, streaky at the leading end where the brush runs dry and
+// solid behind it.
+//
+// p: the pixel from the frame's middle, in shorter sides. shape: the
+// frame in shorter sides. angle: the strokes' tilt in radians. dry: how
+// streaky they are.
+fn brush_matte(p0: vec2<f32>, shape: vec2<f32>, progress: f32, seed: f32, strokes: f32, angle: f32, dry: f32) -> f32 {
+    let p = turn(p0, -angle);
+    let count = i32(clamp(strokes, 1.0, 8.0));
+    let n = f32(count);
+    // More than the frame's height, so the tilt leaves no corner.
+    let cover = 1.25;
+    let inset = -0.25;
+    // The share of the whole run one stroke takes.
+    let span = min(1.0, 1.45 / n);
+    var m = 0.0;
+    for (var i = 0; i < count; i = i + 1) {
+        let fi = f32(i);
+        let r = hash22(vec2<f32>(fi * 7.3 + 2.0, seed * 4.1 + 1.0));
+        var begin = 0.0;
+        if (n > 1.0) {
+            begin = fi * (1.0 - span) / (n - 1.0);
+        }
+        let local = clamp((progress - begin) / span, 0.0, 1.0);
+        // A stroke starts fast and slows as the brush lifts.
+        let go = 1.0 - pow(1.0 - local, 2.2);
+        var way = 1.0;
+        if (i % 2 == 1) {
+            way = -1.0;
+        }
+        // 0 at the side the stroke starts from, 1 at the far side.
+        let u = p.x * way / shape.x + 0.5;
+        let yc = (-cover * 0.5 + (fi + 0.5) * cover / n + (r.x - 0.5) * 0.03
+            + 0.018 * sin(u * 3.0 + r.y * TAU)) * shape.y;
+        let reach = cover / n * 0.5 * 1.5 * shape.y;
+        // The stroke swells and thins along its length.
+        let fat = 0.85 + 0.3 * vnoise(vec2<f32>(u * 3.0 + fi * 10.0, seed));
+        let v = (p.y - yc) / (reach * fat);
+        // Bristles: streaks down the stroke, in clumps and single hairs.
+        let across = (p.y - yc) * 1080.0;
+        let clumps = fbm(vec2<f32>(across * 0.085 + fi * 31.0 + seed * 3.0, u * 1.6), 3);
+        let hairs = vnoise(vec2<f32>(across * 0.42 + fi * 17.0, u * 5.0 + seed));
+        let bb = mix(clumps, hairs, 0.4);
+        // The long edges: ragged, following the bristles.
+        let wave = (fbm(vec2<f32>(u * 5.0 + fi * 13.0, seed + sign(v) * 9.0), 3) - 0.5) * 0.3;
+        let edge = 1.0 - smoothstep(0.7, 1.0, abs(v) + wave + (bb - 0.5) * 0.75);
+        // The brush head: some bristles lead, some lag.
+        let head = mix(inset - 0.3, 1.0 - inset + 0.3, go);
+        let behind = head - u - (bb - 0.5) * 0.24;
+        var wet = smoothstep(0.0, 0.012, behind) * smoothstep(0.0, 0.012, u - inset - (hairs - 0.5) * 0.06);
+        wet = wet * (1.0 - smoothstep(0.0, 0.012, u - (1.0 - inset) - (clumps - 0.5) * 0.08));
+        // Dry brush: gaps between bristles just behind the head, out at
+        // the edges, and a little all along where the paint is thin.
+        let thin = vnoise(vec2<f32>(u * 2.2 + fi * 4.0, across * 0.01 + seed));
+        let thirst = dry * (1.0 - smoothstep(0.0, 0.32, behind)) + dry * 0.75 * smoothstep(0.45, 1.0, abs(v))
+            + dry * 0.55 * smoothstep(0.45, 0.8, thin);
+        let paint = smoothstep(thirst * 0.85 - 0.08, thirst * 0.85 + 0.04, bb + 0.12);
+        m = max(m, edge * wet * paint);
+    }
+    // The last streaks fill in at the very end.
+    return max(m, smoothstep(0.86, 1.0, progress));
+}
+
+// A paper tear travelling across the frame along `dir`. Returns how much
+// of the top sheet is gone, and how much of the paper's white core shows
+// along the tear.
+//
+// p: the pixel from the frame's middle, in shorter sides. shape: the
+// frame in shorter sides. one: a pixel, in shorter sides.
+fn tear_matte(p: vec2<f32>, shape: vec2<f32>, progress: f32, seed: f32, rough: f32, dir: vec2<f32>, one: f32) -> vec2<f32> {
+    let across = dot(p, dir);
+    let along = dot(p, vec2<f32>(-dir.y, dir.x));
+    let half_way = 0.5 * (abs(dir.x) * shape.x + abs(dir.y) * shape.y) + 0.2;
+    // It starts gently, is still moving fast when it leaves, and is all
+    // the way across a little before the end.
+    let k = pow(clamp(progress / 0.9, 0.0, 1.0), 1.6);
+    let pos = mix(-half_way, half_way, k);
+    // The tear line: big wanders, small jags and a fine fray.
+    let n = (fbm(vec2<f32>(along * 2.2, seed * 3.7), 4) - 0.5) * 0.26 * rough
+        + (fbm(vec2<f32>(along * 14.0, seed * 9.1), 3) - 0.5) * 0.035 * rough
+        + (fbm(vec2<f32>(along * 70.0, seed), 2) - 0.5) * 0.007 * rough;
+    // Below 0 the top sheet is gone here.
+    let d = across - pos - n;
+    let gone = 1.0 - smoothstep(-one, one, d);
+    // The core is wider in some places than others, its far edge ragged
+    // too, and it is not flat white: paper has fibres.
+    let wide = 16.0 / 1080.0 * (0.35 + 1.3 * fbm(vec2<f32>(along * 9.0, seed * 5.0 + 3.0), 3))
+        + (fbm(vec2<f32>(along * 90.0, seed * 2.0 + 7.0), 2) - 0.5) * 0.006;
+    var rim = smoothstep(-one, one, d) * (1.0 - smoothstep(wide - one, wide + one, d));
+    rim = rim * (0.82 + 0.18 * fbm(p * 260.0 + seed, 2));
+    return vec2<f32>(gone, rim);
+}
+";
+
 /// The kernels. They read `fx`, `fetch`, `straight` and `premultiplied`
 /// from the effect shader, and [`NOISE`].
 pub(crate) const DRAWN: &str = r"

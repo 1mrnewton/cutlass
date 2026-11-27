@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "id": "brush-reveal",
+  "name": "Brush Reveal",
+  "category": "Reveal",
+  "preview": "lake",
+  "poster": 0.5,
+  "controls": [
+    {
+      "id": "speed",
+      "name": "Speed",
+      "default": 1,
+      "min": 0.25,
+      "max": 3,
+      "unit": "times",
+      "speed": true
+    }
+  ],
+  "passes": [
+    {
+      "block": "reveal",
+      "params": {
+        "progress": {
+          "keys": [
+            [
+              0,
+              0
+            ],
+            [
+              1.2,
+              1
+            ]
+          ]
+        },
+        "kind": 9,
+        "count": 4,
+        "angle": -4
+      }
+    }
+  ]
+}

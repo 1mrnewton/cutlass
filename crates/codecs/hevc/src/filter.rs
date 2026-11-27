@@ -235,7 +235,11 @@ impl Picture {
             let mut memo = query.memo.get();
             if memo.0 != rs {
                 let header = &self.slice_of(query.q.0, query.q.1)?.header;
-                memo = (rs, header.beta_offset, header.tc_offset);
+                memo = (
+                    rs,
+                    2 * header.slice_beta_offset_div2,
+                    2 * header.slice_tc_offset_div2,
+                );
                 query.memo.set(memo);
             }
             (memo.1, memo.2)
@@ -279,7 +283,7 @@ impl Picture {
     #[inline(always)]
     fn luma_strength(&self, query: &EdgeQuery<'_>) -> Option<Strength> {
         let (qp, beta_offset, tc_offset, no_p, no_q) = self.edge_terms(query)?;
-        let shift = u32::from(self.sps.bit_depth) - 8;
+        let shift = u32::from(self.sps.bit_depth()) - 8;
         let beta = BETA[(qp + beta_offset).clamp(0, 51) as usize] << shift;
         let tc =
             TC[(qp + 2 * (i32::from(query.bs) - 1) + tc_offset).clamp(0, 53) as usize] << shift;
@@ -288,13 +292,13 @@ impl Picture {
             tc,
             no_p,
             no_q,
-            max: (1 << self.sps.bit_depth) - 1,
+            max: (1 << self.sps.bit_depth()) - 1,
         })
     }
 
     fn chroma_strength(&self, query: &EdgeQuery<'_>, offset: i32) -> Option<Strength> {
         let (qp, _, tc_offset, no_p, no_q) = self.edge_terms(query)?;
-        let shift = u32::from(self.sps.bit_depth) - 8;
+        let shift = u32::from(self.sps.bit_depth()) - 8;
         let qpc = chroma_qp((qp + offset).clamp(0, 57));
         let tc = TC[(qpc + 2 + tc_offset).clamp(0, 53) as usize] << shift;
         Some(Strength {
@@ -302,7 +306,7 @@ impl Picture {
             tc,
             no_p,
             no_q,
-            max: (1 << self.sps.bit_depth) - 1,
+            max: (1 << self.sps.bit_depth()) - 1,
         })
     }
 
@@ -332,10 +336,10 @@ impl Picture {
         let width = self.width;
         let ver_stride = width / 8 + 1;
         let cw = width / 2;
-        let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
+        let offsets = [self.pps.pps_cb_qp_offset, self.pps.pps_cr_qp_offset];
         let memo = Cell::new((usize::MAX, 0, 0));
         // Luma of 8 to 11 bits: two segments of four lines at a time.
-        let bit_depth = u32::from(self.sps.bit_depth);
+        let bit_depth = u32::from(self.sps.bit_depth());
         let fast = deblock::accelerated() && (P::bytes(&band[0]).is_some() || bit_depth <= 11);
         if fast {
             for y in (top..bottom).step_by(8) {
@@ -415,9 +419,9 @@ impl Picture {
     ) {
         let width = self.width;
         let cw = width / 2;
-        let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
+        let offsets = [self.pps.pps_cb_qp_offset, self.pps.pps_cr_qp_offset];
         let memo = Cell::new((usize::MAX, 0, 0));
-        let bit_depth = u32::from(self.sps.bit_depth);
+        let bit_depth = u32::from(self.sps.bit_depth());
         let fast = deblock::accelerated() && (P::bytes(&band[0]).is_some() || bit_depth <= 11);
         if fast {
             for y in (top.max(8)..bottom).step_by(8) {
@@ -509,7 +513,9 @@ impl Picture {
             return true;
         }
         let layout = &self.layout;
-        if !self.pps.loop_filter_across_tiles && layout.tile_of[cur] != layout.tile_of[nb] {
+        if !self.pps.loop_filter_across_tiles_enabled_flag
+            && layout.tile_of[cur] != layout.tile_of[nb]
+        {
             return false;
         }
         if self.slice_addr(cur) == self.slice_addr(nb) {
@@ -524,19 +530,19 @@ impl Picture {
             return false;
         };
         if layout.rs_to_ts[nb] < layout.rs_to_ts[cur] {
-            a.header.loop_filter_across_slices
+            a.header.slice_loop_filter_across_slices_enabled_flag
         } else {
-            b.header.loop_filter_across_slices
+            b.header.slice_loop_filter_across_slices_enabled_flag
         }
     }
 
     /// Whether any slice of the picture has SAO on.
     pub fn sao_on(&self) -> bool {
-        self.sps.sao
+        self.sps.sample_adaptive_offset_enabled_flag
             && self
                 .slices
                 .iter()
-                .any(|s| s.header.sao_luma || s.header.sao_chroma)
+                .any(|s| s.header.slice_sao_luma_flag || s.header.slice_sao_chroma_flag)
     }
 
     /// The luma lines [`Self::sao_row`] makes final for CTB row `r`: those
@@ -655,10 +661,13 @@ impl Picture {
         let ctb_w = self.layout.ctb_width as usize;
         let ctb_h = self.layout.ctb_height as usize;
         let log2_ctb = u32::from(self.layout.log2_ctb);
-        let bit_depth = u32::from(self.sps.bit_depth);
+        let bit_depth = u32::from(self.sps.bit_depth());
         let max = (1i32 << bit_depth) - 1;
-        let keep_possible =
-            self.pps.transquant_bypass || self.sps.pcm.is_some_and(|p| p.loop_filter_disabled);
+        let keep_possible = self.pps.transquant_bypass_enabled_flag
+            || self
+                .sps
+                .pcm
+                .is_some_and(|p| p.pcm_loop_filter_disabled_flag);
         let (rx, ry) = (rs % ctb_w, rs / ctb_w);
         let params = self.sao.get(rs);
         if params.iter().all(|p| p.kind == 0) {

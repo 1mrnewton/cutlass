@@ -45,7 +45,7 @@ pub enum OutForm {
 /// packed picture, uncropped, which its final rows are shifted into as
 /// they come. The frame's rows are then published empty, in step.
 pub fn staged(reference: bool, form: Option<OutForm>, sps: &Sps) -> bool {
-    !reference && form == Some(OutForm::Packed) && sps.crop == [0; 4] && sps.bit_depth > 8
+    !reference && form == Some(OutForm::Packed) && sps.crop() == [0; 4] && sps.bit_depth() > 8
 }
 
 /// A picture to decode.
@@ -99,7 +99,7 @@ impl<P: Pixel> Job<P> {
         let direct = staged(reference, out.as_ref().map(|o| o.form), &pic.sps)
             || (!reference
                 && out.is_some()
-                && pic.sps.crop == [0; 4]
+                && pic.sps.crop() == [0; 4]
                 && P::of_bytes_mut(&mut []).is_some());
         let pipe = Pipeline::new(&pic, &work, &frame, writer, col, (out, direct));
         let mut result = Ok(());
@@ -145,9 +145,9 @@ pub struct OutRows {
 impl OutRows {
     /// `spare`: a buffer of an earlier packed picture, to fill again.
     pub fn new(sps: &Sps, form: OutForm, spare: Option<Vec<u8>>) -> Self {
-        let width = sps.width as usize;
-        let height = sps.height as usize;
-        let [left, right, top, bottom] = sps.crop.map(|v| v as usize);
+        let width = sps.pic_width_in_luma_samples as usize;
+        let height = sps.pic_height_in_luma_samples as usize;
+        let [left, right, top, bottom] = sps.crop().map(|v| v as usize);
         let w = width.saturating_sub(left + right);
         let h = height.saturating_sub(top + bottom);
         let crop = [
@@ -155,7 +155,7 @@ impl OutRows {
             (left / 2, top / 2, w / 2, h / 2),
             (left / 2, top / 2, w / 2, h / 2),
         ];
-        let shift = u32::from(sps.bit_depth) - 8;
+        let shift = u32::from(sps.bit_depth()) - 8;
         let size = |c: usize| crop[c].2 * crop[c].3;
         let total = size(0) + size(1) + size(2);
         let eight = match form {
@@ -355,8 +355,8 @@ fn decode_slice<P: Pixel>(
     let first_row = segment / ctb_w;
     let rows = slice.entries.len() + 1;
     let wavefront = threads > 1
-        && pic.pps.entropy_sync
-        && !pic.pps.tiles
+        && pic.pps.entropy_coding_sync_enabled_flag
+        && !pic.pps.tiles_enabled_flag
         && segment.is_multiple_of(ctb_w)
         && rows > 1
         && first_row + rows <= layout.ctb_height as usize;

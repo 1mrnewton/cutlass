@@ -18,7 +18,7 @@ use crate::picture::{
     SaoParams, Work, lock,
 };
 use crate::pixel::Pixel;
-use crate::ps::{Pps, Sps};
+use crate::ps::{Pps, ScalingList, Sps};
 use crate::slice::SliceType;
 use crate::transform;
 
@@ -362,10 +362,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     pub fn decode(&mut self) -> Result<(), CodecError> {
         let header = self.pic.slices[self.slice].header.clone();
         let layout = self.pic.layout.clone();
-        let ctb_size = 1usize << self.sps.log2_ctb;
+        let ctb_size = 1usize << self.sps.log2_ctb();
         let ctb_w = layout.ctb_width as usize;
         let total = layout.ctb_count() as usize;
-        let start_rs = self.start_rs.unwrap_or(header.segment_address as usize);
+        let start_rs = self
+            .start_rs
+            .unwrap_or(header.slice_segment_address as usize);
         let Some(&start_ts) = layout.rs_to_ts.get(start_rs) else {
             return Err(malformed("slice runs past the picture"));
         };
@@ -400,10 +402,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 .map(|(nx, ny)| self.pic.available(self.ctb_x, self.ctb_y, nx, ny));
             let tile_start =
                 ts == 0 || layout.tile_of[rs] != layout.tile_of[layout.ts_to_rs[ts - 1] as usize];
-            let row_start =
-                self.pps.entropy_sync && col as u32 == layout.tile_col_start(col as u32);
+            let row_start = self.pps.entropy_coding_sync_enabled_flag
+                && col as u32 == layout.tile_col_start(col as u32);
             if first {
-                if !header.dependent || tile_start {
+                if !header.dependent_slice_segment_flag || tile_start {
                     self.reset_contexts();
                     self.first_qg = true;
                 } else if row_start {
@@ -424,7 +426,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
             first = false;
             self.coding_tree_unit()?;
-            if self.pps.entropy_sync
+            if self.pps.entropy_coding_sync_enabled_flag
                 && col as u32 == layout.tile_col_start(col as u32) + 1
                 && let Some(slot) = lock(&self.pic.wpp_ctx).get_mut(rs)
             {
@@ -444,7 +446,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 if self.next_entry < self.entries.len() {
                     return Err(malformed("slice ends before its last entry point"));
                 }
-                if self.pps.dependent_slices {
+                if self.pps.dependent_slice_segments_enabled_flag {
                     *lock(&self.pic.dependent) = (self.cabac.ctx, self.last_qp);
                 }
                 return Ok(());
@@ -455,8 +457,8 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             let next_rs = layout.ts_to_rs[ts] as usize;
             let next_col = next_rs % ctb_w;
             let next_tile = layout.tile_of[next_rs] != layout.tile_of[rs];
-            let next_row =
-                self.pps.entropy_sync && next_col as u32 == layout.tile_col_start(next_col as u32);
+            let next_row = self.pps.entropy_coding_sync_enabled_flag
+                && next_col as u32 == layout.tile_col_start(next_col as u32);
             if (next_tile || next_row) && !self.cabac.terminate() {
                 return Err(malformed("end_of_subset_one_bit"));
             }
@@ -488,14 +490,14 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let init_type = match header.slice_type {
             SliceType::I => 0,
             SliceType::P => {
-                if header.cabac_init {
+                if header.cabac_init_flag {
                     2
                 } else {
                     1
                 }
             }
             SliceType::B => {
-                if header.cabac_init {
+                if header.cabac_init_flag {
                     1
                 } else {
                     2
@@ -509,7 +511,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     /// after the CTB above and to the right when that CTB is available
     /// (clause 9.3.1); otherwise it initializes them.
     fn sync_wpp(&mut self) {
-        let ctb = 1usize << self.sps.log2_ctb;
+        let ctb = 1usize << self.sps.log2_ctb();
         let (x, y) = (self.ctb_x, self.ctb_y);
         if y >= ctb
             && self
@@ -528,10 +530,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
 
     fn coding_tree_unit(&mut self) -> Result<(), CodecError> {
         let header = &self.pic.slices[self.slice].header;
-        if header.sao_luma || header.sao_chroma {
+        if header.slice_sao_luma_flag || header.slice_sao_chroma_flag {
             self.sao_syntax()?;
         }
-        self.coding_quadtree(self.ctb_x, self.ctb_y, u32::from(self.sps.log2_ctb), 0)
+        self.coding_quadtree(self.ctb_x, self.ctb_y, u32::from(self.sps.log2_ctb()), 0)
     }
 
     fn sao_syntax(&mut self) -> Result<(), CodecError> {
@@ -541,7 +543,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let slice_addr = self.pic.slices[self.slice].slice_addr as usize;
         let (luma_on, chroma_on) = {
             let h = &self.pic.slices[self.slice].header;
-            (h.sao_luma, h.sao_chroma)
+            (h.slice_sao_luma_flag, h.slice_sao_chroma_flag)
         };
         let mut merge_left = false;
         if !rs.is_multiple_of(ctb_w)
@@ -562,7 +564,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             self.pic.sao.set(rs, self.pic.sao.get(rs - ctb_w));
             return Ok(());
         }
-        let bit_depth = u32::from(self.sps.bit_depth);
+        let bit_depth = u32::from(self.sps.bit_depth());
         let max_abs = (1u32 << (bit_depth.min(10) - 5)) - 1;
         let mut params = [SaoParams::default(); 3];
         for c in 0..3 {
@@ -626,7 +628,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         depth: u32,
     ) -> Result<(), CodecError> {
         let size = 1usize << log2;
-        let min_cb = u32::from(self.sps.log2_min_cb);
+        let min_cb = u32::from(self.sps.log2_min_cb());
         let split = if x0 + size <= self.pic.width && y0 + size <= self.pic.height && log2 > min_cb
         {
             let mut inc = 0;
@@ -640,7 +642,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         } else {
             log2 > min_cb
         };
-        let log2_qg = u32::from(self.sps.log2_ctb) - u32::from(self.pps.diff_cu_qp_delta_depth);
+        let log2_qg = u32::from(self.sps.log2_ctb()) - u32::from(self.pps.diff_cu_qp_delta_depth);
         if log2 >= log2_qg {
             self.start_qg(x0, y0);
         }
@@ -703,7 +705,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             log2,
             ..Cu::default()
         };
-        if self.pps.transquant_bypass {
+        if self.pps.transquant_bypass_enabled_flag {
             self.cu.bypass = self.cabac.decide(cabac::TRANSQUANT_BYPASS);
         }
         self.pic
@@ -741,7 +743,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             true
         };
         self.cu.intra = intra;
-        let min_cb = u32::from(self.sps.log2_min_cb);
+        let min_cb = u32::from(self.sps.log2_min_cb());
         let part = if !intra || log2 == min_cb {
             self.part_mode(log2)
         } else {
@@ -764,8 +766,8 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             self.cu.intra_split = part == PART_NXN;
             if let Some(pcm_params) = self.sps.pcm
                 && part == PART_2NX2N
-                && log2 >= u32::from(pcm_params.log2_min)
-                && log2 <= u32::from(pcm_params.log2_max)
+                && log2 >= u32::from(pcm_params.log2_min())
+                && log2 <= u32::from(pcm_params.log2_max())
             {
                 pcm = self.cabac.terminate();
             }
@@ -773,7 +775,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 self.pcm_sample(x0, y0, log2)?;
                 let flags = MODE_INTRA
                     | FLAG_PCM
-                    | if self.sps.pcm.is_some_and(|p| p.loop_filter_disabled) || self.cu.bypass {
+                    | if self
+                        .sps
+                        .pcm
+                        .is_some_and(|p| p.pcm_loop_filter_disabled_flag)
+                        || self.cu.bypass
+                    {
                         FLAG_KEEP
                     } else {
                         0
@@ -818,9 +825,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             };
             if root {
                 self.cu.max_trafo_depth = if intra {
-                    u32::from(self.sps.max_th_depth_intra) + u32::from(self.cu.intra_split)
+                    u32::from(self.sps.max_transform_hierarchy_depth_intra)
+                        + u32::from(self.cu.intra_split)
                 } else {
-                    u32::from(self.sps.max_th_depth_inter)
+                    u32::from(self.sps.max_transform_hierarchy_depth_inter)
                 };
                 let root = Tb {
                     x: x0,
@@ -857,7 +865,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         if self.cabac.decide(cabac::PART_MODE) {
             return PART_2NX2N;
         }
-        let min_cb = u32::from(self.sps.log2_min_cb);
+        let min_cb = u32::from(self.sps.log2_min_cb());
         if log2 == min_cb {
             if self.cu.intra {
                 return PART_NXN;
@@ -873,7 +881,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
             return PART_NXN;
         }
-        if !self.sps.amp {
+        if !self.sps.amp_enabled_flag {
             if self.cabac.decide(cabac::PART_MODE + 1) {
                 return PART_2NXN;
             }
@@ -903,8 +911,8 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         };
         let rest = self.cabac.remaining();
         let size = 1usize << log2;
-        let luma_bits = u32::from(pcm.bit_depth);
-        let chroma_bits = u32::from(pcm.bit_depth_chroma);
+        let luma_bits = u32::from(pcm.bit_depth());
+        let chroma_bits = u32::from(pcm.bit_depth_chroma());
         let total_bits =
             size * size * luma_bits as usize + 2 * (size / 2) * (size / 2) * chroma_bits as usize;
         let bytes = total_bits.div_ceil(8);
@@ -912,7 +920,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             return Err(truncated("pcm samples"));
         }
         let mut reader = crate::bits::Bits::new(&rest[..bytes]);
-        let bit_depth = u32::from(self.sps.bit_depth);
+        let bit_depth = u32::from(self.sps.bit_depth());
         let (plane, stride) = self.out.from(0, x0, y0);
         for y in 0..size {
             for x in 0..size {
@@ -1010,7 +1018,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             return 1;
         }
         if above {
-            let log2 = self.sps.log2_ctb;
+            let log2 = self.sps.log2_ctb();
             if (ny as usize) < ((y >> log2) << log2) {
                 return 1;
             }
@@ -1032,9 +1040,9 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let Tb {
             x: x0, y: y0, log2, ..
         } = tb;
-        let max_tb = u32::from(self.sps.log2_max_tb);
-        let min_tb = u32::from(self.sps.log2_min_tb);
-        let inter_split = self.sps.max_th_depth_inter == 0
+        let max_tb = u32::from(self.sps.log2_max_tb());
+        let min_tb = u32::from(self.sps.log2_min_tb());
+        let inter_split = self.sps.max_transform_hierarchy_depth_inter == 0
             && !self.cu.intra
             && self.cu.part != PART_2NX2N
             && depth == 0;
@@ -1093,7 +1101,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         } = tb;
         let chroma_here = log2 > 2 || blk == 3;
         let any_chroma = cbf[0] || cbf[1];
-        if (cbf_luma || any_chroma) && self.pps.cu_qp_delta && !self.qp_delta_coded {
+        if (cbf_luma || any_chroma) && self.pps.cu_qp_delta_enabled_flag && !self.qp_delta_coded {
             let mut abs = 0i32;
             let mut ctx = 0;
             while abs < 5 && self.cabac.decide(cabac::CU_QP_DELTA + ctx) {
@@ -1181,7 +1189,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         };
         let (px, py) = (x / scale, y / scale);
         let mut refs = Refs::new(n);
-        let constrained = self.pps.constrained_intra_pred;
+        let constrained = self.pps.constrained_intra_pred_flag;
         let pic: &Picture = self.pic;
         // Availability (clause 6.4.1) of the 4×4 luma block at (lx, ly):
         // inside this CTB by z-scan order, in another CTB by that CTB alone
@@ -1287,12 +1295,17 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 all = false;
             }
         }
-        let bit_depth = u32::from(self.sps.bit_depth);
+        let bit_depth = u32::from(self.sps.bit_depth());
         if !all {
             refs.substitute(bit_depth);
         }
         if c == 0 {
-            intra::filter(&mut refs, mode, self.sps.strong_intra_smoothing, bit_depth);
+            intra::filter(
+                &mut refs,
+                mode,
+                self.sps.strong_intra_smoothing_enabled_flag,
+                bit_depth,
+            );
         }
         let (dst, stride) = self.out.from(c, px, py);
         intra::predict(&refs, mode, c == 0, bit_depth, dst, stride);
@@ -1345,7 +1358,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         // registers.
         let mut e = self.cabac.e;
         let mut transform_skip = false;
-        if self.pps.transform_skip && !self.cu.bypass && log2 == 2 {
+        if self.pps.transform_skip_enabled_flag && !self.cu.bypass && log2 == 2 {
             transform_skip = e.decide(
                 &mut self.cabac.ctx,
                 cabac::TRANSFORM_SKIP + usize::from(c > 0),
@@ -1423,7 +1436,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let scale = self.scaling(log2, c, transform_skip);
         // Coded sub-block flags, bit `ys * 8 + xs`.
         let mut csbf = 0u64;
-        let sign_hiding = self.pps.sign_data_hiding && !self.cu.bypass;
+        let sign_hiding = self.pps.sign_data_hiding_enabled_flag && !self.cu.bypass;
         let chroma = c > 0;
         let mut greater1_state = 1u32;
         let mut max_x = 0usize;
@@ -1605,7 +1618,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     /// How the coefficients of a block are scaled (clause 8.6.3).
     fn scaling(&self, log2: u32, c: usize, transform_skip: bool) -> Scale<'a> {
         let n = 1usize << log2;
-        let bit_depth = u32::from(self.sps.bit_depth);
+        let bit_depth = u32::from(self.sps.bit_depth());
         if self.cu.bypass {
             return Scale::Bypass;
         }
@@ -1614,9 +1627,9 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         } else {
             let slice = &self.pic.slices[self.slice].header;
             let offset = if c == 1 {
-                self.pps.cb_qp_offset + slice.cb_qp_offset
+                self.pps.pps_cb_qp_offset + slice.slice_cb_qp_offset
             } else {
-                self.pps.cr_qp_offset + slice.cr_qp_offset
+                self.pps.pps_cr_qp_offset + slice.slice_cr_qp_offset
             };
             let qpi = (self.qp_y + offset).clamp(-self.sps.qp_bd_offset_c(), 57);
             chroma_qp(qpi) + self.sps.qp_bd_offset_c()
@@ -1624,11 +1637,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let shift = bit_depth + log2 - 5;
         let add = 1i64 << (shift - 1);
         let factor = transform::LEVEL_SCALE[(qp % 6) as usize] << (qp / 6);
-        let list = self
-            .pps
-            .scaling_list
-            .as_ref()
-            .or(self.sps.scaling_list.as_ref());
+        let list = ScalingList::active(self.sps, self.pps);
         match list {
             Some(list) if !(transform_skip && n > 4) => {
                 let size_id = log2 as usize - 2;
@@ -1667,7 +1676,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     ) {
         let (max_x, max_y) = max;
         let n = 1usize << log2;
-        let bit_depth = u32::from(self.sps.bit_depth);
+        let bit_depth = u32::from(self.sps.bit_depth());
         let scale = if c == 0 { 1 } else { 2 };
         let maxv = (1i32 << bit_depth) - 1;
         let coeffs = &self.coeffs[..n * n];
@@ -1757,7 +1766,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             return false;
         }
         let slice = &self.pic.slices[self.slice];
-        if slice.header.deblocking_disabled {
+        if slice.header.slice_deblocking_filter_disabled_flag {
             return false;
         }
         let (px, py) = (px as usize, py as usize);
@@ -1770,12 +1779,13 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         if p_ctb == q_ctb {
             return true;
         }
-        if self.pic.slice_addr(p_ctb) != slice.slice_addr && !slice.header.loop_filter_across_slices
+        if self.pic.slice_addr(p_ctb) != slice.slice_addr
+            && !slice.header.slice_loop_filter_across_slices_enabled_flag
         {
             return false;
         }
         if self.pic.layout.tile_of[p_ctb] != self.pic.layout.tile_of[q_ctb]
-            && !self.pps.loop_filter_across_tiles
+            && !self.pps.loop_filter_across_tiles_enabled_flag
         {
             return false;
         }
@@ -1786,7 +1796,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         if !x.is_multiple_of(8) || x >= self.pic.width || x == 0 {
             return;
         }
-        if self.pic.slices[self.slice].header.deblocking_disabled {
+        if self.pic.slices[self.slice]
+            .header
+            .slice_deblocking_filter_disabled_flag
+        {
             return;
         }
         let stride = self.pic.width / 8 + 1;
@@ -1817,7 +1830,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         if !y.is_multiple_of(8) || y >= self.pic.height || y == 0 {
             return;
         }
-        if self.pic.slices[self.slice].header.deblocking_disabled {
+        if self.pic.slices[self.slice]
+            .header
+            .slice_deblocking_filter_disabled_flag
+        {
             return;
         }
         let w4 = self.pic.w4;

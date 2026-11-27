@@ -25,6 +25,13 @@
 //!
 //! The vector kernels of 8-bit pictures (interpolation, inverse transforms,
 //! deblocking, SAO) are in `cutlass-simd`; this crate has no `unsafe`.
+//!
+//! [`stateless`] is the same decoder without reconstruction, for hardware
+//! that does not parse the bitstream (VA-API, Vulkan Video): it parses the
+//! parameter sets and slice segment headers, derives order counts, the
+//! reference picture sets and lists, keeps the decoded picture buffer and
+//! outputs in display order, and hands each picture to an [`Accelerator`].
+//! It refuses what [`HevcDecoder`] refuses.
 
 #![forbid(unsafe_code)]
 
@@ -34,6 +41,7 @@ mod ctu;
 mod dec;
 mod filter;
 mod frame;
+mod front;
 mod inter;
 mod intra;
 mod job;
@@ -43,6 +51,12 @@ mod picture;
 mod pixel;
 mod ps;
 mod slice;
+pub mod stateless;
 mod transform;
 
 pub use dec::{HevcDecoder, register_decoders};
+pub use stateless::{
+    Accelerator, LongTerm, Output, Pcm, Picture, Pps, PredWeight, PredWeightTable,
+    ProfileTierLevel, Reference, RpsSet, ScalingList, Slice, SliceHeader, SliceType, Sps, StRps,
+    StatelessDecoder, Vui,
+};

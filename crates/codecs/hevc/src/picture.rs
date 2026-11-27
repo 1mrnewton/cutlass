@@ -471,8 +471,8 @@ impl Picture {
     /// picture: rows of [`RING`] + 2 more CTB rows, as a power of two of
     /// 4×4 rows.
     pub fn map_mask(sps: &Sps, ring: Option<usize>) -> usize {
-        let h4 = sps.height as usize / 4;
-        let ctb4 = (1usize << sps.log2_ctb) / 4;
+        let h4 = sps.pic_height_in_luma_samples as usize / 4;
+        let ctb4 = (1usize << sps.log2_ctb()) / 4;
         match ring {
             Some(rows) if ((rows + RING + 2) * ctb4).next_power_of_two() < h4 => {
                 ((rows + RING + 2) * ctb4).next_power_of_two() - 1
@@ -487,8 +487,8 @@ impl Picture {
         layout: Arc<Layout>,
         (poc, mask4): (i32, usize),
     ) -> Result<Self, CodecError> {
-        let width = sps.width as usize;
-        let height = sps.height as usize;
+        let width = sps.pic_width_in_luma_samples as usize;
+        let height = sps.pic_height_in_luma_samples as usize;
         width.checked_mul(height).ok_or(CodecError::Limit {
             what: "picture size",
         })?;
@@ -515,7 +515,7 @@ impl Picture {
             slices: Vec::new(),
             poc,
             dependent: Mutex::new(([0; 256], 0)),
-            wpp_ctx: Mutex::new(if pps.entropy_sync {
+            wpp_ctx: Mutex::new(if pps.entropy_coding_sync_enabled_flag {
                 vec![None; ctbs]
             } else {
                 Vec::new()
@@ -536,8 +536,8 @@ impl Picture {
         (poc, mask4): (i32, usize),
     ) -> Result<Self, CodecError> {
         let Some(mut pic) = old.filter(|p| {
-            p.width == sps.width as usize
-                && p.height == sps.height as usize
+            p.width == sps.pic_width_in_luma_samples as usize
+                && p.height == sps.pic_height_in_luma_samples as usize
                 && p.ctb_slice.len() == layout.ctb_count() as usize
                 && p.mask4 == mask4
         }) else {
@@ -559,7 +559,7 @@ impl Picture {
             let ctbs = layout.ctb_count() as usize;
             let mut wpp = lock(&pic.wpp_ctx);
             wpp.clear();
-            if pps.entropy_sync {
+            if pps.entropy_coding_sync_enabled_flag {
                 wpp.resize(ctbs, None);
             }
         }
@@ -633,7 +633,7 @@ impl Picture {
             return false;
         }
         // Without tiles, tile scan is raster scan.
-        if !self.pps.tiles {
+        if !self.pps.tiles_enabled_flag {
             return nb_ctb < cur_ctb;
         }
         self.layout.tile_of[nb_ctb] == self.layout.tile_of[cur_ctb]

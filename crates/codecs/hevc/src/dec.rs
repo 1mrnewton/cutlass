@@ -1,7 +1,9 @@
-//! The decoder: parameter sets, picture order counts, reference picture
-//! sets and lists (clause 8.3), the decoded picture buffer and output order
-//! (clause C.5.2), the jobs that decode pictures, and the engine's decoder
-//! interfaces.
+//! The software decoder: the jobs that reconstruct pictures, on the
+//! caller's thread or on workers, and the engine's decoder interfaces. What
+//! comes before reconstruction (parameter sets, picture order counts,
+//! reference picture sets and lists, the decoded picture buffer and output
+//! order) is the front end of [`crate::front`], shared with the stateless
+//! decoder.
 //!
 //! The caller's thread reads every header, keeps the picture buffer and
 //! starts a job for each picture. With more than one thread the jobs run on
@@ -20,147 +22,35 @@ use cutlass_decode::{
 };
 
 use crate::frame::{Frame, OutSamples, Spares};
+use crate::front::{Backend, Front, Meta, SliceIn, Start};
 use crate::job::{Job, Leftovers, OutForm, OutRows, SliceData};
-use crate::nal::{self, Nal};
 use crate::picture::{Picture, RefPic, SliceCtx, Work, lock};
 use crate::pixel::{AnyRows, Pixel};
-use crate::ps::{self, Layout, Pps, Sps};
-use crate::slice::{self, SliceHeader, SliceType};
+use crate::ps::{Layout, Pps, Sps};
 
-const MAX_SPS: usize = 16;
-const MAX_PPS: usize = 64;
 /// Most threads a decoder uses.
 const MAX_THREADS: usize = 16;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Marking {
-    Unused,
-    Short,
-    Long,
-}
-
-/// What an output picture carries besides its samples.
-#[derive(Clone, Debug)]
-struct Meta {
-    pts: i64,
-    duration: i64,
-    timescale: u32,
-    keyframe: bool,
-    sps: Arc<Sps>,
-}
-
-#[derive(Clone)]
-struct DpbPic {
-    frame: Arc<Frame>,
-    poc: i32,
-    marking: Marking,
-    /// Waiting for output.
-    output: bool,
-    uid: u64,
-    meta: Option<Arc<Meta>>,
-}
 
 /// Everything the headers of a push may change. A failed push leaves the
 /// last good copy.
 #[derive(Clone)]
 struct State {
-    sps: Vec<Option<Arc<Sps>>>,
-    pps: Vec<Option<Arc<Pps>>>,
-    dpb: Vec<DpbPic>,
-    /// `PicOrderCntVal` of the previous `TemporalId` 0 picture.
-    prev_tid0_poc: i32,
-    /// An IRAP picture has started a coded video sequence.
-    started: bool,
-    /// `NoRaslOutputFlag` of the last IRAP picture.
-    no_rasl_output: bool,
-    /// An end of sequence came before the next picture.
-    after_eos: bool,
-    next_uid: u64,
+    front: Front<Arc<Frame>>,
     /// The layout of the last parameter sets a picture used.
     layout: Option<(Arc<Sps>, Arc<Pps>, Arc<Layout>)>,
 }
 
-/// A picture chosen for output, in output order.
-type Bumped = (Arc<Frame>, Arc<Meta>);
-
 impl State {
     fn new() -> Self {
         Self {
-            sps: vec![None; MAX_SPS],
-            pps: vec![None; MAX_PPS],
-            dpb: Vec::new(),
-            prev_tid0_poc: 0,
-            started: false,
-            no_rasl_output: true,
-            after_eos: false,
-            next_uid: 1,
+            front: Front::new(),
             layout: None,
         }
     }
-
-    fn uid(&mut self) -> u64 {
-        let uid = self.next_uid;
-        self.next_uid += 1;
-        uid
-    }
-
-    fn store_param(&mut self, nal: &Nal) -> Result<(), CodecError> {
-        match nal.kind {
-            nal::SPS => {
-                let sps = ps::parse_sps(&nal.rbsp)?;
-                let id = usize::from(sps.id);
-                self.sps[id] = Some(Arc::new(sps));
-            }
-            nal::PPS => {
-                let pps = ps::parse_pps(&nal.rbsp)?;
-                let id = usize::from(pps.id);
-                self.pps[id] = Some(Arc::new(pps));
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn sets(&self, pps_id: u8) -> Option<(Arc<Sps>, Arc<Pps>)> {
-        let pps = self.pps.get(usize::from(pps_id))?.clone()?;
-        let sps = self.sps.get(usize::from(pps.sps_id))?.clone()?;
-        Some((sps, pps))
-    }
-
-    /// The bumping process: output the picture with the smallest order
-    /// count while too many wait (clause C.5.2.4, as the reference decoder
-    /// counts them).
-    fn bump(&mut self, max_output: usize, max_dpb: usize, out: &mut Vec<Bumped>) {
-        loop {
-            let waiting = self.dpb.iter().filter(|p| p.output).count();
-            if waiting == 0 || (waiting <= max_output && self.dpb.len() <= max_dpb) {
-                break;
-            }
-            let Some(index) = self
-                .dpb
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| p.output)
-                .min_by_key(|(_, p)| p.poc)
-                .map(|(i, _)| i)
-            else {
-                break;
-            };
-            self.dpb[index].output = false;
-            if let Some(meta) = &self.dpb[index].meta {
-                out.push((self.dpb[index].frame.clone(), meta.clone()));
-            }
-            self.dpb
-                .retain(|p| p.output || p.marking != Marking::Unused);
-        }
-    }
-
-    fn flush(&mut self, out: &mut Vec<Bumped>) {
-        self.bump(0, usize::MAX, out);
-        self.dpb
-            .retain(|p| p.output || p.marking != Marking::Unused);
-    }
 }
+
+/// A picture chosen for output, in output order.
+type Bumped = crate::front::Bumped<Arc<Frame>>;
 
 /// The picture whose slice segments are being read.
 struct Pending {
@@ -170,14 +60,8 @@ struct Pending {
     /// Whether a later picture may reference this one: not when it is a
     /// sub-layer non-reference picture of the highest sub-layer.
     reference: bool,
-    meta: Arc<Meta>,
-    /// The last independent slice segment header, for dependent ones.
-    independent: Option<SliceHeader>,
-    slice_addr: u32,
-    st_before: Vec<RefPic>,
-    st_after: Vec<RefPic>,
-    lt_curr: Vec<RefPic>,
-    uid: u64,
+    /// The references the front end handed over, in its order.
+    refs: Vec<RefPic>,
     slices: Vec<SliceData>,
 }
 
@@ -195,12 +79,16 @@ impl Ready {
         }
     }
 
+    fn pic(&self) -> &Picture {
+        match self {
+            Self::Eight(j) => &j.pic,
+            Self::Deep(j) => &j.pic,
+        }
+    }
+
     /// Whether the picture's slice segments decode as wavefronts.
     fn wavefront(&self) -> bool {
-        match self {
-            Self::Eight(j) => j.pic.pps.entropy_sync,
-            Self::Deep(j) => j.pic.pps.entropy_sync,
-        }
+        self.pic().pps.entropy_coding_sync_enabled_flag
     }
 }
 
@@ -343,6 +231,11 @@ pub struct HevcDecoder {
     running: VecDeque<Arc<Frame>>,
     /// Pictures chosen for output whose samples are not handed out yet.
     queue: VecDeque<Bumped>,
+    /// For tests: each picture decoded, in decoding order, as its order
+    /// count and, for each slice segment, the order counts of its
+    /// reference picture lists as reconstruction reads them.
+    #[cfg(test)]
+    pub(crate) ref_trace: Vec<(i32, Vec<[Vec<i32>; 2]>)>,
 }
 
 impl HevcDecoder {
@@ -371,6 +264,8 @@ impl HevcDecoder {
             workers: Arc::new(Workers::default()),
             running: VecDeque::new(),
             queue: VecDeque::new(),
+            #[cfg(test)]
+            ref_trace: Vec::new(),
         };
         dec.apply_extra()?;
         Ok(dec)
@@ -404,20 +299,9 @@ impl HevcDecoder {
     }
 
     fn apply_extra(&mut self) -> Result<(), CodecError> {
-        if self.extra.is_empty() {
-            return Ok(());
-        }
-        let nals = if nal::is_hvcc(&self.extra) {
-            let (size, nals) = nal::hvcc(&self.extra)?;
-            self.length_size = size;
-            nals
-        } else {
-            nal::access_unit(&self.extra, 0)?
-        };
-        for nal in &nals {
-            self.state.store_param(nal)?;
-        }
-        Ok(())
+        self.state
+            .front
+            .apply_extra(&self.extra, &mut self.length_size)
     }
 
     /// Read the headers of one access unit: the pictures to decode and
@@ -427,253 +311,24 @@ impl HevcDecoder {
         state: &mut State,
         packet: &Packet,
     ) -> Result<(Vec<Ready>, Vec<Bumped>), CodecError> {
-        let nals = nal::access_unit(&packet.data, self.length_size)?;
-        let mut ready = Vec::new();
+        let State { front, layout } = state;
+        let mut soft = Soft {
+            dec: self,
+            layout,
+            ready: Vec::new(),
+        };
         let mut out = Vec::new();
-        let mut current: Option<Pending> = None;
-        let mut skipping = false;
-        for nal in nals {
-            if nal.layer != 0 {
-                continue;
-            }
-            match nal.kind {
-                nal::SPS | nal::PPS => state.store_param(&nal)?,
-                nal::EOS | nal::EOB => {
-                    if let Some(done) = current.take() {
-                        ready.push(self.finish(state, done, &mut out));
-                    }
-                    state.after_eos = true;
-                }
-                _ if nal.is_slice() => {
-                    let first = nal.rbsp.first().is_some_and(|b| b & 0x80 != 0);
-                    if first {
-                        if let Some(done) = current.take() {
-                            ready.push(self.finish(state, done, &mut out));
-                        }
-                        let header = parse(state, &nal, None)?;
-                        current = self.start_picture(state, &nal, &header, packet, &mut out)?;
-                        skipping = current.is_none();
-                        if let Some(pending) = current.as_mut() {
-                            add_slice(pending, Arc::new(nal), header)?;
-                        }
-                    } else if !skipping && let Some(pending) = current.as_mut() {
-                        let header = parse(state, &nal, pending.independent.as_ref())?;
-                        add_slice(pending, Arc::new(nal), header)?;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(done) = current.take() {
-            ready.push(self.finish(state, done, &mut out));
-        }
-        Ok((ready, out))
+        front.access_unit(&mut soft, packet, self.length_size, &mut out)?;
+        Ok((soft.ready, out))
     }
 
-    /// Start a picture at its first slice segment: order count, reference
-    /// picture set, missing references, and the output of prior pictures.
-    /// `None` skips the picture.
-    fn start_picture(
-        &self,
-        state: &mut State,
-        nal: &Nal,
-        header: &SliceHeader,
-        packet: &Packet,
-        out: &mut Vec<Bumped>,
-    ) -> Result<Option<Pending>, CodecError> {
-        let Some((sps, pps)) = state.sets(header.pps_id) else {
-            return Err(CodecError::Malformed {
-                at_bit: 0,
-                what: "slice references a missing parameter set",
-            });
-        };
-        let irap = nal.is_irap();
-        if irap {
-            state.no_rasl_output =
-                nal.is_idr() || nal.is_bla() || !state.started || state.after_eos;
-            state.started = true;
-        } else if !state.started {
-            return Ok(None);
-        }
-        if nal.is_rasl() && state.no_rasl_output {
-            return Ok(None);
-        }
-        let new_sequence = irap && state.no_rasl_output;
-        let flushed_by_eos = state.after_eos;
-        state.after_eos = false;
-
-        // Picture order count (clause 8.3.1).
-        let max_lsb = 1i32 << sps.log2_max_poc_lsb;
-        let lsb = header.poc_lsb as i32;
-        let msb = if new_sequence {
-            0
-        } else {
-            let prev_lsb = state.prev_tid0_poc & (max_lsb - 1);
-            let prev_msb = state.prev_tid0_poc - prev_lsb;
-            if lsb < prev_lsb && prev_lsb - lsb >= max_lsb / 2 {
-                prev_msb + max_lsb
-            } else if lsb > prev_lsb && lsb - prev_lsb > max_lsb / 2 {
-                prev_msb - max_lsb
-            } else {
-                prev_msb
-            }
-        };
-        let poc = msb + lsb;
-        if nal.temporal_id == 0 && !nal.is_rasl() && !nal.is_radl() && !nal.is_sub_layer_non_ref() {
-            state.prev_tid0_poc = poc;
-        }
-
-        // Output of prior pictures at a new sequence (clause C.5.2.2).
-        if new_sequence {
-            let discard =
-                header.no_output_of_prior_pics || (nal.kind == nal::CRA && flushed_by_eos);
-            if discard {
-                state.dpb.clear();
-            } else {
-                for p in &mut state.dpb {
-                    p.marking = Marking::Unused;
-                }
-                state.flush(out);
-            }
-            state.dpb.clear();
-        }
-
-        // Reference picture set (clause 8.3.2).
-        let mut keep = vec![Marking::Unused; state.dpb.len()];
-        let mut lt_curr = Vec::new();
-        for lt in &header.long_term {
-            let (value, exact) = if lt.msb {
-                (poc + lt.poc, true)
-            } else {
-                (lt.poc, false)
-            };
-            let found = state.dpb.iter().position(|p| {
-                p.marking != Marking::Unused
-                    && if exact {
-                        p.poc == value
-                    } else {
-                        p.poc & (max_lsb - 1) == value
-                    }
-            });
-            if let Some(i) = found {
-                keep[i] = Marking::Long;
-            }
-            if lt.used {
-                lt_curr.push((value, found));
-            }
-        }
-        let mut st_lists = [Vec::new(), Vec::new()];
-        let rps = &header.st_rps;
-        let deltas = [
-            (&rps.negative, &rps.negative_used, 0usize),
-            (&rps.positive, &rps.positive_used, 1usize),
-        ];
-        for (values, used, list) in deltas {
-            for (&delta, &used) in values.iter().zip(used.iter()) {
-                let target = poc + delta;
-                let found = state.dpb.iter().enumerate().position(|(i, p)| {
-                    p.marking == Marking::Short && keep[i] != Marking::Long && p.poc == target
-                });
-                if let Some(i) = found {
-                    keep[i] = Marking::Short;
-                }
-                if used {
-                    st_lists[list].push((target, found));
-                }
-            }
-        }
-        for (p, mark) in state.dpb.iter_mut().zip(&keep) {
-            p.marking = *mark;
-        }
-        // Generate what is missing (clause 8.3.3), mid-grey and not output.
-        let (width, height) = (sps.width as usize, sps.height as usize);
-        let resolve =
-            |state: &mut State, wanted: Vec<(i32, Option<usize>)>, long: bool| -> Vec<RefPic> {
-                wanted
-                    .into_iter()
-                    .map(|(value, found)| {
-                        let index = found.unwrap_or_else(|| {
-                            let uid = state.uid();
-                            state.dpb.push(DpbPic {
-                                frame: Frame::missing(width, height, sps.bit_depth, value),
-                                poc: value,
-                                marking: if long { Marking::Long } else { Marking::Short },
-                                output: false,
-                                uid,
-                                meta: None,
-                            });
-                            state.dpb.len() - 1
-                        });
-                        let p = &state.dpb[index];
-                        RefPic {
-                            frame: p.frame.clone(),
-                            poc: p.poc,
-                            long_term: long,
-                            uid: p.uid,
-                        }
-                    })
-                    .collect()
-            };
-        let [before, after] = st_lists;
-        let st_before = resolve(state, before, false);
-        let st_after = resolve(state, after, false);
-        let lt_curr = resolve(state, lt_curr, true);
-        state
-            .dpb
-            .retain(|p| p.output || p.marking != Marking::Unused);
-
-        let layout = match &state.layout {
-            Some((s, p, l)) if Arc::ptr_eq(s, &sps) && Arc::ptr_eq(p, &pps) => l.clone(),
-            _ => {
-                let l = Arc::new(Layout::new(&sps, &pps)?);
-                state.layout = Some((sps.clone(), pps.clone(), l.clone()));
-                l
-            }
-        };
-        let old = lock(&self.shared.pics).pop();
-        // The 4×4 maps are a ring of CTB rows unless tiles reorder them.
-        let rows = if pps.entropy_sync {
-            self.split(true).1
-        } else {
-            1
-        };
-        let mask4 = Picture::map_mask(&sps, (!pps.tiles).then_some(rows));
-        let pic = Picture::reuse(old, sps.clone(), pps.clone(), layout, (poc, mask4))?;
-        let output = header.pic_output && !(nal.is_rasl() && state.no_rasl_output);
-        let uid = state.uid();
-        let reference = !(nal.is_sub_layer_non_ref() && nal.temporal_id + 1 >= sps.max_sub_layers);
-        Ok(Some(Pending {
-            pic,
-            sps: sps.clone(),
-            output,
-            reference,
-            meta: Arc::new(Meta {
-                pts: packet.pts,
-                duration: packet.duration,
-                timescale: packet.timescale,
-                keyframe: irap,
-                sps,
-            }),
-            independent: None,
-            slice_addr: 0,
-            st_before,
-            st_after,
-            lt_curr,
-            uid,
-            slices: Vec::new(),
-        }))
-    }
-
-    /// The picture's slice segments are all read: its frame enters the
-    /// picture buffer (clause C.5.2.3) and its job is made.
-    fn finish(&self, state: &mut State, pending: Pending, out: &mut Vec<Bumped>) -> Ready {
+    /// The job of a picture whose slice segments are all read.
+    fn ready(&self, pending: Pending) -> Ready {
         let Pending {
             pic,
             sps,
             output,
             reference,
-            meta,
-            uid,
             slices,
             ..
         } = pending;
@@ -681,8 +336,8 @@ impl HevcDecoder {
         let poc = pic.poc;
         let log2_ctb = u32::from(pic.layout.log2_ctb);
         let form = output.then_some(self.form);
-        let row_threads = self.split(pic.pps.entropy_sync).1;
-        let ready = if sps.bit_depth == 8 {
+        let row_threads = self.split(pic.pps.entropy_coding_sync_enabled_flag).1;
+        if sps.bit_depth() == 8 {
             Ready::Eight(make_job(
                 &self.shared,
                 &self.shared.work8,
@@ -700,20 +355,7 @@ impl HevcDecoder {
                 (pic, slices, form, row_threads),
                 (width, height, log2_ctb, poc, reference),
             ))
-        };
-        state.dpb.push(DpbPic {
-            frame: ready.frame().clone(),
-            poc,
-            marking: Marking::Short,
-            output,
-            uid,
-            meta: Some(meta),
-        });
-        let top = usize::from(sps.max_sub_layers.saturating_sub(1)).min(7);
-        let reorder = usize::from(sps.max_num_reorder[top]);
-        let max_dpb = usize::from(sps.max_dec_pic_buffering[top]);
-        state.bump(reorder, max_dpb, out);
-        ready
+        }
     }
 
     /// Start the decode of a picture, on a worker or (one thread) here.
@@ -808,6 +450,19 @@ impl HevcDecoder {
         }
         let mut state = self.state.clone();
         let (ready, bumped) = self.parse_unit(&mut state, packet)?;
+        #[cfg(test)]
+        let trace: Vec<(i32, Vec<[Vec<i32>; 2]>)> = ready
+            .iter()
+            .map(|r| {
+                let pic = r.pic();
+                let slices = pic.slices.iter().map(|s| {
+                    s.refs
+                        .each_ref()
+                        .map(|list| list.iter().map(|r| r.poc).collect())
+                });
+                (pic.poc, slices.collect())
+            })
+            .collect();
         if self.threads <= 1 {
             // One thread: the push fails as a whole, the state unchanged.
             let frames: Vec<Arc<Frame>> = ready.iter().map(|r| r.frame().clone()).collect();
@@ -826,6 +481,8 @@ impl HevcDecoder {
                 self.start(r);
             }
         }
+        #[cfg(test)]
+        self.ref_trace.extend(trace);
         self.queue.extend(bumped);
         self.drained = false;
         self.collect(self.threads <= 1)
@@ -837,7 +494,7 @@ impl HevcDecoder {
         }
         self.drained = true;
         let mut bumped = Vec::new();
-        self.state.flush(&mut bumped);
+        self.state.front.flush(&mut bumped);
         self.queue.extend(bumped);
         let out = self.collect(true)?;
         self.running.retain(|f| !f.is_done());
@@ -886,9 +543,9 @@ fn make_job<P: Pixel>(
     (width, height, log2_ctb, poc, reference): (usize, usize, u32, i32, bool),
 ) -> Job<P> {
     // A ring of row buffers, unless tiles reorder the CTB rows.
-    let slots = if pic.pps.tiles {
+    let slots = if pic.pps.tiles_enabled_flag {
         usize::MAX
-    } else if pic.pps.entropy_sync {
+    } else if pic.pps.entropy_coding_sync_enabled_flag {
         row_threads + crate::picture::RING
     } else {
         crate::picture::RING
@@ -911,7 +568,7 @@ fn make_job<P: Pixel>(
     // as the packed picture does: it is the output itself.
     let share = output == Some(OutForm::Packed)
         && if P::bytes(&[]).is_some() {
-            pic.sps.crop == [0; 4]
+            pic.sps.crop() == [0; 4]
         } else {
             !staged
         };
@@ -935,149 +592,141 @@ fn make_job<P: Pixel>(
     }
 }
 
-fn parse(state: &State, nal: &Nal, prev: Option<&SliceHeader>) -> Result<SliceHeader, CodecError> {
-    let lookup = |id: u8| state.sets(id).map(|(s, p)| ((*s).clone(), (*p).clone()));
-    let prev = prev.cloned();
-    slice::parse_header(nal, &lookup, prev.as_ref()).map(|(header, _, _)| header)
+/// The software decoder as the front end's backend: a job for each
+/// picture.
+struct Soft<'a> {
+    dec: &'a HevcDecoder,
+    layout: &'a mut Option<(Arc<Sps>, Arc<Pps>, Arc<Layout>)>,
+    /// The jobs of the pictures read, in decoding order.
+    ready: Vec<Ready>,
 }
 
-/// Reference picture lists of one slice (clause 8.3.4).
-fn ref_lists(pending: &Pending, header: &SliceHeader) -> Result<[Vec<RefPic>; 2], CodecError> {
-    if header.slice_type == SliceType::I {
-        return Ok([Vec::new(), Vec::new()]);
+impl Backend for Soft<'_> {
+    type Pic = Arc<Frame>;
+    type Building = Pending;
+
+    fn sequence(&mut self, _sps: &Arc<Sps>) -> Result<(), CodecError> {
+        Ok(())
     }
-    let total = pending.st_before.len() + pending.st_after.len() + pending.lt_curr.len();
-    if total == 0 {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "inter slice without references",
-        });
+
+    /// Mid-grey.
+    fn missing(&mut self, sps: &Arc<Sps>, poc: i32) -> Result<Arc<Frame>, CodecError> {
+        let width = sps.pic_width_in_luma_samples as usize;
+        let height = sps.pic_height_in_luma_samples as usize;
+        Ok(Frame::missing(width, height, sps.bit_depth(), poc))
     }
-    let mut lists = [Vec::new(), Vec::new()];
-    let count = if header.slice_type == SliceType::B {
-        2
-    } else {
-        1
-    };
-    for (list, out) in lists.iter_mut().enumerate().take(count) {
-        let wanted = header.num_ref_idx[list];
-        let size = wanted.max(total);
-        let order: [&Vec<RefPic>; 3] = if list == 0 {
-            [&pending.st_before, &pending.st_after, &pending.lt_curr]
-        } else {
-            [&pending.st_after, &pending.st_before, &pending.lt_curr]
+
+    fn start(&mut self, start: Start<'_, Arc<Frame>>) -> Result<Pending, CodecError> {
+        let Start {
+            sps,
+            pps,
+            poc,
+            output,
+            reference,
+            refs,
+            ..
+        } = start;
+        let layout = match &*self.layout {
+            Some((s, p, l)) if Arc::ptr_eq(s, sps) && Arc::ptr_eq(p, pps) => l.clone(),
+            _ => {
+                let l = Arc::new(Layout::new(sps, pps)?);
+                *self.layout = Some((sps.clone(), pps.clone(), l.clone()));
+                l
+            }
         };
-        let mut temp = Vec::with_capacity(size);
-        while temp.len() < size {
-            for part in order {
-                for r in part {
-                    if temp.len() < size {
-                        temp.push(r.clone());
-                    }
-                }
+        let old = lock(&self.dec.shared.pics).pop();
+        // The 4×4 maps are a ring of CTB rows unless tiles reorder them.
+        let rows = if pps.entropy_coding_sync_enabled_flag {
+            self.dec.split(true).1
+        } else {
+            1
+        };
+        let mask4 = Picture::map_mask(sps, (!pps.tiles_enabled_flag).then_some(rows));
+        let pic = Picture::reuse(old, sps.clone(), pps.clone(), layout, (poc, mask4))?;
+        let refs = refs
+            .iter()
+            .map(|r| RefPic {
+                frame: r.pic.clone(),
+                poc: r.poc,
+                long_term: r.long_term,
+                uid: r.uid,
+            })
+            .collect();
+        Ok(Pending {
+            pic,
+            sps: sps.clone(),
+            output,
+            reference,
+            refs,
+            slices: Vec::new(),
+        })
+    }
+
+    fn slice(&mut self, pending: &mut Pending, slice: SliceIn) -> Result<(), CodecError> {
+        let SliceIn {
+            nal,
+            header,
+            data_offset,
+            entries,
+            slice_addr,
+            ref_lists,
+            ..
+        } = slice;
+        let mut refs: [Vec<RefPic>; 2] = [Vec::new(), Vec::new()];
+        for (list, indices) in refs.iter_mut().zip(&ref_lists) {
+            for &i in indices {
+                let Some(r) = pending.refs.get(i) else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "reference picture list",
+                    });
+                };
+                list.push(r.clone());
             }
         }
-        for i in 0..wanted {
-            let index = match &header.list_entry[list] {
-                Some(entries) => *entries.get(i).ok_or(CodecError::Malformed {
-                    at_bit: 0,
-                    what: "list_entry",
-                })? as usize,
-                None => i,
-            };
-            let Some(r) = temp.get(index) else {
-                return Err(CodecError::Malformed {
-                    at_bit: 0,
-                    what: "list_entry",
-                });
-            };
-            out.push(r.clone());
+        let poc = pending.pic.poc;
+        let no_backward_pred = refs.iter().flatten().all(|r| r.poc <= poc);
+        let qp = 26 + pending.pic.pps.init_qp_minus26 + header.slice_qp_delta;
+        let slice_type = header.slice_type;
+        let segment = header.slice_segment_address as usize;
+        pending.pic.slices.push(SliceCtx {
+            header,
+            refs,
+            slice_addr,
+            qp,
+            no_backward_pred,
+        });
+        let index = pending.pic.slices.len() - 1;
+        if index >= usize::from(u16::MAX) {
+            return Err(CodecError::Limit { what: "slices" });
         }
+        pending.slices.push(SliceData {
+            nal,
+            index,
+            start: data_offset,
+            entries,
+            qp,
+            slice_type,
+            segment,
+        });
+        Ok(())
     }
-    Ok(lists)
-}
 
-/// Record one slice segment of the pending picture.
-fn add_slice(pending: &mut Pending, nal: Arc<Nal>, header: SliceHeader) -> Result<(), CodecError> {
-    if !header.dependent {
-        pending.slice_addr = header.segment_address;
-        pending.independent = Some(header.clone());
-    } else if pending.independent.is_none() {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "dependent slice without a slice",
-        });
+    fn finish(&mut self, pending: Pending, _data: &[u8]) -> Result<Arc<Frame>, CodecError> {
+        let ready = self.dec.ready(pending);
+        let frame = ready.frame().clone();
+        self.ready.push(ready);
+        Ok(frame)
     }
-    if pending.pic.pps.id != header.pps_id {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "pps changed inside a picture",
-        });
-    }
-    let refs = ref_lists(pending, &header)?;
-    let poc = pending.pic.poc;
-    let no_backward_pred = refs.iter().flatten().all(|r| r.poc <= poc);
-    let qp = pending.pic.pps.init_qp + header.qp_delta;
-    let slice_type = header.slice_type;
-    // Substream starts, from coded offsets to RBSP offsets in the data.
-    let start = header.data_offset;
-    let Some(data) = nal.rbsp.get(start..) else {
-        return Err(CodecError::Truncated {
-            at_bit: 0,
-            what: "slice data",
-        });
-    };
-    let raw_start = nal.raw_of(start);
-    let mut entries = Vec::with_capacity(header.entry_points.len());
-    let mut raw = raw_start;
-    for &offset in &header.entry_points {
-        raw = raw.saturating_add(offset as usize);
-        let at = nal.rbsp_of(raw).saturating_sub(start);
-        if at > data.len() {
-            return Err(CodecError::Truncated {
-                at_bit: 0,
-                what: "entry point",
-            });
-        }
-        entries.push(at);
-    }
-    let segment = header.segment_address as usize;
-    if segment >= pending.pic.layout.ctb_count() as usize {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "slice runs past the picture",
-        });
-    }
-    pending.pic.slices.push(SliceCtx {
-        header,
-        refs,
-        slice_addr: pending.slice_addr,
-        qp,
-        no_backward_pred,
-    });
-    let index = pending.pic.slices.len() - 1;
-    if index >= usize::from(u16::MAX) {
-        return Err(CodecError::Limit { what: "slices" });
-    }
-    pending.slices.push(SliceData {
-        nal,
-        index,
-        start,
-        entries,
-        qp,
-        slice_type,
-        segment,
-    });
-    Ok(())
 }
 
 /// The output picture, 8-bit and, above 8 bits, the full samples.
 fn video_output(samples: OutSamples, meta: &Meta) -> Option<VideoOutput> {
     let sps = &meta.sps;
-    let [left, right, top, bottom] = sps.crop.map(|v| v as usize);
-    let w = (sps.width as usize).checked_sub(left + right)?;
-    let h = (sps.height as usize).checked_sub(top + bottom)?;
-    let bits = u32::from(sps.bit_depth);
+    let [left, right, top, bottom] = sps.crop().map(|v| v as usize);
+    let w = (sps.pic_width_in_luma_samples as usize).checked_sub(left + right)?;
+    let h = (sps.pic_height_in_luma_samples as usize).checked_sub(top + bottom)?;
+    let bits = u32::from(sps.bit_depth());
     let OutSamples::Planes { eight, deep } = samples else {
         return None;
     };
@@ -1104,15 +753,15 @@ fn video_output(samples: OutSamples, meta: &Meta) -> Option<VideoOutput> {
         duration: meta.duration,
         timescale: meta.timescale,
         keyframe: meta.keyframe,
-        range: vui.range,
-        primaries: vui.primaries,
-        transfer: vui.transfer,
-        matrix: vui.matrix,
-        sample_aspect: vui.sample_aspect,
+        range: vui.range(),
+        primaries: vui.primaries(),
+        transfer: vui.transfer(),
+        matrix: vui.matrix(),
+        sample_aspect: vui.sample_aspect(),
         timing: SequenceTiming {
-            num_units: vui.num_units,
-            time_scale: vui.time_scale,
-            fixed: vui.fixed_rate,
+            num_units: vui.vui_num_units_in_tick,
+            time_scale: vui.vui_time_scale,
+            fixed: vui.vui_timing_info_present_flag,
         },
     })
 }
@@ -1133,17 +782,17 @@ fn packed_output(
         OutSamples::Planes { .. } | OutSamples::Later => return Ok(None),
     };
     let sps = &meta.sps;
-    let [left, right, top, bottom] = sps.crop.map(|v| v as usize);
-    let w = (sps.width as usize).saturating_sub(left + right);
-    let h = (sps.height as usize).saturating_sub(top + bottom);
+    let [left, right, top, bottom] = sps.crop().map(|v| v as usize);
+    let w = (sps.pic_width_in_luma_samples as usize).saturating_sub(left + right);
+    let h = (sps.pic_height_in_luma_samples as usize).saturating_sub(top + bottom);
     let vui = &sps.vui;
     let picture = PictureOutput::cpu_shared(
         PictureInfo::new(
             w as u32,
             h as u32,
             PixelFormat::Yuv420p,
-            vui.primaries,
-            vui.transfer,
+            vui.primaries(),
+            vui.transfer(),
         ),
         bytes,
         meta.pts,

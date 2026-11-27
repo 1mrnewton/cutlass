@@ -27,6 +27,9 @@ pub struct Nal {
     pub rbsp: Vec<u8>,
     /// For each removed `0x03`, the number of payload bytes kept before it.
     pub epb: Vec<usize>,
+    /// Where the coded NAL unit, header included, lies in the buffer it was
+    /// split from.
+    pub span: std::ops::Range<usize>,
 }
 
 impl Nal {
@@ -125,7 +128,15 @@ pub fn parse(data: &[u8]) -> Result<Nal, CodecError> {
         temporal_id: tid_plus1 - 1,
         rbsp,
         epb,
+        span: 0..data.len(),
     })
+}
+
+/// Parse the NAL unit at `range` of `data`.
+fn parse_at(data: &[u8], range: std::ops::Range<usize>) -> Result<Nal, CodecError> {
+    let mut nal = parse(&data[range.clone()])?;
+    nal.span = range;
+    Ok(nal)
 }
 
 /// Every NAL unit of one packet. `length_size` 0 is Annex B. A length
@@ -191,7 +202,7 @@ fn annex_b(data: &[u8]) -> Result<Vec<Nal>, CodecError> {
     }
     ranges
         .into_iter()
-        .map(|(start, end)| parse(&data[start..end]))
+        .map(|(start, end)| parse_at(data, start..end))
         .collect()
 }
 
@@ -215,12 +226,13 @@ fn length_prefixed(data: &[u8], length_size: u8) -> Result<Vec<Nal>, CodecError>
             .iter()
             .fold(0usize, |acc, &byte| (acc << 8) | usize::from(byte));
         at += size;
-        let Some(body) = data.get(at..at.saturating_add(len)) else {
+        if data.get(at..at.saturating_add(len)).is_none() {
             return Err(CodecError::Truncated {
                 at_bit: (at as u64) * 8,
                 what: "nal unit",
             });
-        };
+        }
+        let range = at..at + len;
         at += len;
         if len == 0 {
             continue;
@@ -230,7 +242,7 @@ fn length_prefixed(data: &[u8], length_size: u8) -> Result<Vec<Nal>, CodecError>
                 what: "nal units in one access unit",
             });
         }
-        nals.push(parse(body)?);
+        nals.push(parse_at(data, range)?);
     }
     Ok(nals)
 }

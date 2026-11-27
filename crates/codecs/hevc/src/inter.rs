@@ -63,9 +63,9 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         skip: bool,
     ) -> Result<(), CodecError> {
         let header = &self.pic.slices[self.slice].header;
-        let max_merge = usize::from(header.max_merge_cand);
-        let num_ref = header.num_ref_idx;
-        let mvd_l1_zero = header.mvd_l1_zero;
+        let max_merge = usize::from(header.max_num_merge_cand());
+        let num_ref = header.num_ref_idx_active();
+        let mvd_l1_zero = header.mvd_l1_zero_flag;
         let pb = Pb {
             xcb: self.cu.x,
             ycb: self.cu.y,
@@ -234,7 +234,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     /// Merge motion (clauses 8.5.3.2.2 to 8.5.3.2.5).
     fn merge_motion(&self, mut pb: Pb, merge_idx: usize) -> Result<MvField, CodecError> {
         let orig = (pb.w, pb.h);
-        let level = u32::from(self.pps.log2_parallel_merge_level);
+        let level = u32::from(self.pps.log2_parallel_merge_level());
         if level > 2 && pb.ncb == 8 {
             pb = Pb {
                 x: pb.xcb,
@@ -307,12 +307,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             take!(b);
         }
         let header = &self.pic.slices[self.slice].header;
-        let max = usize::from(header.max_merge_cand);
+        let max = usize::from(header.max_num_merge_cand());
         let is_b = header.slice_type == SliceType::B;
         if let Some(field) = list.get(merge_idx) {
             return Ok(self.restrict(field, orig));
         }
-        if list.len() < max && header.temporal_mvp {
+        if list.len() < max && header.slice_temporal_mvp_enabled_flag {
             let l0 = self.temporal(pb, 0, 0);
             let l1 = if is_b { self.temporal(pb, 1, 0) } else { None };
             if l0.is_some() || l1.is_some() {
@@ -372,9 +372,9 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
         }
         let num_ref = if is_b {
-            header.num_ref_idx[0].min(header.num_ref_idx[1])
+            header.num_ref_idx_active()[0].min(header.num_ref_idx_active()[1])
         } else {
-            header.num_ref_idx[0]
+            header.num_ref_idx_active()[0]
         };
         let mut zero = 0usize;
         while list.len() < max {
@@ -406,24 +406,24 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     fn temporal(&self, pb: Pb, list: usize, ref_idx: usize) -> Option<Mv> {
         let slice = &self.pic.slices[self.slice];
         let header = &slice.header;
-        if !header.temporal_mvp {
+        if !header.slice_temporal_mvp_enabled_flag {
             return None;
         }
-        let col_list = if header.slice_type == SliceType::B && !header.collocated_from_l0 {
+        let col_list = if header.slice_type == SliceType::B && !header.collocated_from_l0_flag {
             1
         } else {
             0
         };
-        let col_ref = slice.refs[col_list].get(header.collocated_ref_idx)?;
+        let col_ref = slice.refs[col_list].get(usize::from(header.collocated_ref_idx))?;
         let col = &col_ref.frame;
         // The candidates lie in this CTB row.
-        let ctb = 1usize << self.sps.log2_ctb;
-        let need = ((pb.y >> self.sps.log2_ctb) + 1) * ctb;
+        let ctb = 1usize << self.sps.log2_ctb();
+        let need = ((pb.y >> self.sps.log2_ctb()) + 1) * ctb;
         if need > self.seen_motion.get() {
             col.wait_motion(need);
             self.seen_motion.set(col.motion_published());
         }
-        let log2 = self.sps.log2_ctb;
+        let log2 = self.sps.log2_ctb();
         let xbr = pb.x + pb.w;
         let ybr = pb.y + pb.h;
         if (pb.y >> log2) == (ybr >> log2) && ybr < self.pic.height && xbr < self.pic.width {
@@ -451,7 +451,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         } else if slice.no_backward_pred {
             list
         } else {
-            usize::from(slice.header.collocated_from_l0)
+            usize::from(slice.header.collocated_from_l0_flag)
         };
         if target.long_term != cand.long_term[which] {
             return None;
@@ -570,11 +570,11 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let slice = &pic.slices[self.slice];
         let header = &slice.header;
         let explicit = match header.slice_type {
-            SliceType::P => self.pps.weighted_pred,
-            SliceType::B => self.pps.weighted_bipred,
+            SliceType::P => self.pps.weighted_pred_flag,
+            SliceType::B => self.pps.weighted_bipred_flag,
             SliceType::I => false,
         };
-        let bit_depth = u32::from(self.sps.bit_depth);
+        let bit_depth = u32::from(self.sps.bit_depth());
         let mut refs: [Option<&'p Frame>; 2] = [None, None];
         for (list, slot) in refs.iter_mut().enumerate() {
             if field.uses(list) {
@@ -585,7 +585,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
         }
         let weights = if explicit {
-            let Some(table) = header.weights.as_ref() else {
+            let Some(table) = header.pred_weight_table.as_ref() else {
                 return Err(malformed("weighted prediction without weights"));
             };
             let mut out = [[Wp {
@@ -602,11 +602,15 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 if !field.uses(list) {
                     continue;
                 }
-                let Some(entry) = table.lists[list].get(field.ref_idx[list] as usize) else {
+                let Some(entry) = table.entries[list].get(field.ref_idx[list] as usize) else {
                     return Err(malformed("weight index"));
                 };
                 for (c, slot) in out.iter_mut().enumerate() {
-                    let log2_denom = table.log2_denom[usize::from(c > 0)];
+                    let log2_denom = u32::from(if c == 0 {
+                        table.luma_log2_weight_denom
+                    } else {
+                        table.chroma_log2_weight_denom()
+                    });
                     slot[list] = Wp {
                         weight: entry.weight[c],
                         offset: entry.offset[c],

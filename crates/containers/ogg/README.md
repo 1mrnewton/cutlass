@@ -168,7 +168,7 @@ Gaps:
 - The checked-in Vorbis files are mono, stereo and 5.1. Other channel counts are not tested here.
 - A packet with a malformed Opus TOC, or a Vorbis packet naming a mode the setup lacks, is returned with duration 0.
 - Seek landings report `ordinal` 0 at the start and `u32::MAX` elsewhere, because Ogg has no packet count.
-- Opus or Vorbis inside WebM or Matroska is not this crate's job, and no Matroska reader exists yet.
+- Opus or Vorbis inside WebM or Matroska is not this crate's job: `cutlass-matroska` reads those.
 
 ## Specifications
 

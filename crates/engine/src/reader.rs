@@ -13,10 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use cutlass_codec::access::{
-    ChannelLayout, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, PixelFormat, SampleFormat,
-    StandardLayout, Transfer,
+    ChannelLayout, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients,
+    PixelFormat, SampleFormat, StandardLayout, Transfer,
 };
-use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
+use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, StreamColor, Timescale};
 use cutlass_container::{
     Demux, DisplayQuarter, Landing, OpenError, ProbeResult, ReadError, SeekTo,
 };
@@ -248,6 +248,8 @@ struct Pipe {
     valid_end: Option<(u32, i64)>,
     /// No packet has been pushed since open or the last reset.
     fresh: bool,
+    /// The colour the container states, for what a picture leaves unspecified.
+    color: StreamColor,
 }
 
 impl Pipe {
@@ -266,6 +268,7 @@ impl Pipe {
             lead_samples: None,
             valid_end: None,
             fresh: true,
+            color: StreamColor::default(),
         }
     }
 
@@ -910,9 +913,10 @@ impl Media {
                     Err(error) => return Err(EngineError::Codec(error)),
                 };
                 let last = pipe.last_duration;
+                let color = pipe.color;
                 for (frame, pts) in outputs
                     .into_iter()
-                    .filter_map(|output| coded_output(output, timescale))
+                    .filter_map(|output| coded_output(output, timescale, &color))
                 {
                     let duration = pipe.length_of(pts, last);
                     pipe.ready.push_back(Ready {
@@ -940,7 +944,8 @@ impl Media {
             let packet_pts = packet.timestamp().presentation_or_decode();
             let duration = packet.timestamp().duration().unwrap_or(0);
             pipe.note_length(packet_pts, duration);
-            for (frame, pts) in push_picture(pipe.decoder.as_mut(), &access, timescale)? {
+            let color = pipe.color;
+            for (frame, pts) in push_picture(pipe.decoder.as_mut(), &access, timescale, &color)? {
                 let pts = pts.or(packet_pts);
                 let duration = pipe.length_of(pts, duration);
                 pipe.ready.push_back(Ready {
@@ -1361,6 +1366,7 @@ fn push_picture(
     decoder: &mut dyn Decoder,
     packet: &AccessPacket,
     timescale: Timescale,
+    color: &StreamColor,
 ) -> Result<Vec<(DecodedFrame, Option<i64>)>, EngineError> {
     match decoder.decode_picture(packet) {
         Ok(frames) => Ok(frames
@@ -1374,7 +1380,7 @@ fn push_picture(
             let outputs = decoder.push(packet)?;
             Ok(outputs
                 .into_iter()
-                .filter_map(|output| coded_output(output, timescale))
+                .filter_map(|output| coded_output(output, timescale, color))
                 .collect())
         }
         Err(error) => Err(EngineError::Codec(error)),
@@ -1382,18 +1388,44 @@ fn push_picture(
 }
 
 /// A picture and its start. The start is kept only in the stream's own ticks.
-fn coded_output(output: Output, timescale: Timescale) -> Option<(DecodedFrame, Option<i64>)> {
+fn coded_output(
+    output: Output,
+    timescale: Timescale,
+    color: &StreamColor,
+) -> Option<(DecodedFrame, Option<i64>)> {
     match output {
         Output::Picture(picture) => {
             let pts = (picture.timescale() == timescale.ticks_per_second()).then(|| picture.pts());
-            Some((frame_from_picture(picture), pts))
+            Some((frame_from_picture(picture, color), pts))
         }
         Output::Audio(_) => None,
     }
 }
 
-fn frame_from_picture(picture: PictureOutput) -> DecodedFrame {
-    let info = picture.info();
+/// The frame of a decoded picture. Its primaries, transfer, matrix and
+/// range are the decoder's, which read them from the bitstream (and were
+/// handed the container's at open); one the decoder leaves unspecified
+/// is the container's `color`, when the container states it.
+fn frame_from_picture(picture: PictureOutput, color: &StreamColor) -> DecodedFrame {
+    let mut info = picture.info();
+    if info.primaries == ColorPrimaries::Unspecified
+        && let Some(code) = color.primaries
+    {
+        info.primaries = ColorPrimaries::from_cicp(code);
+    }
+    if info.transfer == Transfer::Unspecified
+        && let Some(code) = color.transfer
+    {
+        info.transfer = Transfer::from_cicp(code);
+    }
+    if info.matrix == ColorMatrix::Unspecified
+        && let Some(code) = color.matrix
+    {
+        info.matrix = ColorMatrix::from_cicp(code);
+    }
+    if info.range == ColorRange::Unspecified {
+        info.range = color.range;
+    }
     match picture.samples() {
         PictureSamples::Platform { token } => {
             return DecodedFrame::Platform {
@@ -1503,13 +1535,17 @@ fn open_pipe(
             tag: unknown_tag(codec),
         });
     };
-    let params = params_for(
+    let mut params = params_for(
         stream.params().extradata(),
         stream.params().size(),
         stream.params().sample_rate(),
         stream.params().channels(),
         *id,
     )?;
+    let color = stream.params().color();
+    if stream.params().size().is_some() {
+        with_container_color(&mut params, &color);
+    }
     let decoder = match factory.open(&params) {
         Ok(decoder) => decoder,
         Err(CodecError::Unsupported { .. }) => {
@@ -1527,7 +1563,25 @@ fn open_pipe(
     );
     pipe.gapless = gapless_of(stream);
     pipe.lead_samples = exact_lead(stream, pipe.lead);
+    pipe.color = color;
     Ok(pipe)
+}
+
+/// The colour a container states, on the parameters a picture decoder
+/// opens with. How it weighs them against its bitstream is the decoder's:
+/// VP9's takes the primaries and transfer, which its header does not
+/// carry, and the matrix where the header says the colour space is unknown.
+fn with_container_color(params: &mut CodecParams, color: &StreamColor) {
+    if let Some(code) = color.primaries {
+        params.primaries = ColorPrimaries::from_cicp(code);
+    }
+    if let Some(code) = color.transfer {
+        params.transfer = Transfer::from_cicp(code);
+    }
+    if let Some(code) = color.matrix {
+        params.matrix = MatrixCoefficients::from_cicp(code);
+    }
+    params.range = color.range;
 }
 
 /// The encoder delay in samples, with the sample rate, when the stream's
@@ -2105,6 +2159,107 @@ mod tests {
         assert_eq!(exact_lead(&stream(1_000, Some(120)), 5), None);
         assert_eq!(exact_lead(&stream(1_000, None), 3), None);
         assert_eq!(exact_lead(&stream(1_000, Some(0)), 0), None);
+    }
+
+    /// The container's colour reaches the decoder's parameters, and fills
+    /// what a decoded picture leaves unspecified; what the picture states
+    /// stands.
+    #[test]
+    fn container_colour_fills_what_the_picture_leaves_unspecified() {
+        let hdr = StreamColor {
+            primaries: Some(9),
+            transfer: Some(16),
+            matrix: Some(9),
+            range: ColorRange::Limited,
+            content_light: None,
+            mastering_display: None,
+        };
+        let mut params = CodecParams::video(CodecId::H264, 2, 2);
+        with_container_color(&mut params, &hdr);
+        assert_eq!(params.primaries, ColorPrimaries::Bt2020);
+        assert_eq!(params.transfer, Transfer::Pq);
+        assert_eq!(params.matrix, MatrixCoefficients::Bt2020);
+        assert_eq!(params.range, ColorRange::Limited);
+
+        let picture = |primaries, transfer, matrix, range| {
+            let info = cutlass_decode::PictureInfo {
+                matrix,
+                range,
+                ..cutlass_decode::PictureInfo::new(2, 2, PixelFormat::Yuv420p, primaries, transfer)
+            };
+            PictureOutput::cpu(info, vec![0; 6], 0, 1_000).unwrap()
+        };
+        let colour_of = |frame: DecodedFrame| match frame {
+            DecodedFrame::Coded {
+                primaries,
+                transfer,
+                matrix,
+                range,
+                ..
+            } => (primaries, transfer, matrix, range),
+            _ => panic!("coded"),
+        };
+        let unstated = picture(
+            ColorPrimaries::Unspecified,
+            Transfer::Unspecified,
+            ColorMatrix::Unspecified,
+            ColorRange::Unspecified,
+        );
+        assert_eq!(
+            colour_of(frame_from_picture(unstated.clone(), &hdr)),
+            (
+                ColorPrimaries::Bt2020,
+                Transfer::Pq,
+                ColorMatrix::Bt2020,
+                ColorRange::Limited
+            )
+        );
+        assert_eq!(
+            colour_of(frame_from_picture(unstated, &StreamColor::default())),
+            (
+                ColorPrimaries::Unspecified,
+                Transfer::Unspecified,
+                ColorMatrix::Unspecified,
+                ColorRange::Unspecified
+            )
+        );
+        let stated = picture(
+            ColorPrimaries::Bt709,
+            Transfer::Bt709,
+            ColorMatrix::Bt709,
+            ColorRange::Full,
+        );
+        assert_eq!(
+            colour_of(frame_from_picture(stated, &hdr)),
+            (
+                ColorPrimaries::Bt709,
+                Transfer::Bt709,
+                ColorMatrix::Bt709,
+                ColorRange::Full
+            )
+        );
+        // Only the fields left unspecified are filled.
+        let half = picture(
+            ColorPrimaries::Bt2020,
+            Transfer::Unspecified,
+            ColorMatrix::Bt2020,
+            ColorRange::Unspecified,
+        );
+        let hlg = StreamColor {
+            primaries: Some(1),
+            transfer: Some(18),
+            range: ColorRange::Full,
+            ..StreamColor::default()
+        };
+        assert_eq!(
+            colour_of(frame_from_picture(half, &hlg)),
+            (
+                ColorPrimaries::Bt2020,
+                Transfer::Hlg,
+                ColorMatrix::Bt2020,
+                ColorRange::Full
+            )
+        );
     }
 
     #[test]

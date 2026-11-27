@@ -19,6 +19,7 @@
 
 use cutlass_codec::{CodecId, FrameSize, StreamCodec, StreamParams, UnknownCodec};
 
+use crate::colour::stream_color;
 use crate::error::{Error, Result};
 use crate::limits::MAX_CODEC_ID;
 use crate::meta::{Encoding, TrackEntry, TrackKind};
@@ -146,15 +147,20 @@ fn unknown(tag: &[u8]) -> Result<StreamCodec> {
 
 /// Stream parameters from the track's Video or Audio element. A picture
 /// with no size, or sound with no rate or channels, is kept as an opaque
-/// stream rather than dropped.
+/// stream rather than dropped. A video track's Colour is its stream's
+/// colour, whatever the codec.
 fn params_for(track: &TrackEntry, codec: StreamCodec, extradata: Vec<u8>) -> StreamParams {
     match track.kind {
         TrackKind::Video => {
             let width = u32::try_from(track.pixel_width).unwrap_or(0);
             let height = u32::try_from(track.pixel_height).unwrap_or(0);
-            match FrameSize::try_new(width, height) {
+            let params = match FrameSize::try_new(width, height) {
                 Ok(size) => StreamParams::video(codec, size, extradata),
                 Err(_) => StreamParams::opaque(codec, extradata),
+            };
+            match &track.colour {
+                Some(colour) => params.with_color(stream_color(colour)),
+                None => params,
             }
         }
         TrackKind::Audio => {
@@ -697,6 +703,7 @@ mod tests {
             display_width: None,
             display_height: None,
             alpha_mode: 0,
+            colour: None,
             sampling_frequency: 44_100.0,
             output_sampling_frequency: None,
             channels: 2,

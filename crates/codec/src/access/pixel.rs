@@ -264,9 +264,99 @@ impl PixelFormat {
     }
 }
 
+impl ColorPrimaries {
+    /// The name of an ISO/IEC 23091-2 `colour_primaries` code. 5 and 6 are
+    /// both [`Self::Bt601`]; 2, a reserved code and a code past the table
+    /// are [`Self::Unspecified`].
+    #[must_use]
+    pub const fn from_cicp(code: u8) -> Self {
+        match code {
+            1 => Self::Bt709,
+            4 => Self::Bt470m,
+            5 | 6 => Self::Bt601,
+            7 => Self::Smpte240m,
+            8 => Self::Film,
+            9 => Self::Bt2020,
+            10 => Self::Smpte428,
+            11 => Self::Smpte431,
+            12 => Self::Smpte432,
+            22 => Self::Ebu3213,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
+impl Transfer {
+    /// The name of an ISO/IEC 23091-2 `transfer_characteristics` code, as
+    /// the H.264 and HEVC decoders name them: 1 and 6 are [`Self::Bt709`],
+    /// 4 and 5 [`Self::Bt601`], 14 and 15 [`Self::Bt2020`]. 2, a reserved
+    /// code and a code past the table are [`Self::Unspecified`].
+    #[must_use]
+    pub const fn from_cicp(code: u8) -> Self {
+        match code {
+            1 | 6 => Self::Bt709,
+            4 | 5 => Self::Bt601,
+            7 => Self::Smpte240m,
+            8 => Self::Linear,
+            9 => Self::Log100,
+            10 => Self::LogSqrt,
+            11 => Self::Iec61966_2_4,
+            12 => Self::Bt1361,
+            13 => Self::Srgb,
+            14 | 15 => Self::Bt2020,
+            16 => Self::Pq,
+            17 => Self::Smpte428,
+            18 => Self::Hlg,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
+impl ColorMatrix {
+    /// The name of an ISO/IEC 23091-2 `matrix_coefficients` code. 5 and 6
+    /// are both [`Self::Bt601`], 9 and 10 both [`Self::Bt2020`]; 2, the
+    /// reserved 3 and a code past the table are [`Self::Unspecified`].
+    #[must_use]
+    pub const fn from_cicp(code: u8) -> Self {
+        match code {
+            0 => Self::Identity,
+            1 => Self::Bt709,
+            4 => Self::Fcc,
+            5 | 6 => Self::Bt601,
+            7 => Self::Smpte240m,
+            8 => Self::Ycgco,
+            9 | 10 => Self::Bt2020,
+            11 => Self::Smpte2085,
+            12 => Self::ChromaDerived,
+            13 => Self::ChromaDerivedConstant,
+            14 => Self::Ictcp,
+            15 => Self::IptC2,
+            16 => Self::YcgcoRe,
+            17 => Self::YcgcoRo,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
+impl MatrixCoefficients {
+    /// The name of an ISO/IEC 23091-2 `matrix_coefficients` code, where
+    /// this smaller set has one: 0, 1, 5 and 6, 9 and 10. Every other code
+    /// is [`Self::Unspecified`].
+    #[must_use]
+    pub const fn from_cicp(code: u8) -> Self {
+        match code {
+            0 => Self::Rgb,
+            1 => Self::Bt709,
+            5 | 6 => Self::Bt601,
+            9 | 10 => Self::Bt2020,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ColorPrimaries, MatrixCoefficients, Transfer};
+    use super::{ColorMatrix, ColorPrimaries, MatrixCoefficients, Transfer};
 
     #[test]
     fn the_color_names_have_their_cicp_codes() {
@@ -287,5 +377,39 @@ mod tests {
         assert_eq!(MatrixCoefficients::Unspecified.cicp(), 2);
         assert_eq!(MatrixCoefficients::Bt601.cicp(), 6);
         assert_eq!(MatrixCoefficients::Bt2020.cicp(), 9);
+    }
+
+    #[test]
+    fn a_cicp_code_names_its_color_and_back() {
+        for code in 0..=255_u8 {
+            let primaries = ColorPrimaries::from_cicp(code);
+            if primaries != ColorPrimaries::Unspecified && code != 5 {
+                assert_eq!(primaries.cicp(), code, "primaries {code}");
+            }
+            let transfer = Transfer::from_cicp(code);
+            if !matches!(transfer, Transfer::Unspecified | Transfer::Bt601)
+                && !matches!(code, 6 | 15)
+            {
+                assert_eq!(transfer.cicp(), code, "transfer {code}");
+            }
+            let matrix = MatrixCoefficients::from_cicp(code);
+            if matrix != MatrixCoefficients::Unspecified && !matches!(code, 5 | 10) {
+                assert_eq!(matrix.cicp(), code, "matrix {code}");
+            }
+        }
+        assert_eq!(ColorPrimaries::from_cicp(2), ColorPrimaries::Unspecified);
+        assert_eq!(ColorPrimaries::from_cicp(13), ColorPrimaries::Unspecified);
+        assert_eq!(Transfer::from_cicp(16), Transfer::Pq);
+        assert_eq!(Transfer::from_cicp(18), Transfer::Hlg);
+        assert_eq!(Transfer::from_cicp(5), Transfer::Bt601);
+        assert_eq!(Transfer::from_cicp(0), Transfer::Unspecified);
+        assert_eq!(ColorMatrix::from_cicp(0), ColorMatrix::Identity);
+        assert_eq!(ColorMatrix::from_cicp(10), ColorMatrix::Bt2020);
+        assert_eq!(ColorMatrix::from_cicp(3), ColorMatrix::Unspecified);
+        assert_eq!(ColorMatrix::from_cicp(18), ColorMatrix::Unspecified);
+        assert_eq!(
+            MatrixCoefficients::from_cicp(4),
+            MatrixCoefficients::Unspecified
+        );
     }
 }

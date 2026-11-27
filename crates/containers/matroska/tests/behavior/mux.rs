@@ -2,9 +2,10 @@
 
 use std::io::Cursor;
 
+use cutlass_codec::access::{ColorRange, ContentLight, MasteringDisplay};
 use cutlass_codec::{
-    BlockAddition, CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
-    UnknownCodec,
+    BlockAddition, CodecId, FrameSize, Packet, StreamCodec, StreamColor, StreamParams, Timescale,
+    Timestamp, UnknownCodec,
 };
 use cutlass_container::{
     Demux, Landing, Language, Mux, MuxError, MuxStatus, NewStream, SeekTo, TrackDuration, TrackId,
@@ -965,4 +966,63 @@ fn a_track_without_alpha_has_no_alpha_mode_and_block_add_id_zero_is_refused() {
         }]);
     assert!(mux.write_packet(&frame).is_err());
     assert_eq!(mux.status(), MuxStatus::Failed);
+}
+
+/// A stream that carries colour is written with a Colour element in its
+/// Video element, which reads back as the same colour, in WebM and in
+/// Matroska; a stream without colour is written without one.
+#[test]
+fn a_stream_with_colour_is_written_with_a_colour_element() {
+    let color = StreamColor {
+        primaries: Some(9),
+        transfer: Some(16),
+        matrix: Some(9),
+        range: ColorRange::Limited,
+        content_light: Some(ContentLight {
+            max_cll: 1000,
+            max_fall: 400,
+        }),
+        mastering_display: Some(MasteringDisplay {
+            primaries: [[44564, 20972], [17367, 45220], [9830, 3932]],
+            white_point: [20493, 21561],
+            max_luminance: 256_000,
+            min_luminance: 82,
+        }),
+    };
+    for (webm, codec, extradata) in [
+        (true, CodecId::Vp9, &[][..]),
+        (true, CodecId::Av1, &[0x81, 0x00, 0x0C, 0x00][..]),
+        (false, CodecId::H264, AVCC),
+    ] {
+        let writer = Cursor::new(Vec::new());
+        let mut mux = if webm {
+            MatroskaMux::webm(writer)
+        } else {
+            MatroskaMux::new(writer)
+        };
+        let mut stream = video(codec, extradata, 1000);
+        stream.params = stream.params.with_color(color);
+        let picture = mux.add_stream(stream).expect("video");
+        mux.write_packet(&packet(picture, vec![1; 10], 0, 40, 1000, true))
+            .expect("packet");
+        let bytes = finish(mux, &[(picture, 1000, 40)]);
+        assert!(
+            bytes.windows(2).any(|window| window == [0x55, 0xB0]),
+            "{codec:?}"
+        );
+        let demux = read_back(bytes);
+        assert_eq!(demux.streams()[0].params().color(), color, "{codec:?}");
+        let stored = demux.track_entries()[0].colour.expect("colour");
+        assert_eq!(stored.primaries, Some(9));
+        assert_eq!(stored.range, Some(1));
+    }
+
+    let mut mux = MatroskaMux::webm(Cursor::new(Vec::new()));
+    let picture = mux.add_stream(video(CodecId::Vp9, &[], 1000)).expect("vp9");
+    mux.write_packet(&packet(picture, vec![1; 10], 0, 40, 1000, true))
+        .expect("packet");
+    let bytes = finish(mux, &[(picture, 1000, 40)]);
+    let demux = read_back(bytes);
+    assert_eq!(demux.track_entries()[0].colour, None);
+    assert!(demux.streams()[0].params().color().is_empty());
 }

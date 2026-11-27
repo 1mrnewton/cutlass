@@ -1,6 +1,6 @@
 # cutlass-opus
 
-`cutlass-opus` decodes and encodes Opus (RFC 6716 as updated by RFC 8251). It is safe Rust: the crate has `#![forbid(unsafe_code)]` and depends only on `cutlass-decode` and `cutlass-encode`. One packet is one Opus packet. Ogg framing is in `cutlass-ogg` and MP4 framing in `cutlass-isobmff`.
+`cutlass-opus` decodes and encodes Opus (RFC 6716 as updated by RFC 8251). It is safe Rust: the crate has `#![forbid(unsafe_code)]` and depends only on `cutlass-decode` and `cutlass-encode`. One packet is one Opus packet. Ogg framing is in `cutlass-ogg`, MP4 framing in `cutlass-isobmff`, and WebM and Matroska framing in `cutlass-matroska`.
 
 The desktop app registers the decoder and the encoder, ahead of the platform codecs, so Opus decodes and encodes the same on every platform.
 
@@ -122,7 +122,6 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 - Family 255 has no speaker positions. Its channels are labeled by count only so that a buffer can be built.
 - Nothing outside this crate calls `conceal`, `conceal_output`, or `decode_fec`.
 - The decoder copies its whole stream state before every packet, so that a failed packet can be undone. The encoder does the same on every push.
-- Opus in WebM does not open in Cutlass: the Matroska container is not built.
 - The app's export writes Opus alone, in an `.opus` file. A movie with Opus sound is refused.
 
 ## Specifications

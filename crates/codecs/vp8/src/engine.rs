@@ -52,8 +52,9 @@ pub struct EngineDecoder {
 }
 
 impl EngineDecoder {
-    /// Opens with the container's parameters. The colour comes from the
-    /// `vpcC` payload in `params.extra` when there is one, and is BT.601
+    /// Opens with the container's parameters. The primaries and transfer
+    /// are the parameters' own when they name them (a WebM's Colour
+    /// element), then the `vpcC` payload's in `params.extra`, and BT.601
     /// otherwise, which is what a VP8 frame with colour space 0 means
     /// (RFC 6386 Section 9.2).
     pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
@@ -65,7 +66,13 @@ impl EngineDecoder {
         if params.codec != CodecId::Vp8 {
             return Err(CodecError::Unsupported { what: "codec" });
         }
-        let (primaries, transfer) = vpcc_colour(&params.extra);
+        let (mut primaries, mut transfer) = vpcc_colour(&params.extra);
+        if params.primaries != ColorPrimaries::Unspecified {
+            primaries = params.primaries;
+        }
+        if params.transfer != Transfer::Unspecified {
+            transfer = params.transfer;
+        }
         Ok(Self {
             inner: decode::Decoder::with_max_pixels(max_pixels),
             primaries,
@@ -328,6 +335,23 @@ mod tests {
             assert!(u.iter().all(|&s| s.abs_diff(59) <= 3), "cb");
             assert!(v.iter().all(|&s| s.abs_diff(189) <= 3), "cr");
         }
+
+        // A WebM has no `vpcC`: the colour its Colour element names comes
+        // on the parameters, and wins over the `vpcC` bytes too.
+        for extra in [Vec::new(), configs[0].clone()] {
+            let mut tagged = CodecParams::video(CodecId::Vp8, 64, 32);
+            tagged.extra = extra;
+            tagged.primaries = ColorPrimaries::Bt2020;
+            tagged.transfer = Transfer::Hlg;
+            let mut decoder = decoders.open(&tagged).expect("decoder");
+            let Some(Output::Picture(picture)) =
+                pictures(decoder.as_mut(), &packets).into_iter().next()
+            else {
+                panic!("picture");
+            };
+            assert_eq!(picture.info().primaries, ColorPrimaries::Bt2020);
+            assert_eq!(picture.info().transfer, Transfer::Hlg);
+        }
     }
 
     /// Odd sizes lose their last column or row, hidden frames give no
@@ -367,6 +391,7 @@ mod tests {
                 let info = picture.info();
                 assert_eq!((info.width, info.height), (w, h));
                 assert_eq!(info.primaries, ColorPrimaries::Bt601);
+                assert_eq!(info.transfer, Transfer::Bt601);
                 let PictureSamples::Cpu(bytes) = picture.samples() else {
                     panic!("platform buffer");
                 };

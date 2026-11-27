@@ -13,6 +13,7 @@
 #[path = "../behavior/build.rs"]
 #[allow(dead_code)]
 mod build;
+mod colour;
 mod fuzz;
 mod local;
 mod measure;

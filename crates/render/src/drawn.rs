@@ -863,12 +863,14 @@ fn film_grain(uv: vec2<f32>) -> vec4<f32> {
 fn film_dust(at: vec2<f32>, cell: f32, big: f32, density: f32, sd: f32, clumps: f32, size: f32) -> f32 {
     let g = at / cell;
     let id = floor(g);
+    // Patches: some parts of the frame are dirtier than others. A patch
+    // is many cells wide, so it is worked out once here, not for each
+    // neighbour.
+    let dirtier = mix(1.0, smoothstep(0.35, 0.75, fbm(id * cell * 0.0035 + sd * 0.37, 3)) * 2.2, clumps);
     var sum = 0.0;
     for (var dy = -1; dy <= 1; dy = dy + 1) {
         for (var dx = -1; dx <= 1; dx = dx + 1) {
             let cl = id + vec2<f32>(f32(dx), f32(dy));
-            // Patches: some parts of the frame are dirtier than others.
-            let dirtier = mix(1.0, smoothstep(0.35, 0.75, fbm(cl * cell * 0.0035 + sd * 0.37, 3)) * 2.2, clumps);
             if (hash12(cl * 1.7 + sd * 3.1) > min(density * dirtier, 0.4)) {
                 continue;
             }
@@ -1227,11 +1229,9 @@ fn crumple_cones(p: vec2<f32>, sd: f32) -> f32 {
     return best;
 }
 
-// The height of crumpled paper at a point.
-fn crumple_surface(p: vec2<f32>) -> f32 {
+// The height of crumpled paper at a point, already pushed about.
+fn crumple_surface(w: vec2<f32>) -> f32 {
     let sd = fx.a.y * 7.3;
-    // The cones are pushed about, so the creases are not quite straight.
-    let w = p + (vec2<f32>(fbm(p * 0.7 + sd, 3), fbm(p * 0.7 + sd + 30.0, 3)) - 0.5) * 0.5;
     return crumple_cones(w * 2.2, sd)
         + crumple_cones(turn(w, 0.7) * 5.1 + 9.0, sd + 5.0) * 0.38
         + crumple_cones(turn(w, -0.4) * 11.0 + 3.0, sd + 9.0) * 0.12;
@@ -1243,7 +1243,12 @@ fn crumple(uv: vec2<f32>) -> vec4<f32> {
     if (fx.a.x <= 0.0) {
         return c;
     }
-    let p = uv * frame_shape() * fx.a.z * 1.6;
+    let at = uv * frame_shape() * fx.a.z * 1.6;
+    // The cones are pushed about by slow clouds, so the creases are not
+    // quite straight. The push hardly changes over the step the slope is
+    // measured across, so it is worked out once.
+    let sd = fx.a.y * 7.3;
+    let p = at + (vec2<f32>(fbm(at * 0.7 + sd, 3), fbm(at * 0.7 + sd + 30.0, 3)) - 0.5) * 0.5;
     let e = 0.003;
     let h = crumple_surface(p);
     let slope = vec2<f32>(crumple_surface(p + vec2<f32>(e, 0.0)) - h, crumple_surface(p + vec2<f32>(0.0, e)) - h) / e;

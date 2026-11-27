@@ -49,6 +49,19 @@ const CASES: &[(&str, &str, Controls)] = &[
     ("soft-glow", "soft-glow", &[]),
     ("dreamy", "dreamy", &[]),
     ("vhs (5 passes)", "vhs", &[]),
+    // The drawn ones: their cost is arithmetic in every pixel, not reads.
+    ("film-leak", "film-leak", &[]),
+    ("bokeh-lights", "bokeh-lights", &[]),
+    ("lens-flare", "lens-flare", &[]),
+    ("dust", "dust", &[]),
+    ("sparks", "sparks", &[]),
+    ("fog", "fog", &[]),
+    ("smoke", "smoke", &[]),
+    ("real-grain", "real-grain", &[]),
+    ("scratched-film", "scratched-film", &[]),
+    ("worn-print (4 passes)", "worn-print", &[]),
+    ("crumpled-paper", "crumpled-paper", &[]),
+    ("ink-reveal", "ink-reveal", &[]),
 ];
 
 fn main() -> Result<(), Failure> {

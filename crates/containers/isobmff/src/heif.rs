@@ -116,6 +116,7 @@ pub fn parse_meta(
             };
             groups.push(BuiltTrack {
                 stream: Stream {
+                    gapless: None,
                     params: StreamParams {
                         track_id: item.id,
                         codec: codec_for(item.kind),

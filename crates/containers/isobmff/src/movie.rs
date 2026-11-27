@@ -6,7 +6,8 @@ use cutlass_container::DisplayQuarter;
 
 use crate::index::{self, ChunkMap, CtsRun, Framing, Grouped, Run, Sample, Sizes, Sync, Tables};
 use crate::legacy::{
-    AudioParams, Edit, Error, MediaKind, Stream, StreamParams, Timescale, VideoParams,
+    AudioParams, CodecId, Edit, Error, Gapless, MediaKind, Stream, StreamParams, Timescale,
+    VideoParams,
 };
 use crate::limits::{MAX_EDITS, MAX_SAMPLES, MAX_TABLE_ROWS, MAX_TRACKS};
 use crate::parse::{self, Reader};
@@ -66,6 +67,7 @@ struct Draft {
 
 pub fn parse_moov(payload: &[u8], budget: &mut u32, depth: u32) -> Result<Built, Error> {
     let depth = parse::enter(depth)?;
+    let mut note = None;
     let mut built = Built {
         timescale: 0,
         duration: 0,
@@ -93,8 +95,14 @@ pub fn parse_moov(payload: &[u8], budget: &mut u32, depth: u32) -> Result<Built,
                 built.fragmented = true;
                 parse_mvex(atom.payload, &mut built, budget, depth)?;
             }
+            b"udta" => note = note.or_else(|| crate::smpb::in_udta(atom.payload)),
             _ => {}
         }
+    }
+    if let Some(note) = note
+        && !built.fragmented
+    {
+        apply_gapless(&mut built.tracks, note);
     }
     let movie = built.matrix;
     for track in &mut built.tracks {
@@ -107,6 +115,27 @@ pub fn parse_moov(payload: &[u8], budget: &mut u32, depth: u32) -> Result<Built,
         });
     }
     Ok(built)
+}
+
+/// Give an `iTunSMPB` note to the movie's one sound track, when that is AAC,
+/// has no edit list, and its samples add up to the note's counts. A
+/// fragmented movie's samples are not all in `moov`, so it takes none.
+///
+/// The note names no track. FFmpeg gives it to the last track read and skips
+/// the priming for AAC alone; an edit list, when the track has one, is what
+/// places its samples.
+fn apply_gapless(tracks: &mut [BuiltTrack], note: Gapless) {
+    let mut sound = tracks
+        .iter_mut()
+        .filter(|track| matches!(track.stream.params.kind, MediaKind::Audio(_)));
+    let (Some(track), None) = (sound.next(), sound.next()) else {
+        return;
+    };
+    let params = &track.stream.params;
+    if params.codec != CodecId::Aac || !track.stream.edits.is_empty() {
+        return;
+    }
+    track.stream.gapless = note.fitting(params.duration_ticks);
 }
 
 fn parse_mvhd(payload: &[u8], built: &mut Built) -> Result<(), Error> {
@@ -281,6 +310,7 @@ fn parse_trak(
                 color,
             },
             edits: draft.edits,
+            gapless: None,
             display: DisplayQuarter::Zero,
         },
         matrix: draft.matrix,

@@ -255,7 +255,7 @@ const VIDEO_COMPOUND_SILENT: &[Entry<'static>] = video_menu!(
 );
 
 /// The audio clip menu: the reference editor's rows in its order, with
-/// this build's Volume, Speed, Fade and Beat rows after Delete and its
+/// this build's Volume, Speed, Fade, Beat and Auto beats rows after Delete and its
 /// Replace row with the clip rows.
 const AUDIO: &[Entry<'static>] = &[
     COPY,
@@ -268,6 +268,7 @@ const AUDIO: &[Entry<'static>] = &[
     done("speed", "Speed", ""),
     done("fade", "Fade", ""),
     done("beat", "Beat", ""),
+    done("auto-beats", "Auto beats", ""),
     SEP,
     done("transcript", "Transcript", ""),
     SEPARATE_AUDIO,
@@ -1659,6 +1660,7 @@ mod tests {
                 "speed",
                 "fade",
                 "beat",
+                "auto-beats",
                 "transcript",
                 "separate-audio",
                 "sync",

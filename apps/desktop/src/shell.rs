@@ -48,6 +48,7 @@ use cutlass_transcription::{
 };
 
 mod assistant;
+mod beats;
 mod compound;
 mod cover;
 mod effect_preview;

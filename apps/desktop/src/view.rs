@@ -7005,6 +7005,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let enabled = |id: &str| match id {
         "edit-effects" => !effects.is_empty(),
         "sync" => shell.sync_enabled(),
+        "auto-beats" => shell.auto_beats_enabled(),
         "edit-freeze" => shell.freeze_enabled(),
         "edit-reverse" => shell.reverse_enabled(),
         "edit-mirror" => shell.mirror_enabled(),
@@ -7071,6 +7072,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             }
             "open-compound" => shell.open_compound(),
             "sync" => shell.start_sync(),
+            "auto-beats" => shell.auto_beats(),
             "edit-effects" => match effects.first() {
                 Some(effect) => shell.edit_clip_effect(&effect.segment_id),
                 None => Ok(()),

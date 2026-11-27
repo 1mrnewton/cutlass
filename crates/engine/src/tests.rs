@@ -362,6 +362,8 @@ fn export_returns_the_still_and_playback_does_not_decode() {
         panic!("cpu picture");
     };
     assert_eq!(again.rgba(), bytes.rgba());
+    // The still is made into a picture once and shared after that.
+    assert!(std::ptr::eq(again.rgba(), bytes.rgba()));
     assert_eq!(export.decodes(), 1);
     assert!(matches!(export.sample(Micros(0)), Sample::Ready(_)));
 

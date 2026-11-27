@@ -51,6 +51,15 @@ impl<T> FrameWindow<T> {
             .map(|frame| &frame.value)
     }
 
+    /// The start of the stored picture that covers `time`.
+    #[must_use]
+    pub fn start_at(&self, time: i64) -> Option<i64> {
+        self.frames
+            .iter()
+            .find(|frame| time >= frame.start && time < frame.end)
+            .map(|frame| frame.start)
+    }
+
     /// The stored picture whose start is nearest `time`, covering it or not.
     #[must_use]
     pub fn nearest(&self, time: i64) -> Option<&T> {

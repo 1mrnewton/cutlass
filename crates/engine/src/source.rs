@@ -17,7 +17,7 @@ use cutlass_container::DisplayQuarter;
 use cutlass_decode::StillImage;
 use cutlass_gpu::Extent;
 use cutlass_model::{Draft, Micros, Segment, SegmentId};
-use cutlass_picture::{CpuBytes, Picture, PictureSource, PlatformBuffer, Sample, rgba_len};
+use cutlass_picture::{CpuBytes, Picture, PictureSource, PlatformBuffer, Sample};
 
 use crate::ahead::ReadAhead;
 use crate::cache::FrameWindow;
@@ -45,6 +45,10 @@ pub struct VideoSource {
     /// An animated GIF or WebP plays round and round for as long as its
     /// clip lasts: the length of one round.
     round: Option<i64>,
+    /// The still last made into a picture, by the start of its stored frame.
+    /// A photo is one picture all along its clip, and making 24 megapixels
+    /// into a picture takes about 70 ms, so it is made once.
+    still: RefCell<Option<(i64, Picture)>>,
 }
 
 impl VideoSource {
@@ -116,7 +120,21 @@ impl VideoSource {
 
     /// The picture at `time`. Playback misses without decoding. Export decodes and waits.
     pub fn picture_at(&self, time: Micros) -> Result<Picture, EngineError> {
-        to_picture(&self.frame_at(time)?)
+        let source = self.source_at(time)?.0;
+        if let Some(start) = self.cache.borrow().start_at(source)
+            && let Some((made, picture)) = self.still.borrow().as_ref()
+            && *made == start
+        {
+            return Ok(picture.clone());
+        }
+        let frame = self.frame_at(time)?;
+        let picture = to_picture(&frame)?;
+        if matches!(frame, DecodedFrame::Still(_))
+            && let Some(start) = self.cache.borrow().start_at(source)
+        {
+            *self.still.borrow_mut() = Some((start, picture.clone()));
+        }
+        Ok(picture)
     }
 
     /// Wait for the picture asked for, or not. See [`Self::take_stale`].
@@ -352,6 +370,7 @@ fn open_at(
         patient: Cell::new(true),
         stale: Cell::new(false),
         round,
+        still: RefCell::new(None),
     })
 }
 
@@ -572,31 +591,33 @@ impl<'a> Planes<'a> {
 /// samples. The straight sample is mapped, then partial alpha is
 /// `(channel * alpha + 127) / 255`. A gamma of zero, with no sRGB intent and
 /// no readable profile, is a color miss.
+///
+/// A still with an edge past [`cutlass_gpu::MAX_EDGE`], such as a 61
+/// megapixel photo or a panorama, is shrunk until its longer edge fits,
+/// keeping its shape. A clip fits its picture to the canvas by shape, so it
+/// is drawn at the same size with fewer pixels.
 fn still_picture(image: &StillImage) -> Result<Picture, EngineError> {
-    let Some(rgba) = still_rgba(image) else {
-        return Err(EngineError::ColorMiss {
-            layout: still_layout(image).to_owned(),
-        });
+    let miss = || EngineError::ColorMiss {
+        layout: still_layout(image).to_owned(),
     };
-    let cpu =
-        CpuBytes::new(image.width, image.height, rgba).map_err(|_| EngineError::ColorMiss {
-            layout: still_layout(image).to_owned(),
-        })?;
+    let (width, height, rgba) = still_rgba(image, cutlass_gpu::MAX_EDGE).ok_or_else(miss)?;
+    let cpu = CpuBytes::new(width, height, rgba).map_err(|_| miss())?;
     Ok(Picture::Cpu(cpu))
 }
 
-fn still_rgba(image: &StillImage) -> Option<Vec<u8>> {
-    if image.width == 0 || image.height == 0 {
+/// The still as premultiplied RGBA, shrunk by area to fit `max_edge`.
+fn still_rgba(image: &StillImage, max_edge: u32) -> Option<(u32, u32, Vec<u8>)> {
+    if image.width == 0 || image.height == 0 || max_edge == 0 {
         return None;
     }
     let channels = image.color.channels();
     if channels == 0 {
         return None;
     }
-    let pixels = usize::try_from(image.width)
-        .ok()?
-        .checked_mul(usize::try_from(image.height).ok()?)?;
-    if image.samples.len() != pixels.checked_mul(channels)? {
+    let width = usize::try_from(image.width).ok()?;
+    let height = usize::try_from(image.height).ok()?;
+    let row_samples = width.checked_mul(channels)?;
+    if image.samples.len() != row_samples.checked_mul(height)? {
         return None;
     }
     let map = cutlass_color::StillMap::prepare(&cutlass_color::StillTags {
@@ -606,18 +627,107 @@ fn still_rgba(image: &StillImage) -> Option<Vec<u8>> {
         icc_profile: &image.icc_profile,
     })
     .ok()?;
-    let mut rgba = vec![0_u8; rgba_len(image.width, image.height)?];
-    for (pixel, chunk) in image.samples.chunks(channels).enumerate() {
-        let (red, green, blue, alpha) = straight(image, chunk)?;
-        let [red, green, blue] = map.map_rgb([red, green, blue]);
-        let dest = pixel.checked_mul(4)?;
-        let slot = rgba.get_mut(dest..dest + 4)?;
-        slot[0] = premultiply(red, alpha);
-        slot[1] = premultiply(green, alpha);
-        slot[2] = premultiply(blue, alpha);
-        slot[3] = alpha;
+    let row = |y: usize, line: &mut [u8]| -> Option<()> {
+        let samples = image
+            .samples
+            .get(y.checked_mul(row_samples)?..y.checked_add(1)?.checked_mul(row_samples)?)?;
+        for (chunk, slot) in samples.chunks(channels).zip(line.as_chunks_mut::<4>().0) {
+            let (red, green, blue, alpha) = straight(image, chunk)?;
+            let [red, green, blue] = map.map_rgb([red, green, blue]);
+            slot[0] = premultiply(red, alpha);
+            slot[1] = premultiply(green, alpha);
+            slot[2] = premultiply(blue, alpha);
+            slot[3] = alpha;
+        }
+        Some(())
+    };
+    let row_len = width.checked_mul(4)?;
+    let (out_width, out_height) = fitted(image.width, image.height, max_edge);
+    if (out_width, out_height) == (image.width, image.height) {
+        let mut rgba = vec![0_u8; row_len.checked_mul(height)?];
+        for (y, line) in rgba.chunks_exact_mut(row_len).enumerate() {
+            row(y, line)?;
+        }
+        return Some((image.width, image.height, rgba));
     }
-    Some(rgba)
+    let across = area_taps(width, usize::try_from(out_width).ok()?);
+    let down = area_taps(height, usize::try_from(out_height).ok()?);
+    let out_row = across.len().checked_mul(4)?;
+    let mut line = vec![0_u8; row_len];
+    // The last source row made narrow, kept because two output rows can
+    // share it.
+    let mut narrow = vec![0_f32; out_row];
+    let mut narrow_row = None;
+    let mut sum = vec![0_f32; out_row];
+    let mut rgba = Vec::new();
+    rgba.try_reserve_exact(out_row.checked_mul(down.len())?)
+        .ok()?;
+    for (first, weights) in &down {
+        sum.fill(0.0);
+        for (offset, weight) in weights.iter().enumerate() {
+            let y = first.checked_add(offset)?;
+            if narrow_row != Some(y) {
+                row(y, &mut line)?;
+                narrow.fill(0.0);
+                for ((first_x, weights_x), out) in across.iter().zip(narrow.as_chunks_mut::<4>().0)
+                {
+                    let pixels = line.get(first_x.checked_mul(4)?..)?.as_chunks::<4>().0;
+                    for (weight_x, pixel) in weights_x.iter().zip(pixels) {
+                        for (channel, sample) in out.iter_mut().zip(pixel) {
+                            *channel += weight_x * f32::from(*sample);
+                        }
+                    }
+                }
+                narrow_row = Some(y);
+            }
+            for (total, value) in sum.iter_mut().zip(&narrow) {
+                *total += weight * value;
+            }
+        }
+        // Each premultiplied channel is at most its alpha in every source
+        // pixel, so it still is after the same weighted sum and rounding.
+        rgba.extend(
+            sum.iter()
+                .map(|value| value.round().clamp(0.0, 255.0) as u8),
+        );
+    }
+    Some((out_width, out_height, rgba))
+}
+
+/// The still's own size, or its size shrunk until the longer edge is
+/// `max_edge`, the other edge rounded and at least 1.
+fn fitted(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
+    if width <= max_edge && height <= max_edge {
+        return (width, height);
+    }
+    let long = u64::from(width.max(height));
+    let shrink = |edge: u32| {
+        let scaled = (u64::from(edge) * u64::from(max_edge) + long / 2) / long;
+        u32::try_from(scaled.clamp(1, u64::from(max_edge))).unwrap_or(max_edge)
+    };
+    (shrink(width), shrink(height))
+}
+
+/// For each of `to` output samples, the first of the `from` source samples
+/// it covers and the share of it each covered sample gives: an average over
+/// the area. The shares of one output sample add up to 1.
+fn area_taps(from: usize, to: usize) -> Vec<(usize, Vec<f32>)> {
+    let step = from as f64 / to as f64;
+    (0..to)
+        .map(|out| {
+            let start = out as f64 * step;
+            let end = ((out + 1) as f64 * step).min(from as f64);
+            let first = (start.floor() as usize).min(from.saturating_sub(1));
+            let last = (end.ceil() as usize).clamp(first + 1, from);
+            let weights = (first..last)
+                .map(|at| {
+                    let covered = end.min(at as f64 + 1.0) - start.max(at as f64);
+                    (covered.max(0.0) / step) as f32
+                })
+                .collect();
+            (first, weights)
+        })
+        .collect()
 }
 
 fn straight(image: &StillImage, samples: &[u16]) -> Option<(u8, u8, u8, u8)> {
@@ -1205,5 +1315,68 @@ mod tests {
             still_picture(&high),
             Err(EngineError::ColorMiss { .. })
         ));
+    }
+
+    #[test]
+    fn a_still_past_the_edge_cap_shrinks_to_fit_and_keeps_its_shape() {
+        assert_eq!(fitted(6000, 4000, 8192), (6000, 4000));
+        assert_eq!(fitted(8192, 8192, 8192), (8192, 8192));
+        assert_eq!(fitted(9504, 6336, 8192), (8192, 5461));
+        assert_eq!(fitted(16_000, 1000, 8192), (8192, 512));
+        assert_eq!(fitted(1000, 16_000, 8192), (512, 8192));
+        assert_eq!(fitted(100_000, 1, 8192), (8192, 1));
+        for (from, to) in [(16_000, 8192), (9504, 8192), (3, 2), (7, 7), (5, 1)] {
+            let taps = area_taps(from, to);
+            assert_eq!(taps.len(), to);
+            for (first, weights) in &taps {
+                assert!(first + weights.len() <= from, "{from} to {to}");
+                let total: f32 = weights.iter().sum();
+                assert!((total - 1.0).abs() < 1e-4, "{from} to {to}: {total}");
+            }
+        }
+
+        // A 16000 by 3 panorama, black on the left half and white on the
+        // right, becomes 8192 by 2 with the edge where it was.
+        let mut samples = Vec::new();
+        for _ in 0..3 {
+            samples.extend((0..16_000).map(|x| if x < 8000 { 0_u16 } else { 255 }));
+        }
+        let wide = StillImage::from_samples(16_000, 3, ColorType::Gray, BitDepth::Eight, samples);
+        let Picture::Cpu(bytes) = still_picture(&wide).expect("picture") else {
+            panic!("cpu");
+        };
+        assert_eq!((bytes.extent().width, bytes.extent().height), (8192, 2));
+        let rgba = bytes.into_rgba();
+        for y in 0..2 {
+            let at = |x: usize| &rgba[(y * 8192 + x) * 4..(y * 8192 + x) * 4 + 4];
+            assert_eq!(at(0), [0, 0, 0, 255]);
+            assert_eq!(at(4095), [0, 0, 0, 255]);
+            assert_eq!(at(4096), [255, 255, 255, 255]);
+            assert_eq!(at(8191), [255, 255, 255, 255]);
+        }
+    }
+
+    #[test]
+    fn a_shrunk_still_keeps_a_flat_translucent_colour() {
+        let samples = [200_u16, 100, 50, 128].repeat(8200 * 5);
+        let image = StillImage::from_samples(8200, 5, ColorType::Rgba, BitDepth::Eight, samples);
+        let Picture::Cpu(bytes) = still_picture(&image).expect("picture") else {
+            panic!("cpu");
+        };
+        assert_eq!((bytes.extent().width, bytes.extent().height), (8192, 5));
+        let want = [
+            premultiply(200, 128),
+            premultiply(100, 128),
+            premultiply(50, 128),
+            128,
+        ];
+        assert!(
+            bytes
+                .into_rgba()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == want)
+        );
     }
 }

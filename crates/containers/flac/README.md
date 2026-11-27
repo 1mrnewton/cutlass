@@ -13,14 +13,15 @@ One packet is one FLAC frame, from its header to its CRC-16. The stream timescal
 | Other metadata blocks (comments, pictures, padding, cue sheet, application) | Skipped by their length, not read | Not written |
 | Frames, fixed or variable block size | Split where the next valid header starts and the CRC-16 closes the frame | Each packet is checked: header, CRC-16, frame or sample number, duration |
 | Timestamps | Frame number times the block size, or the coded sample number | Must continue from the previous frame |
+| ID3v2 tags before `fLaC` | Skipped by their declared sizes, up to 16 (`MAX_ID3V2_TAGS`); nothing in them is read | Not written |
 | ID3v1 tag at the end | Left out of the sound data | Not written |
 
 Seeking uses the SEEKTABLE when the file has one. Without one, it bisects the file down to a 256 KiB window. Either way it then walks frames to the one that holds the target sample.
 
 What is refused when reading:
 
-- A file that starts with an ID3v2 tag: `OpenError::UnsupportedBrand`. `probe` refuses it too.
-- No `fLaC` marker: `OpenError::Unrecognized`.
+- No `fLaC` marker, at the start or behind the ID3v2 tags, or an `ID3` header whose version, revision or size is not valid: `OpenError::Unrecognized`.
+- An ID3v2 tag whose size runs past the end of the file: `OpenError::Truncated`. More than `MAX_ID3V2_TAGS` tags: `OpenError::Source`.
 - STREAMINFO missing, repeated, not first, or with a wrong length; a second SEEKTABLE; seek points out of order or after a placeholder; metadata block type 127; more than `MAX_METADATA_BLOCKS` blocks; no frame after the metadata: `OpenError::Source`.
 - A frame longer than `Limits::max_packet_bytes`: `ReadError::HostileSize`.
 - Bytes that are not a frame header where a frame should start: `ReadError::Source`.
@@ -61,7 +62,8 @@ fn count_samples(path: &std::path::Path) -> Result<i64, Box<dyn std::error::Erro
 cargo test -p cutlass-flac-container
 ```
 
-- `src/tests.rs` muxes and demuxes hand-built frames: round trips with fixed and variable block sizes, seeking with and without a SEEKTABLE, every metadata refusal, a cut last frame, cancel, and each writer refusal. One test flips single bits at every byte of a small file and reads and seeks it.
+- `src/tests.rs` muxes and demuxes hand-built frames: round trips with fixed and variable block sizes, seeking with and without a SEEKTABLE, every metadata refusal, a cut last frame, cancel, and each writer refusal. One test flips single bits at every byte of a small file and reads and seeks it. Files behind ID3v2 tags (an empty tag, a 200 kB one, and a pair with a footer) read and seek to the same packets as without them, and each tag refusal is checked.
+- `src/tag.rs` and `src/probe.rs` check the tag size with and without a footer, invalid headers, the marker behind stacked tags, the tag limit, and a probe header too short to hold the marker.
 - `tests/external/oracle.rs` demuxes files written by the `flac` tool and by FFmpeg and compares every frame's bytes with `flac --analyze` and every packet's time and size with `ffprobe`, then decodes the packets and checks the MD5. It also checks random seeks, and remuxes each file and has `flac -t`, `metaflac` and `ffprobe` read the result. These tests return without checking anything when `flac`, `ffmpeg`, `ffprobe` or `metaflac` is not installed.
 - `tests/external/e2e.rs` runs a recording through demux, decode, encode and mux and has `flac -t` and FFmpeg read the result. It needs private sample files and is skipped when their folder or the tools are absent.
 - `tests/external/fuzz.rs` is an in-process campaign over `probe`, `FlacDemux` and `FlacMux`. A short run (2000 seeds or 20 seconds, whichever comes first) is part of the normal suite. The long run is `#[ignore]`d:
@@ -98,7 +100,7 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 - At most 4096 metadata blocks (`MAX_METADATA_BLOCKS`). A SEEKTABLE may hold at most `Limits::max_index_entries` points. One frame may not exceed `Limits::max_packet_bytes`.
 - The writer reserves at most 65,535 seek points and remembers at most 16,777,216 frame starts for the table.
 - STREAMINFO stores the sample count in 36 bits. A longer stream is written with the count zero, which means unknown.
-- A file that starts with an ID3v2 tag does not open.
+- `probe` sees only the header it is given. It accepts `fLaC` behind ID3v2 tags that end inside that header, and refuses a tag that runs past it, which the MP3 family claims. `starts_with_flac(reader, length)` reads each tag's ten-byte header to find the marker behind tags of any length; the desktop and phone readers ask it before opening a file as MP3, and `cutlass-probe` before giving up on FLAC.
 - Tags, cover pictures and cue sheets are not exposed when reading, and the writer cannot store them.
 - Ogg FLAC and FLAC in MP4 are not handled here.
 - There is no forward-only open; the reader must seek.
@@ -109,3 +111,4 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 ## Specifications
 
 - RFC 9639, Free Lossless Audio Codec (FLAC): the file layout, the STREAMINFO and SEEKTABLE blocks, the frame header, and the two CRCs.
+- id3.org, ID3 tag version 2.4.0, Main Structure, section 3.1: the tag header, its synchsafe size, and the footer flag. Only the header is read.

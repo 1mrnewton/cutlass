@@ -1,10 +1,11 @@
 //! Native `.flac` demux (RFC 9639 sections 6 to 8).
 //!
-//! Open reads the marker and the metadata blocks: STREAMINFO (first, once),
-//! SEEKTABLE (at most once), and every other block skipped by its length
-//! without being read. Frames have no length field, so a frame ends where
-//! the next valid header starts and the CRC-16 of the bytes before it is
-//! zero. The next header must also carry the next frame or sample number
+//! Open skips any ID3v2 tags in front of the marker by their declared
+//! sizes, then reads the marker and the metadata blocks: STREAMINFO (first,
+//! once), SEEKTABLE (at most once), and every other block skipped by its
+//! length without being read. Frames have no length field, so a frame ends
+//! where the next valid header starts and the CRC-16 of the bytes before it
+//! is zero. The next header must also carry the next frame or sample number
 //! and the stream's channel count, depth, and rate.
 
 use std::io::{Read, Seek};
@@ -21,6 +22,7 @@ use crate::format::{
     FrameHeader, Header, MAX_HEADER_LEN, PLACEHOLDER, SEEK_POINT_LEN, STREAMINFO_LEN, SeekPoint,
     StreamInfo, crc16_byte, is_sync, parse_header,
 };
+use crate::tag::{ID3V2_HEADER, MAX_ID3V2_TAGS, id3v2_len};
 
 /// Bytes read from the file at a time.
 const CHUNK: usize = 64 * 1024;
@@ -86,12 +88,36 @@ impl<R: Read + Seek> FlacDemux<R> {
         input
             .read_exact(&mut marker)
             .map_err(OpenError::from_header)?;
-        if &marker != b"fLaC" {
-            if &marker[..3] == b"ID3" {
-                return Err(OpenError::UnsupportedBrand {
+        let mut tags = 0u32;
+        while &marker[..3] == b"ID3" {
+            tags += 1;
+            if tags > MAX_ID3V2_TAGS {
+                return Err(open_malformed("too many ID3v2 tags"));
+            }
+            let at = input.position().saturating_sub(marker.len() as u64);
+            let mut head = [0u8; ID3V2_HEADER];
+            head[..marker.len()].copy_from_slice(&marker);
+            input
+                .read_exact(&mut head[marker.len()..])
+                .map_err(OpenError::from_header)?;
+            let Some(len) = id3v2_len(&head) else {
+                return Err(OpenError::Unrecognized {
                     family: ContainerId::Flac,
                 });
+            };
+            let to = at.saturating_add(len);
+            if to > length {
+                return Err(OpenError::Truncated {
+                    expected: to,
+                    got: length,
+                });
             }
+            input.seek(to).map_err(OpenError::from_header)?;
+            input
+                .read_exact(&mut marker)
+                .map_err(OpenError::from_header)?;
+        }
+        if &marker != b"fLaC" {
             return Err(OpenError::Unrecognized {
                 family: ContainerId::Flac,
             });

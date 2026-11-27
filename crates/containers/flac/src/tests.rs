@@ -10,7 +10,7 @@ use cutlass_container::{
 };
 
 use crate::format::{PLACEHOLDER, SeekPoint, StreamInfo, crc8, crc16};
-use crate::{FlacDemux, FlacMux};
+use crate::{FlacDemux, FlacMux, MAX_ID3V2_TAGS, starts_with_flac};
 
 const RATE: u32 = 44_100;
 
@@ -225,10 +225,7 @@ fn malformed_metadata_is_refused() {
         open(b"RIFF0000WAVE"),
         Err(OpenError::Unrecognized { .. })
     ));
-    assert!(matches!(
-        open(b"ID3\x04\x00\x00"),
-        Err(OpenError::UnsupportedBrand { .. })
-    ));
+    assert!(open(b"ID3\x04\x00\x00").is_err());
     assert!(open(b"fLa").is_err());
     let refused = [
         header_with(&[(4, vec![0; 8]), (0, info_body())]),
@@ -265,6 +262,99 @@ fn malformed_metadata_is_refused() {
     let mut head = header_with(&[(0, info_body())]);
     head.extend_from_slice(&[0u8; 64]);
     assert!(open(&head).is_err());
+}
+
+/// An ID3v2.4 tag with `body` bytes after its header, and a footer when
+/// `footer` is set.
+fn id3v2(body: usize, footer: bool) -> Vec<u8> {
+    let size = u32::try_from(body).expect("size");
+    let synchsafe: Vec<u8> = (0..4)
+        .rev()
+        .map(|shift| u8::try_from((size >> (7 * shift)) & 0x7F).expect("seven bits"))
+        .collect();
+    let flags = if footer { 0x10 } else { 0 };
+    let mut tag = vec![b'I', b'D', b'3', 4, 0, flags];
+    tag.extend(&synchsafe);
+    // A body that holds neither `fLaC` nor a frame sync.
+    tag.extend((0..body).map(|index| b'a' + (index % 26) as u8));
+    if footer {
+        tag.extend([b'3', b'D', b'I', 4, 0, flags]);
+        tag.extend(&synchsafe);
+    }
+    tag
+}
+
+#[test]
+fn a_file_behind_id3v2_tags_reads_and_seeks_as_it_does_without_them() {
+    let (bare, written) = file(&blocks(), false, 3);
+    let plain = open(&bare).expect("bare");
+    let bare_first = plain.first_frame();
+    let points = plain.seek_points().to_vec();
+    assert!(!points.is_empty());
+    let leads = [
+        id3v2(0, false),
+        // Longer than a probe's header and than one read.
+        id3v2(200_000, false),
+        [id3v2(300, true), id3v2(5, false)].concat(),
+    ];
+    for lead in leads {
+        let mut bytes = lead.clone();
+        bytes.extend_from_slice(&bare);
+        assert!(starts_with_flac(Cursor::new(&bytes), bytes.len() as u64));
+        let mut demux = open(&bytes).expect("open");
+        assert_eq!(demux.first_frame(), lead.len() as u64 + bare_first);
+        assert_eq!(
+            demux.seek_points(),
+            points,
+            "offsets count from the first frame"
+        );
+        assert_eq!(read_all(&mut demux), written);
+        for target in [0i64, 4097, 409_600, 820_199] {
+            let landing = demux
+                .seek(SeekTo {
+                    track: 0,
+                    time: target,
+                    end: None,
+                })
+                .expect("seek");
+            assert!(matches!(landing.landing, Landing::Packet { .. }));
+            let next = demux.read_packet().expect("read").expect("packet");
+            assert_eq!(next, written[(target / 4096) as usize], "{target}");
+        }
+    }
+}
+
+#[test]
+fn id3v2_tags_that_do_not_lead_to_flac_are_refused() {
+    let (bare, _) = file(&[4096, 4096], false, 0);
+    let behind = |lead: Vec<u8>| {
+        let mut bytes = lead;
+        bytes.extend_from_slice(&bare);
+        bytes
+    };
+    // MPEG audio, not FLAC, behind the tag.
+    let mut mp3 = id3v2(20, false);
+    mp3.extend([0xFF, 0xFB, 0x90, 0x64]);
+    mp3.resize(400, 0);
+    assert!(matches!(open(&mp3), Err(OpenError::Unrecognized { .. })));
+    // A size with a top bit set.
+    let mut bad = id3v2(0, false);
+    bad[9] = 0x80;
+    assert!(matches!(
+        open(&behind(bad)),
+        Err(OpenError::Unrecognized { .. })
+    ));
+    // A tag that says it runs past the end of the file.
+    let long = behind(id3v2(0, false));
+    let mut past = long.clone();
+    past[6..10].copy_from_slice(&[0x7F; 4]);
+    assert!(matches!(open(&past), Err(OpenError::Truncated { .. })));
+    assert!(!starts_with_flac(Cursor::new(&past), past.len() as u64));
+    // One tag more than are skipped.
+    let most = behind((0..MAX_ID3V2_TAGS).flat_map(|_| id3v2(0, false)).collect());
+    assert!(open(&most).is_ok());
+    let more = behind((0..=MAX_ID3V2_TAGS).flat_map(|_| id3v2(0, false)).collect());
+    assert!(matches!(open(&more), Err(OpenError::Source { .. })));
 }
 
 #[test]

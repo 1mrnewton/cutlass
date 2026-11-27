@@ -12,7 +12,7 @@
 //! | Timestamps | Frame number times the block size, or the sample number | From the sample count |
 //! | Seek | SEEKTABLE, else a bounded bisection, then a frame walk | Points about every 10 s |
 //! | Finish | — | STREAMINFO sample count, sizes, and MD5 written back |
-//! | ID3v2 before `fLaC` | Refused as unsupported | Not written |
+//! | ID3v2 before `fLaC` | Skipped by its declared size, up to [`MAX_ID3V2_TAGS`] tags | Not written |
 //! | Ogg FLAC, MP4 `dfLa` | Not in this crate | Not in this crate |
 
 #![forbid(unsafe_code)]
@@ -21,6 +21,7 @@ mod demux;
 mod format;
 mod mux;
 mod probe;
+mod tag;
 
 pub use demux::{FlacDemux, MAX_METADATA_BLOCKS};
 pub use format::{
@@ -29,6 +30,7 @@ pub use format::{
 };
 pub use mux::{DEFAULT_SEEK_POINTS, FlacMux, SEEK_SPACING_SECONDS};
 pub use probe::{FlacFamily, probe};
+pub use tag::{MAX_ID3V2_TAGS, starts_with_flac};
 
 #[cfg(test)]
 mod tests;

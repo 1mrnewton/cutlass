@@ -987,4 +987,118 @@ fn band_tear(uv: vec2<f32>) -> vec4<f32> {
     let blue = fetch(uv + vec2<f32>(base - apart, 0.0));
     return vec4<f32>(red.r, middle.g, blue.b, max(middle.a, max(red.a, blue.a)));
 }
+
+// A sheet of paper worked out from where a pixel is: tooth, fibres,
+// specks, soft clouds and creases. `at` is in film pixels. Returns a
+// brightness around 1.
+fn paper_sheet(at: vec2<f32>, sd: f32, tooth: f32, fibres: f32, mottle: f32, specks: f32, creases: f32) -> f32 {
+    var v = 1.0;
+    // Tooth: the fine roughness of the surface.
+    v = v + (fbm(at * 0.8 + sd * 11.0, 3) - 0.5) * 0.09 * tooth;
+    v = v + (hash12(at + sd * 3.0) - 0.5) * 0.03 * tooth;
+    // Fibres: long thin hairs lying every which way, some lighter than
+    // the sheet, some darker.
+    for (var k = 0; k < 7; k = k + 1) {
+        let fk = f32(k);
+        let a = hash12(vec2<f32>(fk * 5.1, sd * 2.3)) * PI;
+        var r = turn(at + vec2<f32>(fk * 311.0, sd * 97.0), a);
+        // A slow bend, so the hairs curl instead of lying like scratches.
+        r.y = r.y + (vnoise(r * 0.006 + fk * 3.0) - 0.5) * 70.0;
+        let n = vnoise(vec2<f32>(r.x * 0.011, r.y * 0.4));
+        var hair = 1.0 - smoothstep(0.0, 0.035, abs(n - 0.5));
+        // Only here and there, not everywhere.
+        hair = hair * smoothstep(0.5, 0.68, vnoise(r * 0.018 + fk * 9.0));
+        var tone = -0.035;
+        if (k % 2 == 0) {
+            tone = 0.03;
+        }
+        v = v + hair * tone * fibres;
+    }
+    // Soft clouds: kept low, since big blotches show in flat skies.
+    v = v + (fbm(at * 0.004 + sd * 5.0, 4) - 0.5) * 0.3 * mottle;
+    // Specks: a few small dark bits pressed into the sheet.
+    let cell = floor(at / 16.0);
+    if (hash12(cell + sd * 13.0) < 0.05 * specks) {
+        let spot = (0.15 + 0.7 * hash22(cell + sd * 29.0)) * 16.0;
+        let rr = 0.5 + 1.7 * hash12(cell * 1.7 + 3.0);
+        let d = length(at - cell * 16.0 - spot);
+        v = v - (1.0 - smoothstep(rr - 0.6, rr + 0.6, d)) * (0.1 + 0.25 * hash12(cell + 71.0));
+    }
+    // Creases: straight fold lines, each with light on one side and
+    // shade on the other.
+    if (creases > 0.0) {
+        for (var k = 0; k < 4; k = k + 1) {
+            let fk = f32(k);
+            let h = hash22(vec2<f32>(fk * 8.3 + 2.0, sd * 6.1 + 4.0));
+            // A sheet is folded mostly square to its edges.
+            var a = (h.x - 0.5) * 0.16;
+            var far = 0.0;
+            if (k % 2 == 1) {
+                a = a + PI * 0.5;
+                far = 500.0;
+            }
+            let nrm = vec2<f32>(-sin(a), cos(a));
+            var d = abs(dot(at, nrm)) - mix(180.0, 900.0, h.y) - far;
+            d = d + (vnoise(at * 0.01 + fk * 5.0) - 0.5) * 3.0;
+            // The fold is a thin dark line; one side of it catches the
+            // light, the other falls away.
+            v = v - exp(-d * d / 2.5) * 0.06 * creases;
+            v = v + sign(d) * exp(-abs(d) / 70.0) * 0.022 * creases;
+        }
+    }
+    return v;
+}
+
+// amount, seed, scale, tooth | fibres, mottle, specks, creases | red,
+// green, blue
+fn paper(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let at = film_at(uv) / max(fx.a.z, 0.01);
+    let v = paper_sheet(at, fx.a.y, fx.a.w, fx.b.x, fx.b.y, fx.b.z, fx.b.w);
+    let sheet = clamp(fx.c.xyz * v, vec3<f32>(0.0), vec3<f32>(1.0));
+    return multiplied(c, mix(vec3<f32>(1.0), sheet, fx.a.x));
+}
+
+// The distance to the nearest of a scatter of points: a field of cones
+// with sharp valleys between them, which is what a crease is.
+fn crumple_cones(p: vec2<f32>, sd: f32) -> f32 {
+    let id = floor(p);
+    var best = 9.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let cl = id + vec2<f32>(f32(dx), f32(dy));
+            best = min(best, length(p - cl - hash22(cl + sd)));
+        }
+    }
+    return best;
+}
+
+// The height of crumpled paper at a point.
+fn crumple_surface(p: vec2<f32>) -> f32 {
+    let sd = fx.a.y * 7.3;
+    // The cones are pushed about, so the creases are not quite straight.
+    let w = p + (vec2<f32>(fbm(p * 0.7 + sd, 3), fbm(p * 0.7 + sd + 30.0, 3)) - 0.5) * 0.5;
+    return crumple_cones(w * 2.2, sd)
+        + crumple_cones(turn(w, 0.7) * 5.1 + 9.0, sd + 5.0) * 0.38
+        + crumple_cones(turn(w, -0.4) * 11.0 + 3.0, sd + 9.0) * 0.12;
+}
+
+// amount, seed, facets, base | light
+fn crumple(uv: vec2<f32>) -> vec4<f32> {
+    let c = fetch(uv);
+    if (fx.a.x <= 0.0) {
+        return c;
+    }
+    let p = uv * frame_shape() * fx.a.z * 1.6;
+    let e = 0.003;
+    let h = crumple_surface(p);
+    let slope = vec2<f32>(crumple_surface(p + vec2<f32>(e, 0.0)) - h, crumple_surface(p + vec2<f32>(0.0, e)) - h) / e;
+    let lit = dot(slope, vec2<f32>(cos(fx.b.x), sin(fx.b.x)));
+    // Soft, so a steep facet does not go black or white.
+    let shade = lit / (1.0 + abs(lit) * 0.6) * 0.085 * fx.a.x;
+    return multiplied(c, vec3<f32>(mix(1.0, fx.a.w, min(fx.a.x, 1.0)) + shade));
+}
 ";

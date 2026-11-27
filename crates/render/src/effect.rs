@@ -109,7 +109,9 @@ pub(crate) const fn space(block: Block) -> Option<Space> {
         | Block::FilmDamage
         | Block::Grime
         | Block::Flicker
-        | Block::Tape => Some(Space::Display),
+        | Block::Tape
+        | Block::Paper
+        | Block::Crumple => Some(Space::Display),
     }
 }
 
@@ -816,7 +818,7 @@ fn place(uv: vec2<f32>) -> vec4<f32> {
     let back = r / scale / fx.size + vec2<f32>(0.5);
     let edge = fx.b.w * short * fx.a.x;
     let foot = fx.c.x * short * fx.a.x;
-    if (edge <= 0.0 && foot <= 0.0 && fx.c.w <= 0.0) {
+    if (edge <= 0.0 && foot <= 0.0 && fx.c.w <= 0.0 && fx.d.x <= 0.0) {
         if (any(back < vec2<f32>(0.0)) || any(back > vec2<f32>(1.0))) {
             return behind;
         }
@@ -836,7 +838,18 @@ fn place(uv: vec2<f32>) -> vec4<f32> {
         let shade = (1.0 - smoothstep(-soft, soft, distance)) * 0.45 * fx.b.z;
         behind = vec4<f32>(behind.rgb * (1.0 - shade), shade + behind.a * (1.0 - shade));
     }
-    let paper = 1.0 - smoothstep(-0.5, 0.5, rounded_box(r - paper_middle, paper_half, 0.0));
+    var paper_edge = rounded_box(r - paper_middle, paper_half, 0.0);
+    if (fx.d.x > 0.0) {
+        // A torn edge: a big slow wander, a middle wobble and fine teeth,
+        // measured on the print so the tear travels with it.
+        let at = r / (short * fx.a.x) * 1080.0;
+        let sd = fx.d.y;
+        let wander = (fbm(at * 0.005 + sd * 7.0, 4) - 0.5) * 90.0
+            + (fbm(at * 0.03 + sd * 3.0, 3) - 0.5) * 16.0
+            + (fbm(at * 0.22 + sd, 2) - 0.5) * 3.5;
+        paper_edge = paper_edge + wander * fx.d.x * short * fx.a.x / 1080.0;
+    }
+    let paper = 1.0 - smoothstep(-0.5, 0.5, paper_edge);
     let photo = 1.0 - smoothstep(-0.5, 0.5, rounded_box(r, half, 0.0));
     let picture = fetch(clamp(back, vec2<f32>(0.0), vec2<f32>(1.0)));
     let white = vec4<f32>(0.97, 0.97, 0.96, 1.0);
@@ -921,16 +934,20 @@ fn halftone(uv: vec2<f32>) -> vec4<f32> {
     if (cell < 2.0) {
         return c;
     }
-    // A grid turned 45 degrees, as printers turn theirs.
+    // A grid turned on its side, 45 degrees as printers turn theirs.
     let pixel = uv * fx.size;
-    let k = 0.70710678;
-    let turned = vec2<f32>(k * pixel.x - k * pixel.y, k * pixel.x + k * pixel.y);
+    let k = cos(radians(fx.a.w));
+    let j = sin(radians(fx.a.w));
+    let turned = vec2<f32>(k * pixel.x - j * pixel.y, j * pixel.x + k * pixel.y);
     let middle_turned = (floor(turned / cell) + vec2<f32>(0.5)) * cell;
-    let middle = vec2<f32>(k * middle_turned.x + k * middle_turned.y, -k * middle_turned.x + k * middle_turned.y);
+    let middle = vec2<f32>(k * middle_turned.x + j * middle_turned.y, -j * middle_turned.x + k * middle_turned.y);
     let sample = straight(fetch(middle / fx.size));
-    let radius = sqrt(1.0 - clamp(luma(sample), 0.0, 1.0)) * cell * 0.7;
+    let light = clamp((luma(sample) - 0.5) * fx.b.x + 0.5 + fx.b.y, 0.0, 1.0);
+    let radius = sqrt(1.0 - light) * cell * 0.7;
+    // Uneven inking pushes each dot's edge in or out a little.
+    let wobble = (hash12(middle_turned / cell) - 0.5) * 0.12 * fx.b.z * cell;
     // A dot under a pixel wide fades out rather than leaving half a pixel.
-    let dot_cover = (1.0 - smoothstep(radius - 0.75, radius + 0.75, length(turned - middle_turned)))
+    let dot_cover = (1.0 - smoothstep(radius - 0.75, radius + 0.75, length(turned - middle_turned) + wobble))
         * min(radius / 0.75, 1.0);
     let ink = mix(vec3<f32>(0.05), sample, fx.a.z);
     let printed = mix(vec3<f32>(0.97), ink, dot_cover);
@@ -1099,6 +1116,8 @@ fn kernel(uv: vec2<f32>) -> vec4<f32> {
         case 52u: { return flicker(uv); }
         case 53u: { return tape(uv); }
         case 54u: { return band_tear(uv); }
+        case 55u: { return paper(uv); }
+        case 56u: { return crumple(uv); }
         case 100u: { return gauss(uv); }
         case 101u: { return halve(uv); }
         case 102u: { return smooth_up(uv); }
@@ -1962,6 +1981,8 @@ mod tests {
             step(Block::Flicker, &[]),
             step(Block::Tape, &[]),
             step(Block::BandTear, &[]),
+            step(Block::Paper, &[]),
+            step(Block::Crumple, &[]),
         ];
         close(&draw(&renderer, &ROW, (4, 1), &resting), &ROW);
     }
@@ -2051,6 +2072,8 @@ mod tests {
         for (block, set) in [
             (Block::Grime, &[(0, 1.0), (1, 1.3)][..]),
             (Block::Flicker, &[(0, 0.5), (1, 1.3), (4, 1.0)][..]),
+            (Block::Paper, &[(0, 1.0), (7, 1.0)][..]),
+            (Block::Crumple, &[(0, 1.0)][..]),
         ] {
             let shaded = run(block, set);
             assert!(
@@ -2066,6 +2089,31 @@ mod tests {
         let tape = run(Block::Tape, &[(0, 1.0), (1, 1.3), (7, 3.0)]);
         assert!(mean(&tape) < 127.0, "{}", mean(&tape));
         assert!(tape.chunks(4).any(|pixel| pixel[0] > 160));
+    }
+
+    #[test]
+    fn a_torn_print_keeps_its_middle_and_loses_bites_from_its_edge() {
+        let Some(renderer) = renderer() else { return };
+        let size = (240, 240);
+        let flat = grey(size);
+        let print = |torn: f32| {
+            let set = [(0, 0.5), (7, 0.05), (12, torn)];
+            draw(&renderer, &flat, size, &[step(Block::Place, &set)])
+        };
+        let (cut, torn) = (print(0.0), print(1.0));
+        assert_eq!(torn, print(1.0));
+        let alpha = |frame: &[u8], x: usize, y: usize| frame[4 * (y * 240 + x) + 3];
+        // The middle is whole either way.
+        assert_eq!((alpha(&cut, 120, 120), alpha(&torn, 120, 120)), (255, 255));
+        // The cut print's edge is a straight line; the torn one's is not,
+        // so along a row just inside the cut edge some of it is gone and
+        // along a row just outside some of it is there.
+        let covered =
+            |frame: &[u8], y: usize| (60..180).filter(|x| alpha(frame, *x, y) > 128).count();
+        assert_eq!((covered(&cut, 56), covered(&cut, 52)), (120, 0));
+        let (inside, outside) = (covered(&torn, 56), covered(&torn, 52));
+        assert!(inside < 120 || outside > 0, "{inside} {outside}");
+        assert!(inside + outside > 20, "{inside} {outside}");
     }
 
     #[test]

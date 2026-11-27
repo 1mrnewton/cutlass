@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "id": "torn-photo",
+  "name": "Torn Photo",
+  "category": "Distort",
+  "preview": "dancer",
+  "controls": [
+    {
+      "id": "torn",
+      "name": "Tear",
+      "default": 1,
+      "min": 0,
+      "max": 2,
+      "unit": "percent",
+      "scale": [
+        [
+          0,
+          "torn"
+        ]
+      ]
+    }
+  ],
+  "passes": [
+    {
+      "block": "place",
+      "params": {
+        "scale": 0.72,
+        "rotate": -3,
+        "border": 0.03,
+        "back": 0.05,
+        "dim": 0.45,
+        "shadow": 0.03,
+        "torn": 0.3,
+        "seed": 4
+      }
+    }
+  ]
+}

@@ -202,6 +202,13 @@ pub enum Block {
     /// every couple of frames, a few of them shoved sideways, with the
     /// colours pulled apart. It swells and dies as `progress` goes 0 to 1.
     BandTear,
+    /// The picture printed on a sheet of paper: fine tooth, long fibres,
+    /// small dark specks, soft clouds and fold lines. It does not move.
+    Paper,
+    /// Paper that was crumpled into a ball and flattened out again: flat
+    /// facets that each catch the light differently, with sharp creases
+    /// between them.
+    Crumple,
 }
 
 /// One parameter of a block: its name, its value when a recipe leaves it
@@ -462,7 +469,9 @@ const FOCUS: &[Param] = &[
 /// fractions of the shorter side and shrink with `scale`. `shadow` is how
 /// soft the print's shadow is, none at 0. `back` fills the rest of the
 /// frame with a copy of the picture blurred that far, as a fraction of the
-/// shorter side, and darkened by `dim`; at 0 the rest is clear.
+/// shorter side, and darkened by `dim`; at 0 the rest is clear. `torn`
+/// tears the print's edge instead of cutting it, wandering that far, and
+/// `seed` picks the tear.
 const PLACE: &[Param] = &[
     param("scale", 1.0, 0.0, 4.0),
     param("x", 0.0, -2.0, 2.0),
@@ -476,11 +485,21 @@ const PLACE: &[Param] = &[
     param("back", 0.0, 0.0, 0.1),
     param("dim", 0.0, 0.0, 1.0),
     param("shadow", 0.0, 0.0, 0.1),
+    param("torn", 0.0, 0.0, 2.0),
+    param("seed", 1.0, 0.0, 1000.0),
 ];
+/// `angle` is the slant of the rows of dots, in degrees. `contrast` and
+/// `lift` change the picture before it is printed, `lift` making the whole
+/// print lighter. `rough` inks the dots unevenly, so they are not perfect
+/// circles.
 const HALFTONE: &[Param] = &[
     param("size", 0.0, 0.0, 0.1),
     param("amount", 1.0, 0.0, 1.0),
     param("color", 0.0, 0.0, 1.0),
+    param("angle", 45.0, 0.0, 90.0),
+    param("contrast", 1.0, 0.0, 3.0),
+    param("lift", 0.0, -0.5, 0.5),
+    param("rough", 0.0, 0.0, 2.0),
 ];
 /// `mode` 0 adds the kept picture's light, 1 screens it, 2 multiplies by
 /// it, 3 keeps the lighter of the two and 4 mixes toward it. `amount` 0
@@ -764,9 +783,37 @@ const BAND_TEAR: &[Param] = &[
     param("blocks", 0.5, 0.0, 2.0),
 ];
 
+/// `scale` 2 makes every fibre and speck twice as big; `tooth`,
+/// `fibres`, `mottle`, `specks` and `creases` set each part; the colour
+/// is the sheet's.
+const PAPER: &[Param] = &[
+    param("amount", 0.0, 0.0, 1.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("scale", 1.0, 0.25, 4.0),
+    param("tooth", 1.0, 0.0, 3.0),
+    param("fibres", 1.0, 0.0, 3.0),
+    param("mottle", 0.15, 0.0, 2.0),
+    param("specks", 1.0, 0.0, 3.0),
+    param("creases", 0.0, 0.0, 3.0),
+    param("red", 0.955, 0.0, 1.0),
+    param("green", 0.94, 0.0, 1.0),
+    param("blue", 0.905, 0.0, 1.0),
+];
+
+/// `amount` is how strong the light and shade are; `facets` 2 gives
+/// twice as many at half the size; `base` is the grey of flat paper (1
+/// white); `light` is where the light comes from, in radians.
+const CRUMPLE: &[Param] = &[
+    param("amount", 0.0, 0.0, 3.0),
+    param("seed", 1.0, 0.0, 1000.0),
+    param("facets", 1.0, 0.25, 4.0),
+    param("base", 0.86, 0.0, 1.0),
+    param("light", 2.2, -3.2, 3.2),
+];
+
 impl Block {
     /// Every block, in the order of their codes.
-    pub const ALL: [Self; 55] = [
+    pub const ALL: [Self; 57] = [
         Self::Transform,
         Self::RgbSplit,
         Self::Slices,
@@ -822,6 +869,8 @@ impl Block {
         Self::Flicker,
         Self::Tape,
         Self::BandTear,
+        Self::Paper,
+        Self::Crumple,
     ];
 
     /// The parameters in the order the shader reads them.
@@ -883,6 +932,8 @@ impl Block {
             Self::Flicker => FLICKER,
             Self::Tape => TAPE,
             Self::BandTear => BAND_TEAR,
+            Self::Paper => PAPER,
+            Self::Crumple => CRUMPLE,
         }
     }
 
@@ -945,6 +996,8 @@ impl Block {
             Self::Flicker => 52,
             Self::Tape => 53,
             Self::BandTear => 54,
+            Self::Paper => 55,
+            Self::Crumple => 56,
         }
     }
 }
@@ -1900,7 +1953,7 @@ fn unit_hash(seed: u64, step: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-const BUNDLED_FILES: [&str; 232] = [
+const BUNDLED_FILES: [&str; 237] = [
     include_str!("../recipes/vignette.json"),
     include_str!("../recipes/black-white.json"),
     include_str!("../recipes/vivid.json"),
@@ -2133,6 +2186,11 @@ const BUNDLED_FILES: [&str; 232] = [
     include_str!("../recipes/worn-print.json"),
     include_str!("../recipes/tape-tracking.json"),
     include_str!("../recipes/band-tear.json"),
+    include_str!("../recipes/paper-print.json"),
+    include_str!("../recipes/old-paper.json"),
+    include_str!("../recipes/crumpled-paper.json"),
+    include_str!("../recipes/rough-print.json"),
+    include_str!("../recipes/torn-photo.json"),
 ];
 
 /// The recipes that ship in the app, in picker order.

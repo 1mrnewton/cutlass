@@ -33,6 +33,7 @@ mod remove_bg;
 mod retouch;
 mod shape;
 mod speed;
+mod template;
 
 pub(crate) use markdown::install_fonts;
 
@@ -123,7 +124,9 @@ impl Shelf {
             Self::Transitions => "No transitions in this project.",
             Self::Filters => "No filters in this project.",
             Self::Adjustments => "No adjustments in this project.",
-            Self::Templates => "No templates in this project.",
+            Self::Templates => {
+                "No templates yet. Mark clips as slots, then File › Save as template."
+            }
         }
     }
 }
@@ -283,6 +286,8 @@ pub struct ViewState {
     quitting: bool,
     listed: Vec<ListedProject>,
     listed_stamp: String,
+    /// The Templates tab, Save as template, and the fill sheet.
+    template: template::TemplateView,
     /// The recent projects outside the projects folder, read again only
     /// when the list or one of their drafts changes.
     recent: Vec<ListedProject>,
@@ -381,6 +386,7 @@ impl Default for ViewState {
             recent: Vec::new(),
             recent_stamp: String::new(),
             listed_stamp: String::new(),
+            template: template::TemplateView::default(),
             listed_checked: None,
             marquee_press: None,
             marquee: None,
@@ -503,6 +509,16 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
             if pick {
                 view.dialogs.cover(parent);
             }
+        }
+        if view.template.save.is_some() {
+            let root = projects_root(view);
+            template::save_sheet(shell, ui, &mut view.template, &root);
+        }
+        if let Some(ask) = shell.take_template_ask() {
+            // A file for a template clip: a slot's media, or its music.
+            let slot = ask.slot.is_some().then_some(0);
+            view.template.pending = Some(ask);
+            view.dialogs.template_media(parent, slot);
         }
         job_strip(shell, ui, full);
         shortcuts(shell, ui, view);
@@ -717,6 +733,11 @@ fn projects_home(
     ui::Scroll::vertical("projects")
         .auto_shrink([false, false])
         .show(&mut body_ui, |ui| {
+            template::home_tabs(ui, &mut view.template);
+            if view.template.tab == template::HomeTab::Templates {
+                template::templates_page(shell, ui, &mut view.template, &root);
+                return;
+            }
             if new_project_button(ui) {
                 open_created(shell, &root);
             }
@@ -847,6 +868,21 @@ fn new_project_button(ui: &mut Ui) -> bool {
 /// black when nothing is at the timeline's start. Until the picture is
 /// drawn, a quiet field shows there instead.
 fn project_card(ui: &mut Ui, shell: &mut Shell, project: &ListedProject) -> bool {
+    let meta = if project.duration.0 > 0 {
+        format!(
+            "{}  {}",
+            card_meta(project.duration.0),
+            modified_label(project.modified)
+        )
+    } else {
+        modified_label(project.modified)
+    };
+    card(ui, shell, &project.path, &project.name, &meta)
+}
+
+/// A card at home: the folder's first frame over a name and a line under
+/// it. A template's card is drawn the same way as a project's.
+fn card(ui: &mut Ui, shell: &mut Shell, path: &std::path::Path, name: &str, meta: &str) -> bool {
     const WIDTH: f32 = 220.0;
     const PICTURE: f32 = 124.0;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(WIDTH, PICTURE + 60.0), Sense::click());
@@ -863,7 +899,7 @@ fn project_card(ui: &mut Ui, shell: &mut Shell, project: &ListedProject) -> bool
         sw: 0,
         se: 0,
     };
-    match cover::card_picture(shell, ui.ctx(), &project.path) {
+    match cover::card_picture(shell, ui.ctx(), path) {
         Some(texture) => {
             let [w, h] = texture.size();
             ui.painter().add(
@@ -881,19 +917,10 @@ fn project_card(ui: &mut Ui, shell: &mut Shell, project: &ListedProject) -> bool
     ui.painter().text(
         text,
         Align2::LEFT_TOP,
-        &project.name,
+        name,
         FontId::proportional(14.0),
         tokens::TEXT,
     );
-    let meta = if project.duration.0 > 0 {
-        format!(
-            "{}  {}",
-            card_meta(project.duration.0),
-            modified_label(project.modified)
-        )
-    } else {
-        modified_label(project.modified)
-    };
     ui.painter().text(
         text + Vec2::new(0.0, 22.0),
         Align2::LEFT_TOP,
@@ -1500,7 +1527,8 @@ fn to_text_field(ctx: &egui::Context, id: &str) -> bool {
 /// Run the menu bar item `id`: a window command, or a shortcut action.
 pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe::Frame>, id: &str) {
     use crate::menubar::{
-        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS,
+        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SAVE_TEMPLATE,
+        SETTINGS,
     };
 
     let open = shell.draft().is_some();
@@ -1525,8 +1553,12 @@ pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe:
             shell.check_for_updates();
             Ok(())
         }
-        SAVE | IMPORT | EXPORT | PROJECTS if !open => Err(ShellError::NoProject),
+        SAVE | SAVE_TEMPLATE | IMPORT | EXPORT | PROJECTS if !open => Err(ShellError::NoProject),
         SAVE => shell.save(),
+        SAVE_TEMPLATE => {
+            view.template.open_save(shell);
+            Ok(())
+        }
         IMPORT => {
             view.dialogs.import(parent);
             Ok(())
@@ -2796,6 +2828,25 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                 };
                 bin_cards(draft, &place, shelf, &query)
             }));
+            if shelf == Shelf::Templates && shell.draft().is_some() {
+                let root = projects_root(view);
+                let wanted = query.trim().to_lowercase();
+                cards.extend(
+                    view.template
+                        .listed(&root)
+                        .iter()
+                        .filter(|listed| {
+                            wanted.is_empty() || listed.name.to_lowercase().contains(&wanted)
+                        })
+                        .map(|listed| BinCard {
+                            id: crate::shell::template_card_id(&listed.path),
+                            name: listed.name.clone(),
+                            meta: template::template_meta(listed),
+                            on_timeline: false,
+                            look: CardLook::Swatch,
+                        }),
+                );
+            }
             if shelf == Shelf::Stickers && group == SHAPES {
                 cards = shape_cards(&query);
             }
@@ -3932,26 +3983,11 @@ fn bin_cards(
                 });
             }
         }
-        Shelf::Templates => {
-            for template in cutlass_editor::TITLE_TEMPLATES {
-                if !query.is_empty() && !template.name.to_lowercase().contains(&query) {
-                    continue;
-                }
-                cards.push(template_card(template));
-            }
-        }
+        // The user's saved templates are files outside the draft; the
+        // shelf adds them itself.
+        Shelf::Templates => {}
     }
     cards
-}
-
-fn template_card(template: &cutlass_editor::TitleTemplate) -> BinCard {
-    BinCard {
-        id: template.card_id(),
-        name: template.name.to_owned(),
-        meta: template.meta.to_owned(),
-        on_timeline: false,
-        look: CardLook::Title(Color32::from_hex(template.color()).unwrap_or(Color32::WHITE)),
-    }
 }
 
 fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
@@ -8851,6 +8887,9 @@ fn paint_clip(
         if lane.main {
             chips.push(shell.timecode_at(duration));
         }
+        if let Some(badge) = shell.template_badge(&clip.id) {
+            chips.push(badge);
+        }
         let chip = if audio {
             tokens::CLIP_AUDIO_CHIP
         } else {
@@ -8954,6 +8993,9 @@ fn paint_clip(
                 }
                 return;
             }
+            // A template is closed: a double-click shows its clips to
+            // replace again, and never opens it.
+            shell.show_template_strip();
         }
         if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(pos) = pointer_pos(ui, &response)
@@ -9027,6 +9069,12 @@ fn paint_clip(
     paint_clip_beats(shell, ui, clip, lanes_left, row);
     if shell.is_selected(&clip.id) {
         paint_clip_keys(shell, ui, clip, clip_rect, row);
+    }
+    if !ghost
+        && shell.template_strip_shown(&clip.id)
+        && let Some(template) = shell.template_clip(&clip.id)
+    {
+        template::slot_strip(shell, ui, &template, visible);
     }
 }
 
@@ -10431,6 +10479,10 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
             }
             Ok(())
         }
+        Picker::TemplateMedia(_) => {
+            template::picked(shell, &mut view.template, &path);
+            Ok(())
+        }
         Picker::SaveLog => Shell::export_log(&path).map(|()| {
             shell.set_notice(format!("Saved the log to {}", path.display()));
         }),
@@ -11502,7 +11554,7 @@ mod tests {
             output.textures_delta.clear();
         }
         for label in [
-            "Templates",
+            "Presets",
             "Bubble",
             "Tracking",
             "The 1 paragraph",
@@ -20903,7 +20955,7 @@ mod tests {
             page: 1,
             section: None,
         });
-        picture(&mut harness, "caption-templates");
+        picture(&mut harness, "caption-presets");
         harness.state_mut().1.inspector.focus(inspector::Focus {
             tab: 0,
             page: 2,

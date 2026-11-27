@@ -32,8 +32,7 @@ pub struct TitleStyle {
     pub enter: Option<&'static str>,
 }
 
-/// The text shelf, in order: only plain text, as title templates live on
-/// their own shelf.
+/// The text shelf, in order: only plain text.
 pub const TITLE_STYLES: &[TitleStyle] = &[TitleStyle {
     id: "default",
     name: "Default text",

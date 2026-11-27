@@ -161,7 +161,7 @@ pub fn duplicate_project(path: &Path) -> Result<PathBuf, StoreError> {
 /// Every file and folder under `from` into a new `to`. A link is not
 /// followed: it would reach outside the project. The hold on the folder
 /// stays with it.
-fn copy_tree(from: &Path, to: &Path) -> Result<(), StoreError> {
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<(), StoreError> {
     let io = |path: &Path, error: std::io::Error| StoreError::Io {
         path: path.to_path_buf(),
         message: error.to_string(),
@@ -217,7 +217,7 @@ fn next_slot(root: &Path) -> (String, PathBuf, String) {
     (name, path, format!("project-{stamp}"))
 }
 
-fn unix_millis() -> i64 {
+pub(crate) fn unix_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))

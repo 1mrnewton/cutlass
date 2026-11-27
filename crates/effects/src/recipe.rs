@@ -2,8 +2,8 @@
 //!
 //! A recipe is JSON. It names up to [`MAX_PASSES`] passes; each pass is one
 //! [`Block`] and values for that block's parameters. A value is a number or
-//! a curve over the effect's own time: keyframes, a wave, or a held random
-//! step. The GPU runs the blocks; a recipe never carries shader code, so a
+//! a curve over the effect's own time: keyframes, a wave, a held random
+//! step, or a clock that counts the seconds. The GPU runs the blocks; a recipe never carries shader code, so a
 //! recipe from anywhere can only ask for what the blocks already do.
 //!
 //! A pass may keep its result under a name (`"save"`), and a [`Block::Blend`]
@@ -26,12 +26,14 @@ use serde::{Deserialize, Serialize};
 
 /// The recipe format this app reads. A recipe with a higher version needs
 /// blocks or fields this app does not have. Version 2 added eased keys,
-/// version 3 kept pictures and [`Block::Blend`].
-pub const RECIPE_VERSION: u32 = 3;
+/// version 3 kept pictures and [`Block::Blend`], version 4 the clock curve.
+pub const RECIPE_VERSION: u32 = 4;
 /// The first version whose keys may name an [`Ease`].
 pub const EASE_VERSION: u32 = 2;
 /// The first version whose passes may save and blend pictures.
 pub const PICTURE_VERSION: u32 = 3;
+/// The first version whose values may be a clock.
+pub const CLOCK_VERSION: u32 = 4;
 /// The most names one list of passes may save pictures under.
 pub const MAX_SAVED: usize = 3;
 /// The picture as it entered the effect, which a blend may always read.
@@ -580,6 +582,12 @@ pub enum Curve {
     Jitter {
         jitter: Jitter,
     },
+    /// The effect's own seconds, counted on from `from` at `rate` a
+    /// second: what a block that drifts or falls without end moves by. It
+    /// stops at the end of its parameter's range.
+    Clock {
+        clock: Clock,
+    },
 }
 
 /// How a value moves from one key to the next.
@@ -740,6 +748,18 @@ pub struct Jitter {
     pub to: f32,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub seed: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Clock {
+    pub rate: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub from: f32,
+}
+
+fn is_zero_f32(value: &f32) -> bool {
+    *value == 0.0
 }
 
 /// How a control's value reads in the inspector.
@@ -1259,6 +1279,14 @@ pub(crate) fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<
             range(jitter.from)?;
             range(jitter.to)
         }
+        // Where it starts is checked; where it goes is held to the range
+        // when the value is worked out, since a clock has no end.
+        Curve::Clock { clock } => {
+            if !clock.rate.is_finite() || clock.rate == 0.0 {
+                return Err(broken());
+            }
+            range(clock.from)
+        }
     }
 }
 
@@ -1276,10 +1304,15 @@ pub(crate) fn to_json<T: Serialize>(recipe: &T) -> Result<String, RecipeError> {
 
 /// The lowest format version that can hold `curves`.
 pub(crate) fn least_version<'a>(curves: impl IntoIterator<Item = &'a Curve>) -> u32 {
-    let eased = curves
+    curves
         .into_iter()
-        .any(|curve| matches!(curve, Curve::Keys { ease, .. } if !ease.is_empty()));
-    if eased { EASE_VERSION } else { 1 }
+        .map(|curve| match curve {
+            Curve::Clock { .. } => CLOCK_VERSION,
+            Curve::Keys { ease, .. } if !ease.is_empty() => EASE_VERSION,
+            _ => 1,
+        })
+        .max()
+        .unwrap_or(1)
 }
 
 /// The lowest format version that can hold `passes`' kept pictures.
@@ -1420,6 +1453,7 @@ impl Curve {
                 let unit = unit_hash(u64::from(jitter.seed), step);
                 jitter.from + (jitter.to - jitter.from) * unit
             }
+            Self::Clock { clock } => clock.from + seconds * clock.rate,
         }
     }
 }
@@ -2120,6 +2154,64 @@ mod tests {
         );
     }
 
+    fn clocked(version: u32, clock: &str, controls: &str) -> Result<Recipe, RecipeError> {
+        read(&format!(
+            r#"{{"version":{version},"id":"a","name":"A","controls":[{controls}],
+            "passes":[{{"block":"transform","params":{{"rotate":{{"clock":{clock}}}}}}}]}}"#
+        ))
+    }
+
+    #[test]
+    fn a_clock_counts_seconds_and_stops_at_its_range() {
+        let recipe = clocked(4, r#"{"rate":10}"#, "").unwrap();
+        let rotate = |seconds: f64| recipe.steps_at(Micros((seconds * 1e6) as i64))[0].values[3];
+        assert_eq!(rotate(0.0), 0.0);
+        assert!((rotate(2.0) - 20.0).abs() < 1e-4);
+        assert!((rotate(2.5) - 25.0).abs() < 1e-4);
+        // Rotate ends at 180: the clock holds there and never leaves it.
+        assert_eq!(rotate(18.0), 180.0);
+        assert_eq!(rotate(4000.0), 180.0);
+        let back = clocked(4, r#"{"rate":-10,"from":5}"#, "").unwrap();
+        let step = back.steps_at(Micros(1_000_000));
+        assert!((step[0].values[3] + 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_speed_control_runs_a_clock_faster() {
+        let speed = r#"{"id":"speed","name":"Speed","default":1,"min":0.5,"max":3,"speed":true}"#;
+        let recipe = clocked(4, r#"{"rate":10}"#, speed).unwrap();
+        let twice = std::collections::BTreeMap::from([("speed".to_owned(), 2.0)]);
+        let step = recipe.steps_with(Micros(1_000_000), &twice);
+        assert!((step[0].values[3] - 20.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_clock_needs_version_four_and_usable_numbers() {
+        assert!(matches!(
+            clocked(3, r#"{"rate":10}"#, ""),
+            Err(RecipeError::Shape(_))
+        ));
+        let recipe = clocked(4, r#"{"rate":10}"#, "").unwrap();
+        let json = recipe.to_json().unwrap();
+        assert!(json.contains("\"version\": 4"), "{json}");
+        assert!(!json.contains("from"), "{json}");
+        assert_eq!(read(&json).unwrap(), recipe);
+        for clock in [r#"{"rate":0}"#, r#"{"rate":1e40}"#] {
+            assert!(
+                matches!(clocked(4, clock, ""), Err(RecipeError::Curve { .. })),
+                "{clock}"
+            );
+        }
+        assert!(matches!(
+            clocked(4, r#"{"rate":1,"from":500}"#, ""),
+            Err(RecipeError::Range { .. })
+        ));
+        assert!(matches!(
+            clocked(4, r#"{"rate":1,"wrap":2}"#, ""),
+            Err(RecipeError::Shape(_))
+        ));
+    }
+
     #[test]
     fn a_recipe_that_would_not_read_back_is_not_written() {
         let mut recipe =
@@ -2140,8 +2232,8 @@ mod tests {
     #[test]
     fn a_newer_recipe_asks_for_an_update_even_with_blocks_this_app_lacks() {
         assert_eq!(
-            read(r#"{"version":4,"id":"a","name":"A","passes":[{"block":"bloom"}]}"#),
-            Err(RecipeError::Newer(4))
+            read(r#"{"version":5,"id":"a","name":"A","passes":[{"block":"bloom"}]}"#),
+            Err(RecipeError::Newer(5))
         );
         assert!(matches!(
             read(r#"{"id":"a","name":"A","passes":[{"block":"blur"}]}"#),

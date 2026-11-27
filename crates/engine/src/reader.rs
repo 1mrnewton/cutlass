@@ -242,6 +242,10 @@ struct Pipe {
     /// `lead` exactly, as (sample rate, samples), when the edit holds the
     /// container's encoder delay rounded to a tick it cannot state.
     lead_samples: Option<(u32, i64)>,
+    /// Where the stream's sound ends, as (sample rate, samples) on its own
+    /// time line, when the container states padding after the last valid
+    /// sample. A decoder that does not cut that padding itself returns it.
+    valid_end: Option<(u32, i64)>,
     /// No packet has been pushed since open or the last reset.
     fresh: bool,
 }
@@ -260,6 +264,7 @@ impl Pipe {
             lead,
             gapless: None,
             lead_samples: None,
+            valid_end: None,
             fresh: true,
         }
     }
@@ -303,6 +308,27 @@ impl Pipe {
             .checked_mul(rate)
             .and_then(|value| value.checked_div(per_second))
             .unwrap_or(0)
+    }
+
+    /// `output` with what it holds past the stream's last valid sample
+    /// marked as skipped, or [`None`] when all of it is past that sample.
+    fn within_end(&self, mut output: AudioOutput) -> Option<AudioOutput> {
+        let Some((rate, end)) = self.valid_end else {
+            return Some(output);
+        };
+        // The decoder may run at another rate than the stream names.
+        let end = i128::from(end) * i128::from(output.pcm.rate) / i128::from(rate.max(1));
+        let frames = i128::from(output.pcm.samples);
+        let over = i128::from(self.first_sample(&output)) + frames - end;
+        if over <= 0 {
+            return Some(output);
+        }
+        if over + i128::from(output.skip_leading) >= frames {
+            return None;
+        }
+        let over = u32::try_from(over).unwrap_or(u32::MAX);
+        output.skip_trailing = output.skip_trailing.max(over);
+        Some(output)
     }
 
     /// Drop references, held pictures, and the end of stream before a seek.
@@ -1177,9 +1203,18 @@ impl Media {
         self.next_audio()?.map(audible).transpose()
     }
 
+    /// The next decoded audio buffer with its timestamp, cut at the stream's
+    /// last valid sample. Sound past that sample ends the stream.
+    fn next_audio(&mut self) -> Result<Option<AudioOutput>, EngineError> {
+        let Some(output) = self.next_decoded()? else {
+            return Ok(None);
+        };
+        Ok(self.audio.as_ref().and_then(|pipe| pipe.within_end(output)))
+    }
+
     /// The next decoded audio buffer with its timestamp. A packet that
     /// returns several keeps the rest for the next call.
-    fn next_audio(&mut self) -> Result<Option<AudioOutput>, EngineError> {
+    fn next_decoded(&mut self) -> Result<Option<AudioOutput>, EngineError> {
         let Some(track) = self.audio.as_ref().map(|pipe| pipe.track) else {
             return Ok(None);
         };
@@ -1433,7 +1468,12 @@ fn open_pipes(
         }
         match open_pipe(factory, stream) {
             Ok(pipe) if sized.is_some() => picture = Some(pipe),
-            Ok(pipe) => audio = Some(pipe),
+            Ok(mut pipe) => {
+                pipe.valid_end = demux
+                    .indexed_end(stream.id())
+                    .and_then(|end| valid_end(stream, end.saturating_sub(pipe.lead)));
+                audio = Some(pipe);
+            }
             Err(error) => {
                 first_error.get_or_insert(error);
             }
@@ -1503,6 +1543,33 @@ fn exact_lead(stream: &cutlass_container::Stream, lead: i64) -> Option<(u32, i64
         return None;
     }
     Some((rate, i64::try_from(delay).ok()?))
+}
+
+/// The stream's last valid sample, as (sample rate, samples), when the
+/// container states padding after it. `end` is the stream's indexed end less
+/// its lead, in stream ticks: the padding is the tail of that span, since a
+/// container subtracts neither from its packet times.
+fn valid_end(stream: &cutlass_container::Stream, end: i64) -> Option<(u32, i64)> {
+    let padding = i128::from(stream.trim().trailing_padding().filter(|pad| *pad > 0)?);
+    let rate = stream.params().sample_rate().filter(|rate| *rate > 0)?;
+    let per_second = i128::from(stream.timescale().ticks_per_second());
+    if per_second == 0 {
+        return None;
+    }
+    let samples = i128::from(end) * i128::from(rate) / per_second - padding;
+    Some((rate, i64::try_from(samples.max(0)).ok()?))
+}
+
+/// [`valid_end`] in the stream's ticks, or `end` when no padding is stated.
+fn valid_end_ticks(stream: &cutlass_container::Stream, end: i64) -> i64 {
+    let Some((rate, samples)) = valid_end(stream, end) else {
+        return end;
+    };
+    let per_second = i128::from(stream.timescale().ticks_per_second());
+    // Rounded up: the tick that holds the last valid sample.
+    let rate = i128::from(rate);
+    let ticks = (i128::from(samples) * per_second + rate - 1) / rate;
+    i64::try_from(ticks).unwrap_or(end).min(end)
 }
 
 /// The stream's encoder delay and padding as [`SideData::Gapless`], when the
@@ -1766,7 +1833,8 @@ fn described(demux: &mut dyn Demux, byte_size: u64) -> Result<(MediaInfo, bool),
 }
 
 /// [`duration_of`] from the container's index, without reading a packet:
-/// the latest end of any stream with a clock, less its lead. `None` when a
+/// the latest end of any stream with a clock, less its lead and the padding
+/// it states after its last valid sample. `None` when a
 /// stream with a clock has no indexed end, so the packets must be read.
 fn indexed_duration(demux: &dyn Demux) -> Result<Option<Option<Micros>>, EngineError> {
     let mut end: Option<i64> = None;
@@ -1779,6 +1847,7 @@ fn indexed_duration(demux: &dyn Demux) -> Result<Option<Option<Micros>>, EngineE
             return Ok(None);
         };
         let ticks = ticks.saturating_sub(edit_lead(stream.edits()));
+        let ticks = valid_end_ticks(stream, ticks);
         let micros = ticks_to_micros(ticks, timescale)?;
         end = Some(end.map_or(micros.0, |current| current.max(micros.0)));
     }
@@ -1951,6 +2020,49 @@ mod tests {
             edit_lead(&[edit(None, i64::MAX), edit(Some(i64::MIN), 1)]),
             i64::MIN
         );
+    }
+
+    #[test]
+    fn the_stated_padding_is_counted_back_from_the_end() {
+        let stream = |timescale: u32, padding: Option<u64>| {
+            cutlass_container::Stream::new(
+                cutlass_container::TrackId::new(1),
+                cutlass_codec::StreamParams::try_audio(
+                    StreamCodec::Known(CodecId::Aac),
+                    48_000,
+                    2,
+                    Vec::new(),
+                )
+                .unwrap(),
+                Timescale::new(timescale),
+                None,
+                Vec::new(),
+                cutlass_container::Trim::new(Some(2_112), padding),
+            )
+        };
+        // 672704 ticks after the lead, 704 of them padding.
+        let plain = stream(48_000, Some(704));
+        assert_eq!(valid_end(&plain, 672_704), Some((48_000, 672_000)));
+        assert_eq!(valid_end_ticks(&plain, 672_704), 672_000);
+        // An HE-AAC track ticks at half the rate it plays at.
+        let half = stream(24_000, Some(1_664));
+        assert_eq!(valid_end(&half, 336_832), Some((48_000, 672_000)));
+        assert_eq!(valid_end_ticks(&half, 336_832), 336_000);
+        // A tick that cannot hold the last sample ends after it, never
+        // past the indexed end.
+        let coarse = stream(1_000, Some(100));
+        assert_eq!(valid_end(&coarse, 10), Some((48_000, 380)));
+        assert_eq!(valid_end_ticks(&coarse, 10), 8);
+        // No padding stated, or none to cut: the end is the indexed one.
+        assert_eq!(valid_end(&stream(48_000, None), 672_704), None);
+        assert_eq!(valid_end(&stream(48_000, Some(0)), 672_704), None);
+        assert_eq!(valid_end_ticks(&stream(48_000, None), 672_704), 672_704);
+        // Padding past the whole stream leaves nothing, and nothing wraps.
+        assert_eq!(valid_end(&plain, 100), Some((48_000, 0)));
+        assert_eq!(valid_end_ticks(&plain, 100), 0);
+        assert_eq!(valid_end(&plain, i64::MIN), Some((48_000, 0)));
+        let huge = stream(48_000, Some(u64::MAX));
+        assert_eq!(valid_end(&huge, i64::MAX), Some((48_000, 0)));
     }
 
     #[test]

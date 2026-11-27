@@ -1504,6 +1504,129 @@ fn a_refused_audio_packet_is_silence_and_later_sound_keeps_its_time() {
     assert_eq!(later.as_f32().expect("f32"), &ramp_expected(3_360, 960)[..]);
 }
 
+/// Ten ramp packets at 48 kHz around 3800 valid samples: 600 of priming
+/// before them, stated as the stream's edit and trim, and `padding` after.
+fn primed(indexed: bool, padding: Option<u64>) -> Result<Box<dyn Demux>, OpenError> {
+    let bad = |message: &str| OpenError::Source {
+        message: message.to_owned(),
+    };
+    let scale = Timescale::new(48_000);
+    let params = StreamParams::try_audio(StreamCodec::Known(CodecId::Pcm), 48_000, 1, Vec::new())
+        .map_err(|_| bad("params"))?;
+    let edit = cutlass_container::Edit::try_new(Some(600), 3_800, 1, 1).map_err(|_| bad("edit"))?;
+    let stream = Stream::new(
+        TrackId::new(1),
+        params,
+        scale,
+        None,
+        vec![edit],
+        Trim::new(Some(600), padding),
+    );
+    let mut packets = Vec::new();
+    for index in 0..10_i64 {
+        let pts = index * RAMP_FRAMES;
+        let timestamp =
+            Timestamp::try_new(Some(pts), Some(pts), Some(RAMP_FRAMES)).map_err(|_| bad("time"))?;
+        packets.push(
+            FilePacket::try_new(1, vec![0], timestamp, scale, true).map_err(|_| bad("packet"))?,
+        );
+    }
+    Ok(Box::new(Scripted {
+        streams: vec![stream],
+        packets,
+        cursor: 0,
+        cancelled: false,
+        lands: true,
+        indexed,
+    }))
+}
+
+fn open_primed(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    primed(true, Some(400))
+}
+
+fn open_primed_unindexed(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    primed(false, Some(400))
+}
+
+fn open_primed_unpadded(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    primed(true, None)
+}
+
+fn ramp(from: i64, to: i64) -> Vec<f32> {
+    (from..to).map(ramp_at).collect()
+}
+
+fn primed_readers(
+    open: fn(&Path) -> Result<Box<dyn Demux>, OpenError>,
+    decoder: fn(&CodecParams) -> Result<Box<dyn Decoder>, CodecError>,
+) -> ReaderFactory {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open);
+    readers.decoders_mut().register(CodecId::Pcm, decoder);
+    readers
+}
+
+/// A decoder that returns the padding after the last valid sample, as the
+/// AAC one does, is cut there: the first sample heard is the first valid
+/// one and the last is the last valid one, in one window, in joined
+/// windows, after a seek, and in the stated duration.
+#[test]
+fn sound_starts_after_the_priming_and_ends_before_the_stated_padding() {
+    let readers = primed_readers(open_primed, open_ramp_decoder);
+    let path = fixture("pattern.jpg");
+    let scale = Timescale::new(48_000);
+
+    let mut media = readers.open(&path).expect("open");
+    assert_eq!(
+        media.info().duration,
+        Some(ticks_to_micros(3_800, scale).expect("micros"))
+    );
+    let whole = media.audio_from(Micros(0), 7_200).expect("window");
+    assert_eq!(whole.as_f32().expect("f32"), &ramp(600, 4_400)[..]);
+
+    let mut media = readers.open(&path).expect("open");
+    let mut joined = Vec::new();
+    for window in 0..8_i64 {
+        let pcm = media
+            .audio_from(Micros(window * 10_000), 480)
+            .expect("window");
+        joined.extend_from_slice(pcm.as_f32().expect("f32"));
+    }
+    assert_eq!(joined, ramp(600, 4_400));
+
+    // Sample 3696 of the valid ones: 104 are left.
+    let mut media = readers.open(&path).expect("open");
+    let tail = media.audio_from(Micros(77_000), 480).expect("seek");
+    assert_eq!(tail.as_f32().expect("f32"), &ramp(4_296, 4_400)[..]);
+
+    // Read packet by packet, the priming is the caller's to drop. The
+    // padding is still not handed out.
+    let mut media = readers.open(&path).expect("open");
+    let mut pulled = Vec::new();
+    while let Some(ready) = media.pull_audio().expect("pull") {
+        pulled.extend_from_slice(ready.pcm.as_f32().expect("f32"));
+    }
+    assert_eq!(pulled, ramp(0, 4_400));
+}
+
+/// The cut needs both the stated padding and an indexed end to count it
+/// back from. Without either the stream plays to its last packet.
+#[test]
+fn sound_with_no_stated_padding_or_no_index_plays_to_its_last_packet() {
+    let path = fixture("pattern.jpg");
+    for open in [open_primed_unindexed, open_primed_unpadded] {
+        let readers = primed_readers(open, open_ramp_decoder);
+        let mut media = readers.open(&path).expect("open");
+        assert_eq!(
+            media.info().duration,
+            Some(ticks_to_micros(4_200, Timescale::new(48_000)).expect("micros"))
+        );
+        let whole = media.audio_from(Micros(0), 7_200).expect("window");
+        assert_eq!(whole.as_f32().expect("f32"), &ramp(600, 4_800)[..]);
+    }
+}
+
 /// A 16-bit WAVEFORMATEXTENSIBLE file with `channels` interleaved channels
 /// and `mask` as its `dwChannelMask`.
 fn write_extensible_wav(path: &Path, channels: u16, mask: u32, samples: &[i16]) {

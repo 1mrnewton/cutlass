@@ -16,7 +16,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use cutlass_decode::{
     ChromaSamplePosition, CodecError, CodecId, CodecParams, DecodeFactory, Decoder, ItuT35, Output,
     Packet, PictureInfo, PictureOutput, SequenceTiming, Transfer, VideoDecoder, VideoOutput,
-    Yuv420High, Yuv420p, Yuv420p10,
+    Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p, Yuv444High, Yuv444p,
 };
 
 use crate::frame::{Frame, OutSamples, Spares};
@@ -24,7 +24,7 @@ use crate::job::{Job, Leftovers, OutForm, OutRows, SliceData, packed_format};
 use crate::nal::{self, Nal};
 use crate::picture::{Picture, RefPic, SliceCtx, Work, lock};
 use crate::pixel::{AnyRows, Pixel};
-use crate::ps::{self, Layout, Pps, Sps};
+use crate::ps::{self, Chroma, Layout, Pps, Sps};
 use crate::sei::{Hdr, MAX_T35, PicTiming, Sei};
 use crate::slice::{self, SliceHeader, SliceType};
 
@@ -654,7 +654,11 @@ impl HevcDecoder {
                         let index = found.unwrap_or_else(|| {
                             let uid = state.uid();
                             state.dpb.push(DpbPic {
-                                frame: Frame::missing(width, height, sps.bit_depth, value),
+                                frame: Frame::missing(
+                                    (width, height, sps.chroma()),
+                                    sps.bit_depth,
+                                    value,
+                                ),
                                 poc: value,
                                 marking: if long { Marking::Long } else { Marking::Short },
                                 output: false,
@@ -999,18 +1003,25 @@ fn make_job<P: Pixel>(
     };
     let work = {
         let mut works = lock(works);
+        let format = (pic.sps.chroma(), pic.sps.bit_depth);
         match works
             .iter()
-            .position(|w| w.fits(width, height, log2_ctb, slots))
+            .position(|w| w.fits((width, height), log2_ctb, slots, format))
         {
             Some(i) => works.swap_remove(i),
-            None => Work::new(width, height, log2_ctb, slots),
+            None => Work::new((width, height), log2_ctb, slots, format),
         }
     };
     let staged = crate::job::staged(reference, output, &pic.sps);
     let bufs = (!staged).then(|| crate::frame::free(frame_bufs)).flatten();
-    let (frame, writer, col) =
-        Frame::new((width, height), poc, &shared.frames, wrap, bufs, !staged);
+    let (frame, writer, col) = Frame::new(
+        (width, height, pic.sps.chroma()),
+        poc,
+        &shared.frames,
+        wrap,
+        bufs,
+        !staged,
+    );
     // The frame of an 8-bit picture that is not cropped holds its planes
     // as the packed picture does: it is the output itself.
     let share = output == Some(OutForm::Packed)
@@ -1175,7 +1186,10 @@ fn add_slice(pending: &mut Pending, nal: Arc<Nal>, header: SliceHeader) -> Resul
     Ok(())
 }
 
-/// The output picture, 8-bit and, above 8 bits, the full samples.
+/// The output picture, 8-bit and, above 8 bits, the full samples. A
+/// 4:2:2 or 4:4:4 picture keeps its samples in the matching buffer, and
+/// `picture` is their 8-bit samples subsampled to 4:2:0, cut to an even
+/// size.
 fn video_output(samples: OutSamples, meta: &Meta) -> Option<VideoOutput> {
     let sps = &meta.sps;
     let [left, right, top, bottom] = sps.crop.map(|v| v as usize);
@@ -1185,25 +1199,53 @@ fn video_output(samples: OutSamples, meta: &Meta) -> Option<VideoOutput> {
     let OutSamples::Planes { eight, deep } = samples else {
         return None;
     };
-    let [y, u, v] = eight;
-    let picture = Yuv420p::try_new(w as u32, h as u32, y, u, v).ok()?;
-    let (yuv420p10, yuv420_high) = match (bits, deep) {
-        (10, Some([y, u, v])) => (Yuv420p10::try_new(w as u32, h as u32, y, u, v).ok(), None),
-        (8, _) | (_, None) => (None, None),
-        (_, Some([y, u, v])) => (
-            None,
-            Yuv420High::try_new(bits as u8, w as u32, h as u32, y, u, v).ok(),
-        ),
+    let chroma = sps.chroma();
+    let (mut yuv420p10, mut yuv420_high) = (None, None);
+    let (mut yuv422, mut yuv422_high) = (None, None);
+    let (mut yuv444, mut yuv444_high) = (None, None);
+    let (wu, hu) = (w as u32, h as u32);
+    let picture = if chroma.is_422() || chroma.is_444() {
+        let picture = subsampled(&eight, (w, h), chroma)?;
+        match (bits, deep) {
+            (8, _) => {
+                let [y, u, v] = eight;
+                if chroma.is_422() {
+                    yuv422 = Yuv422p::try_new(wu, hu, y, u, v).ok();
+                } else {
+                    yuv444 = Yuv444p::try_new(wu, hu, y, u, v).ok();
+                }
+            }
+            (_, Some([y, u, v])) => {
+                if chroma.is_422() {
+                    yuv422_high = Yuv422High::try_new(bits as u8, wu, hu, y, u, v).ok();
+                } else {
+                    yuv444_high = Yuv444High::try_new(bits as u8, wu, hu, y, u, v).ok();
+                }
+            }
+            (_, None) => {}
+        }
+        picture
+    } else {
+        let [y, u, v] = eight;
+        let picture = Yuv420p::try_new(wu, hu, y, u, v).ok()?;
+        match (bits, deep) {
+            (10, Some([y, u, v])) => yuv420p10 = Yuv420p10::try_new(wu, hu, y, u, v).ok(),
+            (8, _) | (_, None) => {}
+            (_, Some([y, u, v])) => {
+                yuv420_high = Yuv420High::try_new(bits as u8, wu, hu, y, u, v).ok();
+            }
+        }
+        picture
     };
     let vui = &sps.vui;
     Some(VideoOutput {
         picture,
         yuv420p10,
         yuv420_high,
-        yuv422: None,
-        yuv422_high: None,
-        yuv444: None,
-        yuv444_high: None,
+        yuv422,
+        yuv422_high,
+        yuv444,
+        yuv444_high,
         pts: meta.pts,
         duration: meta.duration,
         timescale: meta.timescale,
@@ -1219,6 +1261,32 @@ fn video_output(samples: OutSamples, meta: &Meta) -> Option<VideoOutput> {
             fixed: vui.fixed_rate,
         },
     })
+}
+
+/// The 8-bit 4:2:0 view of 4:2:2 or 4:4:4 planes of `w`×`h` luma
+/// samples: luma and every other chroma sample across (and, for 4:4:4,
+/// down), the top-left one of each pair, cut to an even size.
+fn subsampled(planes: &[Vec<u8>; 3], (w, h): (usize, usize), chroma: Chroma) -> Option<Yuv420p> {
+    let (vw, vh) = (w / 2 * 2, h / 2 * 2);
+    if vw == 0 || vh == 0 {
+        return Yuv420p::try_new(2, 2, vec![0; 4], vec![128], vec![128]).ok();
+    }
+    let cw = w >> chroma.sub_w;
+    let (step_x, step_y) = (2 >> chroma.sub_w, 2 >> chroma.sub_h);
+    let mut y = Vec::with_capacity(vw * vh);
+    for row in planes[0].chunks_exact(w.max(1)).take(vh) {
+        y.extend_from_slice(row.get(..vw)?);
+    }
+    let pick = |plane: &[u8]| -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(vw / 2 * (vh / 2));
+        for row in 0..vh / 2 {
+            let line = plane.get(row * step_y * cw..)?;
+            out.extend((0..vw / 2).filter_map(|col| line.get(col * step_x).copied()));
+        }
+        (out.len() == vw / 2 * (vh / 2)).then_some(out)
+    };
+    let (u, v) = (pick(&planes[1])?, pick(&planes[2])?);
+    Yuv420p::try_new(vw as u32, vh as u32, y, u, v).ok()
 }
 
 /// A picture as the engine takes it, with what the stream says about
@@ -1237,7 +1305,7 @@ pub struct HevcPicture {
 /// range, colour and timing from the VUI, the HDR description from SEI.
 fn picture_info(meta: &Meta, width: u32, height: u32) -> PictureInfo {
     let vui = &meta.sps.vui;
-    let (pixel, _) = packed_format(meta.sps.bit_depth);
+    let (pixel, _) = packed_format(meta.sps.bit_depth, meta.sps.chroma());
     let mut info = PictureInfo::new(width, height, pixel, vui.primaries, meta.transfer());
     info.matrix = vui.matrix;
     info.range = vui.range;

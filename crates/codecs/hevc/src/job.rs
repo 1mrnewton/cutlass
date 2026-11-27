@@ -16,7 +16,7 @@ use crate::frame::{Done, Frame, OutSamples};
 use crate::nal::Nal;
 use crate::picture::{ColMv, Picture, Work};
 use crate::pixel::{AnyRows, Pixel};
-use crate::ps::Sps;
+use crate::ps::{Chroma, Sps};
 use crate::slice::SliceType;
 
 /// One slice segment of the picture, ready to decode.
@@ -40,19 +40,39 @@ pub enum OutForm {
     Planes,
 }
 
-/// The format of the packed picture for samples of `bit_depth` bits, and
-/// how far each sample is shifted up to fill it. 10 and 12 bits are
-/// returned as they are. 9 and 11 bits have no format of their own and
-/// take the next one, each sample doubled: for studio swing that is the
-/// same level exactly (black 32 of 9 bits is black 64 of 10), for full
-/// swing white comes out one code low (1022 for 511).
-pub fn packed_format(bit_depth: u8) -> (PixelFormat, u32) {
+/// The format of the packed picture for samples of `bit_depth` bits with
+/// chroma laid out as `chroma` (monochrome as 4:2:0, its chroma
+/// mid-grey), and how far each sample is shifted up to fill it. 10 and
+/// 12 bits are returned as they are. 9 and 11 bits have no format of
+/// their own and take the next one, each sample doubled: for studio swing
+/// that is the same level exactly (black 32 of 9 bits is black 64 of 10),
+/// for full swing white comes out one code low (1022 for 511).
+pub fn packed_format(bit_depth: u8, chroma: Chroma) -> (PixelFormat, u32) {
+    let [eight, ten, twelve] = if chroma.is_444() {
+        [
+            PixelFormat::Yuv444p,
+            PixelFormat::Yuv444p10,
+            PixelFormat::Yuv444p12,
+        ]
+    } else if chroma.is_422() {
+        [
+            PixelFormat::Yuv422p,
+            PixelFormat::Yuv422p10,
+            PixelFormat::Yuv422p12,
+        ]
+    } else {
+        [
+            PixelFormat::Yuv420p,
+            PixelFormat::Yuv420p10,
+            PixelFormat::Yuv420p12,
+        ]
+    };
     match bit_depth {
-        9 => (PixelFormat::Yuv420p10, 1),
-        10 => (PixelFormat::Yuv420p10, 0),
-        11 => (PixelFormat::Yuv420p12, 1),
-        12 => (PixelFormat::Yuv420p12, 0),
-        _ => (PixelFormat::Yuv420p, 0),
+        9 => (ten, 1),
+        10 => (ten, 0),
+        11 => (twelve, 1),
+        12 => (twelve, 0),
+        _ => (eight, 0),
     }
 }
 
@@ -189,10 +209,12 @@ impl OutRows {
         let [left, right, top, bottom] = sps.crop.map(|v| v as usize);
         let w = width.saturating_sub(left + right);
         let h = height.saturating_sub(top + bottom);
+        let chroma = sps.chroma();
+        let (sw, sh) = (chroma.sub_w, chroma.sub_h);
         let crop = [
             (left, top, w, h),
-            (left / 2, top / 2, w / 2, h / 2),
-            (left / 2, top / 2, w / 2, h / 2),
+            (left >> sw, top >> sh, w >> sw, h >> sh),
+            (left >> sw, top >> sh, w >> sw, h >> sh),
         ];
         let shift = u32::from(sps.bit_depth) - 8;
         let size = |c: usize| crop[c].2 * crop[c].3;
@@ -218,7 +240,7 @@ impl OutRows {
             form,
             shift,
             bytes,
-            up: packed_format(sps.bit_depth).1,
+            up: packed_format(sps.bit_depth, chroma).1,
             crop,
             next: [0; 3],
             eight,
@@ -560,6 +582,7 @@ impl<'a> SliceJob<'a> {
             slice: self.index,
             sps: &pic.sps,
             pps: &pic.pps,
+            chroma: pic.sps.chroma(),
             cabac: Cabac::new(self.data, [0; 256]),
             data: self.data,
             entries: self.entries.to_vec(),
@@ -755,7 +778,8 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 let lines = upto - from;
                 // Packed output takes luma in place and leaves chroma in the
                 // frame's buffers.
-                let band = [lines, lines / 2, lines / 2];
+                let sub_h = self.work.chroma.sub_h;
+                let band = [lines, lines >> sub_h, lines >> sub_h];
                 let direct = match &mut st.out {
                     Some(out) if st.direct && P::bytes(&[]).is_some() => {
                         out.band_mut::<P>(band).is_some_and(|dst| {
@@ -768,7 +792,8 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                         // into the packed output as byte pairs (see
                         // `staged`).
                         let width = self.pic.width;
-                        let sizes = [lines * width, band[1] * (width / 2), band[2] * (width / 2)];
+                        let cw = width >> self.work.chroma.sub_w;
+                        let sizes = [lines * width, band[1] * cw, band[2] * cw];
                         // SAO writes every sample of the band, and the
                         // buffer stays in cache from band to band: sized,
                         // not cleared.
@@ -906,16 +931,39 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
 #[cfg(test)]
 mod tests {
     use super::{pack16, packed_format};
+    use crate::ps::Chroma;
     use cutlass_decode::PixelFormat;
 
     #[test]
     fn each_depth_has_a_packed_format() {
-        assert_eq!(packed_format(8), (PixelFormat::Yuv420p, 0));
-        assert_eq!(packed_format(10), (PixelFormat::Yuv420p10, 0));
-        assert_eq!(packed_format(12), (PixelFormat::Yuv420p12, 0));
+        let yuv420 = Chroma::of(1);
+        assert_eq!(packed_format(8, yuv420), (PixelFormat::Yuv420p, 0));
+        assert_eq!(packed_format(10, yuv420), (PixelFormat::Yuv420p10, 0));
+        assert_eq!(packed_format(12, yuv420), (PixelFormat::Yuv420p12, 0));
         // 9 and 11 bits take the next format, doubled.
-        assert_eq!(packed_format(9), (PixelFormat::Yuv420p10, 1));
-        assert_eq!(packed_format(11), (PixelFormat::Yuv420p12, 1));
+        assert_eq!(packed_format(9, yuv420), (PixelFormat::Yuv420p10, 1));
+        assert_eq!(packed_format(11, yuv420), (PixelFormat::Yuv420p12, 1));
+    }
+
+    #[test]
+    fn each_chroma_layout_has_its_packed_format() {
+        // Monochrome comes out as 4:2:0, its chroma mid-grey.
+        assert_eq!(packed_format(8, Chroma::of(0)), (PixelFormat::Yuv420p, 0));
+        assert_eq!(packed_format(8, Chroma::of(2)), (PixelFormat::Yuv422p, 0));
+        assert_eq!(
+            packed_format(10, Chroma::of(2)),
+            (PixelFormat::Yuv422p10, 0)
+        );
+        assert_eq!(
+            packed_format(11, Chroma::of(2)),
+            (PixelFormat::Yuv422p12, 1)
+        );
+        assert_eq!(packed_format(8, Chroma::of(3)), (PixelFormat::Yuv444p, 0));
+        assert_eq!(packed_format(9, Chroma::of(3)), (PixelFormat::Yuv444p10, 1));
+        assert_eq!(
+            packed_format(12, Chroma::of(3)),
+            (PixelFormat::Yuv444p12, 0)
+        );
     }
 
     #[test]

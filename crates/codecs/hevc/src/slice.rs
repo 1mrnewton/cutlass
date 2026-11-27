@@ -300,7 +300,9 @@ fn independent(
     let mut sao_chroma = false;
     if sps.sao {
         sao_luma = bits.bit()?;
-        sao_chroma = bits.bit()?;
+        if sps.chroma().present {
+            sao_chroma = bits.bit()?;
+        }
     }
     let mut num_ref_idx = [0usize; 2];
     let mut list_entry: [Option<Vec<u32>>; 2] = [None, None];
@@ -454,7 +456,8 @@ fn pred_weight_table(
     num_ref_idx: [usize; 2],
 ) -> Result<Weights, CodecError> {
     let luma_denom = bits.ue_max(7, "luma_log2_weight_denom")?;
-    let chroma_denom = i64::from(luma_denom) + i64::from(bits.se()?);
+    let present = sps.chroma().present;
+    let chroma_denom = i64::from(luma_denom) + if present { i64::from(bits.se()?) } else { 0 };
     if !(0..=7).contains(&chroma_denom) {
         return Err(bits.malformed("delta_chroma_log2_weight_denom"));
     }
@@ -471,7 +474,10 @@ fn pred_weight_table(
         for flag in luma_flags.iter_mut().take(count) {
             *flag = bits.bit()?;
         }
-        for flag in chroma_flags.iter_mut().take(count) {
+        for flag in chroma_flags
+            .iter_mut()
+            .take(if present { count } else { 0 })
+        {
             *flag = bits.bit()?;
         }
         for i in 0..count {

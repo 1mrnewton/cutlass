@@ -59,4 +59,8 @@ pub fn register_encoders_with(factory: &mut EncodeFactory, video: bool) {
             factory.register(id, nvenc::open_encoder);
         }
     }
+    if backends.vaapi {
+        factory.register(CodecId::H264, va::h264_enc::open_encoder);
+        factory.register(CodecId::Hevc, va::hevc_enc::open_encoder);
+    }
 }

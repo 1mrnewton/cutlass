@@ -41,6 +41,8 @@ pub const VAConfigAttribMaxPictureWidth: i32 = 18;
 pub const VAConfigAttribMaxPictureHeight: i32 = 19;
 pub const VAConfigAttribEncHEVCFeatures: i32 = 50;
 pub const VAConfigAttribEncHEVCBlockSizes: i32 = 51;
+pub const VAConfigAttribPredictionDirection: i32 = 39;
+pub const VA_PREDICTION_DIRECTION_BI_NOT_EMPTY: u32 = 4;
 
 pub const VAPictureParameterBufferType: i32 = 0;
 pub const VAIQMatrixBufferType: i32 = 1;
@@ -630,4 +632,469 @@ pub mod h264_iq {
     pub const SIZE: usize = 240;
     pub const SCALING_LIST_4X4: Array<U8> = Array::new(0, 96, 1);
     pub const SCALING_LIST_8X8: Array<U8> = Array::new(96, 128, 1);
+}
+
+/// `VAEncSequenceParameterBufferH264`.
+pub mod h264_enc_seq {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 1132;
+    pub const SEQ_PARAMETER_SET_ID: U8 = U8(0);
+    pub const LEVEL_IDC: U8 = U8(1);
+    pub const INTRA_PERIOD: U32 = U32(4);
+    pub const INTRA_IDR_PERIOD: U32 = U32(8);
+    pub const IP_PERIOD: U32 = U32(12);
+    pub const BITS_PER_SECOND: U32 = U32(16);
+    pub const MAX_NUM_REF_FRAMES: U32 = U32(20);
+    pub const PICTURE_WIDTH_IN_MBS: U16 = U16(24);
+    pub const PICTURE_HEIGHT_IN_MBS: U16 = U16(26);
+    pub const CHROMA_FORMAT_IDC: Bits = Bits {
+        offset: 28,
+        shift: 0,
+        width: 2,
+    };
+    pub const FRAME_MBS_ONLY_FLAG: Bits = Bits {
+        offset: 28,
+        shift: 2,
+        width: 1,
+    };
+    pub const DIRECT_8X8_INFERENCE_FLAG: Bits = Bits {
+        offset: 28,
+        shift: 5,
+        width: 1,
+    };
+    pub const LOG2_MAX_FRAME_NUM_MINUS4: Bits = Bits {
+        offset: 28,
+        shift: 6,
+        width: 4,
+    };
+    pub const PIC_ORDER_CNT_TYPE: Bits = Bits {
+        offset: 28,
+        shift: 10,
+        width: 2,
+    };
+    pub const LOG2_MAX_PIC_ORDER_CNT_LSB_MINUS4: Bits = Bits {
+        offset: 28,
+        shift: 12,
+        width: 4,
+    };
+    pub const BIT_DEPTH_LUMA_MINUS8: U8 = U8(32);
+    pub const BIT_DEPTH_CHROMA_MINUS8: U8 = U8(33);
+    pub const FRAME_CROPPING_FLAG: U8 = U8(1068);
+    pub const FRAME_CROP_LEFT_OFFSET: U32 = U32(1072);
+    pub const FRAME_CROP_RIGHT_OFFSET: U32 = U32(1076);
+    pub const FRAME_CROP_TOP_OFFSET: U32 = U32(1080);
+    pub const FRAME_CROP_BOTTOM_OFFSET: U32 = U32(1084);
+    pub const VUI_PARAMETERS_PRESENT_FLAG: U8 = U8(1088);
+    pub const TIMING_INFO_PRESENT_FLAG: Bits = Bits {
+        offset: 1092,
+        shift: 1,
+        width: 1,
+    };
+    pub const BITSTREAM_RESTRICTION_FLAG: Bits = Bits {
+        offset: 1092,
+        shift: 2,
+        width: 1,
+    };
+    pub const LOG2_MAX_MV_LENGTH_HORIZONTAL: Bits = Bits {
+        offset: 1092,
+        shift: 3,
+        width: 5,
+    };
+    pub const LOG2_MAX_MV_LENGTH_VERTICAL: Bits = Bits {
+        offset: 1092,
+        shift: 8,
+        width: 5,
+    };
+    pub const MOTION_VECTORS_OVER_PIC_BOUNDARIES_FLAG: Bits = Bits {
+        offset: 1092,
+        shift: 15,
+        width: 1,
+    };
+    pub const NUM_UNITS_IN_TICK: U32 = U32(1108);
+    pub const TIME_SCALE: U32 = U32(1112);
+}
+
+/// `VAEncPictureParameterBufferH264`.
+pub mod h264_enc_pic {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 648;
+    pub const CURR_PIC: Base = Base(0);
+    pub const REFERENCE_FRAMES: Array<Base> = Array::new(36, 16, 36);
+    pub const CODED_BUF: U32 = U32(612);
+    pub const PIC_PARAMETER_SET_ID: U8 = U8(616);
+    pub const SEQ_PARAMETER_SET_ID: U8 = U8(617);
+    pub const LAST_PICTURE: U8 = U8(618);
+    pub const FRAME_NUM: U16 = U16(620);
+    pub const PIC_INIT_QP: U8 = U8(622);
+    pub const NUM_REF_IDX_L0_ACTIVE_MINUS1: U8 = U8(623);
+    pub const NUM_REF_IDX_L1_ACTIVE_MINUS1: U8 = U8(624);
+    pub const CHROMA_QP_INDEX_OFFSET: I8 = I8(625);
+    pub const SECOND_CHROMA_QP_INDEX_OFFSET: I8 = I8(626);
+    pub const IDR_PIC_FLAG: Bits = Bits {
+        offset: 628,
+        shift: 0,
+        width: 1,
+    };
+    pub const REFERENCE_PIC_FLAG: Bits = Bits {
+        offset: 628,
+        shift: 1,
+        width: 2,
+    };
+    pub const ENTROPY_CODING_MODE_FLAG: Bits = Bits {
+        offset: 628,
+        shift: 3,
+        width: 1,
+    };
+    pub const TRANSFORM_8X8_MODE_FLAG: Bits = Bits {
+        offset: 628,
+        shift: 8,
+        width: 1,
+    };
+    pub const DEBLOCKING_FILTER_CONTROL_PRESENT_FLAG: Bits = Bits {
+        offset: 628,
+        shift: 9,
+        width: 1,
+    };
+}
+
+/// `VAEncSliceParameterBufferH264`.
+pub mod h264_enc_slice {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 3140;
+    pub const MACROBLOCK_ADDRESS: U32 = U32(0);
+    pub const NUM_MACROBLOCKS: U32 = U32(4);
+    pub const MACROBLOCK_INFO: U32 = U32(8);
+    pub const SLICE_TYPE: U8 = U8(12);
+    pub const PIC_PARAMETER_SET_ID: U8 = U8(13);
+    pub const IDR_PIC_ID: U16 = U16(14);
+    pub const PIC_ORDER_CNT_LSB: U16 = U16(16);
+    pub const DIRECT_SPATIAL_MV_PRED_FLAG: U8 = U8(32);
+    pub const NUM_REF_IDX_ACTIVE_OVERRIDE_FLAG: U8 = U8(33);
+    pub const NUM_REF_IDX_L0_ACTIVE_MINUS1: U8 = U8(34);
+    pub const NUM_REF_IDX_L1_ACTIVE_MINUS1: U8 = U8(35);
+    pub const REF_PIC_LIST0: Array<Base> = Array::new(36, 32, 36);
+    pub const REF_PIC_LIST1: Array<Base> = Array::new(1188, 32, 36);
+    pub const CABAC_INIT_IDC: U8 = U8(3118);
+    pub const SLICE_QP_DELTA: I8 = I8(3119);
+    pub const DISABLE_DEBLOCKING_FILTER_IDC: U8 = U8(3120);
+    pub const SLICE_ALPHA_C0_OFFSET_DIV2: I8 = I8(3121);
+    pub const SLICE_BETA_OFFSET_DIV2: I8 = I8(3122);
+}
+
+/// `VAEncSequenceParameterBufferHEVC`.
+pub mod hevc_enc_seq {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 116;
+    pub const GENERAL_PROFILE_IDC: U8 = U8(0);
+    pub const GENERAL_LEVEL_IDC: U8 = U8(1);
+    pub const GENERAL_TIER_FLAG: U8 = U8(2);
+    pub const INTRA_PERIOD: U32 = U32(4);
+    pub const INTRA_IDR_PERIOD: U32 = U32(8);
+    pub const IP_PERIOD: U32 = U32(12);
+    pub const BITS_PER_SECOND: U32 = U32(16);
+    pub const PIC_WIDTH_IN_LUMA_SAMPLES: U16 = U16(20);
+    pub const PIC_HEIGHT_IN_LUMA_SAMPLES: U16 = U16(22);
+    pub const CHROMA_FORMAT_IDC: Bits = Bits {
+        offset: 24,
+        shift: 0,
+        width: 2,
+    };
+    pub const BIT_DEPTH_LUMA_MINUS8: Bits = Bits {
+        offset: 24,
+        shift: 3,
+        width: 3,
+    };
+    pub const BIT_DEPTH_CHROMA_MINUS8: Bits = Bits {
+        offset: 24,
+        shift: 6,
+        width: 3,
+    };
+    pub const SCALING_LIST_ENABLED_FLAG: Bits = Bits {
+        offset: 24,
+        shift: 9,
+        width: 1,
+    };
+    pub const STRONG_INTRA_SMOOTHING_ENABLED_FLAG: Bits = Bits {
+        offset: 24,
+        shift: 10,
+        width: 1,
+    };
+    pub const AMP_ENABLED_FLAG: Bits = Bits {
+        offset: 24,
+        shift: 11,
+        width: 1,
+    };
+    pub const SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG: Bits = Bits {
+        offset: 24,
+        shift: 12,
+        width: 1,
+    };
+    pub const PCM_ENABLED_FLAG: Bits = Bits {
+        offset: 24,
+        shift: 13,
+        width: 1,
+    };
+    pub const SPS_TEMPORAL_MVP_ENABLED_FLAG: Bits = Bits {
+        offset: 24,
+        shift: 15,
+        width: 1,
+    };
+    pub const LOW_DELAY_SEQ: Bits = Bits {
+        offset: 24,
+        shift: 16,
+        width: 1,
+    };
+    pub const LOG2_MIN_LUMA_CODING_BLOCK_SIZE_MINUS3: U8 = U8(28);
+    pub const LOG2_DIFF_MAX_MIN_LUMA_CODING_BLOCK_SIZE: U8 = U8(29);
+    pub const LOG2_MIN_TRANSFORM_BLOCK_SIZE_MINUS2: U8 = U8(30);
+    pub const LOG2_DIFF_MAX_MIN_TRANSFORM_BLOCK_SIZE: U8 = U8(31);
+    pub const MAX_TRANSFORM_HIERARCHY_DEPTH_INTER: U8 = U8(32);
+    pub const MAX_TRANSFORM_HIERARCHY_DEPTH_INTRA: U8 = U8(33);
+    pub const VUI_PARAMETERS_PRESENT_FLAG: U8 = U8(52);
+}
+
+/// `VAEncPictureParameterBufferHEVC`.
+pub mod hevc_enc_pic {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 576;
+    pub const DECODED_CURR_PIC: Base = Base(0);
+    pub const REFERENCE_FRAMES: Array<Base> = Array::new(28, 15, 28);
+    pub const CODED_BUF: U32 = U32(448);
+    pub const COLLOCATED_REF_PIC_INDEX: U8 = U8(452);
+    pub const LAST_PICTURE: U8 = U8(453);
+    pub const PIC_INIT_QP: U8 = U8(454);
+    pub const DIFF_CU_QP_DELTA_DEPTH: U8 = U8(455);
+    pub const LOG2_PARALLEL_MERGE_LEVEL_MINUS2: U8 = U8(500);
+    pub const NUM_REF_IDX_L0_DEFAULT_ACTIVE_MINUS1: U8 = U8(502);
+    pub const NUM_REF_IDX_L1_DEFAULT_ACTIVE_MINUS1: U8 = U8(503);
+    pub const SLICE_PIC_PARAMETER_SET_ID: U8 = U8(504);
+    pub const NAL_UNIT_TYPE: U8 = U8(505);
+    pub const IDR_PIC_FLAG: Bits = Bits {
+        offset: 508,
+        shift: 0,
+        width: 1,
+    };
+    pub const CODING_TYPE: Bits = Bits {
+        offset: 508,
+        shift: 1,
+        width: 3,
+    };
+    pub const REFERENCE_PIC_FLAG: Bits = Bits {
+        offset: 508,
+        shift: 4,
+        width: 1,
+    };
+    pub const SIGN_DATA_HIDING_ENABLED_FLAG: Bits = Bits {
+        offset: 508,
+        shift: 6,
+        width: 1,
+    };
+    pub const TRANSFORM_SKIP_ENABLED_FLAG: Bits = Bits {
+        offset: 508,
+        shift: 8,
+        width: 1,
+    };
+    pub const CU_QP_DELTA_ENABLED_FLAG: Bits = Bits {
+        offset: 508,
+        shift: 9,
+        width: 1,
+    };
+}
+
+/// `VAEncSliceParameterBufferHEVC`.
+pub mod hevc_enc_slice {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 1076;
+    pub const SLICE_SEGMENT_ADDRESS: U32 = U32(0);
+    pub const NUM_CTU_IN_SLICE: U32 = U32(4);
+    pub const SLICE_TYPE: U8 = U8(8);
+    pub const SLICE_PIC_PARAMETER_SET_ID: U8 = U8(9);
+    pub const NUM_REF_IDX_L0_ACTIVE_MINUS1: U8 = U8(10);
+    pub const NUM_REF_IDX_L1_ACTIVE_MINUS1: U8 = U8(11);
+    pub const REF_PIC_LIST0: Array<Base> = Array::new(12, 15, 28);
+    pub const REF_PIC_LIST1: Array<Base> = Array::new(432, 15, 28);
+    pub const MAX_NUM_MERGE_CAND: U8 = U8(1034);
+    pub const SLICE_QP_DELTA: I8 = I8(1035);
+    pub const LAST_SLICE_OF_PIC_FLAG: Bits = Bits {
+        offset: 1040,
+        shift: 0,
+        width: 1,
+    };
+    pub const SLICE_TEMPORAL_MVP_ENABLED_FLAG: Bits = Bits {
+        offset: 1040,
+        shift: 4,
+        width: 1,
+    };
+    pub const SLICE_SAO_LUMA_FLAG: Bits = Bits {
+        offset: 1040,
+        shift: 5,
+        width: 1,
+    };
+    pub const SLICE_SAO_CHROMA_FLAG: Bits = Bits {
+        offset: 1040,
+        shift: 6,
+        width: 1,
+    };
+    pub const COLLOCATED_FROM_L0_FLAG: Bits = Bits {
+        offset: 1040,
+        shift: 13,
+        width: 1,
+    };
+}
+
+/// `VAConfigAttribValEncHEVCFeatures`: 0 not offered, 1 offered, 2 required.
+pub mod hevc_features {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 4;
+    pub const AMP: Bits = Bits {
+        offset: 0,
+        shift: 4,
+        width: 2,
+    };
+    pub const SAO: Bits = Bits {
+        offset: 0,
+        shift: 6,
+        width: 2,
+    };
+    pub const TEMPORAL_MVP: Bits = Bits {
+        offset: 0,
+        shift: 10,
+        width: 2,
+    };
+    pub const STRONG_INTRA_SMOOTHING: Bits = Bits {
+        offset: 0,
+        shift: 12,
+        width: 2,
+    };
+    pub const SIGN_DATA_HIDING: Bits = Bits {
+        offset: 0,
+        shift: 16,
+        width: 2,
+    };
+    pub const TRANSFORM_SKIP: Bits = Bits {
+        offset: 0,
+        shift: 20,
+        width: 2,
+    };
+    pub const CU_QP_DELTA: Bits = Bits {
+        offset: 0,
+        shift: 22,
+        width: 2,
+    };
+}
+
+/// `VAConfigAttribValEncHEVCBlockSizes`.
+pub mod hevc_block_sizes {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 4;
+    pub const LOG2_MAX_CODING_TREE_BLOCK_SIZE_MINUS3: Bits = Bits {
+        offset: 0,
+        shift: 0,
+        width: 2,
+    };
+    pub const LOG2_MIN_LUMA_CODING_BLOCK_SIZE_MINUS3: Bits = Bits {
+        offset: 0,
+        shift: 4,
+        width: 2,
+    };
+    pub const LOG2_MAX_LUMA_TRANSFORM_BLOCK_SIZE_MINUS2: Bits = Bits {
+        offset: 0,
+        shift: 6,
+        width: 2,
+    };
+    pub const LOG2_MIN_LUMA_TRANSFORM_BLOCK_SIZE_MINUS2: Bits = Bits {
+        offset: 0,
+        shift: 8,
+        width: 2,
+    };
+    pub const MAX_MAX_TRANSFORM_HIERARCHY_DEPTH_INTER: Bits = Bits {
+        offset: 0,
+        shift: 10,
+        width: 2,
+    };
+    pub const MAX_MAX_TRANSFORM_HIERARCHY_DEPTH_INTRA: Bits = Bits {
+        offset: 0,
+        shift: 14,
+        width: 2,
+    };
+}
+
+/// `VAEncMiscParameterBuffer`: the type, then the parameter struct at `SIZE`.
+pub mod misc {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 4;
+    pub const TYPE: U32 = U32(0);
+}
+
+/// `VAEncMiscParameterRateControl`.
+pub mod misc_rate_control {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 60;
+    pub const BITS_PER_SECOND: U32 = U32(0);
+    pub const TARGET_PERCENTAGE: U32 = U32(4);
+    pub const WINDOW_SIZE: U32 = U32(8);
+    pub const INITIAL_QP: U32 = U32(12);
+    pub const MIN_QP: U32 = U32(16);
+    pub const MAX_QP: U32 = U32(32);
+}
+
+/// `VAEncMiscParameterFrameRate`.
+pub mod misc_frame_rate {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 24;
+    pub const FRAMERATE: U32 = U32(0);
+}
+
+/// `VAEncMiscParameterHRD`.
+pub mod misc_hrd {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 24;
+    pub const INITIAL_BUFFER_FULLNESS: U32 = U32(0);
+    pub const BUFFER_SIZE: U32 = U32(4);
+}
+
+/// `VAEncPackedHeaderParameterBuffer`.
+pub mod packed_header {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 28;
+    pub const TYPE: U32 = U32(0);
+    pub const BIT_LENGTH: U32 = U32(4);
+    pub const HAS_EMULATION_BYTES: U8 = U8(8);
+}
+
+/// `VACodedBufferSegment`, read from the driver's memory.
+pub mod coded_segment {
+    #[allow(unused_imports, clippy::wildcard_imports)]
+    use super::*;
+
+    pub const SIZE: usize = 48;
+    pub const SIZE_BYTES: U32 = U32(0);
+    pub const BUF: U64 = U64(16);
+    pub const NEXT: U64 = U64(24);
 }

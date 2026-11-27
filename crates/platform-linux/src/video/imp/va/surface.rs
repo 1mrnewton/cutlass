@@ -1,5 +1,6 @@
-//! VA-API objects that are freed when dropped, and the copy of a decoded
-//! surface back to the CPU.
+//! VA-API objects that are freed when dropped, the copy of a decoded
+//! surface back to the CPU, and the copy of a picture onto a surface an
+//! encoder reads.
 //!
 //! A decoder makes a [`Config`], a [`Pool`] of surfaces and a [`Context`]
 //! over them for each sequence. A surface is free while only the pool
@@ -239,7 +240,7 @@ impl Context {
         let status = unsafe { (node.va.end_picture)(node.display, self.id) };
         rendered?;
         if status != abi::VA_STATUS_SUCCESS {
-            return Err(failed(node, status, "VA-API could not decode a picture"));
+            return Err(failed(node, status, "VA-API could not end a picture"));
         }
         Ok(())
     }
@@ -280,6 +281,11 @@ impl Buffer {
         Self::make(node, context, kind, blob.as_ptr(), blob.len())
     }
 
+    /// An encoder's output buffer of `len` bytes, which the driver fills.
+    pub fn coded(node: &'static Node, context: Id, len: usize) -> Result<Self, CodecError> {
+        Self::make(node, context, abi::VAEncCodedBufferType, ptr::null(), len)
+    }
+
     fn make(
         node: &'static Node,
         context: Id,
@@ -291,8 +297,9 @@ impl Buffer {
             what: "VA-API buffer size",
         })?;
         let mut id = abi::VA_INVALID_ID;
-        // SAFETY: `data` points at `len` readable bytes; libva copies them
-        // into the new buffer and never writes through the pointer.
+        // SAFETY: `data` is null, for a buffer the driver fills, or points
+        // at `len` readable bytes; libva copies them into the new buffer
+        // and never writes through the pointer.
         let status = unsafe {
             (node.va.create_buffer)(
                 node.display,
@@ -308,6 +315,49 @@ impl Buffer {
             return Err(failed(node, status, "VA-API could not make a buffer"));
         }
         Ok(Self { node, id })
+    }
+}
+
+impl Buffer {
+    /// What an encode wrote into this coded buffer, every segment in order.
+    pub fn coded_bytes(&self) -> Result<Vec<u8>, CodecError> {
+        use abi::coded_segment as seg;
+        let node = self.node;
+        let mut data: *mut c_void = ptr::null_mut();
+        // SAFETY: the buffer belongs to this display and the out pointer is
+        // valid.
+        let status = unsafe { (node.va.map_buffer)(node.display, self.id, &raw mut data) };
+        if status != abi::VA_STATUS_SUCCESS || data.is_null() {
+            return Err(failed(node, status, "VA-API could not map a coded picture"));
+        }
+        let mut out = Vec::new();
+        let mut segment = data.cast_const();
+        // A list longer than this is a driver bug, not a picture.
+        for _ in 0..4096 {
+            if segment.is_null() {
+                break;
+            }
+            // SAFETY: a mapped coded buffer is a list of
+            // VACodedBufferSegments, each `seg::SIZE` bytes, whose `buf`
+            // holds `size` bytes, all readable until the buffer is
+            // unmapped below.
+            let (size, buf, next) = unsafe {
+                let at = segment.cast::<u8>();
+                (
+                    ptr::read_unaligned(at.add(seg::SIZE_BYTES.0).cast::<u32>()),
+                    ptr::read_unaligned(at.add(seg::BUF.0).cast::<*const u8>()),
+                    ptr::read_unaligned(at.add(seg::NEXT.0).cast::<*const c_void>()),
+                )
+            };
+            if !buf.is_null() && size > 0 {
+                // SAFETY: as above.
+                out.extend_from_slice(unsafe { std::slice::from_raw_parts(buf, size as usize) });
+            }
+            segment = next;
+        }
+        // SAFETY: the buffer was mapped above and is unmapped once.
+        unsafe { (node.va.unmap_buffer)(node.display, self.id) };
+        Ok(out)
     }
 }
 
@@ -405,6 +455,30 @@ impl Image {
         unsafe { (node.va.unmap_buffer)(node.display, buffer) };
         packed
     }
+
+    /// Map the image and spread a packed NV12 picture over `area`.
+    fn fill(&self, picture: &Picture<'_>, area: (u32, u32)) -> Result<(), CodecError> {
+        let node = self.node;
+        let buffer = self.blob.get(abi::image::BUF);
+        let len = self.blob.get(abi::image::DATA_SIZE) as usize;
+        let mut data: *mut c_void = ptr::null_mut();
+        // SAFETY: the image's buffer belongs to this display and the out
+        // pointer is valid.
+        let status = unsafe { (node.va.map_buffer)(node.display, buffer, &raw mut data) };
+        if status != abi::VA_STATUS_SUCCESS || data.is_null() {
+            return Err(failed(node, status, "VA-API could not map an image"));
+        }
+        // SAFETY: a mapped image buffer holds `data_size` bytes until it is
+        // unmapped below, and only this slice touches them meanwhile.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), len) };
+        let filled = match [self.plane(0), self.plane(1)] {
+            [Some(luma), Some(chroma)] => spread(picture, bytes, [luma, chroma], area),
+            _ => Err(SHORT),
+        };
+        // SAFETY: the buffer was mapped above and is unmapped once.
+        unsafe { (node.va.unmap_buffer)(node.display, buffer) };
+        filled
+    }
 }
 
 impl Drop for Image {
@@ -450,6 +524,167 @@ fn pack(
     // Interleaved chroma: half the rows, the same bytes a row.
     copy(planes[1], top / 2..(top + rows) / 2)?;
     Ok(out)
+}
+
+/// A packed NV12 picture: `width` by `height` luma bytes, then half as
+/// many rows of interleaved chroma.
+#[derive(Clone, Copy, Debug)]
+pub struct Picture<'a> {
+    pub nv12: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+}
+
+/// `picture` over `area` (width, height) of an NV12 image whose planes are
+/// at `planes`, its last column and row repeated over the rest.
+fn spread(
+    picture: &Picture<'_>,
+    bytes: &mut [u8],
+    planes: [(usize, usize); 2],
+    area: (u32, u32),
+) -> Result<(), CodecError> {
+    let (width, height) = (picture.width as usize, picture.height as usize);
+    let (area_w, area_h) = (area.0 as usize, area.1 as usize);
+    let luma = width * height;
+    if width < 2 || height < 2 || area_w < width || area_h < height {
+        return Err(SHORT);
+    }
+    let source = picture.nv12.get(..luma + luma / 2).ok_or(SHORT)?;
+    let (luma, chroma) = source.split_at(luma);
+    fill_plane(bytes, planes[0], luma, (width, height), (area_w, area_h), 1)?;
+    fill_plane(
+        bytes,
+        planes[1],
+        chroma,
+        (width, height / 2),
+        (area_w, area_h / 2),
+        2,
+    )
+}
+
+/// One plane of [`spread`]: rows of `size.0` bytes, each widened to
+/// `area.0` by repeating its last `sample` bytes.
+fn fill_plane(
+    bytes: &mut [u8],
+    (base, pitch): (usize, usize),
+    source: &[u8],
+    size: (usize, usize),
+    area: (usize, usize),
+    sample: usize,
+) -> Result<(), CodecError> {
+    for y in 0..area.1 {
+        let from = y.min(size.1 - 1) * size.0;
+        let from = source.get(from..from + size.0).ok_or(SHORT)?;
+        let at = y
+            .checked_mul(pitch)
+            .and_then(|start| start.checked_add(base))
+            .ok_or(SHORT)?;
+        let row = bytes.get_mut(at..at + area.0).ok_or(SHORT)?;
+        let (picture, edge) = row.split_at_mut(size.0);
+        picture.copy_from_slice(from);
+        let last = &from[size.0 - sample..];
+        for repeat in edge.chunks_mut(sample) {
+            repeat.copy_from_slice(&last[..repeat.len()]);
+        }
+    }
+    Ok(())
+}
+
+/// Copies pictures onto the surfaces an encoder reads.
+///
+/// The picture is written into an image of the surface's size, kept for
+/// the next picture, and copied onto the surface with `vaPutImage`, which
+/// drivers do on the GPU. A driver that refuses has the surface derived
+/// (`vaDeriveImage`) and written in place instead, from then on.
+pub struct Upload {
+    node: &'static Node,
+    image: Option<Image>,
+    derive: bool,
+}
+
+impl Upload {
+    pub fn new(node: &'static Node) -> Self {
+        Self {
+            node,
+            image: None,
+            derive: false,
+        }
+    }
+
+    /// Write `picture` onto `surface`, which is at least as large, its
+    /// last column and row repeated over the rest.
+    pub fn write(&mut self, surface: &Surface, picture: &Picture<'_>) -> Result<(), CodecError> {
+        if !self.derive {
+            match self.put(surface, picture) {
+                Ok(()) => return Ok(()),
+                Err(status) => {
+                    cutlass_logger::info!(
+                        "VA-API: vaPutImage does not copy NV12: {}; writing the surface instead",
+                        self.node.va.error(status)
+                    );
+                    self.image = None;
+                    self.derive = true;
+                }
+            }
+        }
+        self.derived(surface, picture)
+    }
+
+    /// Write through the kept image; `Err` is the status of a step the
+    /// driver refused.
+    fn put(&mut self, surface: &Surface, picture: &Picture<'_>) -> Result<(), Status> {
+        let node = self.node;
+        let size = (surface.width, surface.height);
+        let fits = self
+            .image
+            .as_ref()
+            .is_some_and(|image| image.fourcc() == abi::VA_FOURCC_NV12 && image.size() == size);
+        if !fits {
+            self.image = None;
+            self.image = Some(create_image(node, abi::VA_FOURCC_NV12, size)?);
+        }
+        let Some(image) = &self.image else {
+            return Err(abi::VA_STATUS_ERROR_OPERATION_FAILED);
+        };
+        image
+            .fill(picture, size)
+            .map_err(|_| abi::VA_STATUS_ERROR_OPERATION_FAILED)?;
+        // SAFETY: the surface and image were made on this display and both
+        // rectangles are the whole surface, which the image matches.
+        check(unsafe {
+            (node.va.put_image)(
+                node.display,
+                surface.id,
+                image.id(),
+                0,
+                0,
+                surface.width,
+                surface.height,
+                0,
+                0,
+                surface.width,
+                surface.height,
+            )
+        })
+    }
+
+    fn derived(&self, surface: &Surface, picture: &Picture<'_>) -> Result<(), CodecError> {
+        let node = self.node;
+        let mut blob = Blob::new(abi::image::SIZE);
+        // SAFETY: the surface was made on this display and the blob is a
+        // zeroed VAImage for libva to fill.
+        let status = unsafe { (node.va.derive_image)(node.display, surface.id, blob.as_mut_ptr()) };
+        if status != abi::VA_STATUS_SUCCESS {
+            return Err(refused(node, status, "VA-API could not write a picture"));
+        }
+        let image = Image { node, blob };
+        if image.fourcc() != abi::VA_FOURCC_NV12 {
+            return Err(CodecError::Unsupported {
+                what: "VA-API surface is not NV12",
+            });
+        }
+        image.fill(picture, (surface.width, surface.height))
+    }
 }
 
 /// Copies decoded surfaces back as 8-bit planar 4:2:0.
@@ -686,6 +921,39 @@ mod tests {
         .expect("pack");
         assert_eq!(deep, [0, 1, 2, 3, 16, 17, 18, 19, 32, 33, 34, 35]);
         assert!(pack(&bytes, [(0, 8), (60, 8)], window, 1).is_err());
+    }
+
+    #[test]
+    fn a_picture_spreads_over_the_surface_repeating_its_edges() {
+        // A 2x2 picture: luma 1 2 / 3 4, chroma pair 5 6.
+        let nv12 = [1, 2, 3, 4, 5, 6];
+        let picture = Picture {
+            nv12: &nv12,
+            width: 2,
+            height: 2,
+        };
+        // A 4x4 area in planes of pitch 5: luma at 0, chroma at 20.
+        let mut bytes = vec![0; 30];
+        spread(&picture, &mut bytes, [(0, 5), (20, 5)], (4, 4)).expect("spread");
+        assert_eq!(
+            bytes,
+            [
+                1, 2, 2, 2, 0, //
+                3, 4, 4, 4, 0, //
+                3, 4, 4, 4, 0, //
+                3, 4, 4, 4, 0, //
+                5, 6, 5, 6, 0, //
+                5, 6, 5, 6, 0,
+            ]
+        );
+        let mut small = vec![0; 28];
+        assert!(spread(&picture, &mut small, [(0, 5), (20, 5)], (4, 4)).is_err());
+        assert!(spread(&picture, &mut bytes, [(0, 5), (20, 5)], (1, 4)).is_err());
+        let short = Picture {
+            nv12: &nv12[..5],
+            ..picture
+        };
+        assert!(spread(&short, &mut bytes, [(0, 5), (20, 5)], (4, 4)).is_err());
     }
 
     #[test]

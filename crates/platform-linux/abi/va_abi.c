@@ -132,6 +132,8 @@ int main(void) {
     I(VAConfigAttribMaxPictureHeight);
     I(VAConfigAttribEncHEVCFeatures);
     I(VAConfigAttribEncHEVCBlockSizes);
+    I(VAConfigAttribPredictionDirection);
+    U(VA_PREDICTION_DIRECTION_BI_NOT_EMPTY);
     printf("\n");
 
     I(VAPictureParameterBufferType);
@@ -419,6 +421,226 @@ int main(void) {
     open_mod("h264_iq", "`VAIQMatrixBufferH264`, each list in zigzag order.", sizeof(VAIQMatrixBufferH264));
     A(VAIQMatrixBufferH264, "SCALING_LIST_4X4", ScalingList4x4, ScalingList4x4[0][0]);
     A(VAIQMatrixBufferH264, "SCALING_LIST_8X8", ScalingList8x8, ScalingList8x8[0][0]);
+    close_mod();
+    open_mod("h264_enc_seq", "`VAEncSequenceParameterBufferH264`.", sizeof(VAEncSequenceParameterBufferH264));
+#define Q(NAME, f) F(VAEncSequenceParameterBufferH264, NAME, f)
+#define QB(NAME, f) B(VAEncSequenceParameterBufferH264, NAME, f)
+    Q("SEQ_PARAMETER_SET_ID", seq_parameter_set_id);
+    Q("LEVEL_IDC", level_idc);
+    Q("INTRA_PERIOD", intra_period);
+    Q("INTRA_IDR_PERIOD", intra_idr_period);
+    Q("IP_PERIOD", ip_period);
+    Q("BITS_PER_SECOND", bits_per_second);
+    Q("MAX_NUM_REF_FRAMES", max_num_ref_frames);
+    Q("PICTURE_WIDTH_IN_MBS", picture_width_in_mbs);
+    Q("PICTURE_HEIGHT_IN_MBS", picture_height_in_mbs);
+    QB("CHROMA_FORMAT_IDC", seq_fields.bits.chroma_format_idc);
+    QB("FRAME_MBS_ONLY_FLAG", seq_fields.bits.frame_mbs_only_flag);
+    QB("DIRECT_8X8_INFERENCE_FLAG", seq_fields.bits.direct_8x8_inference_flag);
+    QB("LOG2_MAX_FRAME_NUM_MINUS4", seq_fields.bits.log2_max_frame_num_minus4);
+    QB("PIC_ORDER_CNT_TYPE", seq_fields.bits.pic_order_cnt_type);
+    QB("LOG2_MAX_PIC_ORDER_CNT_LSB_MINUS4", seq_fields.bits.log2_max_pic_order_cnt_lsb_minus4);
+    Q("BIT_DEPTH_LUMA_MINUS8", bit_depth_luma_minus8);
+    Q("BIT_DEPTH_CHROMA_MINUS8", bit_depth_chroma_minus8);
+    Q("FRAME_CROPPING_FLAG", frame_cropping_flag);
+    Q("FRAME_CROP_LEFT_OFFSET", frame_crop_left_offset);
+    Q("FRAME_CROP_RIGHT_OFFSET", frame_crop_right_offset);
+    Q("FRAME_CROP_TOP_OFFSET", frame_crop_top_offset);
+    Q("FRAME_CROP_BOTTOM_OFFSET", frame_crop_bottom_offset);
+    Q("VUI_PARAMETERS_PRESENT_FLAG", vui_parameters_present_flag);
+    QB("TIMING_INFO_PRESENT_FLAG", vui_fields.bits.timing_info_present_flag);
+    QB("BITSTREAM_RESTRICTION_FLAG", vui_fields.bits.bitstream_restriction_flag);
+    QB("LOG2_MAX_MV_LENGTH_HORIZONTAL", vui_fields.bits.log2_max_mv_length_horizontal);
+    QB("LOG2_MAX_MV_LENGTH_VERTICAL", vui_fields.bits.log2_max_mv_length_vertical);
+    QB("MOTION_VECTORS_OVER_PIC_BOUNDARIES_FLAG", vui_fields.bits.motion_vectors_over_pic_boundaries_flag);
+    Q("NUM_UNITS_IN_TICK", num_units_in_tick);
+    Q("TIME_SCALE", time_scale);
+#undef Q
+#undef QB
+    close_mod();
+
+    open_mod("h264_enc_pic", "`VAEncPictureParameterBufferH264`.", sizeof(VAEncPictureParameterBufferH264));
+#define P(NAME, f) F(VAEncPictureParameterBufferH264, NAME, f)
+#define PB(NAME, f) B(VAEncPictureParameterBufferH264, NAME, f)
+    S(VAEncPictureParameterBufferH264, "CURR_PIC", CurrPic);
+    SA(VAEncPictureParameterBufferH264, "REFERENCE_FRAMES", ReferenceFrames);
+    P("CODED_BUF", coded_buf);
+    P("PIC_PARAMETER_SET_ID", pic_parameter_set_id);
+    P("SEQ_PARAMETER_SET_ID", seq_parameter_set_id);
+    P("LAST_PICTURE", last_picture);
+    P("FRAME_NUM", frame_num);
+    P("PIC_INIT_QP", pic_init_qp);
+    P("NUM_REF_IDX_L0_ACTIVE_MINUS1", num_ref_idx_l0_active_minus1);
+    P("NUM_REF_IDX_L1_ACTIVE_MINUS1", num_ref_idx_l1_active_minus1);
+    P("CHROMA_QP_INDEX_OFFSET", chroma_qp_index_offset);
+    P("SECOND_CHROMA_QP_INDEX_OFFSET", second_chroma_qp_index_offset);
+    PB("IDR_PIC_FLAG", pic_fields.bits.idr_pic_flag);
+    PB("REFERENCE_PIC_FLAG", pic_fields.bits.reference_pic_flag);
+    PB("ENTROPY_CODING_MODE_FLAG", pic_fields.bits.entropy_coding_mode_flag);
+    PB("TRANSFORM_8X8_MODE_FLAG", pic_fields.bits.transform_8x8_mode_flag);
+    PB("DEBLOCKING_FILTER_CONTROL_PRESENT_FLAG", pic_fields.bits.deblocking_filter_control_present_flag);
+#undef P
+#undef PB
+    close_mod();
+
+    open_mod("h264_enc_slice", "`VAEncSliceParameterBufferH264`.", sizeof(VAEncSliceParameterBufferH264));
+#define L(NAME, f) F(VAEncSliceParameterBufferH264, NAME, f)
+    L("MACROBLOCK_ADDRESS", macroblock_address);
+    L("NUM_MACROBLOCKS", num_macroblocks);
+    L("MACROBLOCK_INFO", macroblock_info);
+    L("SLICE_TYPE", slice_type);
+    L("PIC_PARAMETER_SET_ID", pic_parameter_set_id);
+    L("IDR_PIC_ID", idr_pic_id);
+    L("PIC_ORDER_CNT_LSB", pic_order_cnt_lsb);
+    L("DIRECT_SPATIAL_MV_PRED_FLAG", direct_spatial_mv_pred_flag);
+    L("NUM_REF_IDX_ACTIVE_OVERRIDE_FLAG", num_ref_idx_active_override_flag);
+    L("NUM_REF_IDX_L0_ACTIVE_MINUS1", num_ref_idx_l0_active_minus1);
+    L("NUM_REF_IDX_L1_ACTIVE_MINUS1", num_ref_idx_l1_active_minus1);
+    SA(VAEncSliceParameterBufferH264, "REF_PIC_LIST0", RefPicList0);
+    SA(VAEncSliceParameterBufferH264, "REF_PIC_LIST1", RefPicList1);
+    L("CABAC_INIT_IDC", cabac_init_idc);
+    L("SLICE_QP_DELTA", slice_qp_delta);
+    L("DISABLE_DEBLOCKING_FILTER_IDC", disable_deblocking_filter_idc);
+    L("SLICE_ALPHA_C0_OFFSET_DIV2", slice_alpha_c0_offset_div2);
+    L("SLICE_BETA_OFFSET_DIV2", slice_beta_offset_div2);
+#undef L
+    close_mod();
+
+    open_mod("hevc_enc_seq", "`VAEncSequenceParameterBufferHEVC`.", sizeof(VAEncSequenceParameterBufferHEVC));
+#define Q(NAME, f) F(VAEncSequenceParameterBufferHEVC, NAME, f)
+#define QB(NAME, f) B(VAEncSequenceParameterBufferHEVC, NAME, f)
+    Q("GENERAL_PROFILE_IDC", general_profile_idc);
+    Q("GENERAL_LEVEL_IDC", general_level_idc);
+    Q("GENERAL_TIER_FLAG", general_tier_flag);
+    Q("INTRA_PERIOD", intra_period);
+    Q("INTRA_IDR_PERIOD", intra_idr_period);
+    Q("IP_PERIOD", ip_period);
+    Q("BITS_PER_SECOND", bits_per_second);
+    Q("PIC_WIDTH_IN_LUMA_SAMPLES", pic_width_in_luma_samples);
+    Q("PIC_HEIGHT_IN_LUMA_SAMPLES", pic_height_in_luma_samples);
+    QB("CHROMA_FORMAT_IDC", seq_fields.bits.chroma_format_idc);
+    QB("BIT_DEPTH_LUMA_MINUS8", seq_fields.bits.bit_depth_luma_minus8);
+    QB("BIT_DEPTH_CHROMA_MINUS8", seq_fields.bits.bit_depth_chroma_minus8);
+    QB("SCALING_LIST_ENABLED_FLAG", seq_fields.bits.scaling_list_enabled_flag);
+    QB("STRONG_INTRA_SMOOTHING_ENABLED_FLAG", seq_fields.bits.strong_intra_smoothing_enabled_flag);
+    QB("AMP_ENABLED_FLAG", seq_fields.bits.amp_enabled_flag);
+    QB("SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG", seq_fields.bits.sample_adaptive_offset_enabled_flag);
+    QB("PCM_ENABLED_FLAG", seq_fields.bits.pcm_enabled_flag);
+    QB("SPS_TEMPORAL_MVP_ENABLED_FLAG", seq_fields.bits.sps_temporal_mvp_enabled_flag);
+    QB("LOW_DELAY_SEQ", seq_fields.bits.low_delay_seq);
+    Q("LOG2_MIN_LUMA_CODING_BLOCK_SIZE_MINUS3", log2_min_luma_coding_block_size_minus3);
+    Q("LOG2_DIFF_MAX_MIN_LUMA_CODING_BLOCK_SIZE", log2_diff_max_min_luma_coding_block_size);
+    Q("LOG2_MIN_TRANSFORM_BLOCK_SIZE_MINUS2", log2_min_transform_block_size_minus2);
+    Q("LOG2_DIFF_MAX_MIN_TRANSFORM_BLOCK_SIZE", log2_diff_max_min_transform_block_size);
+    Q("MAX_TRANSFORM_HIERARCHY_DEPTH_INTER", max_transform_hierarchy_depth_inter);
+    Q("MAX_TRANSFORM_HIERARCHY_DEPTH_INTRA", max_transform_hierarchy_depth_intra);
+    Q("VUI_PARAMETERS_PRESENT_FLAG", vui_parameters_present_flag);
+#undef Q
+#undef QB
+    close_mod();
+
+    open_mod("hevc_enc_pic", "`VAEncPictureParameterBufferHEVC`.", sizeof(VAEncPictureParameterBufferHEVC));
+#define P(NAME, f) F(VAEncPictureParameterBufferHEVC, NAME, f)
+#define PB(NAME, f) B(VAEncPictureParameterBufferHEVC, NAME, f)
+    S(VAEncPictureParameterBufferHEVC, "DECODED_CURR_PIC", decoded_curr_pic);
+    SA(VAEncPictureParameterBufferHEVC, "REFERENCE_FRAMES", reference_frames);
+    P("CODED_BUF", coded_buf);
+    P("COLLOCATED_REF_PIC_INDEX", collocated_ref_pic_index);
+    P("LAST_PICTURE", last_picture);
+    P("PIC_INIT_QP", pic_init_qp);
+    P("DIFF_CU_QP_DELTA_DEPTH", diff_cu_qp_delta_depth);
+    P("LOG2_PARALLEL_MERGE_LEVEL_MINUS2", log2_parallel_merge_level_minus2);
+    P("NUM_REF_IDX_L0_DEFAULT_ACTIVE_MINUS1", num_ref_idx_l0_default_active_minus1);
+    P("NUM_REF_IDX_L1_DEFAULT_ACTIVE_MINUS1", num_ref_idx_l1_default_active_minus1);
+    P("SLICE_PIC_PARAMETER_SET_ID", slice_pic_parameter_set_id);
+    P("NAL_UNIT_TYPE", nal_unit_type);
+    PB("IDR_PIC_FLAG", pic_fields.bits.idr_pic_flag);
+    PB("CODING_TYPE", pic_fields.bits.coding_type);
+    PB("REFERENCE_PIC_FLAG", pic_fields.bits.reference_pic_flag);
+    PB("SIGN_DATA_HIDING_ENABLED_FLAG", pic_fields.bits.sign_data_hiding_enabled_flag);
+    PB("TRANSFORM_SKIP_ENABLED_FLAG", pic_fields.bits.transform_skip_enabled_flag);
+    PB("CU_QP_DELTA_ENABLED_FLAG", pic_fields.bits.cu_qp_delta_enabled_flag);
+#undef P
+#undef PB
+    close_mod();
+
+    open_mod("hevc_enc_slice", "`VAEncSliceParameterBufferHEVC`.", sizeof(VAEncSliceParameterBufferHEVC));
+#define L(NAME, f) F(VAEncSliceParameterBufferHEVC, NAME, f)
+#define LB(NAME, f) B(VAEncSliceParameterBufferHEVC, NAME, f)
+    L("SLICE_SEGMENT_ADDRESS", slice_segment_address);
+    L("NUM_CTU_IN_SLICE", num_ctu_in_slice);
+    L("SLICE_TYPE", slice_type);
+    L("SLICE_PIC_PARAMETER_SET_ID", slice_pic_parameter_set_id);
+    L("NUM_REF_IDX_L0_ACTIVE_MINUS1", num_ref_idx_l0_active_minus1);
+    L("NUM_REF_IDX_L1_ACTIVE_MINUS1", num_ref_idx_l1_active_minus1);
+    SA(VAEncSliceParameterBufferHEVC, "REF_PIC_LIST0", ref_pic_list0);
+    SA(VAEncSliceParameterBufferHEVC, "REF_PIC_LIST1", ref_pic_list1);
+    L("MAX_NUM_MERGE_CAND", max_num_merge_cand);
+    L("SLICE_QP_DELTA", slice_qp_delta);
+    LB("LAST_SLICE_OF_PIC_FLAG", slice_fields.bits.last_slice_of_pic_flag);
+    LB("SLICE_TEMPORAL_MVP_ENABLED_FLAG", slice_fields.bits.slice_temporal_mvp_enabled_flag);
+    LB("SLICE_SAO_LUMA_FLAG", slice_fields.bits.slice_sao_luma_flag);
+    LB("SLICE_SAO_CHROMA_FLAG", slice_fields.bits.slice_sao_chroma_flag);
+    LB("COLLOCATED_FROM_L0_FLAG", slice_fields.bits.collocated_from_l0_flag);
+#undef L
+#undef LB
+    close_mod();
+
+    open_mod("hevc_features", "`VAConfigAttribValEncHEVCFeatures`: 0 not offered, 1 offered, 2 required.", sizeof(VAConfigAttribValEncHEVCFeatures));
+#define H(NAME, f) B(VAConfigAttribValEncHEVCFeatures, NAME, bits.f)
+    H("AMP", amp);
+    H("SAO", sao);
+    H("TEMPORAL_MVP", temporal_mvp);
+    H("STRONG_INTRA_SMOOTHING", strong_intra_smoothing);
+    H("SIGN_DATA_HIDING", sign_data_hiding);
+    H("TRANSFORM_SKIP", transform_skip);
+    H("CU_QP_DELTA", cu_qp_delta);
+#undef H
+    close_mod();
+
+    open_mod("hevc_block_sizes", "`VAConfigAttribValEncHEVCBlockSizes`.", sizeof(VAConfigAttribValEncHEVCBlockSizes));
+#define H(NAME, f) B(VAConfigAttribValEncHEVCBlockSizes, NAME, bits.f)
+    H("LOG2_MAX_CODING_TREE_BLOCK_SIZE_MINUS3", log2_max_coding_tree_block_size_minus3);
+    H("LOG2_MIN_LUMA_CODING_BLOCK_SIZE_MINUS3", log2_min_luma_coding_block_size_minus3);
+    H("LOG2_MAX_LUMA_TRANSFORM_BLOCK_SIZE_MINUS2", log2_max_luma_transform_block_size_minus2);
+    H("LOG2_MIN_LUMA_TRANSFORM_BLOCK_SIZE_MINUS2", log2_min_luma_transform_block_size_minus2);
+    H("MAX_MAX_TRANSFORM_HIERARCHY_DEPTH_INTER", max_max_transform_hierarchy_depth_inter);
+    H("MAX_MAX_TRANSFORM_HIERARCHY_DEPTH_INTRA", max_max_transform_hierarchy_depth_intra);
+#undef H
+    close_mod();
+
+    open_mod("misc", "`VAEncMiscParameterBuffer`: the type, then the parameter struct at `SIZE`.", sizeof(VAEncMiscParameterBuffer));
+    F(VAEncMiscParameterBuffer, "TYPE", type);
+    close_mod();
+
+    open_mod("misc_rate_control", "`VAEncMiscParameterRateControl`.", sizeof(VAEncMiscParameterRateControl));
+    F(VAEncMiscParameterRateControl, "BITS_PER_SECOND", bits_per_second);
+    F(VAEncMiscParameterRateControl, "TARGET_PERCENTAGE", target_percentage);
+    F(VAEncMiscParameterRateControl, "WINDOW_SIZE", window_size);
+    F(VAEncMiscParameterRateControl, "INITIAL_QP", initial_qp);
+    F(VAEncMiscParameterRateControl, "MIN_QP", min_qp);
+    F(VAEncMiscParameterRateControl, "MAX_QP", max_qp);
+    close_mod();
+
+    open_mod("misc_frame_rate", "`VAEncMiscParameterFrameRate`.", sizeof(VAEncMiscParameterFrameRate));
+    F(VAEncMiscParameterFrameRate, "FRAMERATE", framerate);
+    close_mod();
+
+    open_mod("misc_hrd", "`VAEncMiscParameterHRD`.", sizeof(VAEncMiscParameterHRD));
+    F(VAEncMiscParameterHRD, "INITIAL_BUFFER_FULLNESS", initial_buffer_fullness);
+    F(VAEncMiscParameterHRD, "BUFFER_SIZE", buffer_size);
+    close_mod();
+
+    open_mod("packed_header", "`VAEncPackedHeaderParameterBuffer`.", sizeof(VAEncPackedHeaderParameterBuffer));
+    F(VAEncPackedHeaderParameterBuffer, "TYPE", type);
+    F(VAEncPackedHeaderParameterBuffer, "BIT_LENGTH", bit_length);
+    F(VAEncPackedHeaderParameterBuffer, "HAS_EMULATION_BYTES", has_emulation_bytes);
+    close_mod();
+
+    open_mod("coded_segment", "`VACodedBufferSegment`, read from the driver's memory.", sizeof(VACodedBufferSegment));
+    F(VACodedBufferSegment, "SIZE_BYTES", size);
+    F(VACodedBufferSegment, "BUF", buf);
+    F(VACodedBufferSegment, "NEXT", next);
     close_mod();
     return 0;
 }

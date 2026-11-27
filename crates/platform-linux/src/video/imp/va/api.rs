@@ -47,6 +47,19 @@ type RenderPicture = unsafe extern "C" fn(Display, Id, *mut Id, c_int) -> Status
 type DeriveImage = unsafe extern "C" fn(Display, Id, *mut c_void) -> Status;
 type CreateImage = unsafe extern "C" fn(Display, *mut c_void, c_int, c_int, *mut c_void) -> Status;
 type GetImage = unsafe extern "C" fn(Display, Id, c_int, c_int, c_uint, c_uint, Id) -> Status;
+type PutImage = unsafe extern "C" fn(
+    Display,
+    Id,
+    Id,
+    c_int,
+    c_int,
+    c_uint,
+    c_uint,
+    c_int,
+    c_int,
+    c_uint,
+    c_uint,
+) -> Status;
 type QueryImageFormats = unsafe extern "C" fn(Display, *mut c_void, *mut c_int) -> Status;
 type ErrorStr = unsafe extern "C" fn(Status) -> *const c_char;
 
@@ -81,6 +94,7 @@ pub struct Va {
     pub derive_image: DeriveImage,
     pub create_image: CreateImage,
     pub get_image: GetImage,
+    pub put_image: PutImage,
     pub destroy_image: DestroyId,
     pub query_image_formats: QueryImageFormats,
     error_str: ErrorStr,
@@ -132,6 +146,7 @@ impl Va {
                 derive_image: va.symbol(c"vaDeriveImage")?,
                 create_image: va.symbol(c"vaCreateImage")?,
                 get_image: va.symbol(c"vaGetImage")?,
+                put_image: va.symbol(c"vaPutImage")?,
                 destroy_image: va.symbol(c"vaDestroyImage")?,
                 query_image_formats: va.symbol(c"vaQueryImageFormats")?,
                 error_str: va.symbol(c"vaErrorStr")?,

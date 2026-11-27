@@ -448,7 +448,7 @@ fn the_factories_fall_through_to_rust() {
         .open(&encoder_params(CodecId::H264, 320, 240))
         .expect("an H.264 encoder opens");
     let hevc = encoders.open(&encoder_params(CodecId::Hevc, 320, 240));
-    if cuda::device().is_none() {
+    if cuda::device().is_none() && !va::hevc_enc::available() {
         assert!(matches!(hevc, Err(CodecError::Unsupported { .. })));
     }
 }
@@ -932,4 +932,209 @@ fn an_interlaced_stream_falls_back_to_rust() {
     let pictures = decode_all(&mut decoder, &packets);
     assert!(!decoder.hardware());
     assert!(!pictures.is_empty());
+}
+
+/// Whether VA-API encodes `codec` here. A missing encoder fails when
+/// [`REQUIRE_VAAPI`] is set.
+fn vaapi_encode(codec: CodecId, what: &str) -> bool {
+    let present = match codec {
+        CodecId::H264 => va::h264_enc::available(),
+        _ => va::hevc_enc::available(),
+    };
+    if !present {
+        assert!(
+            std::env::var_os(REQUIRE_VAAPI).is_none(),
+            "{REQUIRE_VAAPI} is set but no render node encodes {codec:?}"
+        );
+        eprintln!("skipped: {what}: no VA-API render node encodes {codec:?}");
+    }
+    present
+}
+
+fn va_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
+    match params.codec {
+        CodecId::H264 => va::h264_enc::open_encoder(params),
+        _ => va::hevc_enc::open_encoder(params),
+    }
+}
+
+#[test]
+fn vaapi_encode_round_trips_through_the_rust_decoder() {
+    for codec in [CodecId::H264, CodecId::Hevc] {
+        if !vaapi_encode(codec, "vaapi encode round trip") {
+            continue;
+        }
+        for (width, height) in [(320, 240), (1920, 1080), (642, 362)] {
+            let mut encoder =
+                va_encoder(&encoder_params(codec, width, height)).expect("va-api opens");
+            let packets = encode(encoder.as_mut(), width, height, 40);
+            assert_eq!(packets.len(), 40, "{codec:?} {width}x{height}");
+            let keyframes: Vec<usize> = packets
+                .iter()
+                .enumerate()
+                .filter(|(_, packet)| packet.keyframe)
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(keyframes, [0, 30], "{codec:?}: an IDR every 30 pictures");
+            let extra = config(&packets);
+            let sets = config_sets(codec, &extra);
+            let wanted: &[u8] = if codec == CodecId::H264 {
+                &[7, 8]
+            } else {
+                &[32, 33, 34]
+            };
+            assert_eq!(sets, wanted, "{codec:?} configuration");
+            let mut decoder =
+                rust_decoder(&decoder_params(codec, width, height, extra)).expect("rust decoder");
+            let pictures = decode_all(decoder.as_mut(), &packets);
+            assert_eq!(pictures.len(), 40);
+            for (index, picture) in pictures.iter().enumerate() {
+                assert_eq!(picture.pts(), index as i64);
+                assert_eq!(
+                    (picture.info().width, picture.info().height),
+                    (width, height)
+                );
+                let original = picture_bytes(width, height, index);
+                let quality = psnr(samples(picture), &original);
+                assert!(
+                    quality >= 35.0,
+                    "{codec:?} {width}x{height} picture {index}: {quality:.1} dB"
+                );
+            }
+            eprintln!("{codec:?} {width}x{height}: VA-API encode round trip ok");
+        }
+    }
+}
+
+#[test]
+fn vaapi_encode_reset_starts_again_on_a_keyframe_with_the_config() {
+    for codec in [CodecId::H264, CodecId::Hevc] {
+        if !vaapi_encode(codec, "vaapi encode reset") {
+            continue;
+        }
+        let mut encoder = va_encoder(&encoder_params(codec, 320, 240)).expect("va-api opens");
+        let first = encode(encoder.as_mut(), 320, 240, 3);
+        assert!(!config(&first).is_empty());
+        encoder.reset();
+        let again = encode(encoder.as_mut(), 320, 240, 3);
+        assert_eq!(again.len(), 3);
+        assert!(again[0].keyframe, "{codec:?}");
+        assert!(
+            again[0]
+                .side
+                .iter()
+                .any(|side| matches!(side, SideData::Config(_))),
+            "{codec:?}: the config comes again"
+        );
+        assert_eq!(again[0].pts, 0);
+        let mut decoder =
+            rust_decoder(&decoder_params(codec, 320, 240, config(&again))).expect("rust decoder");
+        assert_eq!(decode_all(decoder.as_mut(), &again).len(), 3);
+    }
+}
+
+#[test]
+fn vaapi_encode_takes_rgba_an_ntsc_rate_and_a_constant_rate() {
+    for codec in [CodecId::H264, CodecId::Hevc] {
+        if !vaapi_encode(codec, "vaapi encode rgba") {
+            continue;
+        }
+        let (width, height) = (640, 360);
+        let mut params = encoder_params(codec, width, height);
+        params.pixel = PixelFormat::Rgba8;
+        params.constant_rate = true;
+        params.bitrate = 4_000_000;
+        let mut encoder = va_encoder(&params).expect("va-api opens");
+        let mut packets = Vec::new();
+        for index in 0..10 {
+            let frame = CpuFrame::new(
+                width,
+                height,
+                PixelFormat::Rgba8,
+                [30, 200, 60, 255].repeat((width * height) as usize),
+                FrameTime::new(index * 1001, 1001, 30_000).expect("time"),
+            )
+            .expect("frame");
+            packets.extend(encoder.push_frame(&FrameInput::Cpu(frame)).expect("encode"));
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        assert_eq!(packets.len(), 10, "{codec:?}");
+        assert_eq!(packets[9].pts, 9 * 1001);
+        assert_eq!(packets[9].timescale, 30_000);
+        let mut decoder = rust_decoder(&decoder_params(codec, width, height, config(&packets)))
+            .expect("rust decoder");
+        let pictures = decode_all(decoder.as_mut(), &packets);
+        assert_eq!(pictures.len(), 10, "{codec:?}");
+    }
+}
+
+#[test]
+fn vaapi_encode_declines_what_it_does_not_encode() {
+    let decline =
+        |params: &CodecParams| matches!(va_encoder(params), Err(CodecError::Unsupported { .. }));
+    assert!(decline(&encoder_params(CodecId::Av1, 320, 240)));
+    for codec in [CodecId::H264, CodecId::Hevc] {
+        assert!(decline(&encoder_params(codec, 321, 240)));
+        assert!(decline(&encoder_params(codec, 9000, 240)));
+        let mut ten_bit = encoder_params(codec, 320, 240);
+        ten_bit.pixel = PixelFormat::Yuv420p10;
+        assert!(decline(&ten_bit));
+    }
+    assert!(matches!(
+        va::h264_enc::open_encoder(&encoder_params(CodecId::Hevc, 320, 240)),
+        Err(CodecError::Unsupported { .. })
+    ));
+    assert!(matches!(
+        va::hevc_enc::open_encoder(&encoder_params(CodecId::H264, 320, 240)),
+        Err(CodecError::Unsupported { .. })
+    ));
+    if !va::h264_enc::available() {
+        assert!(decline(&encoder_params(CodecId::H264, 320, 240)));
+    }
+    if !va::hevc_enc::available() {
+        assert!(decline(&encoder_params(CodecId::Hevc, 320, 240)));
+    }
+}
+
+#[test]
+fn vaapi_encode_refuses_a_platform_frame_and_a_wrong_size() {
+    for codec in [CodecId::H264, CodecId::Hevc] {
+        if !vaapi_encode(codec, "vaapi encode frame checks") {
+            continue;
+        }
+        let mut encoder = va_encoder(&encoder_params(codec, 320, 240)).expect("va-api opens");
+        let time = FrameTime::new(0, 1, 30).expect("time");
+        let platform = FrameInput::Platform(PlatformFrame::new(320, 240, 1, time).expect("frame"));
+        assert!(matches!(
+            encoder.push_frame(&platform),
+            Err(CodecError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            encoder.push_frame(&frame(160, 120, 0)),
+            Err(CodecError::Unsupported { .. })
+        ));
+    }
+}
+
+/// VA-API's H.264 stream, decoded again on VA-API, matches the Rust
+/// decoder's pictures of it.
+#[test]
+fn vaapi_decodes_what_vaapi_encodes() {
+    if !vaapi_encode(CodecId::H264, "vaapi encode then decode") || !vaapi_h264("vaapi decode") {
+        return;
+    }
+    let (width, height) = (640, 360);
+    let mut encoder =
+        va_encoder(&encoder_params(CodecId::H264, width, height)).expect("va-api opens");
+    let packets = encode(encoder.as_mut(), width, height, 35);
+    let params = decoder_params(CodecId::H264, width, height, config(&packets));
+    let mut hardware = va::h264::open(&params).expect("va-api decoder");
+    let mut software = rust_decoder(&params).expect("rust decoder");
+    let ours = decode_all(&mut hardware, &packets);
+    let theirs = decode_all(software.as_mut(), &packets);
+    assert_eq!(ours.len(), theirs.len());
+    for (index, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+        assert_eq!(a.pts(), b.pts());
+        assert_eq!(samples(a), samples(b), "picture {index}");
+    }
 }

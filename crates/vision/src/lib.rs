@@ -33,9 +33,13 @@
 //! as a soft [`Matte`], and a [`Follower`] carries what the user picked
 //! through a clip: [`Portrait`] and [`Matting`] are the first, and
 //! [`FollowModel`] the second.
+//!
+//! One model hears instead of sees. Auto beats: [`BeatModel`] finds where
+//! the beats of a piece of music fall, from its samples.
 
 #![forbid(unsafe_code)]
 
+mod beats;
 mod deflicker;
 mod denoise;
 mod depth;
@@ -62,6 +66,10 @@ mod relight_job;
 use std::fmt;
 use std::path::PathBuf;
 
+pub use beats::{
+    BEATS_MAX_SAMPLES, BEATS_MIN_SAMPLES, BEATS_RATE, BEATS_WEIGHTS, BeatModel, Beats,
+    FRAMES_A_SECOND, convert_beat_this,
+};
 pub use deflicker::{DEFLICKER_REACH, Deflicker, mean_brightness};
 pub use denoise::{
     DENOISE_MAX_SIDE, DENOISE_WEIGHTS, DenoiseStream, Denoiser, MAX_NOISE, MIN_NOISE,
@@ -143,6 +151,9 @@ pub enum VisionError {
     Cache { path: PathBuf, message: String },
     /// The model returned something other than the shapes it was built for.
     Model { message: String },
+    /// A sound shorter than [`BEATS_MIN_SAMPLES`], longer than
+    /// [`BEATS_MAX_SAMPLES`], or with a sample that is not a number.
+    Sound { samples: usize },
 }
 
 impl fmt::Display for VisionError {
@@ -164,6 +175,10 @@ impl fmt::Display for VisionError {
                 write!(f, "kernel cache {}: {message}", path.display())
             }
             Self::Model { message } => write!(f, "model: {message}"),
+            Self::Sound { samples } => write!(
+                f,
+                "a sound of {samples} samples is not one the model can hear"
+            ),
         }
     }
 }

@@ -3400,6 +3400,7 @@ dependencies = [
  "cutlass-still",
  "cutlass-store",
  "image",
+ "rustfft",
  "safetensors 0.8.0",
 ]
 

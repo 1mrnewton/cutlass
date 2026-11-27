@@ -10,8 +10,8 @@
 //! is refused.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::{self, File};
+use std::io::{ErrorKind, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -21,7 +21,9 @@ use serde_json::{Map, Value};
 
 use crate::StoreError;
 use crate::backup::copy_backup;
-use crate::json::{parse_draft, parse_value, write_draft, write_value};
+use crate::json::{
+    JsonLimit, MAX_FILE_BYTES, parse_draft, parse_struct, parse_value, write_draft, write_value,
+};
 use crate::repair::{RepairNote, repair};
 use crate::upgrade::upgrade;
 
@@ -390,11 +392,7 @@ fn read_project(root: &Path, draft: &Draft) -> Result<ProjectIndex, StoreError> 
             rest: Map::new(),
         });
     };
-    let project: ProjectIndex =
-        serde_json::from_slice(&bytes).map_err(|error| StoreError::Json {
-            path,
-            message: error.to_string(),
-        })?;
+    let project: ProjectIndex = parse_struct(&bytes, &path)?;
     if !project.main_timeline_id.is_empty() {
         require_component(&project.main_timeline_id)?;
     }
@@ -412,10 +410,7 @@ where
     let Some(bytes) = read_optional(&path)? else {
         return Ok(T::default());
     };
-    serde_json::from_slice(&bytes).map_err(|error| StoreError::Json {
-        path,
-        message: error.to_string(),
-    })
+    parse_struct(&bytes, &path)
 }
 
 fn read_virtual_store(root: &Path) -> Result<Option<cutlass_model::VirtualStore>, StoreError> {
@@ -423,12 +418,7 @@ fn read_virtual_store(root: &Path) -> Result<Option<cutlass_model::VirtualStore>
     let Some(bytes) = read_optional(&path)? else {
         return Ok(None);
     };
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|error| StoreError::Json {
-            path,
-            message: error.to_string(),
-        })
+    parse_struct(&bytes, &path).map(Some)
 }
 
 fn read_id_map(root: &Path) -> Result<(IdMap, Map<String, Value>), StoreError> {
@@ -436,10 +426,7 @@ fn read_id_map(root: &Path) -> Result<(IdMap, Map<String, Value>), StoreError> {
     let Some(bytes) = read_optional(&path)? else {
         return Ok((IdMap::default(), Map::new()));
     };
-    let file: IdMapFile = serde_json::from_slice(&bytes).map_err(|error| StoreError::Json {
-        path,
-        message: error.to_string(),
-    })?;
+    let file: IdMapFile = parse_struct(&bytes, &path)?;
     Ok((file.id_mapping, file.rest))
 }
 
@@ -468,10 +455,7 @@ fn read_sidecars(root: &Path) -> Result<BTreeMap<String, Value>, StoreError> {
         }
         let path = entry.path();
         stay_inside(root, &path)?;
-        let value = parse_value(
-            &fs::read(&path).map_err(|error| io_error(&path, error))?,
-            &path,
-        )?;
+        let value = parse_value(&read_existing(&path)?, &path)?;
         sidecars.insert(name, value);
     }
     Ok(sidecars)
@@ -497,10 +481,7 @@ fn read_timelines(root: &Path) -> Result<BTreeMap<String, Draft>, StoreError> {
             continue;
         }
         stay_inside(root, &draft_path)?;
-        let draft = parse_draft(
-            &fs::read(&draft_path).map_err(|error| io_error(&draft_path, error))?,
-            &draft_path,
-        )?;
+        let draft = parse_draft(&read_existing(&draft_path)?, &draft_path)?;
         timelines.insert(id, draft);
     }
     Ok(timelines)
@@ -768,22 +749,53 @@ pub(crate) fn stay_inside(root: &Path, path: &Path) -> Result<(), StoreError> {
     }
 }
 
+/// Read a project file that must be there. A missing one is [`StoreError::MissingDraft`].
 fn read_required(path: &Path) -> Result<Vec<u8>, StoreError> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(bytes),
-        Err(error) if error.kind() == ErrorKind::NotFound => Err(StoreError::MissingDraft {
-            path: path.to_path_buf(),
-        }),
+    read_optional(path)?.ok_or_else(|| StoreError::MissingDraft {
+        path: path.to_path_buf(),
+    })
+}
+
+/// Read a project file, or `None` when there is none.
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
+    match File::open(path) {
+        Ok(file) => read_capped(file, path).map(Some),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io_error(path, error)),
     }
 }
 
-fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(io_error(path, error)),
+/// Read a project file a directory listing just named, or one that must be there.
+pub(crate) fn read_existing(path: &Path) -> Result<Vec<u8>, StoreError> {
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    read_capped(file, path)
+}
+
+/// Read an open project file whole, up to [`MAX_FILE_BYTES`].
+///
+/// The size comes from the open file's metadata, so a larger file is refused
+/// before a byte is read. The read itself stops one byte past the bound, so a
+/// file that grew since, or one whose metadata gives no size, is refused too.
+fn read_capped(file: File, path: &Path) -> Result<Vec<u8>, StoreError> {
+    let too_large = || StoreError::TooLarge {
+        path: path.to_path_buf(),
+        limit: JsonLimit::File,
+    };
+    let size = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    if size > MAX_FILE_BYTES {
+        return Err(too_large());
     }
+    let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| io_error(path, error))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn io_error(path: &Path, error: std::io::Error) -> StoreError {
@@ -792,6 +804,9 @@ pub(crate) fn io_error(path: &Path, error: std::io::Error) -> StoreError {
         message: error.to_string(),
     }
 }
+
+#[cfg(test)]
+mod hostile;
 
 #[cfg(test)]
 mod tests {
@@ -805,12 +820,12 @@ mod tests {
     use super::{Folder, open};
     use crate::{RepairNote, StoreError};
 
-    struct Temp {
-        path: PathBuf,
+    pub(super) struct Temp {
+        pub(super) path: PathBuf,
     }
 
     impl Temp {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir()

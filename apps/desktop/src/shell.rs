@@ -43,8 +43,8 @@ use cutlass_settings::{SeekDuringPlayback, Settings};
 use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
 use cutlass_transcription::{
-    FileSource, HeardClip, HeardMiss, ParakeetUnified, Pcm, PcmSource, PrepareError,
-    RecognizeError, Recognizer, caption_requests, columns, fit, words_on_timeline,
+    HeardClip, HeardMiss, ParakeetUnified, Pcm, PcmSource, PrepareError, RecognizeError,
+    Recognizer, caption_requests, columns, fit, words_on_timeline,
 };
 
 mod assistant;
@@ -76,6 +76,7 @@ mod relight;
 mod render;
 mod select;
 mod shape;
+mod sound;
 mod speech_model;
 mod stable;
 mod sync;
@@ -5445,6 +5446,7 @@ impl Shell {
                 "the speech model is not on this machine".to_owned(),
             ));
         }
+        let readers = self.readers.clone();
         self.start_job(label, move |progress| {
             let recognizer = match loaded {
                 Some(recognizer) => Ok(recognizer),
@@ -5456,7 +5458,11 @@ impl Shell {
             let (recognizer, words) = match recognizer {
                 Ok(recognizer) => {
                     progress.stage("Listening");
-                    let words = heard_words(&recognizer, &mut FileSource::new(&file), &clip);
+                    let words = heard_words(
+                        &recognizer,
+                        &mut sound::MediaSource::new(&readers, &file),
+                        &clip,
+                    );
                     (Some(recognizer), words)
                 }
                 Err(error) => (None, Err(error)),

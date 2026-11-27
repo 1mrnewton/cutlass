@@ -999,8 +999,13 @@ impl Media {
             if let Some(pipe) = self.audio.as_mut() {
                 pipe.reset();
             }
-            let early = Micros(source.0.saturating_sub(AUDIO_PREROLL).max(0));
-            let ticks = micros_to_ticks_floor(early, timescale)?.saturating_add(lead);
+            // The pre-roll reaches into the lead: the packets an encoder
+            // put before the stream's time zero are what prime the decoder
+            // for its first samples. Nothing is before tick zero.
+            let early = Micros(source.0.max(0).saturating_sub(AUDIO_PREROLL));
+            let ticks = micros_to_ticks_floor(early, timescale)?
+                .saturating_add(lead)
+                .max(0);
             self.demux
                 .seek(SeekTo {
                     track,

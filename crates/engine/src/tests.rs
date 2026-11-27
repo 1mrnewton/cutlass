@@ -1627,6 +1627,72 @@ fn sound_with_no_stated_padding_or_no_index_plays_to_its_last_packet() {
     }
 }
 
+/// A decoder whose first packet after open or a reset comes out wrong, as
+/// a transform codec's does with no packet before it to overlap.
+struct Cold(bool);
+
+impl Decoder for Cold {
+    fn codec(&self) -> CodecId {
+        CodecId::Pcm
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        let cold = std::mem::take(&mut self.0);
+        let samples = (0..RAMP_FRAMES)
+            .map(|index| {
+                if cold {
+                    9.0
+                } else {
+                    ramp_at(packet.pts + index)
+                }
+            })
+            .collect();
+        let pcm = cutlass_codec::access::Pcm::from_f32(
+            48_000,
+            cutlass_codec::access::ChannelLayout::mono(),
+            samples,
+        )
+        .map_err(|_| CodecError::Limit { what: "pcm" })?;
+        Ok(vec![Output::Audio(cutlass_decode::AudioOutput {
+            pcm,
+            pts: packet.pts,
+            timescale: packet.timescale,
+            skip_leading: 0,
+            skip_trailing: 0,
+            concealed: false,
+        })])
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {
+        self.0 = true;
+    }
+}
+
+fn open_cold_decoder(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(Cold(true)))
+}
+
+/// A read at the stream's start decodes the priming packets before it, so
+/// the decoder is warm for the first valid sample. The priming straddles
+/// packet 1: a seek to the packet that holds the first valid sample would
+/// hand out that packet cold.
+#[test]
+fn the_priming_packets_warm_the_decoder_for_the_first_sample() {
+    let readers = primed_readers(open_primed, open_cold_decoder);
+    let path = fixture("pattern.jpg");
+    let mut media = readers.open(&path).expect("open");
+    let head = media.audio_from(Micros(0), 960).expect("head");
+    assert_eq!(head.as_f32().expect("f32"), &ramp(600, 1_560)[..]);
+    // A seek inside the pre-roll's reach of the start does the same.
+    let mut media = readers.open(&path).expect("open");
+    let near = media.audio_from(Micros(1_000), 480).expect("near");
+    assert_eq!(near.as_f32().expect("f32"), &ramp(648, 1_128)[..]);
+}
+
 /// A 16-bit WAVEFORMATEXTENSIBLE file with `channels` interleaved channels
 /// and `mask` as its `dwChannelMask`.
 fn write_extensible_wav(path: &Path, channels: u16, mask: u32, samples: &[i16]) {

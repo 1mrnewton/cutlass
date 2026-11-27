@@ -13,10 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use cutlass_codec::access::{
-    ChannelLayout, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, PixelFormat, SampleFormat,
-    StandardLayout, Transfer,
+    ChannelLayout, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients,
+    PixelFormat, SampleFormat, StandardLayout, Transfer,
 };
-use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
+use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, StreamColor, Timescale};
 use cutlass_container::{
     Demux, DisplayQuarter, Landing, OpenError, ProbeResult, ReadError, SeekTo,
 };
@@ -246,8 +246,14 @@ struct Pipe {
     /// time line, when the container states padding after the last valid
     /// sample. A decoder that does not cut that padding itself returns it.
     valid_end: Option<(u32, i64)>,
+    /// Where the sound packets pushed since open or the last reset end, as
+    /// (ticks per second, ticks) on the packets' clock. Sound a drain
+    /// releases past it is not the stream's.
+    sound_end: Option<(u32, i64)>,
     /// No packet has been pushed since open or the last reset.
     fresh: bool,
+    /// The colour the container states, for what a picture leaves unspecified.
+    color: StreamColor,
 }
 
 impl Pipe {
@@ -265,7 +271,9 @@ impl Pipe {
             gapless: None,
             lead_samples: None,
             valid_end: None,
+            sound_end: None,
             fresh: true,
+            color: StreamColor::default(),
         }
     }
 
@@ -290,36 +298,46 @@ impl Pipe {
     /// The sample on the stream's own time line where `output` starts, before
     /// any samples the decoder marked to skip.
     fn first_sample(&self, output: &AudioOutput) -> i64 {
-        let rate = i64::from(output.pcm.rate);
-        let per_second = i64::from(output.timescale.max(1));
+        self.sample_on_line(output.pts, output.timescale, output.pcm.rate)
+    }
+
+    /// The sample at `rate` on the stream's own time line that `pts`, in
+    /// `timescale` ticks per second, stands for.
+    fn sample_on_line(&self, pts: i64, timescale: u32, rate: u32) -> i64 {
+        let per_second = i64::from(timescale.max(1));
         if let Some((exact_rate, samples)) = self.lead_samples
-            && exact_rate == output.pcm.rate
+            && exact_rate == rate
         {
-            return output
-                .pts
-                .checked_mul(rate)
+            return pts
+                .checked_mul(i64::from(rate))
                 .and_then(|value| value.checked_div(per_second))
                 .unwrap_or(0)
                 .saturating_sub(samples);
         }
-        output
-            .pts
-            .saturating_sub(self.lead_in(output.timescale))
-            .checked_mul(rate)
+        pts.saturating_sub(self.lead_in(timescale))
+            .checked_mul(i64::from(rate))
             .and_then(|value| value.checked_div(per_second))
             .unwrap_or(0)
     }
 
     /// `output` with what it holds past the stream's last valid sample
     /// marked as skipped, or [`None`] when all of it is past that sample.
-    fn within_end(&self, mut output: AudioOutput) -> Option<AudioOutput> {
+    fn within_end(&self, output: AudioOutput) -> Option<AudioOutput> {
         let Some((rate, end)) = self.valid_end else {
             return Some(output);
         };
         // The decoder may run at another rate than the stream names.
         let end = i128::from(end) * i128::from(output.pcm.rate) / i128::from(rate.max(1));
+        let start = self.first_sample(&output);
+        Self::cut_after(output, start, end)
+    }
+
+    /// `output`, which starts at sample `start`, with what it holds from
+    /// sample `end` on marked as skipped, or [`None`] when nothing before
+    /// `end` is left.
+    fn cut_after(mut output: AudioOutput, start: i64, end: i128) -> Option<AudioOutput> {
         let frames = i128::from(output.pcm.samples);
-        let over = i128::from(self.first_sample(&output)) + frames - end;
+        let over = i128::from(start) + frames - end;
         if over <= 0 {
             return Some(output);
         }
@@ -338,7 +356,43 @@ impl Pipe {
         self.lengths.clear();
         self.heard.clear();
         self.drained = false;
+        self.sound_end = None;
         self.fresh = true;
+    }
+
+    /// Note that a sound packet ending at `end`, in `timescale` ticks per
+    /// second, was pushed.
+    fn note_sound(&mut self, end: i64, timescale: u32) {
+        self.sound_end = Some(match self.sound_end {
+            Some((held, last)) if held == timescale => (held, last.max(end)),
+            _ => (timescale, end),
+        });
+    }
+
+    /// At the end of the stream, the sound the decoder still holds, once.
+    /// A decoder that answers each packet with the one before, as Media
+    /// Foundation's AAC decoder does, gives its last buffer up here. Sound
+    /// past the last packet's end, such as the overlap tail the Rust AAC
+    /// decoder flushes, is not the stream's and is left out, as is all of
+    /// it when the packets carried no time. A drain that fails ends the
+    /// sound where it is.
+    fn drain_sound(&mut self) -> Option<AudioOutput> {
+        if std::mem::replace(&mut self.drained, true) {
+            return None;
+        }
+        let (timescale, tick) = self.sound_end?;
+        let outputs = self.decoder.drain().unwrap_or_default();
+        for output in outputs {
+            let Output::Audio(audio) = output else {
+                continue;
+            };
+            let start = self.first_sample(&audio);
+            let end = self.sample_on_line(tick, timescale, audio.pcm.rate);
+            if let Some(audio) = Self::cut_after(audio, start, i128::from(end)) {
+                self.heard.push_back(audio);
+            }
+        }
+        self.heard.pop_front()
     }
 
     /// Note a picture packet's timestamp and duration.
@@ -910,9 +964,10 @@ impl Media {
                     Err(error) => return Err(EngineError::Codec(error)),
                 };
                 let last = pipe.last_duration;
+                let color = pipe.color;
                 for (frame, pts) in outputs
                     .into_iter()
-                    .filter_map(|output| coded_output(output, timescale))
+                    .filter_map(|output| coded_output(output, timescale, &color))
                 {
                     let duration = pipe.length_of(pts, last);
                     pipe.ready.push_back(Ready {
@@ -940,7 +995,8 @@ impl Media {
             let packet_pts = packet.timestamp().presentation_or_decode();
             let duration = packet.timestamp().duration().unwrap_or(0);
             pipe.note_length(packet_pts, duration);
-            for (frame, pts) in push_picture(pipe.decoder.as_mut(), &access, timescale)? {
+            let color = pipe.color;
+            for (frame, pts) in push_picture(pipe.decoder.as_mut(), &access, timescale, &color)? {
                 let pts = pts.or(packet_pts);
                 let duration = pipe.length_of(pts, duration);
                 pipe.ready.push_back(Ready {
@@ -1218,7 +1274,9 @@ impl Media {
     }
 
     /// The next decoded audio buffer with its timestamp. A packet that
-    /// returns several keeps the rest for the next call.
+    /// returns several keeps the rest for the next call. At the end of the
+    /// stream the decoder is drained once, so a buffer it still holds is
+    /// not lost.
     fn next_decoded(&mut self) -> Result<Option<AudioOutput>, EngineError> {
         let Some(track) = self.audio.as_ref().map(|pipe| pipe.track) else {
             return Ok(None);
@@ -1234,7 +1292,7 @@ impl Media {
                 return Err(EngineError::DecodeLimit);
             }
             let Some(packet) = self.demux.read_packet().map_err(from_read)? else {
-                return Ok(None);
+                return Ok(self.audio.as_mut().and_then(Pipe::drain_sound));
             };
             if packet.stream() != track {
                 if others == OTHER_STREAM_PACKETS {
@@ -1247,6 +1305,13 @@ impl Media {
             let Some(pipe) = self.audio.as_mut() else {
                 return Ok(None);
             };
+            let time = packet.timestamp();
+            if let (Some(pts), Some(duration)) = (time.presentation_or_decode(), time.duration()) {
+                pipe.note_sound(
+                    pts.saturating_add(duration),
+                    packet.timescale().ticks_per_second(),
+                );
+            }
             let access = pipe.access(&packet);
             let outputs = match pipe.decoder.push(&access) {
                 Ok(outputs) => outputs,
@@ -1361,6 +1426,7 @@ fn push_picture(
     decoder: &mut dyn Decoder,
     packet: &AccessPacket,
     timescale: Timescale,
+    color: &StreamColor,
 ) -> Result<Vec<(DecodedFrame, Option<i64>)>, EngineError> {
     match decoder.decode_picture(packet) {
         Ok(frames) => Ok(frames
@@ -1374,7 +1440,7 @@ fn push_picture(
             let outputs = decoder.push(packet)?;
             Ok(outputs
                 .into_iter()
-                .filter_map(|output| coded_output(output, timescale))
+                .filter_map(|output| coded_output(output, timescale, color))
                 .collect())
         }
         Err(error) => Err(EngineError::Codec(error)),
@@ -1382,18 +1448,44 @@ fn push_picture(
 }
 
 /// A picture and its start. The start is kept only in the stream's own ticks.
-fn coded_output(output: Output, timescale: Timescale) -> Option<(DecodedFrame, Option<i64>)> {
+fn coded_output(
+    output: Output,
+    timescale: Timescale,
+    color: &StreamColor,
+) -> Option<(DecodedFrame, Option<i64>)> {
     match output {
         Output::Picture(picture) => {
             let pts = (picture.timescale() == timescale.ticks_per_second()).then(|| picture.pts());
-            Some((frame_from_picture(picture), pts))
+            Some((frame_from_picture(picture, color), pts))
         }
         Output::Audio(_) => None,
     }
 }
 
-fn frame_from_picture(picture: PictureOutput) -> DecodedFrame {
-    let info = picture.info();
+/// The frame of a decoded picture. Its primaries, transfer, matrix and
+/// range are the decoder's, which read them from the bitstream (and were
+/// handed the container's at open); one the decoder leaves unspecified
+/// is the container's `color`, when the container states it.
+fn frame_from_picture(picture: PictureOutput, color: &StreamColor) -> DecodedFrame {
+    let mut info = picture.info();
+    if info.primaries == ColorPrimaries::Unspecified
+        && let Some(code) = color.primaries
+    {
+        info.primaries = ColorPrimaries::from_cicp(code);
+    }
+    if info.transfer == Transfer::Unspecified
+        && let Some(code) = color.transfer
+    {
+        info.transfer = Transfer::from_cicp(code);
+    }
+    if info.matrix == ColorMatrix::Unspecified
+        && let Some(code) = color.matrix
+    {
+        info.matrix = ColorMatrix::from_cicp(code);
+    }
+    if info.range == ColorRange::Unspecified {
+        info.range = color.range;
+    }
     match picture.samples() {
         PictureSamples::Platform { token } => {
             return DecodedFrame::Platform {
@@ -1503,13 +1595,17 @@ fn open_pipe(
             tag: unknown_tag(codec),
         });
     };
-    let params = params_for(
+    let mut params = params_for(
         stream.params().extradata(),
         stream.params().size(),
         stream.params().sample_rate(),
         stream.params().channels(),
         *id,
     )?;
+    let color = stream.params().color();
+    if stream.params().size().is_some() {
+        with_container_color(&mut params, &color);
+    }
     let decoder = match factory.open(&params) {
         Ok(decoder) => decoder,
         Err(CodecError::Unsupported { .. }) => {
@@ -1527,7 +1623,25 @@ fn open_pipe(
     );
     pipe.gapless = gapless_of(stream);
     pipe.lead_samples = exact_lead(stream, pipe.lead);
+    pipe.color = color;
     Ok(pipe)
+}
+
+/// The colour a container states, on the parameters a picture decoder
+/// opens with. How it weighs them against its bitstream is the decoder's:
+/// VP9's takes the primaries and transfer, which its header does not
+/// carry, and the matrix where the header says the colour space is unknown.
+fn with_container_color(params: &mut CodecParams, color: &StreamColor) {
+    if let Some(code) = color.primaries {
+        params.primaries = ColorPrimaries::from_cicp(code);
+    }
+    if let Some(code) = color.transfer {
+        params.transfer = Transfer::from_cicp(code);
+    }
+    if let Some(code) = color.matrix {
+        params.matrix = MatrixCoefficients::from_cicp(code);
+    }
+    params.range = color.range;
 }
 
 /// The encoder delay in samples, with the sample rate, when the stream's
@@ -2105,6 +2219,107 @@ mod tests {
         assert_eq!(exact_lead(&stream(1_000, Some(120)), 5), None);
         assert_eq!(exact_lead(&stream(1_000, None), 3), None);
         assert_eq!(exact_lead(&stream(1_000, Some(0)), 0), None);
+    }
+
+    /// The container's colour reaches the decoder's parameters, and fills
+    /// what a decoded picture leaves unspecified; what the picture states
+    /// stands.
+    #[test]
+    fn container_colour_fills_what_the_picture_leaves_unspecified() {
+        let hdr = StreamColor {
+            primaries: Some(9),
+            transfer: Some(16),
+            matrix: Some(9),
+            range: ColorRange::Limited,
+            content_light: None,
+            mastering_display: None,
+        };
+        let mut params = CodecParams::video(CodecId::H264, 2, 2);
+        with_container_color(&mut params, &hdr);
+        assert_eq!(params.primaries, ColorPrimaries::Bt2020);
+        assert_eq!(params.transfer, Transfer::Pq);
+        assert_eq!(params.matrix, MatrixCoefficients::Bt2020);
+        assert_eq!(params.range, ColorRange::Limited);
+
+        let picture = |primaries, transfer, matrix, range| {
+            let info = cutlass_decode::PictureInfo {
+                matrix,
+                range,
+                ..cutlass_decode::PictureInfo::new(2, 2, PixelFormat::Yuv420p, primaries, transfer)
+            };
+            PictureOutput::cpu(info, vec![0; 6], 0, 1_000).unwrap()
+        };
+        let colour_of = |frame: DecodedFrame| match frame {
+            DecodedFrame::Coded {
+                primaries,
+                transfer,
+                matrix,
+                range,
+                ..
+            } => (primaries, transfer, matrix, range),
+            _ => panic!("coded"),
+        };
+        let unstated = picture(
+            ColorPrimaries::Unspecified,
+            Transfer::Unspecified,
+            ColorMatrix::Unspecified,
+            ColorRange::Unspecified,
+        );
+        assert_eq!(
+            colour_of(frame_from_picture(unstated.clone(), &hdr)),
+            (
+                ColorPrimaries::Bt2020,
+                Transfer::Pq,
+                ColorMatrix::Bt2020,
+                ColorRange::Limited
+            )
+        );
+        assert_eq!(
+            colour_of(frame_from_picture(unstated, &StreamColor::default())),
+            (
+                ColorPrimaries::Unspecified,
+                Transfer::Unspecified,
+                ColorMatrix::Unspecified,
+                ColorRange::Unspecified
+            )
+        );
+        let stated = picture(
+            ColorPrimaries::Bt709,
+            Transfer::Bt709,
+            ColorMatrix::Bt709,
+            ColorRange::Full,
+        );
+        assert_eq!(
+            colour_of(frame_from_picture(stated, &hdr)),
+            (
+                ColorPrimaries::Bt709,
+                Transfer::Bt709,
+                ColorMatrix::Bt709,
+                ColorRange::Full
+            )
+        );
+        // Only the fields left unspecified are filled.
+        let half = picture(
+            ColorPrimaries::Bt2020,
+            Transfer::Unspecified,
+            ColorMatrix::Bt2020,
+            ColorRange::Unspecified,
+        );
+        let hlg = StreamColor {
+            primaries: Some(1),
+            transfer: Some(18),
+            range: ColorRange::Full,
+            ..StreamColor::default()
+        };
+        assert_eq!(
+            colour_of(frame_from_picture(half, &hlg)),
+            (
+                ColorPrimaries::Bt2020,
+                Transfer::Hlg,
+                ColorMatrix::Bt2020,
+                ColorRange::Full
+            )
+        );
     }
 
     #[test]

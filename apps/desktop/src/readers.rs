@@ -2513,4 +2513,242 @@ mod tests {
         .expect("finish");
         mux.into_inner().into_inner()
     }
+
+    /// The primaries, transfer, matrix and range of the first picture the
+    /// app's software decoders give for the file at `path`.
+    fn picture_colour(
+        path: &std::path::Path,
+    ) -> (
+        cutlass_decode::ColorPrimaries,
+        cutlass_decode::Transfer,
+        cutlass_decode::ColorMatrix,
+        cutlass_decode::ColorRange,
+    ) {
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let readers = super::readers_with(crate::register_codecs_with(&software).0);
+        let mut media = readers.open(path).expect("open");
+        let held = media
+            .decode_at(
+                cutlass_model::Micros(0),
+                &cutlass_model::TimeRange::new(0, 1_000_000),
+            )
+            .expect("picture");
+        let cutlass_engine::DecodedFrame::Coded {
+            primaries,
+            transfer,
+            matrix,
+            range,
+            ..
+        } = held.frame
+        else {
+            panic!("{}: not a coded picture", path.display());
+        };
+        (primaries, transfer, matrix, range)
+    }
+
+    /// What `ffprobe` reports for the first video stream of `path`:
+    /// primaries, transfer, matrix and range, by FFmpeg's names.
+    fn probed_colour(path: &std::path::Path) -> [String; 4] {
+        let out = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=color_primaries,color_transfer,color_space,color_range",
+                "-of",
+                "default=nw=1",
+                path_str(path),
+            ])
+            .output()
+            .expect("ffprobe");
+        assert!(out.status.success(), "ffprobe {}", path.display());
+        let text = String::from_utf8_lossy(&out.stdout);
+        let field = |key: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                .unwrap_or("unknown")
+                .to_owned()
+        };
+        [
+            field("color_primaries"),
+            field("color_transfer"),
+            field("color_space"),
+            field("color_range"),
+        ]
+    }
+
+    /// FFmpeg's names for the colours the tests below make.
+    fn ffmpeg_names(
+        colour: (
+            cutlass_decode::ColorPrimaries,
+            cutlass_decode::Transfer,
+            cutlass_decode::ColorMatrix,
+            cutlass_decode::ColorRange,
+        ),
+    ) -> [String; 4] {
+        use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, Transfer};
+        let primaries = match colour.0 {
+            ColorPrimaries::Bt2020 => "bt2020",
+            ColorPrimaries::Bt709 => "bt709",
+            _ => "unknown",
+        };
+        let transfer = match colour.1 {
+            Transfer::Pq => "smpte2084",
+            Transfer::Hlg => "arib-std-b67",
+            Transfer::Bt709 => "bt709",
+            _ => "unknown",
+        };
+        let matrix = match colour.2 {
+            ColorMatrix::Bt2020 => "bt2020nc",
+            ColorMatrix::Bt709 => "bt709",
+            _ => "unknown",
+        };
+        let range = match colour.3 {
+            ColorRange::Limited | ColorRange::Studio => "tv",
+            ColorRange::Full => "pc",
+            ColorRange::Unspecified => "unknown",
+        };
+        [primaries, transfer, matrix, range].map(str::to_owned)
+    }
+
+    /// An HDR VP9 WebM keeps its colour: the PQ transfer and BT.2020
+    /// primaries its Colour element states reach the picture (a VP9 header
+    /// names only the colour space, from which the transfer would be
+    /// BT.2020's SDR curve), as `ffprobe` reports them and as the same
+    /// stream copied into MP4 opens here. An H.264 MKV whose bitstream
+    /// states no colour takes its Colour element's primaries, transfer and
+    /// matrix. Skips, and says so,
+    /// without `ffmpeg`, `ffprobe`, `libvpx-vp9` or `libx264`.
+    #[test]
+    fn a_webm_keeps_the_colour_its_colour_element_states() {
+        use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, Transfer};
+        if !tool_exists("ffmpeg") || !tool_exists("ffprobe") {
+            eprintln!("skipped: ffmpeg or ffprobe is not on PATH");
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("cutlass-readers-colour-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let ffmpeg = |args: &[&str]| {
+            std::process::Command::new("ffmpeg")
+                .args(["-hide_banner", "-loglevel", "error", "-y"])
+                .args(args)
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+
+        // FFmpeg 9 takes the colour from the frames, so `setparams` tags
+        // them as well as the options naming it.
+        let webm = dir.join("hdr.webm");
+        if !ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x240:d=1",
+            "-vf",
+            "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv",
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-color_primaries",
+            "bt2020",
+            "-color_trc",
+            "smpte2084",
+            "-colorspace",
+            "bt2020nc",
+            "-color_range",
+            "tv",
+            path_str(&webm),
+        ]) {
+            eprintln!("skipped: ffmpeg could not write VP9 here");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let hdr = (
+            ColorPrimaries::Bt2020,
+            Transfer::Pq,
+            ColorMatrix::Bt2020,
+            ColorRange::Limited,
+        );
+        let ours = picture_colour(&webm);
+        assert_eq!(ours, hdr);
+        assert_eq!(ffmpeg_names(ours), probed_colour(&webm));
+        let mp4 = dir.join("hdr.mp4");
+        assert!(ffmpeg(&[
+            "-i",
+            path_str(&webm),
+            "-c",
+            "copy",
+            path_str(&mp4)
+        ]));
+        assert_eq!(picture_colour(&mp4), ours);
+        assert_eq!(probed_colour(&mp4), probed_colour(&webm));
+
+        // An H.264 stream with no colour in its VUI, tagged by the
+        // container only.
+        let plain = dir.join("plain.mkv");
+        let tagged = dir.join("tagged.mkv");
+        if ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x240:d=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            path_str(&plain),
+        ]) {
+            assert!(ffmpeg(&[
+                "-i",
+                path_str(&plain),
+                "-c",
+                "copy",
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "arib-std-b67",
+                "-colorspace",
+                "bt2020nc",
+                "-color_range",
+                "pc",
+                path_str(&tagged),
+            ]));
+            let untagged = picture_colour(&plain);
+            assert_eq!(untagged.0, ColorPrimaries::Unspecified);
+            assert_eq!(untagged.1, Transfer::Unspecified);
+            let ours = picture_colour(&tagged);
+            // The H.264 decoder infers limited range from a VUI that does
+            // not state one (H.264 E.2.1), so the container's full range
+            // does not overrule it; FFmpeg's decoder leaves the range
+            // unknown and reports the container's.
+            assert_eq!(
+                ours,
+                (
+                    ColorPrimaries::Bt2020,
+                    Transfer::Hlg,
+                    ColorMatrix::Bt2020,
+                    ColorRange::Limited
+                )
+            );
+            let [primaries, transfer, matrix, range] = probed_colour(&tagged);
+            assert_eq!(
+                ffmpeg_names(ours)[..3],
+                [primaries, transfer, matrix],
+                "{}",
+                tagged.display()
+            );
+            assert_eq!(range, "pc");
+        } else {
+            eprintln!("skipped the H.264 half: ffmpeg could not write H.264 here");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

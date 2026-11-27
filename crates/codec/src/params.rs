@@ -1,8 +1,10 @@
 //! Parameters a container reads from a stream and hands to a decoder.
 //!
-//! Pixel format, sample format, and color tags are not here. This crate
-//! does not decode.
+//! Pixel format and sample format are not here. A video stream may carry
+//! the color its container states ([`StreamColor`]); the color the
+//! bitstream states is the decoder's to read. This crate does not decode.
 
+use crate::access::{ColorRange, ContentLight, MasteringDisplay};
 use crate::id::StreamCodec;
 use std::fmt;
 
@@ -81,11 +83,42 @@ impl fmt::Display for ChannelsError {
 
 impl std::error::Error for ChannelsError {}
 
+/// The color a container states for a video stream, beside its bitstream.
+///
+/// The three codes are ISO/IEC 23091-2 `colour_primaries`,
+/// `transfer_characteristics` and `matrix_coefficients`. [`None`] is a code
+/// the container does not state, states as 2 (unspecified), or states as a
+/// value that table does not define. The light level and mastering display
+/// are in the units [`ContentLight`] and [`MasteringDisplay`] name. The
+/// default states nothing.
+///
+/// A bitstream that states its own color is not overruled by this: the
+/// engine gives it to the decoder, and fills from it only what a decoded
+/// picture leaves unspecified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct StreamColor {
+    pub primaries: Option<u8>,
+    pub transfer: Option<u8>,
+    pub matrix: Option<u8>,
+    pub range: ColorRange,
+    pub content_light: Option<ContentLight>,
+    pub mastering_display: Option<MasteringDisplay>,
+}
+
+impl StreamColor {
+    /// Whether the container states nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Codec configuration a demuxer found on one stream.
 ///
 /// `extradata` is the decoder configuration blob. `size` is the video frame.
-/// `sample_rate` and `channels` describe audio. A missing fact stays [`None`]
-/// rather than a zero sentinel. An unknown codec stays on the value.
+/// `sample_rate` and `channels` describe audio. `color` is the color the
+/// container states for a picture. A missing fact stays [`None`] rather
+/// than a zero sentinel. An unknown codec stays on the value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamParams {
     codec: StreamCodec,
@@ -93,6 +126,7 @@ pub struct StreamParams {
     size: Option<FrameSize>,
     sample_rate: Option<u32>,
     channels: Option<u16>,
+    color: StreamColor,
 }
 
 impl StreamParams {
@@ -105,6 +139,7 @@ impl StreamParams {
             size: Some(size),
             sample_rate: None,
             channels: None,
+            color: StreamColor::default(),
         }
     }
 
@@ -130,6 +165,7 @@ impl StreamParams {
             size: None,
             sample_rate: Some(sample_rate),
             channels: Some(channels),
+            color: StreamColor::default(),
         })
     }
 
@@ -145,6 +181,7 @@ impl StreamParams {
             size: None,
             sample_rate: None,
             channels: None,
+            color: StreamColor::default(),
         }
     }
 
@@ -172,6 +209,19 @@ impl StreamParams {
     pub const fn channels(&self) -> Option<u16> {
         self.channels
     }
+
+    /// The same parameters with the color the container states.
+    #[must_use]
+    pub const fn with_color(mut self, color: StreamColor) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// The color the container states. Empty when it states none.
+    #[must_use]
+    pub const fn color(&self) -> StreamColor {
+        self.color
+    }
 }
 
 /// Audio parameters that cannot describe a stream.
@@ -195,8 +245,10 @@ impl std::error::Error for AudioParamsError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioParamsError, ChannelsError, FrameSize, FrameSizeError, RateError, StreamParams,
+        AudioParamsError, ChannelsError, FrameSize, FrameSizeError, RateError, StreamColor,
+        StreamParams,
     };
+    use crate::access::{ColorRange, ContentLight};
     use crate::id::{CodecId, StreamCodec, UnknownCodec};
 
     #[test]
@@ -209,6 +261,29 @@ mod tests {
         assert_eq!(params.size().expect("frame").height(), 1080);
         assert_eq!(params.sample_rate(), None);
         assert_eq!(params.channels(), None);
+        assert!(params.color().is_empty());
+    }
+
+    #[test]
+    fn a_stream_keeps_the_color_its_container_states() {
+        let size = FrameSize::try_new(64, 32).expect("size");
+        let color = StreamColor {
+            primaries: Some(9),
+            transfer: Some(16),
+            matrix: Some(9),
+            range: ColorRange::Limited,
+            content_light: Some(ContentLight {
+                max_cll: 1000,
+                max_fall: 400,
+            }),
+            mastering_display: None,
+        };
+        let params = StreamParams::video(StreamCodec::Known(CodecId::Vp9), size, Vec::new())
+            .with_color(color);
+        assert_eq!(params.color(), color);
+        assert!(!params.color().is_empty());
+        let plain = StreamParams::video(StreamCodec::Known(CodecId::Vp9), size, Vec::new());
+        assert_ne!(params, plain);
     }
 
     #[test]

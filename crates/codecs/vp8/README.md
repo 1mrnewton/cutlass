@@ -102,12 +102,12 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 
 ## Limits and gaps
 
-- **No WebM.** The Matroska crate is a placeholder, so `.webm` files do not open in Cutlass. VP8 is read from and written to MP4 (`vp08` with a `vpcC` box) only. The desktop app refuses a VP8 export to MOV.
+- **Containers.** VP8 is read from MP4 (`vp08` with a `vpcC` box) and from WebM and Matroska (`cutlass-matroska`, which the desktop app registers). Export writes it to MP4, or to WebM when the file name ends in `.webm`. The desktop app refuses a VP8 export to MOV.
 - **One thread** for decode and for encode.
 - **Pixel caps differ by entry point.** `EngineDecoder` refuses key frames above 8192×8192 pixels. `Decoder::new` and `Vp8Decoder::open` set no area cap, only the 16383 edge limit. A caller that reads untrusted input through them should use `Decoder::with_max_pixels`.
 - **Odd sizes in playback.** `EngineDecoder` drops the last column or row of an odd-sized stream, because the engine's 4:2:0 pictures have even edges. `Decoder` and `Vp8Decoder` keep the odd size.
 - **Display scale is not applied.** The scale bits are reported (`Picture::hscale`, `Picture::vscale`, `Vp8Decoder::scaling`), and no picture is resized.
-- **Color.** `EngineDecoder` takes primaries and transfer from the `vpcC` bytes and falls back to BT.601. `EngineEncoder` always marks its stream BT.709, which is what export's conversion produces.
+- **Color.** `EngineDecoder` takes primaries and transfer from the parameters when they name them (a WebM's Colour element, which the engine passes on), then from the `vpcC` bytes, and falls back to BT.601. `EngineEncoder` always marks its stream BT.709, which is what export's conversion produces.
 - **The clamping promise is not checked.** With `Vp8Options::clamping_type` set, the stream tells decoders that no clamping is needed. The encoder does not verify that its reconstruction stays in range.
 - **Export uses default options.** `EngineEncoder` passes only the bitrate. The other `Vp8Options` fields are reachable through `Vp8Encoder::with_options` only.
 - **Hidden altrefs add delay.** With `hidden_altref`, packets come up to `golden_interval` frames late (at most 64), and `drain` returns the rest.

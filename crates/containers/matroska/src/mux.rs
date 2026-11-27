@@ -79,6 +79,7 @@ use cutlass_container::{
 use crate::codec::{
     Written, aac_config, allowed, opus_head, opus_packet_samples, opus_pre_skip, written,
 };
+use crate::colour::put_colour;
 use crate::ebml::{
     UNKNOWN_SIZE, put_bytes, put_float, put_id, put_master, put_size, put_size_width, put_uint,
     put_uint8, put_void, size_width,
@@ -494,6 +495,7 @@ impl<W: Write + Seek> MatroskaMux<W> {
                 if track.alpha {
                     put_uint(&mut video, ids::ALPHA_MODE, 1);
                 }
+                put_colour(&mut video, &track.params.color());
                 put_master(&mut entry, ids::VIDEO, &video);
             } else if let (Some(rate), Some(channels)) =
                 (track.params.sample_rate(), track.params.channels())

@@ -192,6 +192,9 @@ pub struct TrackEntry {
     /// AlphaMode (RFC 9559, 5.1.4.1.28.4): 1 when the BlockAdditional of
     /// BlockAddID 1 holds alpha as the codec mapping defines it (VP8, VP9).
     pub alpha_mode: u64,
+    /// The Video element's Colour (RFC 9559, 5.1.4.1.28.16), as stored.
+    /// `None` when the track has none, or one that does not parse.
+    pub colour: Option<Colour>,
     pub sampling_frequency: f64,
     pub output_sampling_frequency: Option<f64>,
     pub channels: u64,
@@ -220,6 +223,7 @@ impl TrackEntry {
             display_width: None,
             display_height: None,
             alpha_mode: 0,
+            colour: None,
             sampling_frequency: 8000.0,
             output_sampling_frequency: None,
             channels: 1,
@@ -331,10 +335,91 @@ fn parse_video(data: &[u8], track: &mut TrackEntry) -> Result<()> {
                 track.display_height = Some(ebml::uint(child.id, child.data)?);
             }
             ids::ALPHA_MODE => track.alpha_mode = ebml::uint(child.id, child.data)?,
+            // Colour is description, not framing: one that does not parse
+            // is left out and the track still opens.
+            ids::COLOUR => track.colour = parse_colour(child.data).ok(),
             _ => {}
         }
     }
     Ok(())
+}
+
+/// A video track's Colour element (RFC 9559, 5.1.4.1.28.16), as stored.
+/// Each field is the file's value, or `None` when the file leaves the
+/// element out. Chroma subsampling, siting and BitsPerChannel are not read.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Colour {
+    /// MatrixCoefficients (5.1.4.1.28.17). The file's default is 2,
+    /// unspecified.
+    pub matrix_coefficients: Option<u64>,
+    /// Range (5.1.4.1.28.25): 0 unspecified, 1 broadcast range, 2 full
+    /// range, 3 defined by the matrix and transfer. The default is 0.
+    pub range: Option<u64>,
+    /// TransferCharacteristics (5.1.4.1.28.26). The default is 2.
+    pub transfer_characteristics: Option<u64>,
+    /// Primaries (5.1.4.1.28.27). The default is 2.
+    pub primaries: Option<u64>,
+    /// MaxCLL (5.1.4.1.28.28), in candelas per square metre.
+    pub max_cll: Option<u64>,
+    /// MaxFALL (5.1.4.1.28.29), in candelas per square metre.
+    pub max_fall: Option<u64>,
+    /// MasteringMetadata (5.1.4.1.28.30).
+    pub mastering: Option<Mastering>,
+}
+
+/// MasteringMetadata (RFC 9559, 5.1.4.1.28.30), as stored: CIE 1931
+/// chromaticities and luminances in candelas per square metre. A value
+/// that is not a finite number is left out.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Mastering {
+    /// Red, green and blue, each as x then y.
+    pub primaries: [[Option<f64>; 2]; 3],
+    /// The white point, x then y.
+    pub white_point: [Option<f64>; 2],
+    pub luminance_max: Option<f64>,
+    pub luminance_min: Option<f64>,
+}
+
+fn parse_colour(data: &[u8]) -> Result<Colour> {
+    let mut colour = Colour::default();
+    for child in Children::new(data) {
+        let child = child?;
+        let value = || ebml::uint(child.id, child.data).map(Some);
+        match child.id {
+            ids::MATRIX_COEFFICIENTS => colour.matrix_coefficients = value()?,
+            ids::RANGE => colour.range = value()?,
+            ids::TRANSFER_CHARACTERISTICS => colour.transfer_characteristics = value()?,
+            ids::PRIMARIES => colour.primaries = value()?,
+            ids::MAX_CLL => colour.max_cll = value()?,
+            ids::MAX_FALL => colour.max_fall = value()?,
+            ids::MASTERING_METADATA => colour.mastering = Some(parse_mastering(child.data)?),
+            _ => {}
+        }
+    }
+    Ok(colour)
+}
+
+fn parse_mastering(data: &[u8]) -> Result<Mastering> {
+    let mut mastering = Mastering::default();
+    for child in Children::new(data) {
+        let child = child?;
+        let slot = match child.id {
+            ids::PRIMARY_R_CHROMATICITY_X => &mut mastering.primaries[0][0],
+            ids::PRIMARY_R_CHROMATICITY_Y => &mut mastering.primaries[0][1],
+            ids::PRIMARY_G_CHROMATICITY_X => &mut mastering.primaries[1][0],
+            ids::PRIMARY_G_CHROMATICITY_Y => &mut mastering.primaries[1][1],
+            ids::PRIMARY_B_CHROMATICITY_X => &mut mastering.primaries[2][0],
+            ids::PRIMARY_B_CHROMATICITY_Y => &mut mastering.primaries[2][1],
+            ids::WHITE_POINT_CHROMATICITY_X => &mut mastering.white_point[0],
+            ids::WHITE_POINT_CHROMATICITY_Y => &mut mastering.white_point[1],
+            ids::LUMINANCE_MAX => &mut mastering.luminance_max,
+            ids::LUMINANCE_MIN => &mut mastering.luminance_min,
+            _ => continue,
+        };
+        let value = ebml::float(child.id, child.data)?;
+        *slot = value.is_finite().then_some(value);
+    }
+    Ok(mastering)
 }
 
 fn parse_audio(data: &[u8], track: &mut TrackEntry) -> Result<()> {

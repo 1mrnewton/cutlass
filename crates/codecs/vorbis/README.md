@@ -1,6 +1,6 @@
 # cutlass-vorbis
 
-A Vorbis I audio decoder and encoder in safe Rust (`#![forbid(unsafe_code)]`). Both work on raw Vorbis packets; Ogg pages and granule positions belong to `cutlass-ogg`. The desktop app registers both for `CodecId::Vorbis`, ahead of the platform codecs, so Vorbis sound decodes and encodes the same on every desktop.
+A Vorbis I audio decoder and encoder in safe Rust (`#![forbid(unsafe_code)]`). Both work on raw Vorbis packets; Ogg pages and granule positions belong to `cutlass-ogg`, and WebM and Matroska framing to `cutlass-matroska`, whose CodecPrivate is the same three Xiph-laced headers this crate takes as its configuration. The desktop app registers both for `CodecId::Vorbis`, ahead of the platform codecs, so Vorbis sound decodes and encodes the same on every desktop.
 
 ## What it supports
 
@@ -132,7 +132,6 @@ Gaps:
 - The encoder does not write floor 0, residue 0, lookup type 2 books, more than two modes, or comment fields. The decoder reads all of them.
 - There is no loss concealment. A bad packet is an error and `concealed` is always false.
 - The decoder has no cancel flag; one packet is the unit of work. The encoder has one.
-- Vorbis inside Matroska or WebM does not open in Cutlass, because there is no Matroska reader yet. Only Ogg Vorbis files reach this decoder.
 - The oracle tests have not been verified on Linux or Windows.
 - No reference PCM is checked in, so a machine without FFmpeg and GStreamer does not check decoded sample values.
 

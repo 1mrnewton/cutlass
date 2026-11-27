@@ -4,6 +4,7 @@
 
 pub mod block;
 pub mod codec;
+mod colour;
 mod demux;
 pub mod ebml;
 mod error;
@@ -36,6 +37,9 @@ pub struct Feature {
 /// `false` there means nothing more is done with them. BlockAdditions ride
 /// on their packet both ways (`cutlass_codec::BlockAddition`), and a VP8 or
 /// VP9 track whose packets carry BlockAddID 1 is written with AlphaMode 1.
+/// A video track's Colour element is the colour its stream carries
+/// (`StreamParams::color`), and a stream that carries colour is written
+/// with one.
 pub const FEATURES: &[Feature] = &[
     Feature {
         name: "matroska",
@@ -203,6 +207,11 @@ pub const FEATURES: &[Feature] = &[
         mux: true,
     },
     Feature {
+        name: "colour",
+        demux: true,
+        mux: true,
+    },
+    Feature {
         name: "subtitles",
         demux: false,
         mux: false,
@@ -231,6 +240,7 @@ mod tests {
             "codec-delay",
             "discard-padding",
             "block-additions",
+            "colour",
         ] {
             let row = feature(name);
             assert!(row.demux && row.mux, "{name}");

@@ -43,8 +43,9 @@ Decoder (`Vp9Decoder`, over `Decoder`; `EngineDecoder` for playback):
   (8-bit planes, or little-endian 16-bit ones for 10 and 12 bits; an
   odd-sized 4:2:0 picture repeats its last column or row to an even
   size). Matrix and range are the frame header's; primaries and transfer
-  are the container's when it names them (the parameters' fields, or a
-  `vpcC` payload), since a VP9 header has no transfer curve. `reset`
+  are the container's when it names them (the parameters' fields, which
+  the engine fills from a WebM's Colour element, or an MP4's `vpcC`
+  payload), since a VP9 header has no transfer curve. `reset`
   drops the references and the pictures not yet out, as a seek needs;
   `drain` gives the pictures still being made.
 
@@ -3737,10 +3738,15 @@ carries the colour space, range and render size.
   video contract).
 - The desktop app exports VP9 into WebM only, with Opus or Vorbis sound,
   when the file is named `.webm`: `cutlass-isobmff`'s file muxer refuses
-  VP9 (it writes `vp08`, not `vp09`). `cutlass-matroska`'s demuxer does
-  not read a track's Colour element, so a WebM's primaries and transfer
-  (PQ or HLG of an HDR file) do not reach the decoder; an MP4's `vpcC`
-  does.
+  VP9 (it writes `vp08`, not `vp09`). An exported WebM has no Colour
+  element: export sets no colour on its stream, and the frame header's
+  colour space is all a reader gets.
+- A WebM's Colour element reaches the picture: `cutlass-matroska` reads
+  it onto the stream (`StreamParams::color`) and the engine hands its
+  primaries and transfer to `EngineDecoder` (PQ or HLG of an HDR file,
+  `a_webm_keeps_the_colour_its_colour_element_states` in the desktop
+  app's reader tests). Its MaxCLL, MaxFALL and mastering display stay on
+  the stream: the engine's picture has no fields for them.
 - Interpolation filters switch per block (EIGHTTAP, SMOOTH, SHARP, by
   trial) at speeds 0–2; faster speeds keep EIGHTTAP.
 - The encoder signals any colour space and range, and sRGB in 4:4:4,

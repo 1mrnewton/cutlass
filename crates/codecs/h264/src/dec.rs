@@ -7401,7 +7401,13 @@ mod tests {
         if suffix_length == 0 {
             code -= 15;
         }
-        let offset = |prefix: u32| if prefix == 15 { 0 } else { (1 << (prefix - 3)) - 4096 };
+        let offset = |prefix: u32| {
+            if prefix == 15 {
+                0
+            } else {
+                (1 << (prefix - 3)) - 4096
+            }
+        };
         let mut prefix = 15;
         while code >= offset(prefix) + (1 << (prefix - 3)) {
             prefix += 1;
@@ -7432,9 +7438,7 @@ mod tests {
         data(&mut bits);
         bits.bit(true);
         unit.extend(crate::nal::annex_b_nal(3, 5, &bits.finish()));
-        let mut pictures = decoder
-            .push(&Packet::video(unit, 0, 1, 30, true))
-            .unwrap();
+        let mut pictures = decoder.push(&Packet::video(unit, 0, 1, 30, true)).unwrap();
         pictures.extend(decoder.drain().unwrap());
         assert_eq!(pictures.len(), 1);
         let Some(ten) = pictures[0].yuv420p10.as_ref() else {

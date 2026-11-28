@@ -838,9 +838,7 @@ impl CeltDecoder {
             } else if s1 < s2 {
                 let ratio = ((s1 + 1.0) / (s2 + 1.0)).sqrt();
                 for (i, v) in e.iter_mut().enumerate() {
-                    let gain = WINDOW
-                        .get(i)
-                        .map_or(ratio, |&w| 1.0 - w * (1.0 - ratio));
+                    let gain = WINDOW.get(i).map_or(ratio, |&w| 1.0 - w * (1.0 - ratio));
                     *v *= gain;
                 }
             }

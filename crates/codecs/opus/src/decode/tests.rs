@@ -570,7 +570,11 @@ fn pitch_concealment_holds_a_steady_tone() {
         let mut energies = Vec::new();
         for (k, packet) in packets.iter().enumerate().take(23) {
             let lost = (20..23).contains(&k);
-            let data = if lost { &packet.data[..1] } else { &packet.data[..] };
+            let data = if lost {
+                &packet.data[..1]
+            } else {
+                &packet.data[..]
+            };
             energies.push(mean_square(&decoder.decode(data).unwrap()));
         }
         let last = energies[19];

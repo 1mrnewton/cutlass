@@ -327,3 +327,142 @@ fn opens_only_mpeg4_visual() {
     assert!(matches!(refused, Err(CodecError::Unsupported { .. })));
     assert_eq!(open().codec(), CodecId::Mpeg4);
 }
+
+#[test]
+fn a_refused_short_header_picture_leaves_the_layer_in_force() {
+    let packets = split(&fixture("asp.m4v"));
+    let at = packets[0]
+        .windows(4)
+        .position(|w| w == [0, 0, 1, 0xB6])
+        .expect("a VOP");
+    let (headers, first) = packets[0].split_at(at);
+    let mut bare = packets.clone();
+    bare[0] = first.to_vec();
+    // Sub-QCIF short headers, quantiser 1: a predicted picture, which has
+    // no reference in this stream, and an intra one whose macroblocks are
+    // no code.
+    let predicted = vec![0, 0, 0x80, 0x02, 0x06, 0x01, 0, 0, 0, 0];
+    let mut intra = vec![0, 0, 0x80, 0x02, 0x04, 0x01];
+    intra.extend([0; 64]);
+    for stray in [predicted, intra] {
+        let mut params = CodecParams::video(CodecId::Mpeg4, 48, 32);
+        params.extra = headers.to_vec();
+        let mut decoder = EngineDecoder::open(&params).expect("open");
+        let mut got = Vec::new();
+        for (n, data) in bare.iter().enumerate() {
+            if n == 4 {
+                let refused = decoder.push(&packet(stray.clone(), 99));
+                assert!(refused.is_err(), "{refused:?}");
+            }
+            got.extend(pictures(
+                decoder.push(&packet(data.clone(), n as i64)).expect("push"),
+            ));
+        }
+        got.extend(pictures(decoder.drain().expect("drain")));
+        assert_eq!(got.len(), 10);
+        assert!(joined(&got) == fixture("asp.yuv"));
+    }
+}
+
+#[test]
+fn a_layer_change_that_fails_still_shows_the_picture_it_displaced() {
+    let packets = split(&fixture("asp.m4v"));
+    let mut want = Vec::new();
+    let mut decoder = open();
+    for (n, data) in packets.iter().enumerate().take(4) {
+        want.extend(pictures(
+            decoder.push(&packet(data.clone(), n as i64)).expect("push"),
+        ));
+    }
+    let shown = want.len();
+    want.extend(pictures(decoder.drain().expect("drain")));
+    assert!(want.len() > shown, "a reference was waiting");
+
+    // The 48x64 layer of another stream, its first VOP cut to nothing.
+    let other = split(&fixture("interlaced.m4v"));
+    let vop = other[0]
+        .windows(4)
+        .position(|w| w == [0, 0, 1, 0xB6])
+        .expect("a VOP");
+    let cut = other[0][..vop + 5].to_vec();
+    let mut decoder = open();
+    let mut got = Vec::new();
+    for (n, data) in packets.iter().enumerate().take(4) {
+        got.extend(pictures(
+            decoder.push(&packet(data.clone(), n as i64)).expect("push"),
+        ));
+    }
+    let refused = decoder.push(&packet(cut, 4));
+    assert!(refused.is_err(), "{refused:?}");
+    got.extend(pictures(decoder.drain().expect("drain")));
+    assert_eq!(got.len(), want.len());
+    assert!(got == want);
+}
+
+#[test]
+fn a_layer_change_in_the_configuration_still_shows_the_picture_it_displaced() {
+    let packets = split(&fixture("asp.m4v"));
+    let other = split(&fixture("interlaced.m4v"));
+    let mut want = Vec::new();
+    let mut decoder = open();
+    for (n, data) in packets.iter().enumerate().take(4) {
+        want.extend(pictures(
+            decoder.push(&packet(data.clone(), n as i64)).expect("push"),
+        ));
+    }
+    want.extend(pictures(decoder.drain().expect("drain")));
+    want.extend(decode_all(&mut open(), &other));
+
+    // The 48x64 layer of another stream arrives as configuration.
+    let at = other[0]
+        .windows(4)
+        .position(|w| w == [0, 0, 1, 0xB6])
+        .expect("a VOP");
+    let (headers, first) = other[0].split_at(at);
+    let mut decoder = open();
+    let mut got = Vec::new();
+    for (n, data) in packets.iter().enumerate().take(4) {
+        got.extend(pictures(
+            decoder.push(&packet(data.clone(), n as i64)).expect("push"),
+        ));
+    }
+    let mut configured = packet(first.to_vec(), 4);
+    configured.side.push(SideData::Config(headers.to_vec()));
+    got.extend(pictures(decoder.push(&configured).expect("push")));
+    for (n, data) in other.iter().enumerate().skip(1) {
+        got.extend(pictures(
+            decoder
+                .push(&packet(data.clone(), n as i64 + 4))
+                .expect("push"),
+        ));
+    }
+    got.extend(pictures(decoder.drain().expect("drain")));
+    let sizes = |pictures: &[Picture]| pictures.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>();
+    assert_eq!(sizes(&got), sizes(&want));
+    assert!(joined(&got) == joined(&want));
+}
+
+#[test]
+fn a_refused_configuration_changes_nothing() {
+    let packets = split(&fixture("asp.m4v"));
+    let other = split(&fixture("interlaced.m4v"));
+    // The layer of another stream, then a picture, which a configuration
+    // may not hold.
+    let mut stray = other[0].clone();
+    stray.extend(&other[1]);
+    let mut decoder = open();
+    let mut got = Vec::new();
+    for (n, data) in packets.iter().enumerate() {
+        if n == 4 {
+            let mut configured = packet(data.clone(), n as i64);
+            configured.side.push(SideData::Config(stray.clone()));
+            assert!(decoder.push(&configured).is_err());
+        }
+        got.extend(pictures(
+            decoder.push(&packet(data.clone(), n as i64)).expect("push"),
+        ));
+    }
+    got.extend(pictures(decoder.drain().expect("drain")));
+    assert_eq!(got.len(), 10);
+    assert!(joined(&got) == fixture("asp.yuv"));
+}

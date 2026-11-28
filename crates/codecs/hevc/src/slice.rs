@@ -398,8 +398,8 @@ fn independent(
         max_merge_cand = 5 - bits.ue_max(4, "five_minus_max_num_merge_cand")? as u8;
     }
     let qp_delta = bits.se()?;
-    let qp = pps.init_qp + qp_delta;
-    if qp < -sps.qp_bd_offset() || qp > 51 {
+    let qp = i64::from(pps.init_qp) + i64::from(qp_delta);
+    if qp < i64::from(-sps.qp_bd_offset()) || qp > 51 {
         return Err(bits.malformed("slice_qp_delta"));
     }
     let mut cb_qp_offset = 0;

@@ -255,6 +255,84 @@ fn varying_frame_counts_are_written_as_pairs() {
     assert_eq!(seen, frames);
 }
 
+/// The `kuki` afconvert writes for 44.1 kHz mono 16-bit FLAC: a whole
+/// `dfLa` box, version 0 and flags 0, holding STREAMINFO alone, flagged
+/// last.
+const APPLE_FLAC_COOKIE: [u8; 50] = [
+    0x00, 0x00, 0x00, 0x32, 0x64, 0x66, 0x4c, 0x61, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x22,
+    0x12, 0x00, 0x12, 0x00, 0x00, 0x00, 0xf8, 0x00, 0x06, 0x75, 0x0a, 0xc4, 0x40, 0xf0, 0x00, 0x01,
+    0x58, 0x88, 0x55, 0x5a, 0x3a, 0x07, 0x1a, 0xb2, 0x66, 0x16, 0x60, 0x72, 0xd4, 0xae, 0x6d, 0xe4,
+    0x48, 0x41,
+];
+
+#[test]
+fn flac_extradata_from_mp4_matroska_or_a_flac_file_gives_apple_s_cookie() {
+    let streaminfo = APPLE_FLAC_COOKIE[16..].to_vec();
+    // A VORBIS_COMMENT block flagged last: vendor "Lavf", no comments.
+    let comment = [
+        0x84, 0, 0, 12, 4, 0, 0, 0, b'L', b'a', b'v', b'f', 0, 0, 0, 0,
+    ];
+    let unflagged = |marker: &[u8]| {
+        let mut out = marker.to_vec();
+        out.extend([0x00, 0, 0, 0x22]);
+        out.extend(&streaminfo);
+        out.extend(comment);
+        out
+    };
+    let forms = [
+        // A native file's demuxer: the bare STREAMINFO body.
+        ("streaminfo", streaminfo.clone()),
+        // A Matroska CodecPrivate: the marker, then the blocks.
+        ("fLaC header", unflagged(b"fLaC")),
+        // An MP4 demuxer: the `dfLa` body, version and flags, then the
+        // blocks, as FFmpeg writes it and with a comment after.
+        ("dfLa body", APPLE_FLAC_COOKIE[8..].to_vec()),
+        ("dfLa body and comment", unflagged(&[0, 0, 0, 0])),
+        // A CAF cookie.
+        ("dfLa box", APPLE_FLAC_COOKIE.to_vec()),
+    ];
+    for (name, extra) in forms {
+        let mut mux = writer();
+        mux.add_stream(stream(CodecId::Flac, 44_100, 1, extra.clone()))
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        mux.write_packet(&packet(vec![9; 40], 0, 4096, 44_100))
+            .expect("write");
+        // A late configuration in the same form is taken too.
+        mux.set_config(TrackId::new(0), &extra)
+            .unwrap_or_else(|error| panic!("{name}: late config: {error}"));
+        mux.finish(&done(44_100, 4096)).expect("finish");
+        let bytes = bytes_of(mux);
+        let demux = open(&bytes).expect("open");
+        assert_eq!(demux.cookie(), Some(&APPLE_FLAC_COOKIE[..]), "{name}");
+        assert_eq!(
+            demux.streams()[0].params().extradata(),
+            streaminfo,
+            "{name}"
+        );
+        assert_eq!(demux.description().flags, 1, "{name}: 16-bit FLAC");
+    }
+    // Another `dfLa` version, a first block that is not STREAMINFO, a cut
+    // STREAMINFO, and bytes that are not FLAC configuration.
+    let mut version = APPLE_FLAC_COOKIE[8..].to_vec();
+    version[0] = 1;
+    let mut first = APPLE_FLAC_COOKIE[8..].to_vec();
+    first[4] = 0x84;
+    for extra in [
+        version,
+        first,
+        APPLE_FLAC_COOKIE[8..49].to_vec(),
+        vec![0; 12],
+        b"OpusHead\x01\x01\x38\x01\x44\xac\0\0\0\0\0".to_vec(),
+    ] {
+        let mut mux = writer();
+        assert!(
+            mux.add_stream(stream(CodecId::Flac, 44_100, 1, extra.clone()))
+                .is_err(),
+            "{extra:02x?}"
+        );
+    }
+}
+
 #[test]
 fn opus_writes_no_cookie_and_keeps_the_pre_skip() {
     let mut head = b"OpusHead".to_vec();

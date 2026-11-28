@@ -495,11 +495,15 @@ impl Vop<'_> {
                     } else {
                         v
                     };
-                    if dir == 0 {
-                        levels[j * 8] += v;
+                    // A valid stream keeps predicted levels in 12 bits.
+                    // Saturated, a hostile row of blocks cannot add up
+                    // past what inverse quantisation multiplies in 32 bits.
+                    let level = if dir == 0 {
+                        &mut levels[j * 8]
                     } else {
-                        levels[j] += v;
-                    }
+                        &mut levels[j]
+                    };
+                    *level = (*level + v).clamp(-2048, 2047);
                 }
             }
         }

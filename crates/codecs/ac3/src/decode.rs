@@ -870,12 +870,19 @@ impl Decoder for Ac3Decoder {
         let total = combined.len() / channels;
         let emit = total.saturating_sub(gapless.padding as usize);
         self.held = combined.split_off(emit * channels);
-        self.held_start = start + emit as i64;
+        // `start` follows the packet's timestamp, which may sit at either
+        // end of the range.
+        self.held_start = start.saturating_add(emit as i64);
         if emit == 0 {
             return Ok(Vec::new());
         }
-        let skip = (lead - start).clamp(0, emit as i64) as u32;
-        Ok(vec![self.output(combined, start - lead, skip, 0)?])
+        let skip = lead.saturating_sub(start).clamp(0, emit as i64) as u32;
+        Ok(vec![self.output(
+            combined,
+            start.saturating_sub(lead),
+            skip,
+            0,
+        )?])
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
@@ -894,9 +901,14 @@ impl Decoder for Ac3Decoder {
         }
         let lead = i64::from(gapless.encoder_delay);
         let start = self.held_start;
-        let skip = (lead - start).clamp(0, total as i64) as u32;
+        let skip = lead.saturating_sub(start).clamp(0, total as i64) as u32;
         let trailing = (total as u32).saturating_sub(skip);
-        Ok(vec![self.output(pcm, start - lead, skip, trailing)?])
+        Ok(vec![self.output(
+            pcm,
+            start.saturating_sub(lead),
+            skip,
+            trailing,
+        )?])
     }
 
     fn reset(&mut self) {

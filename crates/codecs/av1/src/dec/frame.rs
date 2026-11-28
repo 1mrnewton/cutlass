@@ -233,11 +233,17 @@ fn lr_units(
 /// loop filter edges are its own sides only (7.14.2), and this changes no
 /// filter size, as such a block's transforms are its own size unless it
 /// is 128 samples wide or high, and every size from 16 samples gives the
-/// same filter.
+/// same filter. In a lossless segment its transforms are 4x4, so it adds
+/// [`LF_LOSSLESS`].
 #[inline]
 pub fn lf_dims(w_log2: u32, h_log2: u32) -> u8 {
     (w_log2 | h_log2 << 3) as u8
 }
+
+/// The bit of an [`FrameState::lf_tx`] entry above the sizes that marks a
+/// skipped inter block of a lossless segment: its edges take the filter
+/// of 4x4 transforms (7.14.3).
+pub const LF_LOSSLESS: u8 = 0x40;
 
 /// The width in 4x4 units of an [`FrameState::lf_tx`] entry.
 #[inline(always)]

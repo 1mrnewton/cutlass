@@ -277,13 +277,16 @@ fn reset_matches_a_fresh_decoder() {
     assert_eq!(decode_all(&mut used, &frames), expected);
 }
 
-/// Concealment after real frames stays finite and dies away.
+/// Concealment after real frames stays finite and dies away: it settles
+/// at the background level, as libopus 1.6.1's does, under the audio the
+/// loss interrupted.
 #[test]
 fn concealment_is_finite_and_decays() {
     let frames = sample_frames();
     for channels in [1usize, 2] {
         let mut dec = CeltDecoder::new(channels, 48_000).expect("decoder");
         let mut out = vec![0f32; 960 * channels];
+        let mut decoded = Vec::new();
         for f in &frames[..10] {
             let mut rd = RangeDecoder::new(f);
             let frame = CeltFrame {
@@ -294,6 +297,7 @@ fn concealment_is_finite_and_decays() {
                 end_band: 21,
             };
             dec.decode(frame, &mut out).expect("decode");
+            decoded.push(out.iter().map(|v| v * v).sum::<f32>());
         }
         let mut energies = Vec::new();
         for _ in 0..30 {
@@ -308,8 +312,8 @@ fn concealment_is_finite_and_decays() {
             assert!(out.iter().all(|v| v.is_finite()));
             energies.push(out.iter().map(|v| v * v).sum::<f32>());
         }
-        let head: f32 = energies[..3].iter().sum();
+        let before: f32 = decoded[7..].iter().sum();
         let tail: f32 = energies[27..].iter().sum();
-        assert!(tail < head.max(1e-9), "{energies:?}");
+        assert!(tail < before, "{decoded:?} then {energies:?}");
     }
 }

@@ -346,6 +346,121 @@ fn ffmpeg_motion_jpeg_files_demux_and_remux() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// FFmpeg makes a FLAC file and copies it into MP4. Its track is written
+/// again from each form FLAC configuration takes: the bare STREAMINFO a
+/// native file gives, the `fLaC` header of a Matroska CodecPrivate, and the
+/// `dfLa` body this demuxer gives. FFmpeg must decode each copy to the same
+/// samples as the FLAC file. The 96 kHz file also checks that the rate is
+/// STREAMINFO's, where the sample entry holds half of it.
+#[test]
+fn ffmpeg_decodes_flac_written_from_each_form_of_configuration() {
+    let (Some(ffmpeg), Some(ffprobe)) = (tool("ffmpeg"), tool("ffprobe")) else {
+        eprintln!("not available: ffmpeg or ffprobe");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("isobmff-flac-oracle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cases = [
+        (
+            "mono",
+            "sine=frequency=440:duration=1:sample_rate=44100",
+            "1",
+            "s16",
+            44_100,
+        ),
+        (
+            "high",
+            "sine=frequency=1000:duration=1:sample_rate=96000",
+            "2",
+            "s32",
+            96_000,
+        ),
+    ];
+    for (name, source, channels, format, rate) in cases {
+        let flac = dir.join(format!("{name}.flac"));
+        let mp4 = dir.join(format!("{name}.mp4"));
+        let quiet = ["-y", "-hide_banner", "-loglevel", "error"];
+        let mut make = quiet.to_vec();
+        make.extend(["-f", "lavfi", "-i", source, "-ac", channels]);
+        make.extend([
+            "-c:a",
+            "flac",
+            "-sample_fmt",
+            format,
+            flac.to_str().unwrap(),
+        ]);
+        run(&ffmpeg, &make);
+        let mut copy = quiet.to_vec();
+        copy.extend([
+            "-i",
+            flac.to_str().unwrap(),
+            "-c",
+            "copy",
+            mp4.to_str().unwrap(),
+        ]);
+        run(&ffmpeg, &copy);
+        let want = pcm_md5(&ffmpeg, &flac);
+        assert!(want.starts_with("MD5="), "{want}");
+
+        let (params, mut packets) = packets_of(&mp4);
+        rebase(&mut packets);
+        let MediaKind::Audio(audio) = params.kind else {
+            panic!("{name}: not a sound track");
+        };
+        assert_eq!(audio.sample_rate, rate, "{name}");
+        let dfla = params.extradata.clone();
+        assert_eq!(&dfla[..8], &[0, 0, 0, 0, 0x80, 0, 0, 34], "{name}");
+        let mut native = b"fLaC".to_vec();
+        native.extend_from_slice(&dfla[4..]);
+        for (form, config) in [
+            ("streaminfo", dfla[8..].to_vec()),
+            ("native", native),
+            ("dfla", dfla.clone()),
+        ] {
+            let out = dir.join(format!("{name}-{form}.mp4"));
+            let mut stored = params.clone();
+            stored.extradata = config;
+            write_remux(&out, &stored, &packets, crate::MuxOptions::default());
+            assert_eq!(pcm_md5(&ffmpeg, &out), want, "{}", out.display());
+            let probed = Command::new(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_name,sample_rate,channels",
+                    "-of",
+                    "csv=p=0",
+                ])
+                .arg(&out)
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&probed.stdout).trim(),
+                format!("flac,{rate},{channels}"),
+                "{}",
+                out.display()
+            );
+            assert_eq!(packets_of(&out).0.extradata, dfla, "{}", out.display());
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// FFmpeg's MD5 of the decoded sound of `path`, or what it said on failure.
+fn pcm_md5(ffmpeg: &Path, path: &Path) -> String {
+    let output = Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:a", "-f", "md5", "-"])
+        .output()
+        .unwrap();
+    if !output.status.success() {
+        return format!("failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
 fn packets_of(path: &Path) -> (crate::StreamParams, Vec<crate::Packet>) {
     let bytes = std::fs::read(path).unwrap();
     let mut source = SliceSource::new(&bytes);

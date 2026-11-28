@@ -2,7 +2,8 @@
 //!
 //! The codec configuration a container hands over is this 34-byte body.
 //! [`StreamInfo::from_extra`] also accepts the body behind a `fLaC` marker
-//! and its block header, the form FFmpeg accepts as extradata.
+//! and its block header, the form FFmpeg accepts as extradata, and the
+//! `dfLa` box body an MP4 `fLaC` sample entry holds.
 
 use cutlass_decode::CodecError;
 
@@ -89,9 +90,10 @@ impl StreamInfo {
         })
     }
 
-    /// Reads codec configuration: empty is `None`; a 34-byte body; or the
-    /// `fLaC` marker, a STREAMINFO block header, and the body, with any
-    /// further metadata blocks after it ignored.
+    /// Reads codec configuration: empty is `None`; a 34-byte body; or a
+    /// STREAMINFO block header and the body behind either the `fLaC`
+    /// marker or the version 0 and flags of an MP4 `dfLa` box body. Any
+    /// further metadata blocks after it are ignored.
     pub fn from_extra(extra: &[u8]) -> Result<Option<Self>, CodecError> {
         if extra.is_empty() {
             return Ok(None);
@@ -99,7 +101,8 @@ impl StreamInfo {
         if extra.len() == STREAMINFO_LEN {
             return Self::parse(extra).map(Some);
         }
-        if extra.len() >= 8 + STREAMINFO_LEN && extra.starts_with(b"fLaC") {
+        // Both forms put the first block header at byte 4.
+        if extra.len() >= 8 + STREAMINFO_LEN && (extra.starts_with(b"fLaC") || extra[0] == 0) {
             let kind = extra[4] & 0x7F;
             let len = u32::from_be_bytes([0, extra[5], extra[6], extra[7]]);
             if kind != 0 || len != 34 {
@@ -185,6 +188,40 @@ mod tests {
         marked[4] = 0x84;
         assert!(StreamInfo::from_extra(&marked).is_err());
         assert!(StreamInfo::from_extra(&body[..STREAMINFO_LEN - 1]).is_err());
+    }
+
+    #[test]
+    fn an_mp4_dfla_box_body_is_read() {
+        // The `dfLa` body FFmpeg 9 writes for `-f lavfi -i sine=d=0.5 -c:a flac x.mp4`.
+        let ffmpeg = [
+            0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x22, 0x04, 0x00, 0x04, 0x00, 0x00, 0x01,
+            0x07, 0x00, 0x01, 0x86, 0x0a, 0xc4, 0x40, 0xf0, 0x00, 0x00, 0x56, 0x22, 0xf9, 0x29,
+            0x51, 0xab, 0xe8, 0x30, 0x8d, 0xe3, 0xf5, 0x4a, 0x91, 0xcd, 0xa0, 0x7e, 0x7f, 0xaa,
+        ];
+        let info = StreamInfo::from_extra(&ffmpeg)
+            .expect("dfLa")
+            .expect("info");
+        assert_eq!((info.min_block, info.max_block), (1024, 1024));
+        assert_eq!(
+            (info.sample_rate, info.channels, info.bits),
+            (44_100, 1, 16)
+        );
+        assert_eq!(info.total_samples, 22_050);
+        // STREAMINFO need not be the last block.
+        let body = sample().to_bytes();
+        let mut boxed = vec![0, 0, 0, 0, 0x00, 0, 0, 34];
+        boxed.extend_from_slice(&body);
+        boxed.extend_from_slice(&[0x81, 0, 0, 4, 0, 0, 0, 0]);
+        assert_eq!(
+            StreamInfo::from_extra(&boxed).expect("boxed"),
+            Some(sample())
+        );
+        // Another version, or another first block, is refused.
+        boxed[0] = 1;
+        assert!(StreamInfo::from_extra(&boxed).is_err());
+        boxed[0] = 0;
+        boxed[4] = 0x04;
+        assert!(StreamInfo::from_extra(&boxed).is_err());
     }
 
     #[test]

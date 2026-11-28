@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_encode::video::{VideoEncoder, VideoInput};
-use cutlass_encode::{CodecError, CodecId, CodecParams, Packet, PixelFormat, SideData};
+use cutlass_encode::{CodecError, CodecId, CodecParams, Packet, PixelFormat, Plane, SideData};
 
 use crate::bool_coder::BoolEncoder;
 use crate::decode::{Frame, mb_filter};
@@ -540,11 +540,13 @@ impl Vp8Encoder {
         let key = plan.key;
         let kind = plan.kind;
         let per_frame = target_bytes(self.opts.bitrate, input.duration, input.timescale);
+        // The frame clock sets no ceiling on `per_frame`, so these saturate.
         let target = match kind {
-            KIND_KEY => per_frame * 5,
-            KIND_GOLDEN => per_frame * 2,
+            KIND_KEY => per_frame.saturating_mul(5),
+            KIND_GOLDEN => per_frame.saturating_mul(2),
             _ => per_frame,
-        } - self.rate.debt / 10;
+        }
+        .saturating_sub(self.rate.debt / 10);
         let q = self.choose_q(kind, target.max(per_frame / 4));
         let base = if key {
             Probs::default()
@@ -729,7 +731,8 @@ impl Vp8Encoder {
         }
         if self.opts.bitrate > 0 {
             let bytes = data.len() as i64;
-            self.rate.debt += bytes - if plan.show { per_frame } else { 0 };
+            let spent = bytes - if plan.show { per_frame } else { 0 };
+            self.rate.debt = self.rate.debt.saturating_add(spent);
             let step = f64::from(AC_Q[usize::from(q)]);
             let sample = bytes as f64 * step;
             let slot = &mut self.rate.model[kind];
@@ -980,6 +983,17 @@ fn plane_sse(a: &[u8], b: &[u8]) -> u64 {
         .sum()
 }
 
+/// Whether `plane` has `width` samples on each of `height` rows. The
+/// plane's fields are public, so its own size proves nothing.
+fn holds(plane: &Plane, width: u32, height: u32) -> bool {
+    let (w, h) = (width as usize, height as usize);
+    plane.stride >= w
+        && h.checked_sub(1)
+            .and_then(|rows| rows.checked_mul(plane.stride))
+            .and_then(|at| at.checked_add(w))
+            .is_some_and(|need| need <= plane.samples.len())
+}
+
 fn target_bytes(bitrate: u32, duration: i64, timescale: u32) -> i64 {
     let ticks = u128::try_from(duration).unwrap_or(0);
     let bits = u128::from(bitrate).saturating_mul(ticks) / u128::from(timescale.max(1));
@@ -1004,6 +1018,15 @@ impl VideoEncoder for Vp8Encoder {
         if frame.width != self.width || frame.height != self.height {
             return Err(CodecError::InvalidApi {
                 what: "picture size",
+            });
+        }
+        let (cw, ch) = (self.width.div_ceil(2), self.height.div_ceil(2));
+        if !holds(&frame.y, self.width, self.height)
+            || !holds(&frame.u, cw, ch)
+            || !holds(&frame.v, cw, ch)
+        {
+            return Err(CodecError::InvalidApi {
+                what: "picture planes",
             });
         }
         if self.opts.bitrate > 0 && (input.duration <= 0 || input.timescale == 0) {

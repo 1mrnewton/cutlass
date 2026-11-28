@@ -614,3 +614,159 @@ fn seeks_land_on_the_keyframe_libavformat_lists() {
         }
     }
 }
+
+/// The body of the first `kind` box in an MP4 file.
+fn box_body<'a>(bytes: &'a [u8], kind: &[u8; 4]) -> &'a [u8] {
+    let at = bytes
+        .windows(4)
+        .position(|window| window == kind)
+        .expect("box");
+    let size = u32::from_be_bytes(bytes[at - 4..at].try_into().expect("size")) as usize;
+    &bytes[at + 4..at - 4 + size]
+}
+
+/// FFmpeg's MD5 of the decoded sound of `path`, or what it said on failure.
+fn pcm_md5(path: &Path) -> String {
+    let path = path.display().to_string();
+    let out = crate::support::output_timeout(
+        "ffmpeg",
+        &["-v", "error", "-i", &path, "-map", "0:a", "-f", "md5", "-"],
+        std::time::Duration::from_secs(60),
+    )
+    .expect("ffmpeg");
+    if !out.status.success() {
+        return format!("failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Writes `packets` of `stream` as the one track of a Matroska file, with
+/// `config` as its extradata.
+fn write_track(
+    path: &Path,
+    stream: &cutlass_container::Stream,
+    config: Vec<u8>,
+    packets: &[cutlass_codec::Packet],
+) {
+    use cutlass_container::{Mux, NewStream, TrackDuration};
+    let params = cutlass_codec::StreamParams::try_audio(
+        stream.params().codec().clone(),
+        stream.params().sample_rate().expect("rate"),
+        stream.params().channels().expect("channels"),
+        config,
+    )
+    .expect("params");
+    let file = std::io::BufWriter::new(std::fs::File::create(path).expect("create"));
+    let mut mux = cutlass_matroska::MatroskaMux::new(file);
+    let track = mux
+        .add_stream(NewStream {
+            params,
+            timescale: stream.timescale(),
+            language: None,
+        })
+        .expect("add stream");
+    let mut ticks = 0;
+    for (index, packet) in packets.iter().enumerate() {
+        let pts = packet.timestamp().presentation().expect("pts");
+        let duration = packet.timestamp().duration().unwrap_or_else(|| {
+            packets
+                .get(index + 1)
+                .and_then(|next| next.timestamp().presentation())
+                .map_or(0, |next| next - pts)
+        });
+        ticks += duration;
+        let stamped =
+            cutlass_codec::Timestamp::try_new(None, Some(pts), Some(duration)).expect("time");
+        let copy = cutlass_codec::Packet::try_new(
+            track.get(),
+            packet.bytes().to_vec(),
+            stamped,
+            packet.timescale(),
+            packet.keyframe(),
+        )
+        .expect("packet");
+        mux.write_packet(&copy).expect("write");
+    }
+    mux.finish(&[TrackDuration {
+        track,
+        timescale: stream.timescale(),
+        ticks,
+    }])
+    .expect("finish");
+}
+
+/// FFmpeg copies a six-channel FLAC file into Matroska and MP4. The
+/// Matroska track is written again with the configuration each other
+/// container hands over: the `dfLa` body from MP4, the bare STREAMINFO
+/// from a native file, and its own CodecPrivate (STREAMINFO and the
+/// channel-mask comment FFmpeg adds for six channels). Each copy's
+/// CodecPrivate is the marker and the blocks, and FFmpeg decodes each to
+/// the same samples.
+#[test]
+fn flac_configuration_from_mp4_or_a_native_file_becomes_a_codec_private() {
+    if !ffmpeg_tools() {
+        return;
+    }
+    let dir = scratch("oracle-flac-config");
+    let source = dir.join("source.flac");
+    let mka = dir.join("copy.mka");
+    let mp4 = dir.join("copy.mp4");
+    let source_arg = source.display().to_string();
+    assert!(ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=2:sample_rate=48000",
+        "-ac",
+        "6",
+        "-c:a",
+        "flac",
+        &source_arg,
+    ]));
+    for copy in [&mka, &mp4] {
+        assert!(ffmpeg(&[
+            "-i",
+            &source_arg,
+            "-c",
+            "copy",
+            &copy.display().to_string()
+        ]));
+    }
+    let dfla = box_body(&std::fs::read(&mp4).expect("mp4"), b"dfLa").to_vec();
+    assert_eq!(&dfla[..8], &[0, 0, 0, 0, 0x80, 0, 0, 0x22]);
+    let mut demux = open(&mka);
+    let stream = demux.streams()[0].clone();
+    assert_eq!(stream.params().codec(), &StreamCodec::Known(CodecId::Flac));
+    let private = stream.params().extradata().to_vec();
+    assert_eq!(&private[..4], b"fLaC");
+    assert_eq!(private[42] & 0x7F, 4, "a comment block follows STREAMINFO");
+    let packets = read_all(&mut demux);
+    let want = pcm_md5(&mka);
+    assert!(want.starts_with("MD5="), "{want}");
+    let mut from_dfla = b"fLaC".to_vec();
+    from_dfla.extend_from_slice(&dfla[4..]);
+    for (name, config, expected) in [
+        ("dfla", dfla.clone(), from_dfla.clone()),
+        ("streaminfo", dfla[8..].to_vec(), from_dfla),
+        ("private", private.clone(), private.clone()),
+    ] {
+        let out = dir.join(format!("from-{name}.mka"));
+        write_track(&out, &stream, config, &packets);
+        assert_eq!(pcm_md5(&out), want, "{name}");
+        let mut copy = open(&out);
+        assert_eq!(
+            copy.streams()[0].params().extradata(),
+            expected.as_slice(),
+            "{name}"
+        );
+        let again = read_all(&mut copy);
+        assert_eq!(again.len(), packets.len(), "{name}");
+        assert!(
+            again
+                .iter()
+                .zip(&packets)
+                .all(|(a, b)| a.bytes() == b.bytes()),
+            "{name}"
+        );
+    }
+}

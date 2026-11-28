@@ -10,6 +10,7 @@ mod alac;
 mod brand;
 mod demux;
 mod file_mux;
+mod flac;
 mod fragment;
 mod heif;
 mod index;

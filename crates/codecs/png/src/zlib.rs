@@ -96,19 +96,24 @@ pub(crate) fn inflate_with(
         block: 0,
         emit,
     };
+    let mut fixed: Option<(Table, Table)> = None;
+    let mut tables = Dynamic::default();
     loop {
         let final_block = bits.get(1).ok_or(ZlibError::Truncated)?;
         let kind = bits.get(2).ok_or(ZlibError::Truncated)?;
         match kind {
             0 => stored(&mut bits, &mut sink)?,
             1 => {
-                let lit = fixed_lit()?;
-                let dist = fixed_dist()?;
-                huffman(&mut bits, &mut sink, &lit, &dist)?;
+                if fixed.is_none() {
+                    fixed = Some((fixed_lit()?, fixed_dist()?));
+                }
+                if let Some((lit, dist)) = &fixed {
+                    huffman(&mut bits, &mut sink, lit, dist)?;
+                }
             }
             2 => {
-                let (lit, dist) = dynamic(&mut bits)?;
-                huffman(&mut bits, &mut sink, &lit, &dist)?;
+                dynamic(&mut bits, &mut tables)?;
+                huffman(&mut bits, &mut sink, &tables.lit, &tables.dist)?;
             }
             _ => return Err(ZlibError::Malformed("deflate block")),
         }
@@ -315,22 +320,40 @@ impl Bits<'_> {
     }
 }
 
-struct Huff {
-    table: Vec<u16>,
-    lens: Vec<u8>,
-    max: u8,
+/// Canonical codes for the encoder, most significant bit first.
+struct Code {
     codes: Vec<u16>,
     lengths: Vec<u8>,
 }
 
-fn build(lengths: &[u8]) -> Result<Huff, ZlibError> {
-    let max = lengths.iter().copied().max().unwrap_or(0);
-    if max > MAX_BITS as u8 {
-        return Err(ZlibError::Malformed("huffman length"));
+fn canonical(lengths: &[u8]) -> Result<Code, ZlibError> {
+    let count = length_counts(lengths)?;
+    let mut next = first_codes(&count);
+    let mut codes = vec![0u16; lengths.len()];
+    for (code, &len) in codes.iter_mut().zip(lengths) {
+        if len == 0 {
+            continue;
+        }
+        let slot = &mut next[usize::from(len)];
+        *code = *slot;
+        *slot = slot.wrapping_add(1);
     }
+    Ok(Code {
+        codes,
+        lengths: lengths.to_vec(),
+    })
+}
+
+/// Count the codes of each length, and refuse a set that claims more than
+/// the whole code space. A set that leaves codes unused is kept; reading one
+/// of the unused codes fails instead.
+fn length_counts(lengths: &[u8]) -> Result<[u16; MAX_BITS + 1], ZlibError> {
     let mut count = [0u16; MAX_BITS + 1];
     for &len in lengths {
-        count[usize::from(len)] += 1;
+        let Some(tally) = count.get_mut(usize::from(len)) else {
+            return Err(ZlibError::Malformed("huffman length"));
+        };
+        *tally += 1;
     }
     count[0] = 0;
     let mut left = 1i32;
@@ -341,96 +364,245 @@ fn build(lengths: &[u8]) -> Result<Huff, ZlibError> {
             return Err(ZlibError::Malformed("huffman tree"));
         }
     }
-    if max == 0 {
-        return Ok(Huff {
-            table: vec![u16::MAX],
-            lens: vec![0],
-            max: 0,
-            codes: vec![0; lengths.len()],
-            lengths: lengths.to_vec(),
-        });
-    }
+    Ok(count)
+}
+
+/// The first code of each length, RFC 1951 section 3.2.2.
+fn first_codes(count: &[u16; MAX_BITS + 1]) -> [u16; MAX_BITS + 1] {
     let mut next = [0u16; MAX_BITS + 1];
     let mut code = 0u16;
     for bits in 1..=MAX_BITS {
         code = code.wrapping_add(count[bits - 1]).wrapping_shl(1);
         next[bits] = code;
     }
-    let size = 1usize << max;
-    let mut table = vec![u16::MAX; size];
-    let mut lens = vec![0u8; size];
-    let mut codes = vec![0u16; lengths.len()];
-    for (symbol, &len) in lengths.iter().enumerate() {
-        if len == 0 {
-            continue;
-        }
-        let assigned = next[usize::from(len)];
-        next[usize::from(len)] = assigned.wrapping_add(1);
-        codes[symbol] = assigned;
-        let rev = reverse_bits(assigned, len);
-        let step = 1usize << len;
-        let mut fill = usize::from(rev);
-        while fill < size {
-            if table[fill] != u16::MAX {
-                return Err(ZlibError::Malformed("huffman tree"));
-            }
-            table[fill] = u16::try_from(symbol).unwrap_or(u16::MAX);
-            lens[fill] = len;
-            fill += step;
-        }
-    }
-    Ok(Huff {
-        table,
-        lens,
-        max,
-        codes,
-        lengths: lengths.to_vec(),
-    })
+    next
 }
 
-impl Huff {
+/// First-level index bits of a literal and length table.
+const LIT_ROOT: u8 = 10;
+/// First-level index bits of a distance table.
+const DIST_ROOT: u8 = 8;
+/// First-level index bits of the code-length table. Its codes are at most
+/// 7 bits, so it never needs a second level.
+const CODE_LENGTH_ROOT: u8 = 7;
+/// Most symbols in one code: the fixed literal and length alphabet.
+const MAX_SYMBOLS: usize = 288;
+
+/// One table slot in one word.
+///
+/// A symbol keeps its value in the low 16 bits and the whole length of its
+/// code above them. A link to a second-level table keeps the table's start
+/// and its index bits in the same places, with `LINK` set. Zero is a code
+/// that no symbol has.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Slot(u32);
+
+impl Slot {
+    const EMPTY: Self = Self(0);
+    const LINK: u32 = 1 << 31;
+
+    fn symbol(value: u16, len: u8) -> Self {
+        Self(u32::from(value) | (u32::from(len) << 16))
+    }
+
+    fn link(start: u16, bits: u8) -> Self {
+        Self(Self::LINK | u32::from(start) | (u32::from(bits) << 16))
+    }
+
+    fn value(self) -> u16 {
+        self.0 as u16
+    }
+
+    fn len(self) -> u8 {
+        (self.0 >> 16) as u8
+    }
+
+    fn is_link(self) -> bool {
+        self.0 & Self::LINK != 0
+    }
+}
+
+/// A two-level decode table for one Huffman code.
+///
+/// The low `root` bits of the input pick a slot. A code no longer than that
+/// fills every slot it is a prefix of. Longer codes that share their first
+/// `root` bits get one second-level table, sized for the longest of them.
+/// Building writes the `1 << root` first-level slots and second-level tables
+/// about as large as the long codes they hold, never `1 << 15` slots, so a
+/// stream of many small dynamic blocks costs time in proportion to its size.
+#[derive(Default)]
+struct Table {
+    slots: Vec<Slot>,
+    root: u8,
+    max: u8,
+}
+
+impl Table {
+    fn new(lengths: &[u8], root: u8) -> Result<Self, ZlibError> {
+        let mut table = Self::default();
+        table.build(lengths, root)?;
+        Ok(table)
+    }
+
+    /// Replace this table with the code `lengths` describe, keeping the
+    /// allocation for the next block.
+    fn build(&mut self, lengths: &[u8], root_bits: u8) -> Result<(), ZlibError> {
+        let count = length_counts(lengths)?;
+        let max = (1..=MAX_BITS)
+            .rev()
+            .find(|&len| count[len] > 0)
+            .unwrap_or(0);
+        self.slots.clear();
+        self.max = max as u8;
+        self.root = 0;
+        if max == 0 {
+            return Ok(());
+        }
+        let root = max.min(usize::from(root_bits));
+        self.root = root as u8;
+        self.slots.resize(1 << root, Slot::EMPTY);
+        // Symbols in canonical order: by code length, then by value.
+        let mut order = [0u16; MAX_SYMBOLS];
+        let mut offset = [0usize; MAX_BITS + 1];
+        let mut total = 0usize;
+        for len in 1..=MAX_BITS {
+            offset[len] = total;
+            total += usize::from(count[len]);
+        }
+        for (symbol, &len) in lengths.iter().enumerate() {
+            if len == 0 {
+                continue;
+            }
+            let at = &mut offset[usize::from(len)];
+            let (Some(slot), Ok(value)) = (order.get_mut(*at), u16::try_from(symbol)) else {
+                return Err(ZlibError::Malformed("huffman length"));
+            };
+            *slot = value;
+            *at += 1;
+        }
+        let symbols = &order[..total];
+        let mut next = first_codes(&count);
+        let mut at = 0;
+        while at < symbols.len() {
+            let symbol = symbols[at];
+            let len = usize::from(lengths[usize::from(symbol)]);
+            let code = next[len];
+            if len <= root {
+                next[len] = code.wrapping_add(1);
+                let first = usize::from(reverse_bits(code, len as u8));
+                let slot = Slot::symbol(symbol, len as u8);
+                spread(&mut self.slots[..1 << root], first, len, slot);
+                at += 1;
+                continue;
+            }
+            // Canonical codes are consecutive, and their lengths never fall,
+            // so the codes under this prefix are the next few, and the last
+            // of them is the longest.
+            let prefix = code >> (len - root);
+            let mut peek = next;
+            let mut end = at;
+            let mut deepest = len;
+            while let Some(&later) = symbols.get(end) {
+                let later_len = usize::from(lengths[usize::from(later)]);
+                let later_code = peek[later_len];
+                if later_code >> (later_len - root) != prefix {
+                    break;
+                }
+                peek[later_len] = later_code.wrapping_add(1);
+                deepest = later_len;
+                end += 1;
+            }
+            let sub = deepest - root;
+            let start = self.slots.len();
+            let link = u16::try_from(start).map_err(|_| ZlibError::Malformed("huffman tree"))?;
+            let primary = usize::from(reverse_bits(prefix, root as u8));
+            if self.slots.get(primary) != Some(&Slot::EMPTY) {
+                return Err(ZlibError::Malformed("huffman tree"));
+            }
+            self.slots[primary] = Slot::link(link, sub as u8);
+            self.slots.resize(start + (1 << sub), Slot::EMPTY);
+            for &member in &symbols[at..end] {
+                let member_len = usize::from(lengths[usize::from(member)]);
+                let member_code = next[member_len];
+                next[member_len] = member_code.wrapping_add(1);
+                let tail = member_len - root;
+                let suffix = member_code & ((1 << tail) - 1);
+                let first = usize::from(reverse_bits(suffix, tail as u8));
+                let slot = Slot::symbol(member, member_len as u8);
+                spread(&mut self.slots[start..], first, tail, slot);
+            }
+            at = end;
+        }
+        Ok(())
+    }
+
     fn symbol(&self, bits: &mut Bits<'_>) -> Result<u16, ZlibError> {
         if self.max == 0 {
             return Err(ZlibError::Malformed("huffman symbol"));
         }
-        if bits.ensure(self.max) {
-            let index = (bits.acc & ((1u32 << self.max) - 1)) as usize;
-            let len = self.lens[index];
-            let symbol = self.table[index];
-            if len == 0 || symbol == u16::MAX {
-                return Err(ZlibError::Malformed("huffman symbol"));
-            }
-            bits.acc >>= len;
-            bits.bits -= len;
-            return Ok(symbol);
+        let whole = bits.ensure(self.max);
+        let slot = self.lookup(bits.acc);
+        let len = slot.len();
+        // With fewer than `max` bits left, the missing ones read as zero. A
+        // code that fits in the bits that are there is still read. Anything
+        // else is a truncated stream rather than a bad code.
+        if len == 0 || len > bits.bits {
+            return Err(if whole {
+                ZlibError::Malformed("huffman symbol")
+            } else {
+                ZlibError::Truncated
+            });
         }
-        let mut acc = 0u16;
-        let mut have = 0u8;
-        loop {
-            let bit = bits.get(1).ok_or(ZlibError::Truncated)?;
-            acc = (acc << 1) | u16::try_from(bit).unwrap_or(0);
-            have += 1;
-            if have > MAX_BITS as u8 {
-                return Err(ZlibError::Malformed("huffman symbol"));
-            }
-            for (symbol, (&len, &code)) in self.lengths.iter().zip(self.codes.iter()).enumerate() {
-                if len == have && code == acc {
-                    return u16::try_from(symbol)
-                        .map_err(|_| ZlibError::Malformed("huffman symbol"));
-                }
-            }
+        bits.acc >>= len;
+        bits.bits -= len;
+        Ok(slot.value())
+    }
+
+    /// The slot the next bits select, through a second-level table if the
+    /// first level points to one.
+    fn lookup(&self, acc: u32) -> Slot {
+        let acc = acc as usize;
+        let first = self.slot(acc & low_mask(self.root));
+        if !first.is_link() {
+            return first;
         }
+        let sub = (acc >> self.root) & low_mask(first.len());
+        self.slot(usize::from(first.value()) + sub)
+    }
+
+    fn slot(&self, index: usize) -> Slot {
+        self.slots.get(index).copied().unwrap_or(Slot::EMPTY)
     }
 }
 
-fn reverse_bits(code: u16, len: u8) -> u16 {
-    let mut value = code;
-    let mut reversed = 0u16;
-    for _ in 0..len {
-        reversed = (reversed << 1) | (value & 1);
-        value >>= 1;
+/// Write `slot` at `first` and every `1 << len` after it.
+fn spread(slots: &mut [Slot], first: usize, len: usize, slot: Slot) {
+    let step = 1 << len;
+    let mut at = first;
+    while let Some(entry) = slots.get_mut(at) {
+        *entry = slot;
+        at += step;
     }
-    reversed
+}
+
+fn low_mask(bits: u8) -> usize {
+    (1usize << bits) - 1
+}
+
+/// The tables a dynamic block replaces, kept from block to block.
+#[derive(Default)]
+struct Dynamic {
+    code_lengths: Table,
+    lit: Table,
+    dist: Table,
+}
+
+/// The low `len` bits of `code`, in the opposite order.
+fn reverse_bits(code: u16, len: u8) -> u16 {
+    if len == 0 {
+        return 0;
+    }
+    code.reverse_bits() >> (16 - u32::from(len.min(16)))
 }
 
 fn stored<F>(bits: &mut Bits<'_>, sink: &mut Sink<F>) -> Result<(), ZlibError>
@@ -453,8 +625,8 @@ where
 fn huffman<F>(
     bits: &mut Bits<'_>,
     sink: &mut Sink<F>,
-    lit: &Huff,
-    dist: &Huff,
+    lit: &Table,
+    dist: &Table,
 ) -> Result<(), ZlibError>
 where
     F: FnMut(&[u8]) -> Result<(), ZlibError>,
@@ -477,7 +649,7 @@ where
     }
 }
 
-fn distance(bits: &mut Bits<'_>, dist: &Huff) -> Result<usize, ZlibError> {
+fn distance(bits: &mut Bits<'_>, dist: &Table) -> Result<usize, ZlibError> {
     let symbol = dist.symbol(bits)?;
     let index = usize::from(symbol);
     if index >= DIST_BASE.len() {
@@ -525,7 +697,7 @@ where
     Ok(())
 }
 
-fn dynamic(bits: &mut Bits<'_>) -> Result<(Huff, Huff), ZlibError> {
+fn dynamic(bits: &mut Bits<'_>, tables: &mut Dynamic) -> Result<(), ZlibError> {
     let hlit = bits.get(5).ok_or(ZlibError::Truncated)? as usize + 257;
     let hdist = bits.get(5).ok_or(ZlibError::Truncated)? as usize + 1;
     let hclen = bits.get(4).ok_or(ZlibError::Truncated)? as usize + 4;
@@ -536,8 +708,10 @@ fn dynamic(bits: &mut Bits<'_>) -> Result<(Huff, Huff), ZlibError> {
     for index in CL_ORDER.iter().take(hclen) {
         code_lengths[*index] = bits.get(3).ok_or(ZlibError::Truncated)? as u8;
     }
-    let alphabet = build(&code_lengths)?;
-    let mut lengths = vec![0u8; hlit + hdist];
+    tables.code_lengths.build(&code_lengths, CODE_LENGTH_ROOT)?;
+    let alphabet = &tables.code_lengths;
+    let mut all = [0u8; 286 + 32];
+    let lengths = &mut all[..hlit + hdist];
     let mut index = 0;
     while index < lengths.len() {
         let symbol = alphabet.symbol(bits)?;
@@ -552,22 +726,22 @@ fn dynamic(bits: &mut Bits<'_>) -> Result<(Huff, Huff), ZlibError> {
                 }
                 let repeat = bits.get(2).ok_or(ZlibError::Truncated)? as usize + 3;
                 let previous = lengths[index - 1];
-                fill(&mut lengths, &mut index, previous, repeat)?;
+                fill(lengths, &mut index, previous, repeat)?;
             }
             17 => {
                 let repeat = bits.get(3).ok_or(ZlibError::Truncated)? as usize + 3;
-                fill(&mut lengths, &mut index, 0, repeat)?;
+                fill(lengths, &mut index, 0, repeat)?;
             }
             18 => {
                 let repeat = bits.get(7).ok_or(ZlibError::Truncated)? as usize + 11;
-                fill(&mut lengths, &mut index, 0, repeat)?;
+                fill(lengths, &mut index, 0, repeat)?;
             }
             _ => return Err(ZlibError::Malformed("code length")),
         }
     }
-    let lit = build(&lengths[..hlit])?;
-    let dist = build(&lengths[hlit..])?;
-    Ok((lit, dist))
+    tables.lit.build(&lengths[..hlit], LIT_ROOT)?;
+    tables.dist.build(&lengths[hlit..], DIST_ROOT)?;
+    Ok(())
 }
 
 fn fill(lengths: &mut [u8], index: &mut usize, value: u8, repeat: usize) -> Result<(), ZlibError> {
@@ -581,19 +755,19 @@ fn fill(lengths: &mut [u8], index: &mut usize, value: u8, repeat: usize) -> Resu
     Ok(())
 }
 
-fn fixed_lit() -> Result<Huff, ZlibError> {
-    let mut lengths = vec![8u8; 288];
+fn fixed_lit() -> Result<Table, ZlibError> {
+    let mut lengths = [8u8; 288];
     for len in &mut lengths[144..256] {
         *len = 9;
     }
     for len in &mut lengths[256..280] {
         *len = 7;
     }
-    build(&lengths)
+    Table::new(&lengths, LIT_ROOT)
 }
 
-fn fixed_dist() -> Result<Huff, ZlibError> {
-    build(&[5u8; 32])
+fn fixed_dist() -> Result<Table, ZlibError> {
+    Table::new(&[5u8; 32], DIST_ROOT)
 }
 
 /// Canonical fixed-Huffman code for a literal or length symbol.
@@ -919,9 +1093,9 @@ fn encode_dynamic(tokens: &[u32]) -> Option<Vec<u8>> {
     if !covers(&code_freq, &code_len) || !tokens_fit(tokens, &lit_len, &dist_len) {
         return None;
     }
-    let lit_huff = build(&lit_len).ok()?;
-    let dist_huff = build(&dist_len).ok()?;
-    let code_huff = build(&code_len).ok()?;
+    let lit_huff = canonical(&lit_len).ok()?;
+    let dist_huff = canonical(&dist_len).ok()?;
+    let code_huff = canonical(&code_len).ok()?;
     let mut send = 4usize;
     for (index, &ord) in CL_ORDER.iter().enumerate() {
         if code_len[ord] != 0 {
@@ -961,7 +1135,7 @@ fn encode_dynamic(tokens: &[u32]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn write_dynamic_token(writer: &mut BitWriter, token: u32, lit: &Huff, dist: &Huff) -> Option<()> {
+fn write_dynamic_token(writer: &mut BitWriter, token: u32, lit: &Code, dist: &Code) -> Option<()> {
     if token & LIT_FLAG != 0 {
         put_huff(writer, lit, (token & 0xff) as usize)?;
         return Some(());
@@ -975,7 +1149,7 @@ fn write_dynamic_token(writer: &mut BitWriter, token: u32, lit: &Huff, dist: &Hu
     Some(())
 }
 
-fn put_huff(writer: &mut BitWriter, huff: &Huff, symbol: usize) -> Option<()> {
+fn put_huff(writer: &mut BitWriter, huff: &Code, symbol: usize) -> Option<()> {
     let len = huff.lengths.get(symbol).copied().unwrap_or(0);
     let code = huff.codes.get(symbol).copied().unwrap_or(0);
     if len == 0 {
@@ -1382,6 +1556,154 @@ mod tests {
         assert_eq!(inflate(&ours, sample.len()).expect("inflate"), sample);
         let back = python_zlib(&ours, false).expect("python");
         assert_eq!(back, sample);
+    }
+
+    #[test]
+    fn a_long_run_of_tiny_dynamic_blocks_inflates_in_linear_time() {
+        // Both codes of every block reach 15 bits. A table indexed by the
+        // longest code writes 2^15 slots for each of them, every block.
+        // Unoptimised on an M-series Mac this is about 0.1 s, and about 4 s
+        // with such a table.
+        let (zlib, expect) = tiny_dynamic_blocks(5_000);
+        let started = std::time::Instant::now();
+        let out = inflate(&zlib, expect.len()).expect("inflate");
+        let elapsed = started.elapsed();
+        assert_eq!(out, expect);
+        assert_eq!(python_zlib(&zlib, false).expect("python"), expect);
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "{} bytes of tiny dynamic blocks took {elapsed:?}",
+            zlib.len()
+        );
+    }
+
+    #[test]
+    fn a_long_run_of_empty_fixed_blocks_inflates_in_linear_time() {
+        // An empty fixed block is ten bits. Building the fixed tables again
+        // for each one costs far more than reading it. Unoptimised on an
+        // M-series Mac this is about 10 ms, and about 6 s that way.
+        let blocks = 200_000;
+        let mut writer = super::BitWriter::default();
+        for _ in 1..blocks {
+            writer.put(0, 1);
+            writer.put(1, 2);
+            writer.put(0, 7);
+        }
+        writer.put(1, 1);
+        writer.put(1, 2);
+        for &byte in b"png" {
+            let (code, len) = super::fixed_lit_code(usize::from(byte));
+            writer.put_code(code, len);
+        }
+        writer.put(0, 7);
+        let mut zlib = vec![0x78, 0x01];
+        writer.finish(&mut zlib);
+        zlib.extend_from_slice(&super::adler32(b"png").to_be_bytes());
+        let started = std::time::Instant::now();
+        let out = inflate(&zlib, 3).expect("inflate");
+        let elapsed = started.elapsed();
+        assert_eq!(out, b"png");
+        assert_eq!(python_zlib(&zlib, false).expect("python"), b"png");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "{blocks} empty fixed blocks took {elapsed:?}"
+        );
+    }
+
+    /// Dynamic blocks whose complete codes are as deep as deflate allows.
+    ///
+    /// Literals 0 to 13 have codes 1 to 14 bits long. End of block and the
+    /// three-byte length have 15 bits. Distance codes 0 to 15 have 1 to 15
+    /// bits, and 15 bits again. Block `n` sends literal `n % 14`, then a
+    /// match through distance code `n % 16` once that far back exists.
+    fn tiny_dynamic_blocks(blocks: usize) -> (Vec<u8>, Vec<u8>) {
+        const END: usize = 256;
+        const LEN_THREE: usize = 257;
+        let mut lit = [0u8; 258];
+        for (len, symbol) in (1..=14).zip(0..14) {
+            lit[symbol] = len;
+        }
+        lit[END] = 15;
+        lit[LEN_THREE] = 15;
+        let mut dist: Vec<u8> = (1..=15).collect();
+        dist.push(15);
+        // The code-length code: lengths 1 to 15 and the long zero run, four
+        // bits each.
+        let mut lengths_code = [0u8; 19];
+        for len in &mut lengths_code[1..=15] {
+            *len = 4;
+        }
+        lengths_code[18] = 4;
+        let lit_codes = canonical_codes(&lit);
+        let dist_codes = canonical_codes(&dist);
+        let length_codes = canonical_codes(&lengths_code);
+        let mut writer = super::BitWriter::default();
+        let put_length = |writer: &mut super::BitWriter, symbol: usize| {
+            writer.put_code(length_codes[symbol], lengths_code[symbol]);
+        };
+        let mut expect = Vec::new();
+        for block in 0..blocks {
+            writer.put(u32::from(block + 1 == blocks), 1);
+            writer.put(2, 2);
+            writer.put((lit.len() - 257) as u32, 5);
+            writer.put((dist.len() - 1) as u32, 5);
+            writer.put(19 - 4, 4);
+            for &symbol in &super::CL_ORDER {
+                writer.put(u32::from(lengths_code[symbol]), 3);
+            }
+            for &len in &lit[..14] {
+                put_length(&mut writer, usize::from(len));
+            }
+            // 242 zero lengths, from 14 to 255: runs of 138 and 104.
+            put_length(&mut writer, 18);
+            writer.put(138 - 11, 7);
+            put_length(&mut writer, 18);
+            writer.put(104 - 11, 7);
+            put_length(&mut writer, 15);
+            put_length(&mut writer, 15);
+            for &len in &dist {
+                put_length(&mut writer, usize::from(len));
+            }
+            let literal = block % 14;
+            writer.put_code(lit_codes[literal], lit[literal]);
+            expect.push(literal as u8);
+            let symbol = block % 16;
+            let back = usize::from(super::DIST_BASE[symbol]);
+            if back <= expect.len() {
+                writer.put_code(lit_codes[LEN_THREE], lit[LEN_THREE]);
+                writer.put_code(dist_codes[symbol], dist[symbol]);
+                writer.put(0, super::DIST_EXTRA[symbol]);
+                for _ in 0..3 {
+                    expect.push(expect[expect.len() - back]);
+                }
+            }
+            writer.put_code(lit_codes[END], lit[END]);
+        }
+        let mut zlib = vec![0x78, 0x01];
+        writer.finish(&mut zlib);
+        zlib.extend_from_slice(&super::adler32(&expect).to_be_bytes());
+        (zlib, expect)
+    }
+
+    /// RFC 1951 section 3.2.2, written out apart from the codec's own.
+    fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
+        let mut count = [0u16; 16];
+        for &len in lengths {
+            count[usize::from(len)] += 1;
+        }
+        count[0] = 0;
+        let mut next = [0u16; 16];
+        for bits in 1..16 {
+            next[bits] = (next[bits - 1] + count[bits - 1]) << 1;
+        }
+        lengths
+            .iter()
+            .map(|&len| {
+                let code = next[usize::from(len)];
+                next[usize::from(len)] += u16::from(len > 0);
+                code
+            })
+            .collect()
     }
 
     #[test]

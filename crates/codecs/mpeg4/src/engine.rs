@@ -77,7 +77,7 @@ impl EngineDecoder {
             return Err(CodecError::Unsupported { what: "codec" });
         }
         let mut inner = dec::Decoder::with_max_pixels(max_pixels);
-        inner.configure(&params.extra)?;
+        inner.configure(&params.extra, &mut Vec::new())?;
         Ok(Self {
             inner,
             pts: BinaryHeap::new(),
@@ -178,11 +178,15 @@ impl Decoder for EngineDecoder {
     }
 
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        let mut displaced = dec::Decoded::default();
         for side in &packet.side {
             if let SideData::Config(config) = side {
-                self.inner.configure(config)?;
+                self.inner.configure(config, &mut displaced.pictures)?;
             }
         }
+        // A layer of another size showed the picture the old one held.
+        let shown = self.finish(displaced, packet.pts)?;
+        self.pending.extend(shown);
         if packet.data.is_empty() {
             return Ok(Vec::new());
         }
@@ -595,6 +599,74 @@ mod tests {
             }
         }
         assert_eq!(kinds, vec![(0, 0, true), (1, 1, false), (2, 0, true)]);
+    }
+
+    fn flat(pts: i64) -> VideoInput {
+        let luma = 40 + u8::try_from(pts % 5).unwrap_or(0) * 30;
+        VideoInput {
+            picture: Yuv420p::solid(32, 32, luma, 128, 128).expect("picture"),
+            pts,
+            duration: 1,
+            timescale: 25,
+            force_keyframe: false,
+        }
+    }
+
+    #[test]
+    fn a_stream_that_starts_late_decodes() {
+        for extra in [Vec::new(), ADVANCED_SIMPLE.to_vec()] {
+            let mut params = CodecParams::video(CodecId::Mpeg4, 32, 32);
+            params.extra = extra;
+            let mut encoder = EngineEncoder::open(&params).expect("open");
+            // An export from more than an hour into its timeline.
+            let start = 3_700 * 25;
+            let mut packets = Vec::new();
+            for n in 0..4 {
+                packets.extend(encoder.push(&flat(start + n)).expect("push"));
+            }
+            packets.extend(encoder.drain().expect("drain"));
+
+            let mut params = CodecParams::video(CodecId::Mpeg4, 32, 32);
+            params.extra = encoder.extradata().to_vec();
+            let mut decoder = EngineDecoder::open(&params).expect("decoder");
+            let mut shown = Vec::new();
+            for packet in &packets {
+                shown.extend(decoder.push(packet).expect("decode"));
+            }
+            shown.extend(decoder.drain().expect("drain"));
+            assert_eq!(shown.len(), 4);
+        }
+    }
+
+    #[test]
+    fn a_gap_longer_than_the_decoder_reads_is_refused() {
+        for extra in [Vec::new(), ADVANCED_SIMPLE.to_vec()] {
+            let mut params = CodecParams::video(CodecId::Mpeg4, 32, 32);
+            params.extra = extra;
+            let mut encoder = EngineEncoder::open(&params).expect("open");
+            let mut packets = Vec::new();
+            for n in 0..4 {
+                packets.extend(encoder.push(&flat(n)).expect("push"));
+            }
+            // modulo_time_base spends a bit on every second since the
+            // picture before, and the decoder reads 3600 of them at most.
+            for pts in [3 + 3_602 * 25, i64::from(u32::MAX)] {
+                let far = encoder.push(&flat(pts)).map(|packets| packets.len());
+                assert!(
+                    matches!(
+                        far,
+                        Err(CodecError::InvalidApi {
+                            what: "picture time"
+                        })
+                    ),
+                    "{far:?}"
+                );
+            }
+            // The refused pictures left the encoder where it was.
+            packets.extend(encoder.push(&flat(4)).expect("push"));
+            packets.extend(encoder.drain().expect("drain"));
+            assert_eq!(packets.len(), 5);
+        }
     }
 
     #[test]

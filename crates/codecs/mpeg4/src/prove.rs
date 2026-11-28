@@ -179,7 +179,7 @@ fn a_layer_over_the_pixel_cap_is_refused() {
 fn a_vop_in_the_configuration_is_refused() {
     let mut decoder = Decoder::with_max_pixels(FUZZ_PIXELS);
     let err = decoder
-        .configure(&[0, 0, 1, 0xB6, 0])
+        .configure(&[0, 0, 1, 0xB6, 0], &mut Vec::new())
         .expect_err("a picture in the configuration");
     assert!(matches!(err, CodecError::Malformed { .. }), "{err:?}");
 }
@@ -286,7 +286,7 @@ fn core_and_engine(bytes: &[u8]) -> Result<(bool, usize), String> {
 
 fn configure_both(bytes: &[u8]) -> Result<(), String> {
     let mut core = Decoder::with_max_pixels(FUZZ_PIXELS);
-    let core_result = core.configure(bytes);
+    let core_result = core.configure(bytes, &mut Vec::new());
     let mut params = CodecParams::video(CodecId::Mpeg4, 0, 0);
     params.extra = bytes.to_vec();
     let engine_result = EngineDecoder::open_limited(&params, FUZZ_PIXELS);

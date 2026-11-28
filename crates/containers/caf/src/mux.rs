@@ -615,8 +615,9 @@ fn source_depth(cookie: Cookie, config: Option<&[u8]>) -> u32 {
 }
 
 fn flac_config(config: &[u8]) -> Result<Vec<u8>, MuxError> {
-    cookie::streaminfo_from_extradata(config)
-        .ok_or_else(|| rejected("the FLAC config is not a STREAMINFO"))
+    cookie::streaminfo_from_extradata(config).ok_or_else(|| {
+        rejected("the FLAC config is not a STREAMINFO, a fLaC header, or a dfLa body")
+    })
 }
 
 fn chunk(out: &mut Vec<u8>, kind: [u8; 4], body: &[u8]) {

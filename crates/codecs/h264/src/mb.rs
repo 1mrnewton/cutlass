@@ -211,7 +211,8 @@ mod mbaff;
 /// SliceQPY after `mb_qp_delta`. The result stays in `-QpBdOffsetY..=51`.
 fn next_qp<S: Sample>(qp: i32, delta: i32) -> i32 {
     let span = 52 + S::QP_BD;
-    (qp + delta + span + S::QP_BD).rem_euclid(span) - S::QP_BD
+    // A CAVLC delta can be any 32-bit value; only its remainder matters.
+    (qp + delta.rem_euclid(span) + span + S::QP_BD).rem_euclid(span) - S::QP_BD
 }
 
 fn chroma_deblock<S: Sample>(luma_qp: i32, offset: i32) -> i8 {
@@ -224,9 +225,12 @@ pub(crate) fn reference_lists<S: Sample>(
     poc: i32,
     max_fn: u32,
     size: (usize, usize),
+    chroma: u8,
 ) -> Result<(Vec<usize>, Vec<usize>), CodecError> {
     let view = header.view_id;
     let (width, height) = size;
+    // A picture of another size or chroma format is not predicted from:
+    // its planes are not the lengths this picture's prediction reads.
     let short = |frame: &&Frame<S>| {
         frame.referenced
             && !frame.long_term
@@ -234,6 +238,7 @@ pub(crate) fn reference_lists<S: Sample>(
             && frame.view_id == view
             && frame.w == width
             && frame.h == height
+            && frame.chroma() == chroma
     };
     let mut shorts: Vec<usize> = dpb
         .iter()
@@ -251,6 +256,7 @@ pub(crate) fn reference_lists<S: Sample>(
                 && frame.view_id == view
                 && frame.w == width
                 && frame.h == height
+                && frame.chroma() == chroma
         })
         .map(|(index, _)| index)
         .collect();
@@ -9491,7 +9497,11 @@ fn read_te(entropy: &mut Entropy<'_, '_>, range: usize, ctx: usize) -> Result<u3
             if range == 2 {
                 Ok(1 - u32::from(bits.bit()?))
             } else {
-                bits.ue()
+                let value = bits.ue()?;
+                if value as usize >= range {
+                    return Err(bits.malformed("ref idx"));
+                }
+                Ok(value)
             }
         }
         Entropy::Cabac(cab) => {
@@ -9649,8 +9659,8 @@ fn read_mvd_part<S: Sample>(
     let dx = read_mvd(entropy, sums[0], 40)?;
     let dy = read_mvd(entropy, sums[1], 47)?;
     let mv = [
-        super::clip_ref(i32::from(pred[0]) + dx),
-        super::clip_ref(i32::from(pred[1]) + dy),
+        super::clip_ref(i32::from(pred[0]).saturating_add(dx)),
+        super::clip_ref(i32::from(pred[1]).saturating_add(dy)),
     ];
     let mvd = [mvd_size(dx), mvd_size(dy)];
     fill_motion(mb, list, cover(x, y, part.w / 4, part.h / 4), mv, mvd);
@@ -10489,11 +10499,11 @@ fn temporal_block(
         .get(usize::from(u8::try_from(ref0).unwrap_or(0)))
         .copied()
         .unwrap_or(false);
-    let td = (col_poc - pic0).clamp(-128, 127);
+    let td = col_poc.saturating_sub(pic0).clamp(-128, 127);
     if long || td == 0 {
         return (ref0, mv_col, [0, 0]);
     }
-    let tb = (slice.poc - pic0).clamp(-128, 127);
+    let tb = slice.poc.saturating_sub(pic0).clamp(-128, 127);
     let tx = (16_384 + (td.abs() / 2)) / td;
     let factor = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
     let mv0 = [scale_mv(factor, mv_col[0]), scale_mv(factor, mv_col[1])];
@@ -10580,11 +10590,11 @@ fn temporal_quarter<S: Sample>(
         (slice.poc, frame_poc, col.poc)
     };
     let long = slice.long0.get(frame0).copied().unwrap_or(false);
-    let td = (pic1 - pic0).clamp(-128, 127);
+    let td = pic1.saturating_sub(pic0).clamp(-128, 127);
     if long || td == 0 {
         return (ref0, mv_col, [0, 0]);
     }
-    let tb = (current - pic0).clamp(-128, 127);
+    let tb = current.saturating_sub(pic0).clamp(-128, 127);
     let tx = (16_384 + (td.abs() / 2)) / td;
     let factor = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
     let mv0 = [scale_mv(factor, mv_col[0]), scale_mv(factor, mv_col[1])];
@@ -12384,11 +12394,11 @@ pub(crate) fn implicit_table(
 /// The weights for a picture, or field, with order count `current` that
 /// predicts from two with order counts `poc0` and `poc1`.
 fn implicit_pair(current: i32, poc0: i32, poc1: i32, long: bool) -> (i32, i32) {
-    let td = (poc1 - poc0).clamp(-128, 127);
+    let td = poc1.saturating_sub(poc0).clamp(-128, 127);
     if td == 0 || long {
         return (32, 32);
     }
-    let tb = (current - poc0).clamp(-128, 127);
+    let tb = current.saturating_sub(poc0).clamp(-128, 127);
     let tx = (16_384 + (td / 2).abs()) / td;
     let dist = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
     let w1 = dist >> 2;
@@ -13496,7 +13506,7 @@ fn same_pictures(a: i8, b: i8, c: i8, d: i8) -> bool {
 }
 
 fn mv_apart(a: [i16; 2], b: [i16; 2]) -> bool {
-    (a[0] - b[0]).abs() >= 4 || (a[1] - b[1]).abs() >= 4
+    a[0].abs_diff(b[0]) >= 4 || a[1].abs_diff(b[1]) >= 4
 }
 
 fn preds_at(mb: &Mb, bx: usize, by: usize) -> [(i8, [i16; 2]); 2] {

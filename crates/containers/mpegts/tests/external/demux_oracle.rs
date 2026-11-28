@@ -60,8 +60,10 @@ pub const VARIANTS: &[Variant] = &[
             "mpeg2video",
             "-flags",
             "+ildct+ilme",
-            "-top",
-            "1",
+            // Top field first. FFmpeg 9 dropped `-top`; the filter
+            // is in every version.
+            "-vf",
+            "setfield=tff",
             "-g",
             "12",
             "-c:a",

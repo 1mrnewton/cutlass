@@ -19,6 +19,9 @@ use crate::tns::{self, TnsWindow};
 
 const END: u32 = 7;
 
+/// Where the noise generator starts after open and after a reset.
+const NOISE_SEED: u32 = 0x1F2E_3D4C;
+
 pub struct AacDecoder {
     config: AudioConfig,
     windows: Windows,
@@ -27,6 +30,9 @@ pub struct AacDecoder {
     live: bool,
     /// The last packet's timestamp and timescale, for the frame a drain releases.
     last: Option<(i64, u32)>,
+    /// Noise generator state. It runs on across channels and frames, so a
+    /// noise band is not the same vector twice.
+    noise: u32,
 }
 
 impl AacDecoder {
@@ -41,6 +47,7 @@ impl AacDecoder {
             frame_index: 0,
             live: false,
             last: None,
+            noise: NOISE_SEED,
         })
     }
 
@@ -81,8 +88,16 @@ impl AacDecoder {
             }
         }
         let mut scratch = self.overlaps.clone();
-        let pcm = decode_unit(&self.config, &self.windows, &mut scratch, &packet.data)?;
+        let mut noise = self.noise;
+        let pcm = decode_unit(
+            &self.config,
+            &self.windows,
+            &mut scratch,
+            &mut noise,
+            &packet.data,
+        )?;
         self.overlaps = scratch;
+        self.noise = noise;
         self.frame_index = self.frame_index.saturating_add(1);
         self.live = true;
         Ok(pcm)
@@ -100,6 +115,7 @@ impl AacDecoder {
             let kbd = overlap.prev_shape_kbd();
             let spec = vec![0.0; self.config.frame_length];
             channels.push(synthesize(&self.windows, overlap, &spec, seq, kbd)?);
+            overlap.restart();
         }
         self.overlaps = scratch;
         self.frame_index = self.frame_index.saturating_add(1);
@@ -113,6 +129,7 @@ impl AacDecoder {
         self.frame_index = 0;
         self.live = false;
         self.last = None;
+        self.noise = NOISE_SEED;
     }
 
     pub fn frame_index(&self) -> u64 {
@@ -128,6 +145,7 @@ fn decode_unit(
     config: &AudioConfig,
     windows: &Windows,
     overlaps: &mut [Overlap],
+    noise: &mut u32,
     data: &[u8],
 ) -> Result<Vec<f32>, CodecError> {
     let mut bits = BitReader::new(data);
@@ -146,11 +164,11 @@ fn decode_unit(
         match id {
             0 => {
                 expect(config, &mut produced, ElementKind::Sce, &bits)?;
-                channels.push(decode_single(&mut bits, config, false)?);
+                channels.push(decode_single(&mut bits, config, false, noise)?);
             }
             1 => {
                 expect(config, &mut produced, ElementKind::Cpe, &bits)?;
-                let pair = decode_pair(&mut bits, config)?;
+                let pair = decode_pair(&mut bits, config, noise)?;
                 channels.extend(pair);
             }
             2 => {
@@ -158,7 +176,7 @@ fn decode_unit(
             }
             3 => {
                 expect(config, &mut produced, ElementKind::Lfe, &bits)?;
-                channels.push(decode_single(&mut bits, config, true)?);
+                channels.push(decode_single(&mut bits, config, true, noise)?);
             }
             4 => skip_data(&mut bits)?,
             5 => {
@@ -231,18 +249,23 @@ fn decode_single(
     bits: &mut BitReader<'_>,
     config: &AudioConfig,
     _lfe: bool,
+    noise: &mut u32,
 ) -> Result<Channel, CodecError> {
     let _tag = bits.read(4)?;
     let mut channel = decode_ics(bits, config, None)?;
     if channel.books.iter().any(|book| *book == 14 || *book == 15) {
         return Err(malformed(bits, "intensity"));
     }
-    apply_noise(config, &mut channel, &mut 0x1F2E_3D4C)?;
+    apply_noise(config, &mut channel, noise)?;
     apply_tns_channel(config, &mut channel)?;
     Ok(channel)
 }
 
-fn decode_pair(bits: &mut BitReader<'_>, config: &AudioConfig) -> Result<Vec<Channel>, CodecError> {
+fn decode_pair(
+    bits: &mut BitReader<'_>,
+    config: &AudioConfig,
+    noise: &mut u32,
+) -> Result<Vec<Channel>, CodecError> {
     let _tag = bits.read(4)?;
     let common = bits.read(1)? == 1;
     let (shared, ms) = if common {
@@ -255,10 +278,10 @@ fn decode_pair(bits: &mut BitReader<'_>, config: &AudioConfig) -> Result<Vec<Cha
     let mut left = decode_ics(bits, config, shared.clone())?;
     let mut right = decode_ics(bits, config, shared)?;
     if common {
-        apply_stereo(config, &mut left, &mut right, &ms)?;
+        apply_stereo(config, &mut left, &mut right, &ms, noise)?;
     } else {
-        apply_noise(config, &mut left, &mut 0x1F2E_3D4C)?;
-        apply_noise(config, &mut right, &mut 0x1F2E_3D4C)?;
+        apply_noise(config, &mut left, noise)?;
+        apply_noise(config, &mut right, noise)?;
     }
     apply_tns_channel(config, &mut left)?;
     apply_tns_channel(config, &mut right)?;
@@ -700,6 +723,7 @@ fn apply_stereo(
     left: &mut Channel,
     right: &mut Channel,
     ms: &[bool],
+    state: &mut u32,
 ) -> Result<(), CodecError> {
     if left.ics.max_sfb != right.ics.max_sfb || left.ics.groups != right.ics.groups {
         return Err(CodecError::Malformed {
@@ -711,8 +735,6 @@ fn apply_stereo(
     let bins = window_bins(left);
     let groups = left.ics.groups.clone();
     let max_sfb = left.ics.max_sfb;
-    let mut left_state = 0x1F2E_3D4Cu32;
-    let mut right_state = left_state;
     let mut windows_at = 0usize;
     for (group, group_len) in groups.into_iter().enumerate() {
         for sfb in 0..max_sfb {
@@ -734,8 +756,7 @@ fn apply_stereo(
                     right_book,
                     index,
                     ms_used,
-                    left_state: &mut left_state,
-                    right_state: &mut right_state,
+                    state,
                 })?;
             }
         }
@@ -753,8 +774,7 @@ struct BandMix<'a> {
     right_book: u8,
     index: usize,
     ms_used: bool,
-    left_state: &'a mut u32,
-    right_state: &'a mut u32,
+    state: &'a mut u32,
 }
 
 fn mix_band(mix: BandMix<'_>) -> Result<(), CodecError> {
@@ -767,8 +787,7 @@ fn mix_band(mix: BandMix<'_>) -> Result<(), CodecError> {
         right_book,
         index,
         ms_used,
-        left_state,
-        right_state,
+        state,
     } = mix;
     if left_book == 14 || left_book == 15 {
         return Err(CodecError::Malformed {
@@ -779,7 +798,7 @@ fn mix_band(mix: BandMix<'_>) -> Result<(), CodecError> {
     if left_book == 13 && right_book == 13 && ms_used {
         let left_scale = pow2_quarter(left.scales[index]);
         let right_scale = pow2_quarter(right.scales[index]);
-        fill_noise(left_state, left_scale, &mut left.spec[left_band.clone()]);
+        fill_noise(state, left_scale, &mut left.spec[left_band.clone()]);
         right.spec[right_band.clone()].copy_from_slice(&left.spec[left_band]);
         if left_scale.abs() > 1.0e-12 {
             let ratio = right_scale / left_scale;
@@ -787,12 +806,11 @@ fn mix_band(mix: BandMix<'_>) -> Result<(), CodecError> {
                 *sample *= ratio;
             }
         }
-        *right_state = *left_state;
         return Ok(());
     }
     if left_book == 13 {
         fill_noise(
-            left_state,
+            state,
             pow2_quarter(left.scales[index]),
             &mut left.spec[left_band.clone()],
         );
@@ -815,7 +833,7 @@ fn mix_band(mix: BandMix<'_>) -> Result<(), CodecError> {
     }
     if right_book == 13 {
         fill_noise(
-            right_state,
+            state,
             pow2_quarter(right.scales[index]),
             &mut right.spec[right_band.clone()],
         );
@@ -944,6 +962,7 @@ pub fn protection_crc(
         }
     }
     let mut bits = BitReader::new(raw);
+    let mut noise = NOISE_SEED;
     let mut seen = 0usize;
     while bits.bits_left() >= 3 {
         seen += 1;
@@ -957,7 +976,7 @@ pub fn protection_crc(
         let after = bits.position();
         match id {
             0 | 3 => {
-                let _ = decode_single(&mut bits, config, id == 3)?;
+                let _ = decode_single(&mut bits, config, id == 3, &mut noise)?;
                 crc.cover(raw, after, bits.position(), 192);
             }
             1 => {
@@ -1356,6 +1375,127 @@ mod tests {
         for (a, b) in quiet.iter().zip(&loud) {
             assert!((b - 2.0 * a).abs() <= peak * 1.0e-5, "{a} {b}");
         }
+    }
+
+    const NOISE_BAND: Band = Band {
+        gain: 150,
+        book: 13,
+        scale: (256, 9),
+        quad: None,
+        pulse: None,
+    };
+
+    /// A common-window pair with the same noise band in both channels.
+    fn noise_pair(ms_mask_present: u32) -> Vec<f32> {
+        let mut writer = BitWriter::with_cap(64);
+        put(&mut writer, 1, 3);
+        put(&mut writer, 0, 4);
+        put(&mut writer, 1, 1);
+        put(&mut writer, 0, 1);
+        put(&mut writer, 0, 2);
+        put(&mut writer, 0, 1);
+        put(&mut writer, 1, 6);
+        put(&mut writer, 0, 1);
+        put(&mut writer, ms_mask_present, 2);
+        write_band(&mut writer, &NOISE_BAND, false);
+        write_band(&mut writer, &NOISE_BAND, false);
+        put(&mut writer, 7, 3);
+        let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::stereo());
+        let mut decoder = AacDecoder::open(&params).unwrap();
+        let packet = Packet::audio(writer.finish(), 0, 1024, 48_000);
+        decoder.push_packet(&packet).unwrap()
+    }
+
+    /// ISO/IEC 14496-3, 4.6.13.3: each channel draws its own noise, and the
+    /// mid/side flag of a band makes the pair share one vector.
+    #[test]
+    fn a_pair_shares_noise_only_under_the_mid_side_flag() {
+        let shared = noise_pair(2);
+        let peak = shared.iter().fold(0.0f32, |max, s| max.max(s.abs()));
+        assert!(peak > 1.0e-4, "{peak}");
+        for [left, right] in shared.as_chunks::<2>().0 {
+            assert!((left - right).abs() <= peak * 1.0e-5, "{left} {right}");
+        }
+        let separate = noise_pair(0);
+        let apart = separate
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .fold(0.0f32, |max, [left, right]| max.max((left - right).abs()));
+        assert!(apart > peak * 1.0e-2, "{apart} {peak}");
+    }
+
+    /// The same access unit three times: the second and third frames carry
+    /// the same band energy but not the same noise.
+    #[test]
+    fn a_noise_band_is_a_new_vector_in_every_frame() {
+        let mut writer = BitWriter::with_cap(64);
+        put(&mut writer, 0, 3);
+        put(&mut writer, 0, 4);
+        write_band(&mut writer, &NOISE_BAND, true);
+        put(&mut writer, 7, 3);
+        let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
+        let mut decoder = AacDecoder::open(&params).unwrap();
+        let packet = Packet::audio(writer.finish(), 0, 1024, 48_000);
+        decoder.push_packet(&packet).unwrap();
+        let second = decoder.push_packet(&packet).unwrap();
+        let third = decoder.push_packet(&packet).unwrap();
+        let peak = second.iter().fold(0.0f32, |max, s| max.max(s.abs()));
+        assert!(peak > 1.0e-4, "{peak}");
+        let apart = second
+            .iter()
+            .zip(&third)
+            .fold(0.0f32, |max, (a, b)| max.max((a - b).abs()));
+        assert!(apart > peak * 1.0e-2, "{apart} {peak}");
+        // A reset starts the generator again, so a seek decodes the same.
+        decoder.reset_state();
+        decoder.push_packet(&packet).unwrap();
+        assert_eq!(decoder.push_packet(&packet).unwrap(), second);
+    }
+
+    /// A start window with one noise band, a drain, then the short window
+    /// that follows a start window in the stream.
+    #[test]
+    fn the_unit_after_a_drain_decodes_whatever_its_window_sequence() {
+        let mut start = BitWriter::with_cap(64);
+        for (value, width) in [
+            (0, 3),
+            (0, 4),
+            (150, 8),
+            (0, 1),
+            (1, 2),
+            (0, 1),
+            (1, 6),
+            (0, 1),
+        ] {
+            put(&mut start, value, width);
+        }
+        for (value, width) in [(13, 4), (1, 5), (256, 9), (0, 1), (0, 1), (0, 1), (7, 3)] {
+            put(&mut start, value, width);
+        }
+        let mut short = BitWriter::with_cap(64);
+        for (value, width) in [
+            (0, 3),
+            (0, 4),
+            (0, 8),
+            (0, 1),
+            (2, 2),
+            (0, 1),
+            (0, 4),
+            (0, 7),
+        ] {
+            put(&mut short, value, width);
+        }
+        for (value, width) in [(0, 1), (0, 1), (0, 1), (7, 3)] {
+            put(&mut short, value, width);
+        }
+        let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
+        let mut decoder = AacDecoder::open(&params).unwrap();
+        let start = Packet::audio(start.finish(), 0, 1024, 48_000);
+        let short = Packet::audio(short.finish(), 1024, 1024, 48_000);
+        decoder.push_packet(&start).unwrap();
+        assert!(decoder.drain_pcm().unwrap().is_some());
+        assert_eq!(decoder.push_packet(&short).unwrap().len(), 1024);
     }
 
     fn refuse_platform(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {

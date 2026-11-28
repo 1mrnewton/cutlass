@@ -69,6 +69,8 @@ ll.obu 2 128x128 yuv420p 863cb381802e9309
 ll.obu 3 128x128 yuv420p e4a42ebe186bd4e6
 lossless-segment.ivf 0 64x64 yuv420p d4e170064dfaae30
 lossless-segment.ivf 1 64x64 yuv420p c47319cff33e95bf
+lossless-skip.ivf 0 64x64 yuv444p12le 12fed5ff58741dab
+lossless-skip.ivf 1 64x64 yuv444p12le be66ec4b86e1f050
 lst.obu 0 128x128 yuv420p 61032e26fc9f2ab5
 lst.obu 1 128x128 yuv420p 909fce3d18f4c300
 masked.obu 0 64x64 yuv420p fe5f9b89ae870b0f
@@ -189,6 +191,14 @@ super.obu 0 64x64 yuv420p 2eba7fac4977792a
 super.obu 1 64x64 yuv420p d1d67332739cae46
 super.obu 2 64x64 yuv420p 1ac40e4159285a78
 super.obu 3 64x64 yuv420p dc78a4769c661bc2
+superres-inter.ivf 0 192x128 yuv420p 7007911762881c51
+superres-inter.ivf 1 192x128 yuv420p 754c02da5ef2f957
+superres-inter.ivf 2 192x128 yuv420p cbacbce5dbf5f4c4
+superres-inter.ivf 3 192x128 yuv420p fee9b542e991da63
+superres-inter.ivf 4 192x128 yuv420p 6a3393295d1a56a2
+superres-inter.ivf 5 192x128 yuv420p 01e1e610a0843100
+superres-inter.ivf 6 192x128 yuv420p bb3affbd8a3aec38
+superres-inter.ivf 7 192x128 yuv420p 601900b0c3d1b652
 sw.obu 0 128x128 yuv420p 832d5f10e25bb379
 sw.obu 1 128x128 yuv420p e711b7e72938348c
 sw.obu 2 128x128 yuv420p 148f178dd2f41d6c

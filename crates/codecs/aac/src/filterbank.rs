@@ -155,6 +155,12 @@ impl Overlap {
             Sequence::OnlyLong | Sequence::LongStop => Sequence::OnlyLong,
         }
     }
+
+    /// Forget the last window sequence. The frame a drain makes up is not in
+    /// the stream, so it does not decide which sequence may follow.
+    pub(crate) fn restart(&mut self) {
+        self.started = false;
+    }
 }
 
 /// Gain between this unnormalized `2/N` pair and the float AAC pair that

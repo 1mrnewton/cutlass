@@ -22,6 +22,7 @@ use super::lossless_encode::webpinfo_ok;
 use super::lossy_encode::psnr;
 use super::oracle::{
     cwebp, dwebp_rgba, local_files, require_or_skip, scratch, sips_rgba, tool, video_frame,
+    write_png,
 };
 use super::stills::lossless_sources;
 use crate::{WebpDecoder, WebpEncoder, WebpOptions};
@@ -156,10 +157,31 @@ fn a_cwebp_picture_goes_through_the_container_and_back_out_to_libwebp_and_imagei
         let again = super::oracle::decode_still(&file).rgba;
         assert!(again == decoded, "{label}: dwebp and this crate differ");
         if label == "lossless" {
-            assert!(decoded == ours, "lossless export changed the picture");
+            // Without `exact`, as in cwebp, the colour under a fully
+            // transparent pixel is free; everything that shows is kept.
+            let visible = decoded.len() == ours.len()
+                && decoded
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(ours.as_chunks::<4>().0)
+                    .all(|(a, b)| a[3] == b[3] && (a[3] == 0 || a[..3] == b[..3]));
+            assert!(visible, "lossless export changed the picture");
         } else {
+            // 30 dB, or within 1 dB of libwebp at the same setting where it
+            // gets less: the synthetic picture, all edges, loses more than a
+            // photograph does.
             let quality = psnr(&ours, &decoded);
-            assert!(quality > 30.0, "{label}: {quality:.2} dB");
+            let png = dir.join(format!("ours-{label}.png"));
+            write_png(&png, width, height, &ours);
+            let libwebp = dir.join(format!("libwebp-{label}.webp"));
+            cwebp(&cwebp_tool, &png, &[], &libwebp);
+            let reference = psnr(&ours, &dwebp_rgba(&dwebp, &libwebp).2);
+            let floor = 30.0f64.min(reference - 1.0);
+            assert!(
+                quality > floor,
+                "{label}: {quality:.2} dB, libwebp {reference:.2} dB"
+            );
         }
         if let Some(webpinfo) = &webpinfo {
             assert!(webpinfo_ok(webpinfo, &path), "{label}: webpinfo");

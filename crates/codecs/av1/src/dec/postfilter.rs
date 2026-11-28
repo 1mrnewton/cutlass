@@ -14,7 +14,7 @@ use crate::dsp::lf::{filter_horizontal_edge, filter_vertical_edge};
 use crate::dsp::lr::{LrPlane, LrScratch, LrUnit, lr_planes, lr_planes_stripes, lr_save_bounds};
 use crate::dsp::superres::upscale_plane;
 
-use super::frame::{FrameState, Picture};
+use super::frame::{FrameState, LF_LOSSLESS, Picture};
 use super::obu::{FrameHeader, SequenceHeader};
 use super::types::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV, NONE, bh4, bw4};
 use cutlass_simd::av1::lfmask::{self, EdgeUnits, Edges, edge_codes};
@@ -307,6 +307,8 @@ struct LfPlane<'a> {
     nr_vis: usize,
     /// Loop filter index `i` of 7.14.5.
     li: usize,
+    /// Whether a segment is lossless, so `tx` may hold [`LF_LOSSLESS`].
+    lossless: bool,
 }
 
 impl<'a> LfPlane<'a> {
@@ -334,6 +336,7 @@ impl<'a> LfPlane<'a> {
             nc_vis: (hdr.frame_width as usize).div_ceil(4 << sx).min(nc),
             nr_vis: (hdr.frame_height as usize).div_ceil(4 << sy).min(nr),
             li,
+            lossless: hdr.lossless_array.contains(&true),
         }
     }
 
@@ -447,6 +450,20 @@ impl<'a> LfPlane<'a> {
             let (c, mask) = edge_codes(&u, edges.unwrap_or(first), luma);
             codes[whole..].copy_from_slice(&c[..rest]);
             masks[k] = mask & ((1 << rest) - 1);
+        }
+        if self.lossless {
+            // An edge beside a skipped inter block of a lossless segment
+            // is filtered as one of 4x4 transforms.
+            for (i, c) in codes.iter_mut().enumerate() {
+                let side = if pass0 {
+                    i.checked_sub(1).map_or(0, |j| cur[j])
+                } else {
+                    across[i]
+                };
+                if *c != 0 && (cur[i] | side) & LF_LOSSLESS != 0 {
+                    *c = 4 << 8 | (*c & 0xff);
+                }
+            }
         }
         if pass0 {
             // Nothing to the left of the frame.
@@ -1455,10 +1472,20 @@ fn cdef_rows<P: Pixel>(
                                     i.skip(r, c) && i.skip(rr, c) && i.skip(r, cc) && i.skip(rr, cc)
                                 }
                                 None => {
-                                    fs.mi_at(r, c).skip()
-                                        && fs.mi_at(rr, c).skip()
-                                        && fs.mi_at(r, cc).skip()
-                                        && fs.mi_at(rr, cc).skip()
+                                    // Parsing writes a tall block's even rows
+                                    // only at its edges (`MiFill::OddRows`);
+                                    // the unit at the odd row and column is
+                                    // always its block's, and a block of 8x8
+                                    // or more holds the whole 8x8.
+                                    let m = fs.mi_at(rr, cc);
+                                    if bw4(m.bsize) > 1 && bh4(m.bsize) > 1 {
+                                        m.skip()
+                                    } else {
+                                        fs.mi_at(r, c).skip()
+                                            && fs.mi_at(rr, c).skip()
+                                            && fs.mi_at(r, cc).skip()
+                                            && m.skip()
+                                    }
                                 }
                             };
                             if skip {

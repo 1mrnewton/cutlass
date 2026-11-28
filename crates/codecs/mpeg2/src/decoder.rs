@@ -248,16 +248,24 @@ impl Mpeg2Decoder {
         }
         // An open first field moves into the working state instead of being
         // shared with it, so its second field decodes into the frame in
-        // place rather than into a copy of the whole frame.
-        let first = self
-            .state
-            .open_field
-            .as_mut()
-            .and_then(|open| open.frame.take());
+        // place rather than into a copy of the whole frame. A frame that a
+        // clone of this decoder shares is copied before it is written, and
+        // stays here.
+        let first = self.state.open_field.as_mut().and_then(|open| {
+            if open
+                .frame
+                .as_ref()
+                .is_some_and(|frame| Arc::strong_count(frame) > 1)
+            {
+                None
+            } else {
+                open.frame.take()
+            }
+        });
         let first_at = first.as_ref().map(Arc::as_ptr);
         let mut state = self.state.clone();
-        if let Some(open) = state.open_field.as_mut() {
-            open.frame = first;
+        if let (Some(open), Some(first)) = (state.open_field.as_mut(), first) {
+            open.frame = Some(first);
         }
         let mut done = Vec::new();
         let clock = Clock {
@@ -276,12 +284,16 @@ impl Mpeg2Decoder {
             }
             Err(error) => {
                 // The first field comes back. A refused packet may have
-                // written only the lines of the other parity, and those are
-                // written again in full before the frame is shown: by its
-                // second field, which must cover the picture, or by
-                // `finish_unpaired`.
+                // written only the lines of the other parity. They go back
+                // to the zeros a first field leaves there, as a second
+                // field with no frame before it predicts from them.
                 if let (Some(at), Some(open)) = (first_at, self.state.open_field.as_mut()) {
-                    open.frame = find_frame(at, &state, &done);
+                    let mut frame = find_frame(at, &state, &done);
+                    drop((state, done));
+                    if let Some(frame) = frame.as_mut() {
+                        clear_field(Arc::make_mut(frame), &open.info.geo, 1 - open.parity);
+                    }
+                    open.frame = frame;
                 }
                 Err(error)
             }
@@ -651,7 +663,11 @@ impl Mpeg2Decoder {
             colour: seq.display.and_then(|display| display.colour),
             sample_aspect: seq.sample_aspect(),
             frame_rate: seq.frame_rate(),
-            pts: clock.pts + clock.started * frame_ticks(clock, seq.frame_rate()),
+            pts: clock.pts.saturating_add(
+                clock
+                    .started
+                    .saturating_mul(frame_ticks(clock, seq.frame_rate())),
+            ),
             duration: clock.duration,
             timescale: clock.timescale,
             keyframe: first_type == PICTURE_I,
@@ -767,6 +783,16 @@ fn find_frame(at: *const Frame, state: &State, done: &[Decoded]) -> Option<Arc<F
         .chain(done.iter().map(|decoded| &decoded.frame))
         .find(|frame| std::ptr::eq(Arc::as_ptr(frame), at))
         .cloned()
+}
+
+/// Zeroes the lines of field `parity`, as a new frame holds them.
+fn clear_field(frame: &mut Frame, geo: &Geometry, parity: usize) {
+    for (c, plane) in frame.planes.iter_mut().enumerate() {
+        let (stride, height) = geo.plane(c);
+        for line in (parity..height).step_by(2) {
+            plane[line * stride..(line + 1) * stride].fill(0);
+        }
+    }
 }
 
 /// A first field whose pair never came: its lines fill the missing field.
@@ -1067,5 +1093,51 @@ mod tests {
         }
         expected.extend(lone.drain().unwrap());
         assert_eq!(with_refusal(cut, None), expected);
+    }
+
+    #[test]
+    fn a_refused_second_field_leaves_the_first_open_in_a_cloned_decoder() {
+        let fields = fields();
+        let second = &fields[3];
+        let slice2 = second.windows(4).position(|w| w == [0, 0, 1, 2]).unwrap();
+        let mut decoder = Mpeg2Decoder::default();
+        let mut out = Vec::new();
+        for (index, field) in fields[..3].iter().enumerate() {
+            out.extend(decoder.push(&packet(field, index as i64 / 2)).unwrap());
+        }
+        // The clone shares the open first field with the decoder.
+        let copy = decoder.clone();
+        assert!(decoder.push(&packet(&second[..slice2], 1)).is_err());
+        out.extend(decoder.push(&packet(second, 1)).unwrap());
+        out.extend(decoder.drain().unwrap());
+        assert_eq!(out, clean());
+        drop(copy);
+    }
+
+    #[test]
+    fn a_refused_packet_that_completed_the_open_frame_leaves_no_trace_in_it() {
+        let fields = fields();
+        // The I bottom field completes the open frame in place, then the P
+        // top field after it is refused for its gap.
+        let slice2 = fields[2]
+            .windows(4)
+            .position(|w| w == [0, 0, 1, 2])
+            .unwrap();
+        let mut refused = fields[1].clone();
+        refused.extend_from_slice(&fields[2][..slice2]);
+        // The P bottom field then pairs with the I top field. With no frame
+        // before it, its skipped macroblocks read the lines of its own
+        // parity from the frame it is decoded into.
+        let mut decoder = Mpeg2Decoder::default();
+        let mut out = decoder.push(&packet(&fields[0], 0)).unwrap();
+        assert!(decoder.push(&packet(&refused, 0)).is_err());
+        out.extend(decoder.push(&packet(&fields[3], 0)).unwrap());
+        out.extend(decoder.drain().unwrap());
+
+        let mut lone = Mpeg2Decoder::default();
+        let mut expected = lone.push(&packet(&fields[0], 0)).unwrap();
+        expected.extend(lone.push(&packet(&fields[3], 0)).unwrap());
+        expected.extend(lone.drain().unwrap());
+        assert_eq!(out, expected);
     }
 }

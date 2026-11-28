@@ -1097,6 +1097,9 @@ impl Vp9Encoder {
                 what: "alpha plane",
             });
         }
+        // The picture's planes too, before its alpha goes in: a refused
+        // picture leaves none behind for the next one at its time.
+        check_planes(c.width, c.height, c.opts.chroma_dims(w, h), &[y, u, v])?;
         lane.wait(a, seconds, clock);
         let coded = c.push_planes([y, u, v], seconds, clock)?;
         Self::code_alpha(lane, coded)
@@ -2735,7 +2738,9 @@ fn check_size(width: u32, height: u32) -> Result<(), CodecError> {
             what: "empty picture",
         });
     }
-    if width > 65536 || height > 65536 {
+    // Past level 6.2, the largest the spec defines, no level holds the
+    // stream, and this crate's decoder refuses it.
+    if !crate::geom::level_picture(width, height) {
         return Err(CodecError::Limit {
             what: "vp9 frame edge",
         });
@@ -3427,7 +3432,10 @@ fn ac_table(bd: u8) -> (&'static [i16; 256], f64) {
 }
 
 impl Rate {
-    fn new(opts: Vp9Options, pixels: u64) -> Self {
+    fn new(mut opts: Vp9Options, pixels: u64) -> Self {
+        // A `max_q` under `min_q` gives way to it, as in `held`: the
+        // quantizer is clamped between the two.
+        opts.max_q = opts.max_q.max(opts.min_q);
         Self {
             opts,
             debt: 0.0,

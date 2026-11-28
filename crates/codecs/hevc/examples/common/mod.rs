@@ -72,13 +72,14 @@ fn access_units(data: &[u8]) -> Vec<Vec<u8>> {
     let mut current = Vec::new();
     let mut has_slice = false;
     for nal in nal_units(data) {
-        if nal.len() < 3 {
+        // An end of sequence or of bitstream is its two header bytes alone.
+        if nal.len() < 2 {
             continue;
         }
         let kind = (nal[0] >> 1) & 0x3f;
         let slice = kind <= 21;
         let starts_unit = if slice {
-            nal[2] & 0x80 != 0
+            nal.get(2).is_some_and(|b| b & 0x80 != 0)
         } else {
             matches!(kind, 32..=35 | 39 | 41..=44 | 48..=55)
         };
@@ -94,4 +95,20 @@ fn access_units(data: &[u8]) -> Vec<Vec<u8>> {
         units.push(current);
     }
     units
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_end_of_sequence_stays_with_its_access_unit() {
+        use super::access_units;
+        // A first slice segment, an end of sequence (a NAL unit of its two
+        // header bytes alone), then the parameter set of the next unit.
+        let slice = [0, 0, 0, 1, 0x26, 0x01, 0xaf, 0x80];
+        let eos = [0, 0, 0, 1, 0x48, 0x01];
+        let vps = [0, 0, 0, 1, 0x40, 0x01, 0x0c, 0x80];
+        let stream = [&slice[..], &eos, &vps].concat();
+        let units = access_units(&stream);
+        assert_eq!(units, vec![[&slice[..], &eos].concat(), vps.to_vec()]);
+    }
 }

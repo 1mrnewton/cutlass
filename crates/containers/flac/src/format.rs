@@ -128,14 +128,15 @@ impl StreamInfo {
         })
     }
 
-    /// Reads codec extradata: a bare body, or `fLaC` and a STREAMINFO block.
+    /// Reads codec extradata in any of the forms containers hand over: the
+    /// bare 34-byte body (what [`crate::FlacDemux`] gives); the `fLaC`
+    /// marker and metadata blocks with STREAMINFO first (a Matroska
+    /// CodecPrivate); or the body of an MP4 `dfLa` box, version 0 and
+    /// flags, then the same blocks. The blocks after STREAMINFO must be well
+    /// formed.
     #[must_use]
     pub fn from_extra(extra: &[u8]) -> Option<Self> {
-        match extra.len() {
-            STREAMINFO_LEN => Self::parse(extra),
-            42 if &extra[..4] == b"fLaC" && extra[4] & 0x7F == 0 => Self::parse(&extra[8..]),
-            _ => None,
-        }
+        Self::parse(extra_blocks(extra)?.first()?.body)
     }
 
     /// The 34-byte body. Fields past their width are cut to it.
@@ -153,6 +154,62 @@ impl StreamInfo {
         out[10..18].copy_from_slice(&packed.to_be_bytes());
         out[18..].copy_from_slice(&self.md5);
         out
+    }
+}
+
+/// The STREAMINFO block type.
+pub(crate) const STREAMINFO: u8 = 0;
+/// The PADDING block type.
+pub(crate) const PADDING: u8 = 1;
+/// The SEEKTABLE block type.
+pub(crate) const SEEKTABLE: u8 = 3;
+/// The block type RFC 9639 forbids.
+const FORBIDDEN: u8 = 127;
+/// The last-metadata-block flag in a block header's first byte.
+pub(crate) const LAST: u8 = 0x80;
+
+/// One metadata block from codec extradata: its type and its body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Block<'a> {
+    pub(crate) kind: u8,
+    pub(crate) body: &'a [u8],
+}
+
+/// The metadata blocks in codec extradata, STREAMINFO first, for the forms
+/// [`StreamInfo::from_extra`] reads. `None` for anything else: a first
+/// block other than a 34-byte STREAMINFO, a second STREAMINFO, the
+/// forbidden type, or a block that runs past the end. Bytes after a block
+/// flagged last are not metadata and are ignored; blocks that end with the
+/// data need no flag.
+pub(crate) fn extra_blocks(extra: &[u8]) -> Option<Vec<Block<'_>>> {
+    if extra.len() == STREAMINFO_LEN {
+        return Some(vec![Block {
+            kind: STREAMINFO,
+            body: extra,
+        }]);
+    }
+    // The marker and the `dfLa` version and flags are both four bytes.
+    let mut rest = match extra {
+        [b'f', b'L', b'a', b'C', rest @ ..] | [0, _, _, _, rest @ ..] => rest,
+        _ => return None,
+    };
+    let mut blocks = Vec::new();
+    loop {
+        let [head, l0, l1, l2, tail @ ..] = rest else {
+            return None;
+        };
+        let kind = head & !LAST;
+        let len = (usize::from(*l0) << 16) | (usize::from(*l1) << 8) | usize::from(*l2);
+        let body = tail.get(..len)?;
+        let first = blocks.is_empty();
+        if kind == FORBIDDEN || (kind == STREAMINFO) != first || (first && len != STREAMINFO_LEN) {
+            return None;
+        }
+        blocks.push(Block { kind, body });
+        rest = &tail[len..];
+        if head & LAST != 0 || rest.is_empty() {
+            return Some(blocks);
+        }
     }
 }
 
@@ -354,7 +411,9 @@ pub fn parse_header(bytes: &[u8]) -> Header {
 
 #[cfg(test)]
 mod tests {
-    use super::{Header, SeekPoint, StreamInfo, crc8, crc16, parse_header};
+    use super::{
+        Block, Header, STREAMINFO, SeekPoint, StreamInfo, crc8, crc16, extra_blocks, parse_header,
+    };
 
     #[test]
     fn crcs_match_their_check_values() {
@@ -380,12 +439,79 @@ mod tests {
         extra.extend_from_slice(&info.to_bytes());
         assert_eq!(StreamInfo::from_extra(&extra), Some(info));
         assert_eq!(StreamInfo::from_extra(&extra[..20]), None);
+        assert_eq!(StreamInfo::from_extra(&info.to_bytes()), Some(info));
         let point = SeekPoint {
             sample: 4096,
             offset: 77,
             samples: 4096,
         };
         assert_eq!(SeekPoint::parse(&point.to_bytes()), point);
+    }
+
+    #[test]
+    fn extradata_blocks_come_from_each_container_form() {
+        let body = StreamInfo {
+            min_block: 4096,
+            max_block: 4096,
+            min_frame: 0,
+            max_frame: 0,
+            sample_rate: 48_000,
+            channels: 2,
+            bits: 24,
+            total_samples: 0,
+            md5: [0; 16],
+        }
+        .to_bytes();
+        let comment = [4, 0, 0, 0, b'L', b'a', b'v', b'f'];
+        // A Matroska CodecPrivate, then an MP4 `dfLa` body with the same
+        // blocks: STREAMINFO, then a comment flagged last.
+        let mut native = b"fLaC\x00\x00\x00\x22".to_vec();
+        native.extend_from_slice(&body);
+        native.extend_from_slice(&[0x84, 0, 0, 8]);
+        native.extend_from_slice(&comment);
+        let mut dfla = native.clone();
+        dfla[..4].copy_from_slice(&[0, 0, 0, 0]);
+        let blocks = [
+            Block {
+                kind: STREAMINFO,
+                body: &body,
+            },
+            Block {
+                kind: 4,
+                body: &comment,
+            },
+        ];
+        for extra in [&native, &dfla] {
+            assert_eq!(extra_blocks(extra).as_deref(), Some(&blocks[..]));
+            assert!(StreamInfo::from_extra(extra).is_some());
+        }
+        // Bytes after the last block are ignored; a list that ends with the
+        // data needs no last flag.
+        let mut trailing = native.clone();
+        trailing.extend_from_slice(&[0xFF, 0xF8]);
+        assert_eq!(extra_blocks(&trailing).as_deref(), Some(&blocks[..]));
+        let mut unflagged = native.clone();
+        unflagged[42] = 0x04;
+        assert_eq!(extra_blocks(&unflagged).as_deref(), Some(&blocks[..]));
+        assert_eq!(extra_blocks(&body).map(|blocks| blocks.len()), Some(1));
+        // A cut block, a cut header, another version, a first block other
+        // than STREAMINFO, a second STREAMINFO, and the forbidden type.
+        let mut refused = vec![native[..native.len() - 1].to_vec(), native[..44].to_vec()];
+        let mut version = dfla.clone();
+        version[0] = 1;
+        refused.push(version);
+        let mut first = native.clone();
+        first[4] = 0x04;
+        refused.push(first);
+        for kind in [0x80, 0xFF] {
+            let mut second = native.clone();
+            second[42] = kind;
+            refused.push(second);
+        }
+        for extra in &refused {
+            assert_eq!(extra_blocks(extra), None, "{extra:x?}");
+            assert_eq!(StreamInfo::from_extra(extra), None, "{extra:x?}");
+        }
     }
 
     #[test]

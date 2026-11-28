@@ -45,6 +45,11 @@ pub(crate) struct Fixes {
     /// Quarter-sample field luma as two 8x8 halves, which libavcodec's
     /// encoder reconstructs with, instead of one 16x8 block.
     pub(crate) qpel_field_halves: bool,
+    /// libavcodec 55.66.100 to 57.66.103 (`FF_BUG_IEDGE`): a field
+    /// prediction from the bottom field that reads past the picture edge
+    /// takes the last row of its Cb block from the first row of Cr, which
+    /// those encoders reconstructed with.
+    pub(crate) iedge: bool,
     /// `dct_type` in every interlaced P macroblock, coded blocks or not,
     /// as old Xvid builds write it. No header names those builds.
     pub(crate) xvid_ilace: bool,
@@ -67,6 +72,12 @@ impl Fixes {
             legacy_qpel: below(enc.lavc_build, 4653),
             divx_413: divx == Some(500) && build == Some(413),
             qpel_field_halves: enc.lavc_build.is_some(),
+            iedge: enc.lavc_build.is_some_and(|b| {
+                b & 0xFF >= 100
+                    && b > 3_621_476
+                    && b < 3_752_552
+                    && !(3_752_037..=3_752_191).contains(&b)
+            }),
             xvid_ilace: false,
         }
     }
@@ -495,11 +506,15 @@ impl Vop<'_> {
                     } else {
                         v
                     };
-                    if dir == 0 {
-                        levels[j * 8] += v;
+                    // A valid stream keeps predicted levels in 12 bits.
+                    // Saturated, a hostile row of blocks cannot add up
+                    // past what inverse quantisation multiplies in 32 bits.
+                    let level = if dir == 0 {
+                        &mut levels[j * 8]
                     } else {
-                        levels[j] += v;
-                    }
+                        &mut levels[j]
+                    };
+                    *level = (*level + v).clamp(-2048, 2047);
                 }
             }
         }
@@ -964,13 +979,26 @@ impl Vop<'_> {
                     } else {
                         (mc::chroma_hpel(mx), mc::chroma_hpel(my))
                     };
-                    for (plane, out) in [(&ru, &mut *u), (&rv, &mut *v)] {
-                        mc::chroma_block(
+                    // FFmpeg pads the block from the edge when its 16x8
+                    // luma reaches past it (`mpeg_motion_internal`).
+                    let iedge = fixes.iedge && select[f] & 1 == 1 && {
+                        let (shift, mask) = if quarter { (2, 3) } else { (1, 1) };
+                        let (sx, sy) = (x + (mx >> shift), fy + (my >> shift));
+                        let (ew, eh) = (self.layer.edge.0 as i32, (self.layer.edge.1 >> 1) as i32);
+                        sx < 0
+                            || sx >= (ew - (mx & mask) - 15).max(0)
+                            || sy < 0
+                            || sy >= (eh - (my & mask) - 7).max(0)
+                    };
+                    for (n, (plane, out)) in
+                        [(&ru, &mut *u), (&rv, &mut *v)].into_iter().enumerate()
+                    {
+                        let overlap = (iedge && n == 0).then_some(&rv);
+                        mc::chroma_field_block(
                             plane,
+                            overlap,
                             cx0,
                             (mby * 4) as i32,
-                            8,
-                            4,
                             cx,
                             cy,
                             rows,

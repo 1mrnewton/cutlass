@@ -32,7 +32,8 @@ impl Plane {
         let mut out = Vec::with_capacity(row * rows);
         for r in 0..rows {
             let at = r * self.stride;
-            out.extend_from_slice(&self.samples[at..(at + row).min(self.samples.len())]);
+            let end = (at + row).min(self.samples.len());
+            out.extend_from_slice(&self.samples[at.min(end)..end]);
         }
         out
     }
@@ -374,7 +375,15 @@ impl Yuv420p {
 
     /// A solid picture. Luma and both chroma planes are filled with one value each.
     pub fn solid(width: u32, height: u32, y: u8, u: u8, v: u8) -> Result<Self, FrameError> {
-        if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        // A size `try_new` refuses whatever the planes hold is refused here,
+        // before the planes are allocated.
+        if width == 0
+            || height == 0
+            || width > MAX_EDGE
+            || height > MAX_EDGE
+            || !width.is_multiple_of(2)
+            || !height.is_multiple_of(2)
+        {
             return Self::try_new(width, height, Vec::new(), Vec::new(), Vec::new());
         }
         let y_len = (width as usize)
@@ -892,6 +901,25 @@ mod tests {
         assert_eq!(frame.y().len(), 8);
         assert_eq!(frame.u().len(), 2);
         assert_eq!(frame.v(), &[128, 128]);
+    }
+
+    #[test]
+    fn a_solid_picture_past_the_edge_limit_is_refused_before_it_is_allocated() {
+        assert_eq!(
+            Yuv420p::solid(u32::MAX - 1, u32::MAX - 1, 0, 0, 0),
+            Err(FrameError::Limit)
+        );
+    }
+
+    #[test]
+    fn packing_a_plane_with_too_few_samples_stops_at_the_last_sample() {
+        let plane = Plane {
+            width: 2,
+            height: 3,
+            stride: 4,
+            samples: vec![1, 2, 0, 0, 3].into(),
+        };
+        assert_eq!(plane.packed(1), vec![1, 2, 3]);
     }
 
     #[test]

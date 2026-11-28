@@ -75,7 +75,15 @@ pub(crate) struct CeltDecoder {
     postfilter: Comb,
     postfilter_old: Comb,
     rng: u32,
-    loss_count: u32,
+    /// Time concealed since the last decoded frame, in 2.5 ms steps, up to
+    /// 10000 (libopus's `loss_duration`, and its `plc_duration`, which only
+    /// its deep-learning redundancy sets apart).
+    loss_duration: u32,
+    /// Conceal with noise, not by pitch: set by a reset and by noise
+    /// concealment, cleared by the second decoded frame in a row.
+    skip_plc: bool,
+    /// The last frame was concealed by pitch (`FRAME_PLC_PERIODIC`).
+    last_periodic: bool,
     last_pitch_index: usize,
 }
 
@@ -225,7 +233,9 @@ impl CeltDecoder {
             postfilter: Comb::default(),
             postfilter_old: Comb::default(),
             rng: 0,
-            loss_count: 0,
+            loss_duration: 0,
+            skip_plc: true,
+            last_periodic: false,
             last_pitch_index: 0,
         };
         dec.reset();
@@ -246,7 +256,10 @@ impl CeltDecoder {
         self.postfilter = Comb::default();
         self.postfilter_old = Comb::default();
         self.rng = 0;
-        self.loss_count = 0;
+        self.loss_duration = 0;
+        // Pitch concealment waits for two decoded frames in a row.
+        self.skip_plc = true;
+        self.last_periodic = false;
         self.last_pitch_index = 0;
     }
 
@@ -312,6 +325,10 @@ impl CeltDecoder {
         let m = 1usize << lm;
         let n = m * SHORT_MDCT_SIZE;
         let len = rd.storage() as i32;
+        // The second decoded frame in a row allows pitch concealment again.
+        if self.loss_duration == 0 {
+            self.skip_plc = false;
+        }
 
         if c == 1 {
             for i in 0..NB_EBANDS {
@@ -359,6 +376,9 @@ impl CeltDecoder {
                 tell = rd.tell();
             }
             let intra = tell + 3 <= total_bits && rd.bit_logp(3);
+            if !intra && self.loss_duration != 0 {
+                self.safe_prediction(start, end, lm);
+            }
             energy::unquant_coarse(&mut self.old_band_e, start, end, intra, rd, c, lm);
             let tf_res = tf_decode(start, end, transient, lm, rd);
             let tell = rd.tell();
@@ -477,7 +497,38 @@ impl CeltDecoder {
         self.update_energy_history(p, transient);
         self.rng = rd.rng();
         self.deemphasis(n, out);
-        self.loss_count = 0;
+        self.loss_duration = 0;
+        self.last_periodic = false;
+    }
+
+    /// The first frame decoded after a loss predicts its energies from
+    /// what concealment left, while the encoder predicted from the frames
+    /// that were lost. So that the coded deltas cannot raise the level in
+    /// a burst, a band whose energy was falling keeps falling for the time
+    /// missed, and any other band takes the lowest of its last three
+    /// energies (libopus 1.6.1, `celt_decode_with_ec_dred`).
+    fn safe_prediction(&mut self, start: usize, end: usize, lm: usize) {
+        let missing = (self.loss_duration >> lm).min(10) as f32;
+        // Shorter frames vary more on their own.
+        let safety = match lm {
+            0 => 1.5,
+            1 => 0.5,
+            _ => 0.0,
+        };
+        for ch in 0..2 {
+            for i in start..end {
+                let at = ch * NB_EBANDS + i;
+                let e0 = self.old_band_e[at];
+                let (e1, e2) = (self.old_log_e[at], self.old_log_e2[at]);
+                let safe = if e0 < e1.max(e2) {
+                    let slope = (e1 - e0).max(0.5 * (e2 - e0)).min(2.0);
+                    (e0 - ((1.0 + missing) * slope).max(0.0)).max(-20.0)
+                } else {
+                    e0.min(e1).min(e2)
+                };
+                self.old_band_e[at] = safe - safety;
+            }
+        }
     }
 
     /// Bands outside the coded range, the stereo mapping, the inverse MDCT,
@@ -572,10 +623,12 @@ impl CeltDecoder {
         } else {
             self.old_log_e2 = self.old_log_e;
             self.old_log_e = self.old_band_e;
-            for i in 0..2 * NB_EBANDS {
-                self.background_log_e[i] =
-                    (self.background_log_e[i] + m as f32 * 0.001).min(self.old_band_e[i]);
-            }
+        }
+        // The noise floor rises at most 2.4 dB a second, but the frame after
+        // a loss carries the weight of the time missed (libopus 1.6.1).
+        let rise = (self.loss_duration + m).min(160) as f32 * 0.001;
+        for i in 0..2 * NB_EBANDS {
+            self.background_log_e[i] = (self.background_log_e[i] + rise).min(self.old_band_e[i]);
         }
         for ch in 0..2 {
             for i in (0..start).chain(end..NB_EBANDS) {
@@ -612,31 +665,34 @@ impl CeltDecoder {
         }
     }
 
-    /// Packet-loss concealment (`celt_decode_lost`): pitch-based LPC
-    /// extrapolation for the first losses of a CELT-only stream, then noise
-    /// at the decaying or background energy.
+    /// Packet-loss concealment (`celt_decode_lost` of libopus 1.6.1): pitch
+    /// extrapolation for up to 100 ms of a CELT-only stream that had two
+    /// decoded frames in a row, else noise at energies that decay toward
+    /// the background level.
     fn conceal(&mut self, p: &Params, out: &mut [f32], synth: &mut Synth) {
         let (start, end, lm) = (p.start, p.end, p.lm);
         let cc = self.channels;
         let m = 1usize << lm;
         let n = m * SHORT_MDCT_SIZE;
-        if self.loss_count >= 5 || start != 0 {
-            let mut band_e = [0f32; 2 * NB_EBANDS];
-            if self.loss_count >= 5 {
-                energy::log2amp(&mut band_e, &self.background_log_e, start, end, cc);
-            } else {
-                let decay = if self.loss_count == 0 { 1.5 } else { 0.5 };
-                for ch in 0..cc {
-                    for i in start..end {
-                        self.old_band_e[ch * NB_EBANDS + i] -= decay;
-                    }
+        // Noise after 100 ms of loss, in hybrid mode, and until pitch
+        // concealment has two decoded frames in a row to work from.
+        let noise = self.loss_duration >= 40 || start != 0 || self.skip_plc;
+        if noise {
+            // 9 dB at once, then 3 dB a frame, down to the background.
+            let decay = if self.loss_duration == 0 { 1.5 } else { 0.5 };
+            for ch in 0..cc {
+                for i in start..end {
+                    let at = ch * NB_EBANDS + i;
+                    self.old_band_e[at] =
+                        self.background_log_e[at].max(self.old_band_e[at] - decay);
                 }
-                energy::log2amp(&mut band_e, &self.old_band_e, start, end, cc);
             }
+            let mut band_e = [0f32; 2 * NB_EBANDS];
+            energy::log2amp(&mut band_e, &self.old_band_e, start, end, cc);
             let mut seed = self.rng;
             let mut x = vec![0f32; cc * n];
             for ch in 0..cc {
-                for (i, &edge) in EBANDS.iter().enumerate().take(NB_EBANDS).skip(start) {
+                for (i, &edge) in EBANDS.iter().enumerate().take(end).skip(start) {
                     let lo = ch * n + (edge << lm);
                     let w = tables::band_width(i, lm);
                     for v in &mut x[lo..lo + w] {
@@ -645,8 +701,6 @@ impl CeltDecoder {
                     }
                     vq::renormalise(&mut x[lo..lo + w], 1.0);
                 }
-                let from = (EBANDS[end] << lm).min(n);
-                x[ch * n + from..(ch + 1) * n].fill(0.0);
             }
             self.rng = seed;
             let mut freq = vec![0f32; cc * n];
@@ -655,43 +709,35 @@ impl CeltDecoder {
                     &x[ch * n..(ch + 1) * n],
                     &mut freq[ch * n..(ch + 1) * n],
                     &band_e[ch * NB_EBANDS..],
-                    NB_EBANDS,
+                    end,
                     m,
                 );
-                let f = &mut freq[ch * n..(ch + 1) * n];
-                f[..EBANDS[start] << lm].fill(0.0);
-                let mut bound = EBANDS[end] << lm;
-                if self.downsample != 1 {
-                    bound = bound.min(n / self.downsample);
-                }
-                f[bound.min(n)..].fill(0.0);
             }
-            let at = DECODE_BUFFER_SIZE - n;
-            for ch in 0..cc {
-                let mem = &mut self.decode_mem[ch];
-                // The reference writes the concealed frame without shifting
-                // the history.
-                let (hist, overlap) = mem.split_at_mut(DECODE_BUFFER_SIZE);
-                inverse_mdct(
-                    &freq[ch * n..(ch + 1) * n],
-                    1,
-                    &mut hist[at..],
-                    overlap,
-                    synth,
-                );
-            }
+            // Synthesised and post-filtered as a decoded frame is, with the
+            // post-filter held.
+            let params = Params {
+                stream_channels: cc,
+                ..*p
+            };
+            self.synthesize(&mut freq, &params, false, self.postfilter, synth);
+            self.skip_plc = true;
         } else {
             self.conceal_pitch(n);
         }
         self.deemphasis(n, out);
-        self.loss_count += 1;
+        self.loss_duration = (self.loss_duration + m as u32).min(10_000);
+        self.last_periodic = !noise;
     }
 
+    /// The periodic branch of `celt_decode_lost` (libopus 1.6.1): the last
+    /// pitch period of the LPC excitation, repeated and scaled by how fast
+    /// the last two periods decayed, through the LPC synthesis filter, and
+    /// folded at its end so that it blends with the next frame's MDCT.
     fn conceal_pitch(&mut self, n: usize) {
         let cc = self.channels;
         let overlap = OVERLAP;
-        let mut fade = 1.0f32;
-        let pitch_index = if self.loss_count == 0 {
+        let first = !self.last_periodic;
+        let pitch_index = if first {
             let mut lp = vec![0f32; DECODE_BUFFER_SIZE >> 1];
             let chans: Vec<&[f32]> = self
                 .decode_mem
@@ -707,22 +753,30 @@ impl CeltDecoder {
                 DECODE_BUFFER_SIZE - poffset,
                 poffset - 100,
             );
-            let index = poffset.saturating_sub(t).max(1);
+            let index = poffset.saturating_sub(t).clamp(1, MAX_PERIOD);
             self.last_pitch_index = index;
             index
         } else {
-            fade = 0.8;
-            self.last_pitch_index.max(1)
+            self.last_pitch_index.clamp(1, MAX_PERIOD)
         };
-        let len = n + overlap;
-        let out_at = DECODE_BUFFER_SIZE - MAX_PERIOD;
+        // Each frame after the first of a loss fades further.
+        let fade = if first { 1.0f32 } else { 0.8 };
+        // Two pitch periods of excitation, to see whether the signal decays.
+        let exc_length = (2 * pitch_index).min(MAX_PERIOD);
+        // A whole MDCT window: the frame and the overlap into the next.
+        let ext_len = n + overlap;
+        // `hist[LPC_ORDER + k]` is sample `k` of the last MAX_PERIOD.
+        let hist_at = DECODE_BUFFER_SIZE - MAX_PERIOD - LPC_ORDER;
+        let pf = self.postfilter;
         for ch in 0..cc {
             let mem = &mut self.decode_mem[ch];
-            let mut e = vec![0f32; MAX_PERIOD + 2 * overlap];
-            let mut exc: Vec<f32> = mem[out_at..out_at + MAX_PERIOD].to_vec();
-            if self.loss_count == 0 {
+            let mut exc: Vec<f32> = mem[hist_at..DECODE_BUFFER_SIZE].to_vec();
+            if first {
+                // LPC of the last MAX_PERIOD samples before the loss, to work
+                // on the excitation.
                 let mut ac = [0f32; LPC_ORDER + 1];
-                pitch::autocorr(&exc, &mut ac, Some(&WINDOW), LPC_ORDER);
+                pitch::autocorr(&exc[LPC_ORDER..], &mut ac, Some(&WINDOW), LPC_ORDER);
+                // A -40 dB noise floor, and lag windowing for stability.
                 ac[0] *= 1.0001;
                 for (i, a) in ac.iter_mut().enumerate().skip(1) {
                     let f = 0.008 * i as f32;
@@ -731,70 +785,81 @@ impl CeltDecoder {
                 pitch::lpc(&mut self.lpc[ch], &ac);
             }
             let lpc = self.lpc[ch];
-            let mut fmem = [0f32; LPC_ORDER];
-            for (i, v) in fmem.iter_mut().enumerate() {
-                *v = mem[out_at + MAX_PERIOD - 1 - i];
+            // The excitation of the last `exc_length` samples, the filter
+            // primed with the samples just before them.
+            let from = LPC_ORDER + MAX_PERIOD - exc_length;
+            let mut fir_mem = [0f32; LPC_ORDER];
+            for (i, v) in fir_mem.iter_mut().enumerate() {
+                *v = exc[from - 1 - i];
             }
-            pitch::fir(&mut exc, &lpc, &mut fmem);
-            let period = pitch_index.min(MAX_PERIOD / 2);
-            let mut e1 = 1f32;
-            let mut e2 = 1f32;
-            for i in 0..period {
-                let a = exc[MAX_PERIOD - period + i];
-                let b = exc[(MAX_PERIOD).saturating_sub(2 * period) + i];
+            pitch::fir(&mut exc[from..], &lpc, &mut fir_mem);
+            let exc = &exc[LPC_ORDER..];
+            // How much the last pitch period lost against the one before,
+            // so that a decaying sound is not held.
+            let decay_length = exc_length >> 1;
+            let (mut e1, mut e2) = (1f32, 1f32);
+            for i in 0..decay_length {
+                let a = exc[MAX_PERIOD - decay_length + i];
+                let b = exc[MAX_PERIOD - 2 * decay_length + i];
                 e1 += a * a;
                 e2 += b * b;
             }
-            e1 = e1.min(e2);
-            let mut decay = (0.5 * e1 / e2).sqrt();
-            let mut offset = MAX_PERIOD as i64 - pitch_index as i64;
+            let decay = (e1.min(e2) / e2).sqrt();
+            // The last period repeated, each repetition `decay` lower, with
+            // the energy of the decoded signal it copies.
+            let offset = MAX_PERIOD - pitch_index;
+            let mut e = vec![0f32; ext_len];
+            let mut attenuation = fade * decay;
             let mut s1 = 0f32;
-            for (i, slot) in e.iter_mut().enumerate().take(len + overlap) {
-                if offset + i as i64 >= MAX_PERIOD as i64 {
-                    offset -= pitch_index as i64;
-                    decay *= decay;
+            let mut j = 0;
+            for slot in &mut e {
+                if j >= pitch_index {
+                    j -= pitch_index;
+                    attenuation *= decay;
                 }
-                let at = (offset + i as i64).clamp(0, MAX_PERIOD as i64 - 1) as usize;
-                *slot = decay * exc[at];
-                let tmp = mem[out_at + at];
+                *slot = attenuation * exc[offset + j];
+                let tmp = mem[DECODE_BUFFER_SIZE - MAX_PERIOD + offset + j];
                 s1 += tmp * tmp;
+                j += 1;
             }
-            for (i, v) in fmem.iter_mut().enumerate() {
-                *v = mem[out_at + MAX_PERIOD - 1 - i];
+            // Back to the signal, continuing from the last decoded sample.
+            let mut iir_mem = [0f32; LPC_ORDER];
+            for (i, v) in iir_mem.iter_mut().enumerate() {
+                *v = mem[DECODE_BUFFER_SIZE - 1 - i];
             }
-            for v in e.iter_mut().take(len + overlap) {
-                *v *= fade;
-            }
-            pitch::iir(&mut e[..len + overlap], &lpc, &mut fmem);
-            let s2: f32 = e[..len + overlap].iter().map(|v| v * v).sum();
+            pitch::iir(&mut e, &lpc, &mut iir_mem);
+            // The synthesis can come out louder than what it copies when the
+            // signal changed in the window: then it is scaled down, the
+            // gain ramping in over the overlap, or muted if it exploded.
+            let s2: f32 = e.iter().map(|v| v * v).sum();
             // Written to catch NaN too, as the reference does.
             if s1.partial_cmp(&(0.2 * s2)) != Some(std::cmp::Ordering::Greater) {
-                e[..len + overlap].fill(0.0);
+                e.fill(0.0);
             } else if s1 < s2 {
-                let ratio = ((0.5 * s1 + 1.0) / (s2 + 1.0)).sqrt();
-                for v in e.iter_mut().take(len + overlap) {
-                    *v *= ratio;
+                let ratio = ((s1 + 1.0) / (s2 + 1.0)).sqrt();
+                for (i, v) in e.iter_mut().enumerate() {
+                    let gain = WINDOW.get(i).map_or(ratio, |&w| 1.0 - w * (1.0 - ratio));
+                    *v *= gain;
                 }
             }
-            // Post-filter the previous frame's MDCT overlap, without fading.
-            let pf = self.postfilter;
-            postfilter::comb_filter_inplace(mem, DECODE_BUFFER_SIZE, overlap, pf, pf, 0);
-            mem.copy_within(out_at + n..DECODE_BUFFER_SIZE + overlap, out_at);
-            for i in 0..overlap / 2 {
-                let tmp = WINDOW[i] * e[n + overlap - 1 - i] + WINDOW[overlap - i - 1] * e[n + i];
-                mem[DECODE_BUFFER_SIZE + i] = WINDOW[overlap - i - 1] * tmp;
-                mem[DECODE_BUFFER_SIZE + overlap - i - 1] = WINDOW[i] * tmp;
-            }
-            mem[DECODE_BUFFER_SIZE - n..DECODE_BUFFER_SIZE].copy_from_slice(&e[..n]);
-            // Pre-filter the overlap for the next frame, whose post-filter
-            // will run over it again.
+            // The previous frame's overlap is dropped: the extrapolation
+            // continues the signal itself.
+            mem.copy_within(n..DECODE_BUFFER_SIZE, 0);
+            mem[DECODE_BUFFER_SIZE - n..DECODE_BUFFER_SIZE + overlap].copy_from_slice(&e);
+            // The next frame runs the post-filter over the overlap again,
+            // so it is pre-filtered here, then folded as an MDCT overlap
+            // (`prefilter_and_fold`).
             let neg = Comb {
                 gain: -pf.gain,
                 ..pf
             };
-            let mut pre = vec![0f32; overlap];
+            let mut pre = [0f32; OVERLAP];
             postfilter::comb_filter_fir(&mut pre, mem, DECODE_BUFFER_SIZE, overlap, neg, neg, 0);
-            mem[DECODE_BUFFER_SIZE..DECODE_BUFFER_SIZE + overlap].copy_from_slice(&pre);
+            for i in 0..overlap / 2 {
+                let tmp = WINDOW[i] * pre[overlap - 1 - i] + WINDOW[overlap - 1 - i] * pre[i];
+                mem[DECODE_BUFFER_SIZE + i] = WINDOW[overlap - 1 - i] * tmp;
+                mem[DECODE_BUFFER_SIZE + overlap - 1 - i] = WINDOW[i] * tmp;
+            }
         }
     }
 }

@@ -256,7 +256,11 @@ fn idr(mbs: u32) -> Vec<u8> {
 }
 
 fn ffmpeg_bin() -> Option<PathBuf> {
-    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+    for candidate in [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ] {
         let path = PathBuf::from(candidate);
         if path.is_file() {
             return Some(path);
@@ -279,8 +283,8 @@ fn ffmpeg_raw(ffmpeg: &std::path::Path, annex: &[u8]) -> Vec<u8> {
             "h264",
             "-i",
             "pipe:0",
-            "-vsync",
-            "0",
+            "-fps_mode",
+            "passthrough",
             "-f",
             "rawvideo",
             "-pix_fmt",

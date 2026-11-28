@@ -211,6 +211,19 @@ mod lifecycle {
     }
 
     #[test]
+    fn later_frames_of_a_packet_with_an_extreme_timestamp_saturate() {
+        // A zero timescale steps each frame by the packet's duration.
+        for (pts, duration, timescale) in [(i64::MAX - 1, 1, 25), (1, i64::MAX / 2 + 1, 0)] {
+            let mut access = packet(fixture("progressive.m2v"), 0);
+            (access.pts, access.duration, access.timescale) = (pts, duration, timescale);
+            let mut decoder = Mpeg2Decoder::default();
+            let out = decoder.push(&access).unwrap();
+            assert_eq!(out.len(), 9);
+            assert!(out.iter().all(|frame| frame.pts >= pts), "{pts}");
+        }
+    }
+
+    #[test]
     fn a_sequence_header_in_the_configuration_opens_headerless_packets() {
         let mut units = units("progressive.m2v");
         let cut = sequence_bytes(&units[0].data);

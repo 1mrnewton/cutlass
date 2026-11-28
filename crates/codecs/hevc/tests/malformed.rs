@@ -43,6 +43,11 @@ mod malformed {
             self.u(len - 1, 0).u(len, v)
         }
 
+        fn se(&mut self, value: i64) -> &mut Self {
+            let code = if value > 0 { 2 * value - 1 } else { -2 * value };
+            self.ue(code as u64)
+        }
+
         /// RBSP trailing bits, emulation prevention, and a start code.
         fn nal(mut self, kind: u8) -> Vec<u8> {
             self.u(1, 1);
@@ -70,6 +75,8 @@ mod malformed {
         bit_depth_minus8: u64,
         log2_min_cb_minus3: u64,
         log2_diff_cb: u64,
+        log2_max_poc_lsb_minus4: u64,
+        long_term: bool,
     }
 
     const GOOD: SpsFields = SpsFields {
@@ -79,6 +86,8 @@ mod malformed {
         bit_depth_minus8: 0,
         log2_min_cb_minus3: 0,
         log2_diff_cb: 3,
+        log2_max_poc_lsb_minus4: 4,
+        long_term: false,
     };
 
     fn sps(f: &SpsFields) -> Vec<u8> {
@@ -98,7 +107,9 @@ mod malformed {
             w.u(1, 0);
         }
         w.ue(f.width).ue(f.height).u(1, 0);
-        w.ue(f.bit_depth_minus8).ue(f.bit_depth_minus8).ue(4);
+        w.ue(f.bit_depth_minus8)
+            .ue(f.bit_depth_minus8)
+            .ue(f.log2_max_poc_lsb_minus4);
         w.u(1, 1).ue(2).ue(0).ue(0);
         w.ue(f.log2_min_cb_minus3)
             .ue(f.log2_diff_cb)
@@ -107,15 +118,24 @@ mod malformed {
             .ue(0)
             .ue(0);
         w.u(1, 0).u(1, 0).u(1, 0).u(1, 0);
-        w.ue(0).u(1, 0).u(1, 0).u(1, 0).u(1, 0).u(1, 0);
+        // No short-term sets; long-term pictures, with none listed here.
+        w.ue(0).u(1, u64::from(f.long_term));
+        if f.long_term {
+            w.ue(0);
+        }
+        w.u(1, 0).u(1, 0).u(1, 0).u(1, 0);
         w.nal(33)
     }
 
     fn pps() -> Vec<u8> {
+        pps_with_init_qp(26)
+    }
+
+    fn pps_with_init_qp(init_qp: i64) -> Vec<u8> {
         let mut w = Writer::new();
-        // Ids, flags, default reference counts, init_qp_minus26 0.
+        // Ids, flags, default reference counts, init_qp_minus26.
         w.ue(0).ue(0).u(1, 0).u(1, 0).u(3, 0).u(1, 0).u(1, 0);
-        w.ue(0).ue(0).ue(0);
+        w.ue(0).ue(0).se(init_qp - 26);
         // Constrained intra, transform skip, cu_qp_delta; Cb and Cr offsets 0.
         w.u(1, 0).u(1, 0).u(1, 0).ue(0).ue(0);
         // Slice chroma offsets, weights, bypass, tiles, wavefronts.
@@ -135,6 +155,177 @@ mod malformed {
         decoder
             .push(&Packet::video(data, 0, 1, 30, true))
             .map(|v| v.len())
+    }
+
+    fn one_thread_decoder() -> HevcDecoder {
+        let mut params = CodecParams::video(CodecId::Hevc, 0, 0);
+        params.nal_length_size = 0;
+        // One thread decodes each picture inside the push that completes it.
+        HevcDecoder::open_with_threads(&params, 1).expect("open")
+    }
+
+    /// Slice data found by search: one intra 64x64 CTB, then the end of the
+    /// slice segment.
+    const ONE_CTB: [u8; 6] = [0x10, 0x33, 0x9c, 0xc0, 0x7b, 0x42];
+
+    /// The rest of an intra slice segment after its picture order fields.
+    fn intra_slice_tail(mut w: Writer, kind: u8, qp_delta: i64) -> Vec<u8> {
+        // slice_qp_delta, filtering across slices, byte alignment.
+        w.se(qp_delta).u(1, 1).u(1, 1);
+        while !w.bits.is_multiple_of(8) {
+            w.u(1, 0);
+        }
+        for byte in ONE_CTB {
+            w.u(8, u64::from(byte));
+        }
+        w.nal(kind)
+    }
+
+    /// An IDR slice segment holding CTB `ctb` of a picture two CTBs wide.
+    fn idr_slice(ctb: u64, qp_delta: i64) -> Vec<u8> {
+        let mut w = Writer::new();
+        // First segment flag, no_output_of_prior_pics_flag, PPS id.
+        w.u(1, u64::from(ctb == 0)).u(1, 0).ue(0);
+        if ctb != 0 {
+            w.u(1, ctb);
+        }
+        // An I slice.
+        w.ue(2);
+        intra_slice_tail(w, 19, qp_delta)
+    }
+
+    #[test]
+    fn a_pps_sent_again_inside_a_picture_does_not_change_its_slices() {
+        let mut dec = one_thread_decoder();
+        let mut data = sps(&SpsFields { width: 128, ..GOOD });
+        data.extend(pps());
+        data.extend(idr_slice(0, 0));
+        // A slice_qp_delta of -51 is in range for the new PPS only. The
+        // picture keeps the PPS it started with, and there the QP is -25.
+        data.extend(pps_with_init_qp(51));
+        data.extend(idr_slice(1, -51));
+        let result = push(&mut dec, data);
+        assert!(
+            matches!(
+                result,
+                Err(CodecError::Malformed {
+                    what: "slice_qp_delta",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_slice_qp_delta_past_32_bits_is_malformed() {
+        for qp_delta in [i64::from(i32::MAX), -i64::from(i32::MAX)] {
+            let mut data = sps(&GOOD);
+            data.extend(pps());
+            data.extend(idr_slice(0, qp_delta));
+            let result = push(&mut one_thread_decoder(), data);
+            assert!(
+                matches!(result, Err(CodecError::Malformed { .. })),
+                "{qp_delta}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_term_picture_past_the_order_count_range_is_malformed() {
+        let mut dec = one_thread_decoder();
+        let fields = SpsFields {
+            long_term: true,
+            ..GOOD
+        };
+        let mut data = sps(&fields);
+        data.extend(pps());
+        data.extend(idr_slice(0, 0));
+        assert_eq!(push(&mut dec, data), Ok(1));
+        // A trailing picture one before the IDR in output order, so its order
+        // count is -1. Its long-term picture sits 2^31 before that.
+        let mut w = Writer::new();
+        // First segment, PPS id, I slice, order count LSBs, an empty
+        // short-term set written in the header.
+        w.u(1, 1).ue(0).ue(2).u(8, 255).u(1, 0).ue(0).ue(0);
+        // One long-term picture: its LSBs, unused, with an MSB cycle.
+        w.ue(1).u(8, 255).u(1, 0).u(1, 1).ue(1 << 23);
+        let result = push(&mut dec, intra_slice_tail(w, 1, 0));
+        assert!(
+            matches!(
+                result,
+                Err(CodecError::Malformed {
+                    what: "delta_poc_msb_cycle_lt",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_picture_wider_than_the_planar_output_is_refused() {
+        // A slice may leave CTBs out, so one CTB makes a whole picture.
+        let picture = |width: u64| {
+            let mut data = sps(&SpsFields { width, ..GOOD });
+            data.extend(pps());
+            data.extend(idr_slice(0, 0));
+            push(&mut one_thread_decoder(), data)
+        };
+        assert_eq!(picture(16_880), Ok(1));
+        // HEVC allows 16,888 samples; a `VideoOutput` picture holds 16,880.
+        assert_eq!(
+            picture(16_888),
+            Err(CodecError::Limit {
+                what: "picture size"
+            })
+        );
+    }
+
+    #[test]
+    fn an_order_count_past_32_bits_is_malformed() {
+        let mut dec = one_thread_decoder();
+        let fields = SpsFields {
+            log2_max_poc_lsb_minus4: 12,
+            ..GOOD
+        };
+        let mut data = sps(&fields);
+        data.extend(pps());
+        data.extend(idr_slice(0, 0));
+        assert_eq!(push(&mut dec, data), Ok(1));
+        // A trailing intra picture with these order count LSBs. Its
+        // short-term set is written in the header and names at most one
+        // picture, the next in output order, which the slice does not use.
+        let trailing = |lsb: u64, names_next: bool| {
+            let mut w = Writer::new();
+            w.u(1, 1).ue(0).ue(2).u(16, lsb).u(1, 0).ue(0);
+            if names_next {
+                w.ue(1).ue(0).u(1, 0);
+            } else {
+                w.ue(0);
+            }
+            intra_slice_tail(w, 1, 0)
+        };
+        // Each pair of pictures wraps the LSBs once more, which adds 2^16 to
+        // the order count.
+        for wrap in 1..1u32 << 15 {
+            assert_eq!(push(&mut dec, trailing(0x8000, false)), Ok(1), "{wrap}");
+            assert_eq!(push(&mut dec, trailing(0, false)), Ok(1), "{wrap}");
+        }
+        assert_eq!(push(&mut dec, trailing(0x8000, false)), Ok(1));
+        // One more wrap would reach 2^31.
+        let result = push(&mut dec, trailing(0, false));
+        assert!(
+            matches!(result, Err(CodecError::Malformed { .. })),
+            "{result:?}"
+        );
+        // So would the picture after the one at 2^31 - 1.
+        let result = push(&mut dec, trailing(0xffff, true));
+        assert!(
+            matches!(result, Err(CodecError::Malformed { .. })),
+            "{result:?}"
+        );
+        assert_eq!(push(&mut dec, trailing(0xffff, false)), Ok(1));
     }
 
     #[test]

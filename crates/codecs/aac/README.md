@@ -16,7 +16,7 @@ The desktop app registers both the decoder and the encoder. On macOS and Windows
 
 Channel order is the AAC element order, center first, not WAV order. Configuration 6 is 5.1, 7 is the wide 7.1 layout and 12 is 7.1 with side surrounds.
 
-The decoder reads single, pair and LFE elements with Huffman coding and escapes, pulse data, temporal noise shaping, perceptual noise substitution, mid/side and intensity stereo, sine and KBD windows, and long, start, short and stop blocks. Data stream and fill elements are skipped, so dynamic range data in a fill element is not applied.
+The decoder reads single, pair and LFE elements with Huffman coding and escapes, pulse data, temporal noise shaping, perceptual noise substitution, mid/side and intensity stereo, sine and KBD windows, and long, start, short and stop blocks. A block sequence that may not follow the previous one, as after a lost packet, still decodes: a long block after a short one overlaps on the short slope, as FFmpeg does. Data stream and fill elements are skipped, so dynamic range data in a fill element is not applied.
 
 The encoder uses KBD windows, one frame of lookahead for block switching (one decision shared by the non-LFE channels), mid/side in bands where the two channels of a pair are strongly correlated, and a lowpass on the LFE channel. It never writes temporal noise shaping, noise substitution, intensity stereo, pulse data, prediction or coupling. The same samples and settings give the same bytes.
 

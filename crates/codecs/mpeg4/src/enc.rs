@@ -15,7 +15,7 @@ use cutlass_decode::CodecError;
 use crate::bits::BitWriter;
 use crate::block::{Quant, dequant_inter, dequant_intra};
 use crate::frame::{Frame, Kind, MbRecord};
-use crate::header::{VISUAL_OBJECT, VOS_START};
+use crate::header::{MAX_MODULO_TIME_BASE, VISUAL_OBJECT, VOS_START};
 use crate::idct;
 use crate::mc::{self, Pel, Rows};
 use crate::tables::{
@@ -25,6 +25,10 @@ use crate::tables::{
 use crate::vop::clip_block;
 
 const TIME_RESOLUTION: u32 = 25;
+
+/// The longest distance, in layer ticks, between the references of a
+/// B-VOP. FFmpeg holds `pp_time` and `pb_time` in 16 bits.
+const MAX_B_DISTANCE: i32 = 65_535;
 
 /// Seconds already written into the VOP clock. `last` is the base from
 /// before the latest non-B picture, which a B-VOP measures from.
@@ -798,7 +802,15 @@ impl Predicted<'_> {
     fn write_mb(&mut self, out: &mut BitWriter, mbx: usize, mby: usize) {
         let mbw = self.width / 16;
         let pred = mv_pred(self.mv, mbw, mbx, mby, 0);
-        let vector = self.search_at(mbx * 16, mby * 16, 16, pred);
+        // In one macroblock column only the vector above is a candidate.
+        // Section 7.6.5 predicts from it and FFmpeg from zero, so only
+        // zero vectors read the same in both.
+        let one_column = mbw == 1;
+        let vector = if one_column {
+            (0, 0)
+        } else {
+            self.search_at(mbx * 16, mby * 16, 16, pred)
+        };
         let cost16 = self.block_cost(mbx * 16, mby * 16, 16, vector, pred);
         let mut four = [(0i32, 0i32); 4];
         let mut cost4 = 0u32;
@@ -811,7 +823,7 @@ impl Predicted<'_> {
         }
         // Four vectors cost three extra differences. Use them when the
         // prediction is actually better, not when the two modes tie.
-        let use_four = cost4 + 64 < cost16;
+        let use_four = !one_column && cost4 + 64 < cost16;
         if !use_four {
             set_mv(self.mv, mbw, mbx, mby, vector);
         }
@@ -1885,11 +1897,21 @@ impl Pictures {
     }
 
     fn intra(&mut self, picture: Held) -> Result<Vec<Access>, CodecError> {
+        if !self.coded {
+            // The VOP clock counts from the first picture's second. Counted
+            // from zero, a stream that starts late would open with a
+            // modulo_time_base bit for every second before it.
+            let seconds = ticks_of(picture.pts)? / self.resolution.max(1);
+            self.clock = TimeBase {
+                seconds,
+                last: seconds,
+            };
+        }
         if let Some(held) = &self.held {
             self.time_ok(held.pts)?;
-            let later = ticks_of(picture.pts)?;
-            let earlier = ticks_of(held.pts)?;
-            if later / self.resolution.max(1) < earlier / self.resolution.max(1) {
+            let later = ticks_of(picture.pts)? / self.resolution.max(1);
+            let earlier = ticks_of(held.pts)? / self.resolution.max(1);
+            if later < earlier || later - earlier > MAX_MODULO_TIME_BASE {
                 return Err(CodecError::InvalidApi {
                     what: "picture time",
                 });
@@ -1920,6 +1942,19 @@ impl Pictures {
         if let Err(error) = self.time_ok(picture.pts) {
             self.held = Some(between);
             return Err(error);
+        }
+        if pp > MAX_B_DISTANCE {
+            // FFmpeg keeps B-VOP distances in 16 bits: further apart, it
+            // drops the B-VOP or scales its direct vectors wrongly. Both
+            // pictures are P-VOPs instead, in display order.
+            let first = self.encode_p(&between)?;
+            self.finish_reference(&between, first.len());
+            let second = self.encode_p(&picture)?;
+            self.finish_reference(&picture, second.len());
+            return Ok(vec![
+                access(first, &between, false),
+                access(second, &picture, false),
+            ]);
         }
         let past = self.reference.clone();
         let predicted = self.encode_p(&picture)?;
@@ -2026,7 +2061,9 @@ impl Pictures {
     fn time_ok(&self, pts: i64) -> Result<(), CodecError> {
         let ticks = ticks_of(pts)?;
         let seconds = ticks / self.resolution.max(1);
-        if seconds < self.clock.seconds {
+        // modulo_time_base spends a bit on each second since the picture
+        // before, and the decoder reads no more than this many.
+        if seconds < self.clock.seconds || seconds - self.clock.seconds > MAX_MODULO_TIME_BASE {
             return Err(CodecError::InvalidApi {
                 what: "picture time",
             });
@@ -2875,10 +2912,14 @@ mod tests {
         assert_eq!(simple[..5], [0, 0, 1, 0xB0, 0x05]);
         assert_eq!(simple[5..10], [0, 0, 1, 0xB5, 0b1000_1001]);
         let mut decoder = Decoder::with_max_pixels(854 * 480);
-        decoder.configure(&simple).expect("configure simple");
+        decoder
+            .configure(&simple, &mut Vec::new())
+            .expect("configure simple");
         // The decoder reads them as the configuration.
         let mut decoder = Decoder::with_max_pixels(854 * 480);
-        decoder.configure(&headers).expect("configure");
+        decoder
+            .configure(&headers, &mut Vec::new())
+            .expect("configure");
     }
 
     /// FNV-1a over 64 bits: a digest that needs no dependency.
@@ -3052,6 +3093,90 @@ mod tests {
             ours.extend_from_slice(picture);
         }
         ffmpeg_matches(&ffmpeg, &stream, &ours, "one-second");
+    }
+
+    /// References more than 65535 ticks apart: FFmpeg's 16-bit B-VOP
+    /// distances dropped every B-VOP between them.
+    #[test]
+    fn references_far_apart_hold_no_bidirectional_picture() {
+        for (duration, bidirectional) in [(65_535i64, false), (30_000, true)] {
+            let mut encoder =
+                super::Pictures::open(super::Profile::AdvancedSimple, 32, 32, 0, false)
+                    .expect("open");
+            let mut packets = Vec::new();
+            for n in 0..5usize {
+                let (y, u, v) = moving(32, 32, n);
+                packets.extend(
+                    encoder
+                        .push(super::PictureIn {
+                            y: &y,
+                            u: &u,
+                            v: &v,
+                            pts: i64::try_from(n).unwrap_or(0) * duration,
+                            duration,
+                            timescale: 65_535,
+                            keyframe: false,
+                        })
+                        .expect("push"),
+                );
+            }
+            packets.extend(encoder.drain().expect("drain"));
+            let mut stream = encoder.headers().to_vec();
+            for packet in &packets {
+                stream.extend_from_slice(&packet.bytes);
+            }
+            let kinds: Vec<u8> = (0..5).map(|n| vop_kind(&stream, n)).collect();
+            assert_eq!(kinds.contains(&2), bidirectional, "{duration}: {kinds:?}");
+            let pts: Vec<i64> = packets.iter().map(|p| p.pts / duration).collect();
+            let pictures = decode_all(&stream);
+            assert_eq!(pictures.len(), 5, "{pts:?}");
+            let Some(ffmpeg) = ffmpeg_bin() else {
+                eprintln!("ffmpeg is not installed; the distant references were not checked");
+                return;
+            };
+            ffmpeg_matches(&ffmpeg, &stream, &pictures.concat(), "distant");
+        }
+    }
+
+    #[test]
+    fn a_movie_one_macroblock_wide_matches_ffmpeg() {
+        for (profile, name) in [
+            (super::Profile::Simple, "narrow-simple"),
+            (super::Profile::AdvancedSimple, "narrow-advanced"),
+        ] {
+            let mut encoder = super::Pictures::open(profile, 16, 48, 0, false).expect("open");
+            let mut packets = Vec::new();
+            for n in 0..6 {
+                let (y, u, v) = moving(16, 48, n);
+                packets.extend(
+                    encoder
+                        .push(super::PictureIn {
+                            y: &y,
+                            u: &u,
+                            v: &v,
+                            pts: i64::try_from(n).unwrap_or(0),
+                            duration: 1,
+                            timescale: 30,
+                            keyframe: false,
+                        })
+                        .expect("push"),
+                );
+            }
+            packets.extend(encoder.drain().expect("drain"));
+            let mut stream = encoder.headers().to_vec();
+            for packet in &packets {
+                stream.extend_from_slice(&packet.bytes);
+            }
+            let pictures = decode_all(&stream);
+            assert_eq!(pictures.len(), 6);
+            let Some(ffmpeg) = ffmpeg_bin() else {
+                eprintln!(
+                    "ffmpeg is not installed; the narrow movie was not checked independently"
+                );
+                return;
+            };
+            ffmpeg_matches(&ffmpeg, &stream, &pictures.concat(), name);
+        }
     }
 
     /// `count` moving pictures. The returned pictures are display order.

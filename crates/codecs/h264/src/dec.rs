@@ -381,6 +381,9 @@ pub(crate) struct Frame<S: Sample = u8> {
     time_scale: u32,
     fixed_rate: bool,
     nonexisting: bool,
+    /// Pictures with one stamp hold the same samples: a frame repeated in
+    /// place of a lost one keeps the stamp of the frame it repeats.
+    stamp: u64,
     /// The picture is three monochrome colour planes. Reconstruction swaps one
     /// plane into `y` and the same plane of every reference.
     separate_plane: bool,
@@ -1006,7 +1009,6 @@ impl VideoDecoder for H264Decoder {
         // The unit is split into NAL units once, for both passes over it.
         let nals = nal::access_unit(&packet.data, self.length_size)?;
         let depth = au_depth(&self.sets, &nals, self.dpb.depth())?;
-        let mut out = std::mem::take(&mut self.stash);
         let prior = if depth == self.dpb.depth() {
             Vec::new()
         } else {
@@ -1061,6 +1063,9 @@ impl VideoDecoder for H264Decoder {
             ),
             _ => return Err(CodecError::Unsupported { what: "bit depth" }),
         };
+        // What an earlier call that failed held back. It stays held until
+        // a unit decodes.
+        let mut out = std::mem::take(&mut self.stash);
         self.outbox.extend(prior);
         self.outbox.extend(queued);
         self.sets = sets;
@@ -1622,7 +1627,9 @@ fn exchange_plane<S: Sample>(frame: &mut Frame<S>, plane: u8) {
 
 fn exchange_refs<S: Sample>(picture: &mut Frame<S>, dpb: &mut [Frame<S>], plane: u8) {
     exchange_plane(picture, plane);
-    for frame in dpb {
+    // Only a 4:4:4 picture can be a reference of this one. Any other keeps
+    // its planes, so its chroma format still reads as what it is.
+    for frame in dpb.iter_mut().filter(|frame| frame.chroma() == 3) {
         exchange_plane(frame, plane);
     }
 }
@@ -1777,18 +1784,28 @@ fn finish_picture<S: Sample>(
     mut pic: Frame<S>,
 ) -> Result<Vec<Frame<S>>, CodecError> {
     let max_ref = dpb_max(dpb, &pic);
+    let mut reset = false;
     if pic.referenced {
         if pic.adaptive {
-            apply_mmco(dpb, &mut pic, _poc)?;
+            reset = apply_mmco(dpb, &mut pic, _poc)?;
         } else {
             mark_ref(dpb, &pic, max_ref);
         }
     }
     let reorder = pic_reorder(&pic);
+    // Clause C.4.4: a picture that reset the memory with operation 5 is
+    // stored once every picture before it has been output, as after an
+    // IDR picture; its order count now starts again from 0.
+    let mut out = if reset {
+        take_output(dpb, 0)
+    } else {
+        Vec::new()
+    };
     pic.seal();
     dpb.push(pic);
     dpb.retain(|frame| frame.referenced || frame.output);
-    Ok(take_output(dpb, reorder))
+    out.extend(take_output(dpb, reorder));
+    Ok(out)
 }
 
 fn dpb_max<S: Sample>(dpb: &[Frame<S>], pic: &Frame<S>) -> usize {
@@ -1821,13 +1838,15 @@ fn mark_ref<S: Sample>(dpb: &mut [Frame<S>], pic: &Frame<S>, max_ref: usize) {
     }
 }
 
-/// Clause 8.2.5. Adaptive marking replaces the sliding window for this picture.
+/// Clause 8.2.5. Adaptive marking replaces the sliding window for this
+/// picture. Returns whether operation 5 reset the memory.
 fn apply_mmco<S: Sample>(
     dpb: &mut [Frame<S>],
     pic: &mut Frame<S>,
     poc: &mut Poc,
-) -> Result<(), CodecError> {
+) -> Result<bool, CodecError> {
     let mut current_long = false;
+    let mut reset = false;
     for mark in pic.mmco.clone() {
         match mark.op {
             1 | 3 => {
@@ -1887,6 +1906,7 @@ fn apply_mmco<S: Sample>(
                 poc.prev_frame_num = 0;
                 poc.prev_frame_num_offset = 0;
                 poc.max_long = None;
+                reset = true;
             }
             6 => {
                 let idx = i32::try_from(mark.arg).unwrap_or(i32::MAX);
@@ -1926,7 +1946,27 @@ fn apply_mmco<S: Sample>(
             what: "reference frames",
         });
     }
-    Ok(())
+    if reset {
+        // Clause 8.2.1: the picture's order counts become relative to
+        // `tempPicOrderCnt`, and the next picture's are counted from
+        // them, with a most significant part of 0.
+        let temp = if pic.field && pic.bottom {
+            pic.field_poc[1]
+        } else if pic.field {
+            pic.field_poc[0]
+        } else {
+            pic.field_poc[0].min(pic.field_poc[1])
+        };
+        pic.field_poc = pic.field_poc.map(|order| order.saturating_sub(temp));
+        pic.poc = pic.poc.saturating_sub(temp);
+        poc.prev_poc_msb = 0;
+        poc.prev_poc_lsb = if pic.field && pic.bottom {
+            0
+        } else {
+            pic.field_poc[0]
+        };
+    }
+    Ok(reset)
 }
 
 fn short_at<S: Sample>(
@@ -1997,6 +2037,10 @@ fn oldest_short<S: Sample>(
 /// Clause 8.2.5.2. Each missing frame_num becomes a non-existing short-term reference
 /// and can slide an older reference out. Those pictures are not displayed and are not
 /// eligible as inter references.
+///
+/// A gap the sequence does not allow is a loss of pictures. As FFmpeg does, each
+/// missing frame is then a copy of the latest short-term reference, two order counts
+/// after it, which the pictures that follow predict from.
 fn fill_frame_num_gap<S: Sample>(
     sps: &Sps,
     state: &mut Poc,
@@ -2014,11 +2058,23 @@ fn fill_frame_num_gap<S: Sample>(
     if frame_num == state.prev_frame_num || frame_num == unused {
         return Ok(());
     }
-    if !sps.gaps_allowed {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "frame_num gap",
-        });
+    let lost = !sps.gaps_allowed;
+    let mut repeated = None;
+    if lost {
+        repeated = latest_short(dpb, sps, state.prev_frame_num).cloned();
+        // As FFmpeg does, only the last `max_num_ref_frames` missing
+        // frames are made: the earlier ones would slide out unused.
+        let missing = frame_num.wrapping_add(max_fn).wrapping_sub(unused) % max_fn;
+        let keep = u32::from(sps.max_num_ref_frames);
+        if missing > keep {
+            let first = frame_num.wrapping_add(max_fn).wrapping_sub(keep) % max_fn;
+            let before = first.wrapping_add(max_fn).wrapping_sub(1) % max_fn;
+            if before < state.prev_frame_num {
+                state.prev_frame_num_offset = state.prev_frame_num_offset.wrapping_add(max_fn);
+            }
+            state.prev_frame_num = before;
+            unused = first;
+        }
     }
     let mut steps = 0u32;
     while unused != frame_num {
@@ -2030,7 +2086,13 @@ fn fill_frame_num_gap<S: Sample>(
         }
         steps += 1;
         let (poc, offset) = ghost_order(sps, state, unused)?;
-        let ghost = absent_frame(sps, unused, poc);
+        let ghost = match &repeated {
+            Some(prev) => copied_frame(sps, prev, unused),
+            None => absent_frame(sps, unused, poc),
+        };
+        if repeated.is_some() {
+            repeated = Some(ghost.clone());
+        }
         mark_ref(dpb, &ghost, ghost.max_ref);
         state.prev_frame_num = unused;
         state.prev_frame_num_offset = offset;
@@ -2039,6 +2101,49 @@ fn fill_frame_num_gap<S: Sample>(
         unused = unused.wrapping_add(1) % max_fn;
     }
     Ok(())
+}
+
+/// A stamp no picture has had.
+pub(crate) fn next_stamp() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The short-term reference decoded last, of the sequence's size, that holds
+/// samples: the one whose frame_num is nearest before `current`.
+fn latest_short<'a, S: Sample>(
+    dpb: &'a [Frame<S>],
+    sps: &Sps,
+    current: u32,
+) -> Option<&'a Frame<S>> {
+    let max_fn = 1u32 << sps.log2_max_frame_num;
+    dpb.iter()
+        .filter(|frame| {
+            frame.referenced
+                && !frame.long_term
+                && !frame.nonexisting
+                && frame.w == sps.width as usize
+                && frame.h == sps.height as usize
+        })
+        .max_by_key(|frame| wrapped(frame, current, max_fn))
+}
+
+/// A missing frame that repeats `prev`, as a short-term reference that is not shown.
+fn copied_frame<S: Sample>(sps: &Sps, prev: &Frame<S>, frame_num: u32) -> Frame<S> {
+    let mut frame = prev.clone();
+    frame.frame_num = frame_num;
+    frame.poc = prev.poc.saturating_add(2);
+    frame.field_poc = prev.field_poc.map(|order| order.saturating_add(2));
+    frame.referenced = true;
+    frame.long_term = false;
+    frame.long_idx = -1;
+    frame.output = false;
+    frame.key = false;
+    frame.adaptive = false;
+    frame.mmco = Vec::new();
+    frame.max_ref = usize::from(sps.max_num_ref_frames).clamp(1, 16);
+    frame.max_fn = 1u32 << sps.log2_max_frame_num;
+    frame
 }
 
 fn ghost_order(sps: &Sps, state: &Poc, frame_num: u32) -> Result<(i32, u32), CodecError> {
@@ -2092,6 +2197,7 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         time_scale: sps.time_scale,
         fixed_rate: sps.fixed_frame_rate,
         nonexisting: true,
+        stamp: next_stamp(),
         separate_plane: sps.separate,
         field: false,
         mbaff: false,
@@ -2643,9 +2749,10 @@ pub(crate) struct Slice<'a> {
     residual_y: Vec<i32>,
     residual_u: Vec<i32>,
     residual_v: Vec<i32>,
-    /// A reference picture with 8×8 inference, which a later picture's
-    /// direct prediction may take as co-located: each macroblock's
-    /// [`Colocated`] `zero` is worked out.
+    /// A reference picture, which a later picture's direct prediction may
+    /// take as co-located: each macroblock's [`Colocated`] `zero` is worked
+    /// out. With or without 8×8 inference here, as that later picture's
+    /// own set says whether it reads them.
     corner_zero: bool,
 }
 
@@ -2818,6 +2925,23 @@ fn decode_slice<S: Sample>(
             mb::deblock(&mut done);
             *held = Some(done);
         }
+    }
+    // Clause 7.4.1: the slices of a picture are all of a reference picture
+    // or all of one that is not, which decides what their records keep.
+    if picture
+        .as_ref()
+        .is_some_and(|pic| pic.referenced != header.nal_ref)
+    {
+        return Err(bits.malformed("nal_ref_idc"));
+    }
+    // Clauses 7.4.1.2.1 and 7.4.3: the slices of a picture share one
+    // sequence parameter set and its frame or field. A set replaced between
+    // them may lay the picture out otherwise.
+    if picture
+        .as_ref()
+        .is_some_and(|pic| !same_layout(&sps, &header, pic))
+    {
+        return Err(bits.malformed("picture layout"));
     }
     if picture.is_none() && !idr {
         fill_frame_num_gap(&sps, poc_state, dpb, header.frame_num)?;
@@ -3397,11 +3521,12 @@ fn read_header(
             || (pps.weighted_bipred == 1 && kind == 1))
     {
         weights = true;
-        luma_denom = bits.ue()? as i32;
-        chroma_denom = bits.ue()? as i32;
-        if luma_denom > 7 || chroma_denom > 7 {
+        let luma = bits.ue()?;
+        let chroma = bits.ue()?;
+        if luma > 7 || chroma > 7 {
             return Err(bits.malformed("weight denom"));
         }
+        (luma_denom, chroma_denom) = (luma as i32, chroma as i32);
         let sample_shift = i32::from(sps.bit_depth) - 8;
         read_weights(
             bits,
@@ -3497,7 +3622,7 @@ fn read_header(
             return Err(bits.malformed("cabac_init_idc"));
         }
     }
-    let qp = pps.init_qp + bits.se()?;
+    let qp = pps.init_qp.saturating_add(bits.se()?);
     let qp_bd = 6 * i32::from(sps.bit_depth.saturating_sub(8));
     if !(-qp_bd..=51).contains(&qp) {
         return Err(bits.malformed("slice qp"));
@@ -3508,7 +3633,7 @@ fn read_header(
         if kind == 3 {
             sp_switch = bits.bit()?;
         }
-        qs = pps.init_qs + bits.se()?;
+        qs = pps.init_qs.saturating_add(bits.se()?);
         if !(0..=51).contains(&qs) {
             return Err(bits.malformed("slice qs"));
         }
@@ -3522,8 +3647,8 @@ fn read_header(
             return Err(bits.malformed("deblock idc"));
         }
         if deblock != 1 {
-            off_a = bits.se()? * 2;
-            off_b = bits.se()? * 2;
+            off_a = bits.se()?.saturating_mul(2);
+            off_b = bits.se()?.saturating_mul(2);
             if !(-12..=12).contains(&off_a) || !(-12..=12).contains(&off_b) {
                 return Err(bits.malformed("deblock offset"));
             }
@@ -3868,7 +3993,7 @@ fn predicted_header(
             return Err(CodecError::Unsupported { what: "3d" });
         }
     }
-    let qp = pps.init_qp + bits.se()?;
+    let qp = pps.init_qp.saturating_add(bits.se()?);
     let qp_bd = 6 * i32::from(sps.bit_depth.saturating_sub(8));
     if !(-qp_bd..=51).contains(&qp) {
         return Err(bits.malformed("slice qp"));
@@ -4166,17 +4291,26 @@ fn read_weights(
         cw[list][i] = [1 << chroma_denom, 1 << chroma_denom];
         co[list][i] = [0, 0];
         if bits.bit()? {
-            yw[list][i] = bits.se()?;
-            yo[list][i] = bits.se()? << sample_shift;
+            yw[list][i] = weight(bits)?;
+            yo[list][i] = weight(bits)? << sample_shift;
         }
         if bits.bit()? {
             for c in 0..2 {
-                cw[list][i][c] = bits.se()?;
-                co[list][i][c] = bits.se()? << sample_shift;
+                cw[list][i][c] = weight(bits)?;
+                co[list][i][c] = weight(bits)? << sample_shift;
             }
         }
     }
     Ok(())
+}
+
+/// A weight or offset of clause 7.4.3.2, which lies in −128..=127.
+fn weight(bits: &mut Bits<'_>) -> Result<i32, CodecError> {
+    let value = bits.se()?;
+    if !(-128..=127).contains(&value) {
+        return Err(bits.malformed("weight"));
+    }
+    Ok(value)
 }
 
 fn picture_order(
@@ -4223,17 +4357,24 @@ fn picture_order(
             0
         };
         let msb = if header.poc_lsb < prev_lsb && prev_lsb - header.poc_lsb >= max_lsb / 2 {
-            prev_msb + max_lsb
+            prev_msb.checked_add(max_lsb)
         } else if header.poc_lsb > prev_lsb && header.poc_lsb - prev_lsb > max_lsb / 2 {
-            prev_msb - max_lsb
+            prev_msb.checked_sub(max_lsb)
         } else {
-            prev_msb
+            Some(prev_msb)
+        };
+        let poc = msb.and_then(|msb| msb.checked_add(header.poc_lsb));
+        let (Some(msb), Some(poc)) = (msb, poc) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "picture order count",
+            });
         };
         if header.nal_ref {
             state.prev_poc_msb = msb;
             state.prev_poc_lsb = header.poc_lsb;
         }
-        msb + header.poc_lsb
+        poc
     };
     Ok((poc, offset))
 }
@@ -4316,30 +4457,7 @@ fn new_frame<S: Sample>(
     if reduced && field_pic {
         return Err(CodecError::Unsupported { what: "3d" });
     }
-    let w = if reduced {
-        sps.depth_mb_width.saturating_mul(16)
-    } else {
-        sps.width as usize
-    };
-    let h = if reduced {
-        sps.depth_mb_height.saturating_mul(16)
-    } else if field_pic {
-        (sps.height as usize) / 2
-    } else {
-        sps.height as usize
-    };
-    let mb_w = if reduced {
-        sps.depth_mb_width
-    } else {
-        sps.mb_width
-    };
-    let mb_h = if reduced {
-        sps.depth_mb_height
-    } else if field_pic {
-        sps.mb_height / 2
-    } else {
-        sps.mb_height
-    };
+    let (w, h, mb_w, mb_h) = picture_size(sps, header);
     if field_pic {
         vis_h /= 2;
     }
@@ -4407,6 +4525,7 @@ fn new_frame<S: Sample>(
         time_scale: sps.time_scale,
         fixed_rate: sps.fixed_frame_rate,
         nonexisting: false,
+        stamp: next_stamp(),
         separate_plane: sps.separate,
         field: header.field,
         mbaff: sps.mbaff && !header.field,
@@ -4435,6 +4554,36 @@ fn new_frame<S: Sample>(
         pending: None,
         writer: None,
     })
+}
+
+/// Luma width and height of a picture of `header`, and the same in
+/// macroblocks.
+fn picture_size(sps: &Sps, header: &Header) -> (usize, usize, usize, usize) {
+    if header.depth && sps.reduced_depth {
+        let (mb_w, mb_h) = (sps.depth_mb_width, sps.depth_mb_height);
+        return (mb_w.saturating_mul(16), mb_h.saturating_mul(16), mb_w, mb_h);
+    }
+    if header.field {
+        let h = (sps.height as usize) / 2;
+        return (sps.width as usize, h, sps.mb_width, sps.mb_height / 2);
+    }
+    let h = sps.height as usize;
+    (sps.width as usize, h, sps.mb_width, sps.mb_height)
+}
+
+/// Whether a slice of `header` can go on with `picture`: one laid out
+/// otherwise, or a frame's slice in a field or the reverse, reads and
+/// writes its planes at other places and lengths.
+fn same_layout<S: Sample>(sps: &Sps, header: &Header, picture: &Frame<S>) -> bool {
+    let (w, h, mb_w, _) = picture_size(sps, header);
+    picture.w == w
+        && picture.h == h
+        && picture.mb_w == mb_w
+        && picture.chroma() == sps.chroma
+        && picture.separate_plane == sps.separate
+        && picture.field == header.field
+        && picture.bottom == header.bottom
+        && picture.mbaff == (sps.mbaff && !header.field)
 }
 
 struct DepthWeights<'a> {
@@ -4583,6 +4732,7 @@ fn make_slice<'a, S: Sample>(
         poc,
         max_fn,
         (sps.width as usize, sps.height as usize),
+        sps.chroma,
     )?;
     let (poc0, long0) = ref_marks(dpb, &ref0);
     let (poc1, long1) = ref_marks(dpb, &ref1);
@@ -4596,9 +4746,17 @@ fn make_slice<'a, S: Sample>(
             let Some(index) = at.checked_sub(1) else {
                 return (-1, 0);
             };
-            let slot = slots
-                .get(index)
-                .map_or(-1, |&slot| i8::try_from(slot).unwrap_or(-1));
+            // A frame repeated in place of a lost one is the frame it
+            // repeats wherever pictures are compared, as FFmpeg compares
+            // buffers: the first in the buffer with the same samples.
+            let slot = slots.get(index).map_or(-1, |&slot| {
+                let first = dpb.get(slot).map_or(slot, |frame| {
+                    dpb.iter()
+                        .position(|other| other.stamp == frame.stamp)
+                        .unwrap_or(slot)
+                });
+                i8::try_from(first).unwrap_or(-1)
+            });
             (slot, pocs.get(index).copied().unwrap_or(0))
         })
     });
@@ -4662,7 +4820,7 @@ fn make_slice<'a, S: Sample>(
         pps: std::borrow::Cow::Borrowed(pps),
         kind: header.kind,
         poc,
-        corner_zero: header.nal_ref && sps.direct_8x8_inference,
+        corner_zero: header.nal_ref,
         qp: header.qp,
         cabac: pps.cabac,
         deblock: header.deblock,
@@ -5528,9 +5686,121 @@ mod tests {
             .collect();
         assert_eq!(live, vec![(2, true, false), (3, true, false)]);
         assert_eq!(poc.prev_frame_num, 3);
+        // Without gaps allowed the missing frames repeat the latest
+        // reference, two order counts on each.
         sps.gaps_allowed = false;
+        let mut dpb = vec![held(0), held(1)];
         poc.prev_frame_num = 1;
-        assert!(super::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 4).is_err());
+        super::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 4).unwrap();
+        let live: Vec<_> = dpb
+            .iter()
+            .filter(|frame| frame.referenced)
+            .map(|frame| (frame.frame_num, frame.nonexisting, frame.output, frame.poc))
+            .collect();
+        assert_eq!(live, vec![(2, false, false, 3), (3, false, false, 5)]);
+        // Of a longer gap, only as many frames as there are references
+        // are made, as FFmpeg makes them.
+        let mut dpb = vec![held(0), held(1)];
+        poc.prev_frame_num = 1;
+        super::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 9).unwrap();
+        let live: Vec<_> = dpb
+            .iter()
+            .filter(|frame| frame.referenced)
+            .map(|frame| (frame.frame_num, frame.poc))
+            .collect();
+        assert_eq!(live, vec![(7, 3), (8, 5)]);
+        assert_eq!(poc.prev_frame_num, 8);
+    }
+
+    #[test]
+    fn a_lost_reference_is_concealed_with_the_one_before_it() {
+        // The P picture with frame_num 2 is lost and the sequence allows
+        // no gaps. FFmpeg repeats the picture before it in its place, so
+        // the skipped picture after the loss shows 10, as it does here.
+        let sets = TinySets::default();
+        let mut decoder = tiny_decoder(&sets);
+        let mut shown = decoder.push(&tiny_pcm_p(&sets, 1, 0, 10, false)).unwrap();
+        shown.extend(
+            decoder
+                .push(&tiny_p(&sets, 3, 0, |bits| bits.ue(1)))
+                .unwrap(),
+        );
+        shown.extend(decoder.drain().unwrap());
+        let firsts: Vec<u8> = shown.iter().map(|frame| frame.picture.y()[0]).collect();
+        assert_eq!(firsts, vec![128, 10, 10]);
+    }
+
+    #[test]
+    fn pictures_after_a_lost_reference_match_ffmpeg() {
+        // Four references, so the pictures after the loss predict from the
+        // repeated frame and from the frame it repeats, side by side, and
+        // FFmpeg deblocks between the two as between one picture.
+        let Some(ff) = ffmpeg_bin() else {
+            eprintln!("skipped: no ffmpeg");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cutlass-h264-lost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (width, height, frames) = (96usize, 80usize, 12usize);
+        let whole = dir.join("whole.h264");
+        let encoded = Command::new(&ff)
+            .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size={width}x{height}:rate=30"))
+            .args(["-frames:v", &frames.to_string(), "-c:v", "libx264"])
+            .args([
+                "-x264-params",
+                "bframes=0:ref=4:keyint=30:scenecut=0:threads=1",
+            ])
+            .args(["-f", "h264"])
+            .arg(&whole)
+            .status();
+        if !encoded.is_ok_and(|status| status.success()) {
+            eprintln!("skipped: ffmpeg has no libx264");
+            return;
+        }
+        let units = access_units(&std::fs::read(&whole).unwrap());
+        for lost in [vec![3], vec![2, 5, 6]] {
+            let kept: Vec<Vec<u8>> = units
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !lost.contains(index))
+                .map(|(_, unit)| unit.clone())
+                .collect();
+            let damaged = dir.join("damaged.h264");
+            let yuv = dir.join("damaged.yuv");
+            std::fs::write(&damaged, kept.concat()).unwrap();
+            let decoded = Command::new(&ff)
+                .args(["-y", "-loglevel", "quiet", "-threads", "1", "-i"])
+                .arg(&damaged)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&yuv)
+                .status()
+                .unwrap();
+            assert!(decoded.success());
+            let reference = std::fs::read(&yuv).unwrap();
+            let mut codec = CodecParams::video(CodecId::H264, width as u32, height as u32);
+            codec.nal_length_size = 0;
+            let mut decoder = H264Decoder::open(&codec).unwrap();
+            let mut got = Vec::new();
+            for (n, unit) in kept.iter().enumerate() {
+                got.extend(
+                    decoder
+                        .push(&Packet::video(unit.clone(), n as i64, 1, 30, n == 0))
+                        .unwrap(),
+                );
+            }
+            got.extend(decoder.drain().unwrap());
+            let mut samples = Vec::new();
+            for picture in &got {
+                samples.extend_from_slice(picture.picture.y());
+                samples.extend_from_slice(picture.picture.u());
+                samples.extend_from_slice(picture.picture.v());
+            }
+            assert_eq!(got.len(), kept.len(), "{lost:?}");
+            assert!(samples == reference, "{lost:?}: differs from ffmpeg");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -5586,11 +5856,19 @@ mod tests {
             arg: 0,
             arg2: 0,
         }];
-        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        current.field_poc = [7, 5];
+        current.poc = 5;
+        poc.prev_poc_msb = 64;
+        poc.prev_poc_lsb = 7;
+        assert!(super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap());
         assert!(dpb.iter().all(|frame| !frame.referenced));
         assert_eq!(current.frame_num, 0);
         assert_eq!(poc.prev_frame_num, 0);
         assert!(poc.max_long.is_none());
+        // Clause 8.2.1: the order counts less `tempPicOrderCnt`, and the
+        // next picture counts from the top field's.
+        assert_eq!((current.field_poc, current.poc), ([2, 0], 0));
+        assert_eq!((poc.prev_poc_msb, poc.prev_poc_lsb), (0, 2));
     }
 
     #[test]
@@ -5605,7 +5883,7 @@ mod tests {
                 super::Mod { idc: 0, arg: 0 },
             ],
         );
-        let (list0, list1) = super::mb::reference_lists(&dpb, &header, 4, 16, (16, 16)).unwrap();
+        let (list0, list1) = super::mb::reference_lists(&dpb, &header, 4, 16, (16, 16), 1).unwrap();
         assert!(list1.is_empty());
         let frames: Vec<u32> = list0.iter().map(|&index| dpb[index].frame_num).collect();
         assert_eq!(frames, vec![1, 1, 0]);
@@ -5615,7 +5893,7 @@ mod tests {
     fn a_reordered_picture_that_is_not_in_the_dpb_is_malformed() {
         let dpb = vec![held(0)];
         let header = p_header(1, 1, vec![super::Mod { idc: 0, arg: 5 }]);
-        assert!(super::mb::reference_lists(&dpb, &header, 0, 16, (16, 16)).is_err());
+        assert!(super::mb::reference_lists(&dpb, &header, 0, 16, (16, 16), 1).is_err());
     }
 
     fn p_header(frame_num: u32, num_ref_l0: usize, ref_mod_l0: Vec<super::Mod>) -> super::Header {
@@ -5712,6 +5990,7 @@ mod tests {
             time_scale: 0,
             fixed_rate: false,
             nonexisting: false,
+            stamp: super::next_stamp(),
             separate_plane: false,
             field: false,
             mbaff: false,
@@ -5824,7 +6103,11 @@ mod tests {
     }
 
     fn ffmpeg() -> Option<std::path::PathBuf> {
-        for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+        for candidate in [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/usr/bin/ffmpeg",
+        ] {
             let path = std::path::PathBuf::from(candidate);
             if path.is_file() {
                 return Some(path);
@@ -6487,6 +6770,728 @@ mod tests {
         assert!(failures > 50, "{failures}");
     }
 
+    #[test]
+    fn a_cavlc_reference_index_past_the_list_is_rejected() {
+        let sets = TinySets {
+            weighted: true,
+            ..TinySets::default()
+        };
+        let mut decoder = tiny_decoder(&sets);
+        // Three active references, the first with a weight of its own, and
+        // a P_L0_16x16 macroblock that names reference 40.
+        let mut bits = tiny_head(&sets, 5, 1, 0);
+        bits.bit(true);
+        bits.ue(2);
+        bits.bit(false);
+        bits.ue(0);
+        bits.ue(0);
+        for index in 0..3 {
+            bits.bit(index == 0);
+            if index == 0 {
+                bits.se(3);
+                bits.se(0);
+            }
+            bits.bit(false);
+        }
+        tiny_tail(&mut bits, true, false);
+        bits.ue(0);
+        bits.ue(0);
+        bits.ue(40);
+        bits.se(0);
+        bits.se(0);
+        bits.ue(0);
+        bits.bit(true);
+        let err = decoder
+            .push(&tiny_packet(1, 1, &bits.finish()))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodecError::Malformed {
+                    what: "ref idx",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_of_another_chroma_format_is_not_predicted_from() {
+        let mut decoder = tiny_decoder(&TinySets::default());
+        // The same size in 4:4:4 as three colour planes, with no IDR picture
+        // in between, so the 4:2:0 picture is still a reference. Each plane
+        // is a slice of one skipped macroblock; the second plane's swaps in
+        // the reference's quarter-size chroma for its luma.
+        let planes = TinySets {
+            profile: 244,
+            separate: true,
+            ..TinySets::default()
+        };
+        let mut unit = tiny_sets(&planes);
+        for plane in 0..3 {
+            let mut bits = Pack::new();
+            bits.ue(0);
+            bits.ue(5);
+            bits.ue(0);
+            bits.u(2, plane);
+            bits.u(4, 1);
+            bits.bit(false);
+            bits.bit(false);
+            tiny_tail(&mut bits, true, false);
+            bits.ue(1);
+            bits.bit(true);
+            unit.extend(crate::nal::annex_b_nal(1, 1, &bits.finish()));
+        }
+        let err = decoder
+            .push(&Packet::video(unit, 1, 1, 30, false))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodecError::Malformed {
+                    what: "ref idx",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn colour_planes_that_start_with_a_chroma_plane_do_not_predict_from_another_chroma_format() {
+        let mut decoder = tiny_decoder(&TinySets::default());
+        // As above, with the planes in another order: the first swaps the
+        // 4:2:0 reference's chroma into its luma before the lists are made.
+        let planes = TinySets {
+            profile: 244,
+            separate: true,
+            ..TinySets::default()
+        };
+        let mut unit = tiny_sets(&planes);
+        for plane in [1, 2, 0] {
+            let mut bits = Pack::new();
+            bits.ue(0);
+            bits.ue(5);
+            bits.ue(0);
+            bits.u(2, plane);
+            bits.u(4, 1);
+            bits.bit(false);
+            bits.bit(false);
+            tiny_tail(&mut bits, true, false);
+            bits.ue(1);
+            bits.bit(true);
+            unit.extend(crate::nal::annex_b_nal(1, 1, &bits.finish()));
+        }
+        let err = decoder
+            .push(&Packet::video(unit, 1, 1, 30, false))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodecError::Malformed {
+                    what: "ref idx",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_sequence_parameter_set_replaced_within_a_picture_is_rejected() {
+        let sets = TinySets {
+            mbs_wide: 2,
+            ..TinySets::default()
+        };
+        // An IDR slice of flat I_16x16 macroblocks from `first`, of a
+        // frame or a top field.
+        fn slice(first: u32, mbs: u32, full_chroma: bool, field: bool) -> Vec<u8> {
+            let mut bits = Pack::new();
+            bits.ue(first);
+            bits.ue(7);
+            bits.ue(0);
+            bits.u(4, 0);
+            if field {
+                bits.bit(true);
+                bits.bit(false);
+            }
+            bits.ue(0);
+            bits.bit(false);
+            bits.bit(false);
+            bits.se(0);
+            bits.ue(1);
+            for _ in 0..mbs {
+                bits.ue(3);
+                if !full_chroma {
+                    bits.ue(0);
+                }
+                bits.se(0);
+                // An empty DC block of luma, and of each chroma plane that
+                // codes like luma.
+                let planes = if full_chroma { 3 } else { 1 };
+                for _ in 0..planes {
+                    bits.bit(true);
+                }
+            }
+            bits.bit(true);
+            crate::nal::annex_b_nal(3, 5, &bits.finish())
+        }
+        // The second slice goes on in 4:4:4, then as a field of a picture
+        // twice as tall, which is as tall as the frame.
+        let full = TinySets {
+            profile: 244,
+            mbs_wide: 2,
+            ..TinySets::default()
+        };
+        let fields = TinySets {
+            mbs_wide: 2,
+            mbaff: true,
+            ..TinySets::default()
+        };
+        for (replaced, full_chroma, field) in [(full, true, false), (fields, false, true)] {
+            let mut params = CodecParams::video(CodecId::H264, 32, 16);
+            params.nal_length_size = 0;
+            let mut decoder = H264Decoder::open(&params).unwrap();
+            let mut unit = tiny_sets(&sets);
+            unit.extend(slice(0, 1, false, false));
+            unit.extend(tiny_sets(&replaced));
+            unit.extend(slice(1, 1, full_chroma, field));
+            let err = decoder
+                .push(&Packet::video(unit, 0, 1, 30, true))
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    CodecError::Malformed {
+                        what: "picture layout",
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_run_of_sei_payloads_is_read_in_linear_time() {
+        let sets = TinySets {
+            refs: 1,
+            ..TinySets::default()
+        };
+        let mut decoder = tiny_decoder(&sets);
+        // Empty payloads of type 0, two bytes each, then the stop bit.
+        let mut sei = vec![0u8; 2 * 200_000];
+        sei.push(0x80);
+        let mut unit = crate::nal::annex_b_nal(0, 6, &sei);
+        unit.extend(tiny_p(&sets, 1, 0, |bits| bits.ue(1)).data.iter());
+        let started = std::time::Instant::now();
+        decoder.push(&Packet::video(unit, 1, 1, 30, false)).unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "the unit took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_reorder_depth_past_the_buffer_does_not_hold_every_picture() {
+        // A VUI whose bitstream restriction asks for 1000 reorder frames.
+        let sets = TinySets {
+            refs: 1,
+            vui: Some(|bits| {
+                for _ in 0..8 {
+                    bits.bit(false);
+                }
+                bits.bit(true);
+                bits.bit(true);
+                bits.ue(0);
+                bits.ue(0);
+                bits.ue(16);
+                bits.ue(16);
+                bits.ue(1000);
+                bits.ue(1000);
+            }),
+            ..TinySets::default()
+        };
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let mut shown = decoder
+            .push(&Packet::video(tiny_idr(&sets), 0, 1, 30, true))
+            .unwrap()
+            .len();
+        let pushed = 41;
+        for n in 1..pushed {
+            let packet = tiny_p(&sets, n % 16, 0, |bits| bits.ue(1));
+            shown += decoder.push(&packet).unwrap().len();
+        }
+        let held = pushed as usize - shown;
+        assert!(held <= 16, "{held} pictures are held for reordering");
+        assert_eq!(decoder.drain().unwrap().len(), held);
+    }
+
+    #[test]
+    fn motion_vectors_at_both_ends_of_the_range_are_deblocked() {
+        let sets = TinySets {
+            mbs_wide: 2,
+            ..TinySets::default()
+        };
+        let mut decoder = tiny_decoder(&sets);
+        // Two P_L0_16x16 macroblocks: the first vector is 32767 across, and
+        // the second, predicted from it, −32768.
+        let mut bits = tiny_head(&sets, 5, 1, 0);
+        bits.bit(false);
+        bits.bit(false);
+        tiny_tail(&mut bits, true, true);
+        for mvd in [32_767, -65_535] {
+            bits.ue(0);
+            bits.ue(0);
+            bits.se(mvd);
+            bits.se(0);
+            bits.ue(0);
+        }
+        bits.bit(true);
+        decoder.push(&tiny_packet(1, 1, &bits.finish())).unwrap();
+    }
+
+    #[test]
+    fn a_motion_vector_difference_at_the_end_of_the_range_is_clipped() {
+        let sets = TinySets {
+            mbs_wide: 2,
+            ..TinySets::default()
+        };
+        let mut decoder = tiny_decoder(&sets);
+        // The second macroblock's predictor is the first one's vector, 4.
+        let packet = tiny_p(&sets, 1, 0, |bits| {
+            for mvd in [4, i32::MAX] {
+                bits.ue(0);
+                bits.ue(0);
+                bits.se(mvd);
+                bits.se(0);
+                bits.ue(0);
+            }
+        });
+        decoder.push(&packet).unwrap();
+    }
+
+    #[test]
+    fn a_macroblock_qp_delta_at_the_end_of_the_range_wraps() {
+        let sets = TinySets::default();
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        // The IDR picture's I_16x16 macroblock has `mb_qp_delta` 2^31 − 1.
+        let mut bits = tiny_head(&sets, 7, 0, 0);
+        bits.bit(false);
+        bits.bit(false);
+        bits.se(0);
+        bits.ue(1);
+        bits.ue(3);
+        bits.ue(0);
+        bits.se(i32::MAX);
+        bits.bit(true);
+        bits.bit(true);
+        let mut unit = tiny_sets(&sets);
+        unit.extend(crate::nal::annex_b_nal(3, 5, &bits.finish()));
+        decoder.push(&Packet::video(unit, 0, 1, 30, true)).unwrap();
+    }
+
+    #[test]
+    fn slices_of_one_picture_that_disagree_on_being_a_reference_are_rejected() {
+        let sets = TinySets {
+            refs: 1,
+            mbs_wide: 2,
+            ..TinySets::default()
+        };
+        let mut decoder = tiny_decoder(&sets);
+        // One skipped macroblock in each slice. The first slice is of a
+        // reference picture and the second says it is not.
+        let mut unit = tiny_p(&sets, 1, 0, |bits| bits.ue(1)).data.to_vec();
+        let mut bits = Pack::new();
+        bits.ue(1);
+        bits.ue(5);
+        bits.ue(0);
+        bits.u(4, 1);
+        bits.bit(false);
+        bits.bit(false);
+        tiny_tail(&mut bits, false, false);
+        bits.ue(1);
+        bits.bit(true);
+        unit.extend(crate::nal::annex_b_nal(0, 1, &bits.finish()));
+        let refused = decoder.push(&Packet::video(unit, 1, 1, 30, false));
+        // A B picture whose spatial direct prediction reads the second
+        // slice's macroblock as one of a reference picture.
+        let mut bits = tiny_head(&sets, 6, 2, 0);
+        bits.bit(true);
+        bits.bit(false);
+        bits.bit(false);
+        bits.bit(false);
+        tiny_tail(&mut bits, false, false);
+        bits.ue(2);
+        bits.bit(true);
+        let _ = decoder.push(&tiny_packet(0, 2, &bits.finish()));
+        assert!(
+            matches!(
+                refused,
+                Err(CodecError::Malformed {
+                    what: "nal_ref_idc",
+                    ..
+                })
+            ),
+            "{refused:?}"
+        );
+    }
+
+    /// A P picture of one I_PCM macroblock whose samples are all `value`,
+    /// with `pic_order_cnt_lsb` `order`. `reset` marks it with
+    /// `memory_management_control_operation` 5, else by the sliding window.
+    fn tiny_pcm_p(sets: &TinySets, frame_num: u32, order: i32, value: u8, reset: bool) -> Packet {
+        let mut bits = tiny_head(sets, 5, frame_num, order);
+        bits.bit(false);
+        bits.bit(false);
+        if reset {
+            bits.bit(true);
+            bits.ue(5);
+            bits.ue(0);
+            tiny_tail(&mut bits, false, false);
+        } else {
+            tiny_tail(&mut bits, true, false);
+        }
+        bits.ue(0);
+        bits.ue(30);
+        while bits.n != 0 {
+            bits.bit(false);
+        }
+        for _ in 0..384 {
+            bits.u(8, u32::from(value));
+        }
+        bits.bit(true);
+        tiny_packet(1, i64::from(value), &bits.finish())
+    }
+
+    #[test]
+    fn pictures_after_a_memory_reset_count_their_order_from_it() {
+        // Clause 8.2.1: after operation 5 the picture's order count is
+        // reduced by itself, to 0, so the picture after it, at count 50,
+        // is shown after the one at 100 that reset. FFmpeg shows them in
+        // this order too.
+        let sets = TinySets {
+            order_type: 0,
+            ..TinySets::default()
+        };
+        let mut decoder = tiny_decoder(&sets);
+        let packets = [
+            tiny_pcm_p(&sets, 1, 100, 10, true),
+            tiny_pcm_p(&sets, 1, 50, 20, false),
+            tiny_pcm_p(&sets, 2, 60, 30, false),
+        ];
+        let mut shown = Vec::new();
+        for packet in &packets {
+            shown.extend(decoder.push(packet).unwrap());
+        }
+        shown.extend(decoder.drain().unwrap());
+        let firsts: Vec<u8> = shown.iter().map(|frame| frame.picture.y()[0]).collect();
+        assert_eq!(firsts, vec![128, 10, 20, 30]);
+    }
+
+    #[test]
+    fn weights_outside_their_range_are_rejected() {
+        let sets = TinySets {
+            weighted: true,
+            ..TinySets::default()
+        };
+        // A denominator of 2^31, then a luma weight of 2^31 − 1.
+        let cases: [(u32, i32, &str); 2] = [(1 << 31, 1, "weight denom"), (0, i32::MAX, "weight")];
+        for (denom, weight, what) in cases {
+            let mut decoder = tiny_decoder(&sets);
+            let mut bits = tiny_head(&sets, 5, 1, 0);
+            bits.bit(false);
+            bits.bit(false);
+            bits.ue(denom);
+            bits.ue(0);
+            bits.bit(true);
+            bits.se(weight);
+            bits.se(0);
+            bits.bit(false);
+            tiny_tail(&mut bits, true, false);
+            bits.ue(0);
+            bits.ue(0);
+            bits.se(0);
+            bits.se(0);
+            bits.ue(0);
+            bits.bit(true);
+            let err = decoder
+                .push(&tiny_packet(1, 1, &bits.finish()))
+                .unwrap_err();
+            assert!(
+                matches!(err, CodecError::Malformed { what: found, .. } if found == what),
+                "{what}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn slice_header_deltas_at_the_end_of_the_range_are_rejected() {
+        let sets = TinySets::default();
+        // `slice_qp_delta`, `slice_qs_delta` of an SP slice, then
+        // `slice_alpha_c0_offset_div2`.
+        let cases: [(u32, i32, i32, i32, &str); 3] = [
+            (5, i32::MAX, 0, 0, "slice qp"),
+            (3, 0, i32::MAX, 0, "slice qs"),
+            (5, 0, 0, 1 << 30, "deblock offset"),
+        ];
+        for (kind, qp, qs, alpha, what) in cases {
+            let mut decoder = tiny_decoder(&sets);
+            let mut bits = tiny_head(&sets, kind, 1, 0);
+            bits.bit(false);
+            bits.bit(false);
+            bits.bit(false);
+            bits.se(qp);
+            if kind == 3 {
+                bits.bit(false);
+                bits.se(qs);
+            }
+            bits.ue(0);
+            bits.se(alpha);
+            bits.se(0);
+            bits.ue(1);
+            bits.bit(true);
+            let err = decoder
+                .push(&tiny_packet(1, 1, &bits.finish()))
+                .unwrap_err();
+            assert!(
+                matches!(err, CodecError::Malformed { what: found, .. } if found == what),
+                "{what}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_set_fields_at_the_end_of_the_range_are_rejected() {
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        // `log2_max_frame_num_minus4` of 2^32 − 2.
+        let mut bits = Pack::new();
+        bits.u(8, 66);
+        bits.u(8, 0);
+        bits.u(8, 30);
+        bits.ue(0);
+        bits.ue(u32::MAX - 1);
+        bits.bit(true);
+        let sps = crate::nal::annex_b_nal(3, 7, &bits.finish());
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let err = decoder
+            .push(&Packet::video(sps, 0, 1, 30, false))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodecError::Malformed {
+                    what: "log2_max_frame_num",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        // `chroma_qp_index_offset` of 2^31 − 1.
+        let sets = TinySets {
+            chroma_qp_offset: i32::MAX,
+            ..TinySets::default()
+        };
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let err = decoder
+            .push(&Packet::video(tiny_idr(&sets), 0, 1, 30, true))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodecError::Malformed {
+                    what: "chroma qp offset",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn b_pictures_between_order_counts_at_both_ends_of_the_range_are_predicted() {
+        // Order count type 1 with no cycle: each picture's count is its
+        // `delta_pic_order_cnt[0]`. Implicit weights and temporal direct
+        // prediction both measure the distances between the counts.
+        let sets = TinySets {
+            refs: 2,
+            order_type: 1,
+            bipred: 2,
+            ..TinySets::default()
+        };
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let mut unit = tiny_sets(&sets);
+        unit.extend(tiny_idr_slice(&sets, -i32::MAX));
+        let mut shown = decoder
+            .push(&Packet::video(unit, 0, 1, 30, true))
+            .unwrap()
+            .len();
+        shown += decoder
+            .push(&tiny_p(&sets, 1, i32::MAX, |bits| bits.ue(1)))
+            .unwrap()
+            .len();
+        // Two B pictures between them, one skipped macroblock each: the
+        // first with spatial direct prediction, the second temporal.
+        for (spatial, order) in [(true, 0), (false, 1)] {
+            let mut bits = tiny_head(&sets, 6, 2, order);
+            bits.bit(spatial);
+            bits.bit(false);
+            bits.bit(false);
+            bits.bit(false);
+            tiny_tail(&mut bits, false, false);
+            bits.ue(1);
+            bits.bit(true);
+            let packet = tiny_packet(0, 2 + i64::from(order), &bits.finish());
+            shown += decoder.push(&packet).unwrap().len();
+        }
+        assert_eq!(shown + decoder.drain().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_reference_decoded_without_8x8_inference_is_co_located_like_one_with_it() {
+        // The P picture's set has no 8×8 inference and the B picture's has.
+        // The B picture's second macroblock, skipped, takes its left
+        // neighbour's vector unless the P picture's co-located motion is
+        // near zero, which it is: the vector is then zero.
+        let decode = |inference: bool| {
+            let sets = TinySets {
+                refs: 2,
+                mbs_wide: 2,
+                order_type: 1,
+                ..TinySets::default()
+            };
+            // An IDR picture at QP 51 whose left macroblock is 14 lighter.
+            let mut bits = tiny_head(&sets, 7, 0, 0);
+            bits.bit(false);
+            bits.bit(false);
+            bits.se(25);
+            bits.ue(1);
+            for darker in [false, true] {
+                bits.ue(3);
+                bits.ue(0);
+                bits.se(0);
+                // One DC level of ±1.
+                bits.u(2, 1);
+                bits.bit(darker);
+                bits.bit(true);
+            }
+            bits.bit(true);
+            let mut unit = tiny_sets(&sets);
+            unit.extend(crate::nal::annex_b_nal(3, 5, &bits.finish()));
+            let mut params = CodecParams::video(CodecId::H264, 32, 16);
+            params.nal_length_size = 0;
+            let mut decoder = H264Decoder::open(&params).unwrap();
+            let mut shown = decoder.push(&Packet::video(unit, 0, 1, 30, true)).unwrap();
+            let before = TinySets { inference, ..sets };
+            let mut unit = tiny_sets(&before);
+            unit.extend(tiny_p(&before, 1, 4, |bits| bits.ue(2)).data.iter());
+            shown.extend(decoder.push(&Packet::video(unit, 1, 1, 30, false)).unwrap());
+            // B_L0_16x16 eight samples to the left, then a skipped one.
+            let mut bits = tiny_head(&sets, 6, 2, 2);
+            bits.bit(true);
+            bits.bit(false);
+            bits.bit(false);
+            bits.bit(false);
+            tiny_tail(&mut bits, false, false);
+            bits.ue(0);
+            bits.ue(1);
+            bits.se(-32);
+            bits.se(0);
+            bits.ue(0);
+            bits.ue(1);
+            bits.bit(true);
+            let mut unit = tiny_sets(&sets);
+            unit.extend(crate::nal::annex_b_nal(0, 1, &bits.finish()));
+            shown.extend(decoder.push(&Packet::video(unit, 2, 1, 30, false)).unwrap());
+            shown.extend(decoder.drain().unwrap());
+            shown
+                .iter()
+                .map(|out| out.picture.y().to_vec())
+                .collect::<Vec<_>>()
+        };
+        let pictures = decode(true);
+        assert_eq!(pictures.len(), 3);
+        // The skipped macroblock copies the reference where it is.
+        let row = &pictures[1][..32];
+        assert!(row[..16].iter().all(|&y| y == row[0]), "{row:?}");
+        assert!(row[16..].iter().all(|&y| y == row[16]), "{row:?}");
+        assert_ne!(row[0], row[16], "{row:?}");
+        assert_eq!(decode(false), pictures);
+    }
+
+    #[test]
+    fn an_order_count_that_cycles_past_the_range_is_rejected() {
+        // Order count type 0 with 16-bit `pic_order_cnt_lsb`. Going from
+        // 32768 back to 0 adds 65536 to the count each time.
+        let sets = TinySets {
+            refs: 1,
+            order_type: 0,
+            ..TinySets::default()
+        };
+        let mut decoder = tiny_decoder(&sets);
+        let mut failed = None;
+        for n in 1..70_000u32 {
+            let lsb = if n % 2 == 1 { 32_768 } else { 0 };
+            let packet = tiny_p(&sets, n % 16, lsb, |bits| bits.ue(1));
+            if let Err(err) = decoder.push(&packet) {
+                failed = Some((n, err));
+                break;
+            }
+        }
+        let Some((n, err)) = failed else {
+            panic!("the order count never left the range");
+        };
+        assert!(n > 65_000, "{n}");
+        assert!(
+            matches!(
+                err,
+                CodecError::Malformed {
+                    what: "picture order count",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_push_keeps_the_pictures_an_earlier_error_held_back() {
+        let sets = TinySets::default();
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap().with_rows_inline();
+        // Four references keep every picture back until the drain. The third
+        // picture's macroblock type is past the table, which is found when
+        // its rows are decoded and returned with the pictures before it.
+        decoder
+            .push(&Packet::video(tiny_idr(&sets), 0, 1, 30, true))
+            .unwrap();
+        decoder
+            .push(&tiny_p(&sets, 1, 0, |bits| bits.ue(1)))
+            .unwrap();
+        decoder
+            .push(&tiny_p(&sets, 2, 0, |bits| {
+                bits.ue(0);
+                bits.ue(40);
+            }))
+            .unwrap();
+        assert!(decoder.drain().is_err());
+        // A unit that fails before it decodes anything, at its slice type.
+        let mut bits = tiny_head(&sets, 10, 3, 0);
+        bits.bit(true);
+        assert!(decoder.push(&tiny_packet(1, 3, &bits.finish())).is_err());
+        assert_eq!(decoder.drain().unwrap().len(), 2);
+    }
+
     /// Thirty minutes of deterministic garbage and one-bit flips of a real
     /// access unit. `cargo test -p cutlass-h264 --release --lib -- --ignored
     /// thirty_minute_decoder_campaign --nocapture` records the run.
@@ -6673,6 +7678,123 @@ mod tests {
             .data
     }
 
+    /// Writes `level` as a CAVLC escape, clause 9.2.2.1: the shortest
+    /// `level_prefix` of 15 or more that holds it, at `suffix_length`.
+    /// `first` is the first level after fewer than three trailing ones.
+    fn level_escape(bits: &mut Pack, level: i32, suffix_length: u32, first: bool) {
+        let mut code = 2 * level.unsigned_abs() - if level > 0 { 2 } else { 1 };
+        if first {
+            code -= 2;
+        }
+        code -= 15 << suffix_length;
+        if suffix_length == 0 {
+            code -= 15;
+        }
+        let offset = |prefix: u32| {
+            if prefix == 15 {
+                0
+            } else {
+                (1 << (prefix - 3)) - 4096
+            }
+        };
+        let mut prefix = 15;
+        while code >= offset(prefix) + (1 << (prefix - 3)) {
+            prefix += 1;
+        }
+        for _ in 0..prefix {
+            bits.bit(false);
+        }
+        bits.bit(true);
+        bits.u(prefix - 3, code - offset(prefix));
+    }
+
+    /// One 16×16 IDR picture of 10-bit 4:2:0 under `sets`, decoded: an
+    /// Intra_16x16 DC-predicted macroblock at QP `qp` with no chroma
+    /// residual, whose luma residual `data` writes from its DC levels on.
+    fn deep_intra16(sets: &TinySets, qp: i32, luma_ac: bool, data: fn(&mut Pack)) -> Vec<u16> {
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let mut unit = tiny_sets(sets);
+        let mut bits = tiny_head(sets, 7, 0, 0);
+        bits.bit(false);
+        bits.bit(false);
+        bits.se(qp - 26);
+        bits.ue(1);
+        bits.ue(if luma_ac { 15 } else { 3 });
+        bits.ue(0);
+        bits.se(0);
+        data(&mut bits);
+        bits.bit(true);
+        unit.extend(crate::nal::annex_b_nal(3, 5, &bits.finish()));
+        let mut pictures = decoder.push(&Packet::video(unit, 0, 1, 30, true)).unwrap();
+        pictures.extend(decoder.drain().unwrap());
+        assert_eq!(pictures.len(), 1);
+        let Some(ten) = pictures[0].yuv420p10.as_ref() else {
+            panic!("no 10-bit samples");
+        };
+        ten.y().to_vec()
+    }
+
+    /// A conforming 10-bit level that needs `level_prefix` 21: under an
+    /// Intra Y list of ones at QP′Y 0, the DC level 129 041 transforms to
+    /// 129 041 and scales to 20 163, both inside the 10-bit range of
+    /// ±2^17. FFmpeg decodes it to 827 throughout the luma.
+    #[test]
+    fn a_deep_level_with_twenty_one_prefix_zeros_is_read() {
+        let sets = TinySets {
+            profile: 110,
+            depth: 2,
+            scaling: Some(|bits| {
+                // List 0 is all ones; the rest fall back.
+                bits.bit(true);
+                bits.se(-7);
+                bits.se(-1);
+                for _ in 1..8 {
+                    bits.bit(false);
+                }
+            }),
+            ..TinySets::default()
+        };
+        let luma = deep_intra16(&sets, -12, false, |bits| {
+            // TotalCoeff 1, TrailingOnes 0; total_zeros 0.
+            bits.u(6, 0b000101);
+            level_escape(bits, 129_041, 0, true);
+            bits.bit(true);
+        });
+        // dcY = (129 041 × 10 + 32) >> 6 = 20 163; (20 163 + 32) >> 6 = 315.
+        assert!(luma.iter().all(|&sample| sample == 512 + 315), "{luma:?}");
+    }
+
+    /// Levels no conforming stream holds: at QP′Y 63 two AC levels of
+    /// 100 000 scale to 1 843 200 000 each, and the transform's first sum
+    /// of them is past `i32::MAX`. Scaled coefficients are held to ±2^21,
+    /// so the block's top-left corner is far above white and its
+    /// bottom-right far below black.
+    #[test]
+    fn levels_past_the_conformance_range_give_held_samples() {
+        let sets = TinySets {
+            profile: 110,
+            depth: 2,
+            ..TinySets::default()
+        };
+        let luma = deep_intra16(&sets, 51, true, |bits| {
+            // No DC levels, and none in AC blocks 0 to 14.
+            for _ in 0..16 {
+                bits.bit(true);
+            }
+            // Block 15: TotalCoeff 2, TrailingOnes 0, at scan places 1
+            // and 2; total_zeros 0.
+            bits.u(8, 0b0000_0111);
+            level_escape(bits, 100_000, 0, true);
+            level_escape(bits, 100_000, 2, false);
+            bits.u(3, 0b111);
+        });
+        assert_eq!(luma[12 * 16 + 12], 1023);
+        assert_eq!(luma[15 * 16 + 15], 0);
+        assert!(luma[..12 * 16].iter().all(|&sample| sample == 512));
+    }
+
     enum SpsTail {
         Interlaced,
         Deep,
@@ -6762,6 +7884,15 @@ mod tests {
             self.u(width + 1, code);
         }
 
+        fn se(&mut self, value: i32) {
+            let code = if value > 0 {
+                2 * value.unsigned_abs() - 1
+            } else {
+                2 * value.unsigned_abs()
+            };
+            self.ue(code);
+        }
+
         fn finish(mut self) -> Vec<u8> {
             if self.n > 0 {
                 self.acc <<= 8 - self.n;
@@ -6769,6 +7900,216 @@ mod tests {
             }
             self.bytes
         }
+    }
+
+    /// Parameter sets of a hand-written CAVLC stream: one macroblock unless
+    /// `mbs_wide` and `mbs_high` say more, 4-bit frame numbers, and
+    /// deblocking under each slice's control.
+    struct TinySets {
+        /// 66; 100, 110 or 122 for 4:2:0 under a High profile; or 244 for
+        /// 4:4:4.
+        profile: u32,
+        /// `separate_colour_plane_flag` of a 4:4:4 stream.
+        separate: bool,
+        /// `bit_depth_luma_minus8` and `bit_depth_chroma_minus8` under a
+        /// High profile.
+        depth: u32,
+        /// Writes the scaling lists after `seq_scaling_matrix_present_flag`
+        /// under a High profile.
+        scaling: Option<fn(&mut Pack)>,
+        refs: u32,
+        mbs_wide: u32,
+        /// Rows of macroblocks, or of pairs when `mbaff`.
+        mbs_high: u32,
+        /// Macroblock-adaptive frames and field pictures.
+        mbaff: bool,
+        /// `direct_8x8_inference_flag`.
+        inference: bool,
+        /// `pic_order_cnt_type`: 0 with a 16-bit `pic_order_cnt_lsb`, 1 with
+        /// no cycle, so the count is `delta_pic_order_cnt[0]`, or 2.
+        order_type: u32,
+        /// `weighted_pred_flag`.
+        weighted: bool,
+        /// `weighted_bipred_idc`.
+        bipred: u32,
+        chroma_qp_offset: i32,
+        /// Writes a VUI after `vui_parameters_present_flag`.
+        vui: Option<fn(&mut Pack)>,
+    }
+
+    impl Default for TinySets {
+        fn default() -> Self {
+            Self {
+                profile: 66,
+                separate: false,
+                depth: 0,
+                scaling: None,
+                refs: 4,
+                mbs_wide: 1,
+                mbs_high: 1,
+                mbaff: false,
+                inference: true,
+                order_type: 2,
+                weighted: false,
+                bipred: 0,
+                chroma_qp_offset: 0,
+                vui: None,
+            }
+        }
+    }
+
+    fn tiny_sets(sets: &TinySets) -> Vec<u8> {
+        let mut bits = Pack::new();
+        bits.u(8, sets.profile);
+        bits.u(8, 0);
+        bits.u(8, 30);
+        bits.ue(0);
+        if matches!(sets.profile, 100 | 110 | 122 | 244) {
+            if sets.profile == 244 {
+                bits.ue(3);
+                bits.bit(sets.separate);
+            } else {
+                bits.ue(1);
+            }
+            bits.ue(sets.depth);
+            bits.ue(sets.depth);
+            bits.bit(false);
+            bits.bit(sets.scaling.is_some());
+            if let Some(scaling) = sets.scaling {
+                scaling(&mut bits);
+            }
+        }
+        bits.ue(0);
+        bits.ue(sets.order_type);
+        if sets.order_type == 0 {
+            bits.ue(12);
+        } else if sets.order_type == 1 {
+            bits.bit(false);
+            bits.se(0);
+            bits.se(0);
+            bits.ue(0);
+        }
+        bits.ue(sets.refs);
+        bits.bit(false);
+        bits.ue(sets.mbs_wide - 1);
+        bits.ue(sets.mbs_high - 1);
+        bits.bit(!sets.mbaff);
+        if sets.mbaff {
+            bits.bit(true);
+        }
+        bits.bit(sets.inference);
+        bits.bit(false);
+        bits.bit(sets.vui.is_some());
+        if let Some(vui) = sets.vui {
+            vui(&mut bits);
+        }
+        bits.bit(true);
+        let mut out = crate::nal::annex_b_nal(3, 7, &bits.finish());
+        let mut bits = Pack::new();
+        bits.ue(0);
+        bits.ue(0);
+        bits.bit(false);
+        bits.bit(false);
+        bits.ue(0);
+        bits.ue(0);
+        bits.ue(0);
+        bits.bit(sets.weighted);
+        bits.u(2, sets.bipred);
+        bits.se(0);
+        bits.se(0);
+        bits.se(sets.chroma_qp_offset);
+        bits.bit(true);
+        bits.bit(false);
+        bits.bit(false);
+        bits.bit(true);
+        out.extend(crate::nal::annex_b_nal(3, 8, &bits.finish()));
+        out
+    }
+
+    /// A slice header as far as the order count, whose value is `order`:
+    /// `kind` is `slice_type`, 7 for the IDR picture, 5 for P and 6 for B.
+    fn tiny_head(sets: &TinySets, kind: u32, frame_num: u32, order: i32) -> Pack {
+        let mut bits = Pack::new();
+        bits.ue(0);
+        bits.ue(kind);
+        bits.ue(0);
+        bits.u(4, frame_num);
+        if kind == 7 {
+            bits.ue(0);
+        }
+        match sets.order_type {
+            0 => bits.u(16, order.unsigned_abs()),
+            1 => bits.se(order),
+            _ => {}
+        }
+        bits
+    }
+
+    /// The end of a P or B slice header: sliding-window marking when the
+    /// picture is a reference, the slice QP, and deblocking on or off.
+    fn tiny_tail(bits: &mut Pack, referenced: bool, deblock: bool) {
+        if referenced {
+            bits.bit(false);
+        }
+        bits.se(0);
+        if deblock {
+            bits.ue(0);
+            bits.se(0);
+            bits.se(0);
+        } else {
+            bits.ue(1);
+        }
+    }
+
+    /// An IDR slice of flat I_16x16 macroblocks.
+    fn tiny_idr_slice(sets: &TinySets, order: i32) -> Vec<u8> {
+        let mut bits = tiny_head(sets, 7, 0, order);
+        bits.bit(false);
+        bits.bit(false);
+        bits.se(0);
+        bits.ue(1);
+        for _ in 0..sets.mbs_wide * sets.mbs_high {
+            bits.ue(3);
+            bits.ue(0);
+            bits.se(0);
+            bits.bit(true);
+        }
+        bits.bit(true);
+        crate::nal::annex_b_nal(3, 5, &bits.finish())
+    }
+
+    /// The sets and [`tiny_idr_slice`].
+    fn tiny_idr(sets: &TinySets) -> Vec<u8> {
+        let mut out = tiny_sets(sets);
+        out.extend(tiny_idr_slice(sets, 0));
+        out
+    }
+
+    /// A decoder that has decoded [`tiny_idr`].
+    fn tiny_decoder(sets: &TinySets) -> H264Decoder {
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        decoder
+            .push(&Packet::video(tiny_idr(sets), 0, 1, 30, true))
+            .unwrap();
+        decoder
+    }
+
+    /// A reference P picture with the default reference count, no weights
+    /// and deblocking off, whose macroblocks `data` writes.
+    fn tiny_p(sets: &TinySets, frame_num: u32, order: i32, data: fn(&mut Pack)) -> Packet {
+        let mut bits = tiny_head(sets, 5, frame_num, order);
+        bits.bit(false);
+        bits.bit(false);
+        tiny_tail(&mut bits, true, false);
+        data(&mut bits);
+        bits.bit(true);
+        tiny_packet(1, i64::from(frame_num), &bits.finish())
+    }
+
+    fn tiny_packet(ref_idc: u8, pts: i64, rbsp: &[u8]) -> Packet {
+        Packet::video(crate::nal::annex_b_nal(ref_idc, 1, rbsp), pts, 1, 30, false)
     }
 
     fn next_u32(state: &mut u32) -> u32 {

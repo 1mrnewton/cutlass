@@ -100,6 +100,155 @@ fn ac3_and_eac3_keep_separate_sample_entries() {
     }
 }
 
+/// STREAMINFO of a one-second 44.1 kHz mono 16-bit sine as FFmpeg 9.0.2
+/// encodes it.
+const SINE_STREAMINFO: [u8; 34] = [
+    0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 0x55, 0x00, 0x01, 0x87, 0x0a, 0xc4, 0x40, 0xf0, 0x00, 0x00,
+    0xac, 0x44, 0xa4, 0x84, 0xb6, 0x60, 0xd9, 0xe0, 0x33, 0xb0, 0x9b, 0xed, 0x9e, 0x68, 0x6a, 0x74,
+    0x73, 0xec,
+];
+
+fn flac_params(extradata: Vec<u8>) -> StreamParams {
+    let mut params = StreamParams::audio(
+        CodecId::Flac,
+        Timescale(44_100),
+        44_100,
+        1,
+        16,
+        Default::default(),
+    );
+    params.extradata = extradata;
+    params
+}
+
+/// The payload of the first `kind` box in `bytes`.
+fn box_payload<'a>(bytes: &'a [u8], kind: &[u8; 4]) -> &'a [u8] {
+    let at = bytes
+        .windows(4)
+        .position(|window| window == kind)
+        .expect("box");
+    let size = u32::from_be_bytes(bytes[at - 4..at].try_into().expect("size"));
+    &bytes[at + 4..at - 4 + size as usize]
+}
+
+#[test]
+fn a_flac_entry_holds_a_dfla_box_from_each_form_of_configuration() {
+    // `dfLa` is a FullBox, version 0 and flags 0, then the metadata blocks
+    // with the last one flagged.
+    let mut dfla = vec![0, 0, 0, 0, 0x80, 0, 0, 34];
+    dfla.extend_from_slice(&SINE_STREAMINFO);
+    let mut native = b"fLaC".to_vec();
+    native.extend_from_slice(&dfla[4..]);
+    // A Matroska CodecPrivate as FFmpeg writes it, with a comment block.
+    let comment = [0x84, 0, 0, 8, 4, 0, 0, 0, b'L', b'a', b'v', b'f'];
+    let mut native_comment = native.clone();
+    native_comment[4] = 0;
+    native_comment.extend_from_slice(&comment);
+    let mut dfla_comment = dfla.clone();
+    dfla_comment[4] = 0;
+    dfla_comment.extend_from_slice(&comment);
+    for (config, expected) in [
+        (SINE_STREAMINFO.to_vec(), &dfla),
+        (native, &dfla),
+        (dfla.clone(), &dfla),
+        (native_comment, &dfla_comment),
+    ] {
+        let bytes = write_movie(
+            MuxOptions::default(),
+            vec![(
+                flac_params(config.clone()),
+                vec![packet(0, 0, 4096, &[0xFF, 0xF8, 0x69], true, 44_100)],
+            )],
+        );
+        assert_eq!(
+            box_payload(&bytes, b"dfLa"),
+            expected.as_slice(),
+            "{config:x?}"
+        );
+        let movie = open(&bytes);
+        let stream = &movie.streams()[0];
+        assert_eq!(stream.params.codec, CodecId::Flac);
+        assert_eq!(&stream.params.sample_entry, b"fLaC");
+        assert_eq!(&stream.params.extradata, expected);
+        assert_eq!(read_all(&bytes)[0].payload, [0xFF, 0xF8, 0x69]);
+    }
+    // Configuration that is not FLAC's is refused when the track is added
+    // or when it arrives later; a track that never got any, at finish.
+    let mut mux = IsoBmffMux::new(Cursor::new(Vec::new()), MuxOptions::default());
+    let mut version_1 = dfla.clone();
+    version_1[0] = 1;
+    for bad in [
+        vec![1, 2, 3],
+        b"OpusHead\x01\x01\x38\x01\x44\xac\0\0\0\0\0".to_vec(),
+        dfla[..41].to_vec(),
+        version_1,
+    ] {
+        assert!(
+            matches!(
+                mux.add_stream(&flac_params(bad.clone())),
+                Err(Error::Unsupported { .. })
+            ),
+            "{bad:x?}"
+        );
+    }
+    let id = mux.add_stream(&flac_params(Vec::new())).expect("stream");
+    assert!(matches!(
+        mux.set_extradata(id, vec![0; 12]),
+        Err(Error::Unsupported { .. })
+    ));
+    let mut frame = packet(0, 0, 4096, &[0xFF, 0xF8], true, 44_100);
+    frame.track_id = id;
+    mux.write_packet(&frame).expect("packet");
+    assert_eq!(
+        mux.finish_into().err(),
+        Some(Error::Missing {
+            what: "FLAC STREAMINFO"
+        })
+    );
+}
+
+/// STREAMINFO of a one-second 96 kHz stereo 24-bit sine as FFmpeg 9.0.2
+/// encodes it.
+const HIGH_STREAMINFO: [u8; 34] = [
+    0x04, 0x00, 0x04, 0x00, 0x00, 0x03, 0x9d, 0x00, 0x05, 0x11, 0x17, 0x70, 0x03, 0x70, 0x00, 0x01,
+    0x77, 0x00, 0xc9, 0x7e, 0xc9, 0x7a, 0x56, 0xa6, 0x1d, 0x7f, 0x07, 0x12, 0x8e, 0x9e, 0xb7, 0xce,
+    0xfd, 0x44,
+];
+
+#[test]
+fn a_flac_entry_states_streaminfo_and_halves_a_rate_above_65535() {
+    // The caller's count and depth are not the stream's; STREAMINFO is.
+    let mut params = StreamParams::audio(
+        CodecId::Flac,
+        Timescale(96_000),
+        96_000,
+        1,
+        16,
+        Default::default(),
+    );
+    params.extradata = HIGH_STREAMINFO.to_vec();
+    let bytes = write_movie(
+        MuxOptions::default(),
+        vec![(
+            params,
+            vec![packet(0, 0, 1024, &[0xFF, 0xF8], true, 96_000)],
+        )],
+    );
+    // Channel count, sample size, and the 16.16 rate as FFmpeg writes them
+    // for this stream: 2, 24, and 48000.0, the encapsulation's halving.
+    let entry = box_payload(&bytes, b"fLaC");
+    assert_eq!(&entry[16..28], &[0, 2, 0, 24, 0, 0, 0, 0, 0xBB, 0x80, 0, 0]);
+    // Reading takes the true rate from STREAMINFO, not the entry.
+    let movie = open(&bytes);
+    let MediaKind::Audio(audio) = movie.streams()[0].params.kind else {
+        panic!("a sound track");
+    };
+    assert_eq!(
+        (audio.sample_rate, audio.channels, audio.bits_per_sample),
+        (96_000, 2, 24)
+    );
+}
+
 fn read_all(bytes: &[u8]) -> Vec<Packet> {
     let mut movie = open(bytes);
     let mut source = SliceSource::new(bytes);

@@ -89,10 +89,11 @@ impl FlacDecoder {
 
     /// Opens from engine parameters.
     ///
-    /// `extra` is empty, a 34-byte STREAMINFO body, or `fLaC` and a
-    /// STREAMINFO block. `sample_format` picks the output: `I16` for streams
-    /// up to 16 bits, otherwise `F32` (the default). A layout whose length
-    /// differs from the STREAMINFO channel count is refused.
+    /// `extra` is empty, a 34-byte STREAMINFO body, `fLaC` and a
+    /// STREAMINFO block, or an MP4 `dfLa` box body. `sample_format` picks
+    /// the output: `I16` for streams up to 16 bits, otherwise `F32` (the
+    /// default). A layout whose length differs from the STREAMINFO channel
+    /// count is refused.
     pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
         if params.codec != CodecId::Flac {
             return Err(CodecError::Unsupported { what: "flac" });

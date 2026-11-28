@@ -509,6 +509,30 @@ fn reset_starts_a_fresh_stream_and_drain_ends_it() {
     }
 }
 
+/// A 7.1 program opened at the default rate gives 384 kbit/s to the 5.1
+/// frame. The same sum asked for by number splits five to two.
+#[test]
+fn reset_keeps_the_rates_of_a_seven_point_one_program() {
+    let channels = [L, R, C, Lfe, Bl, Br, Sl, Sr];
+    let cfg = config(Format::Eac3, 48_000, &channels, 0);
+    let pcm = tones(&channels, 48_000, 5_000, 0.3);
+    let fresh = encode(cfg.clone(), &pcm);
+    let mut encoder = Ac3Encoder::new(cfg).expect("open");
+    encoder
+        .push(&input(
+            &channels,
+            48_000,
+            tones(&channels, 48_000, 3_333, 0.7),
+        ))
+        .expect("push");
+    encoder.reset();
+    let mut again = encoder.push(&input(&channels, 48_000, pcm)).expect("push");
+    again.extend(encoder.drain().expect("drain"));
+    let independent = |packets: &[Packet]| probe(&packets[0].data).expect("probe").frame_bytes;
+    assert_eq!(independent(&again), independent(&fresh));
+    assert_eq!(again, fresh);
+}
+
 #[test]
 fn illegal_input_fails_and_adds_nothing() {
     let channels = [L, R];

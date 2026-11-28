@@ -4417,6 +4417,19 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             }
             eob
         });
+        // The specification holds each dequantized value to 8 + bit depth
+        // bits, and FFmpeg and libvpx keep 8-bit ones in 16 bits: a level
+        // rounded up past that (a flat block's DC at an extreme, at a
+        // coarse step) takes the largest that fits.
+        let room = (1i64 << (7 + u32::from(s.h.bit_depth) + shift)) - 1;
+        let cap = |q: i32| (room / i64::from(q.max(1))) as i32;
+        let (dc_cap, ac_cap) = (cap(dc_q), cap(ac_q));
+        for (k, &rc) in scan.iter().enumerate().take(eob) {
+            let cap = if k == 0 { dc_cap } else { ac_cap };
+            let rc = usize::from(rc);
+            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
+            levels[t] = levels[t].clamp(-cap, cap);
+        }
         // Dequantize as the decoder does, and reconstruct.
         if eob > 0 && !self.tx_dom {
             let mut max_r = 0;

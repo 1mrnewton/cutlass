@@ -229,6 +229,54 @@ fn encoder_contract() {
     );
 }
 
+/// The rate control counts bytes without overflowing, whatever the frame
+/// clock and bitrate say a frame may spend.
+#[test]
+fn bitrate_mode_takes_any_frame_duration() {
+    let (w, h) = (16, 16);
+    for (bitrate, duration) in [(u32::MAX, i64::MAX), (50_000_000, i64::from(u32::MAX))] {
+        let opts = Vp8Options {
+            bitrate,
+            ..Vp8Options::default()
+        };
+        let mut encoder = Vp8Encoder::with_options(w, h, opts).expect("open");
+        let mut decoder = Decoder::new();
+        for t in 0..400 {
+            let mut frame = input(w, h, t % 4);
+            frame.duration = duration;
+            frame.timescale = 1;
+            let out = encoder.push(&frame).expect("push");
+            assert_eq!(out.len(), 1);
+            assert!(decoder.decode(&out[0].data).expect("decode").is_some());
+        }
+    }
+}
+
+/// A picture whose planes hold fewer samples than its size fails the push
+/// and adds nothing.
+#[test]
+fn a_picture_with_short_planes_is_refused() {
+    let (w, h) = (32, 32);
+    let mut encoder = Vp8Encoder::with_options(w, h, Vp8Options::default()).expect("open");
+    let mut short_luma = input(w, h, 0);
+    short_luma.frame.y = synthetic(16, 16, 0).y;
+    let mut short_chroma = input(w, h, 0);
+    short_chroma.frame.v = synthetic(2, 2, 0).v;
+    let mut narrow_stride = input(w, h, 0);
+    narrow_stride.frame.y.stride = 31;
+    let mut missing_row = input(w, h, 0);
+    missing_row.frame.u.stride = 17;
+    for bad in [short_luma, short_chroma, narrow_stride, missing_row] {
+        assert!(matches!(
+            encoder.push(&bad),
+            Err(CodecError::InvalidApi { .. })
+        ));
+    }
+    let mut fresh = Vp8Encoder::with_options(w, h, Vp8Options::default()).expect("open");
+    let want = fresh.push(&input(w, h, 0)).expect("push");
+    assert_eq!(encoder.push(&input(w, h, 0)).expect("push"), want);
+}
+
 #[test]
 fn hidden_frames_produce_no_picture() {
     let (frames, _) = encode_synthetic(32, 32, 2, Vp8Options::default());

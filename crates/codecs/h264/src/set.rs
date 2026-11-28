@@ -481,10 +481,11 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     } else if !matches!(profile, 66 | 77 | 88 | 100 | 110 | 122 | 244) {
         return Err(CodecError::Unsupported { what: "profile" });
     }
-    let log2_max_frame_num = (bits.ue()? + 4) as u8;
+    let log2_max_frame_num = bits.ue()?.saturating_add(4);
     if !(4..=16).contains(&log2_max_frame_num) {
         return Err(bits.malformed("log2_max_frame_num"));
     }
+    let log2_max_frame_num = log2_max_frame_num as u8;
     let poc_type = bits.ue()? as u8;
     if poc_type > 2 {
         return Err(bits.malformed("pic_order_cnt_type"));
@@ -495,10 +496,11 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     let mut offset_top_bottom = 0i32;
     let mut offset_for_ref = Vec::new();
     if poc_type == 0 {
-        log2_max_poc_lsb = (bits.ue()? + 4) as u8;
-        if !(4..=16).contains(&log2_max_poc_lsb) {
+        let log2 = bits.ue()?.saturating_add(4);
+        if !(4..=16).contains(&log2) {
             return Err(bits.malformed("log2_max_pic_order_cnt_lsb"));
         }
+        log2_max_poc_lsb = log2 as u8;
     } else if poc_type == 1 {
         delta_pic_order_always_zero = bits.bit()?;
         offset_non_ref = bits.se()?;
@@ -1418,7 +1420,8 @@ fn parse_vui(bits: &mut Bits<'_>, max_reorder: u32) -> Result<Vui, CodecError> {
         let _ = bits.ue()?;
         let _ = bits.ue()?;
         let _ = bits.ue()?;
-        vui.max_reorder = bits.ue()?;
+        // FFmpeg clips this to the 16 frames a buffer can hold, too.
+        vui.max_reorder = bits.ue()?.min(MAX_REFS);
         let _ = bits.ue()?;
     }
     Ok(vui)
@@ -1634,6 +1637,9 @@ pub(crate) fn parse_pps_in(
     }
     let init_qs = qs_minus + 26;
     let chroma_qp_offset = bits.se()?;
+    if !(-12..=12).contains(&chroma_qp_offset) {
+        return Err(bits.malformed("chroma qp offset"));
+    }
     let deblocking_control = bits.bit()?;
     let constrained_intra = bits.bit()?;
     let redundant = bits.bit()?;
@@ -1648,6 +1654,9 @@ pub(crate) fn parse_pps_in(
         }
         if bits.more_rbsp() {
             second = bits.se()?;
+            if !(-12..=12).contains(&second) {
+                return Err(bits.malformed("chroma qp offset"));
+            }
         }
     }
     let _ = bits.rbsp_trailing();

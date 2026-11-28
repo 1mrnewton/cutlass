@@ -123,6 +123,18 @@ fn a_frame_taken_alone_shows_what_frames_at_once_show() {
     }
 }
 
+#[test]
+fn cdef_of_a_frame_taken_alone_leaves_skipped_blocks_as_one_thread_does() {
+    // Filtered after parsing, the frame's CDEF reads the skips from mode
+    // info that holds a tall block only at its edges and odd rows.
+    for name in ["ten.ivf", "yuv444.ivf"] {
+        let packets = ivf(name);
+        let one = samples(&decode(&mut core(1), &packets).expect("one thread"));
+        let alone = samples(&decode(&mut one_frame_core(2), &packets).expect("alone"));
+        assert_eq!(alone, one, "{name}");
+    }
+}
+
 /// The packets of the fixture files `name_0.obu`, `name_1.obu`, and so on.
 fn obus(name: &str, count: usize) -> Vec<Vec<u8>> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");

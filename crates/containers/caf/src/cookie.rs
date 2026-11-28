@@ -8,7 +8,8 @@
 //!   `frma` and `alac` atoms. The extradata is the bare config, plus the
 //!   `chan` atom when present: the form `cutlass-alac` stores.
 //! - FLAC: the cookie is a `dfLa` box whose first metadata block is
-//!   STREAMINFO. The extradata is the 34-byte STREAMINFO body.
+//!   STREAMINFO. The extradata is the 34-byte STREAMINFO body. The muxer
+//!   also takes the Matroska and MP4 forms of FLAC extradata.
 //! - Opus: AudioToolbox writes a 28-byte cookie whose layout is not
 //!   published, and decodes a file without it. The extradata is an
 //!   `OpusHead` (RFC 7845 §5.1) built from `desc` and the priming frames.
@@ -227,14 +228,19 @@ pub fn flac_streaminfo(cookie: &[u8]) -> Result<Vec<u8>, OpenError> {
     } else {
         return Err(malformed("FLAC cookie is neither a dfLa box nor fLaC"));
     };
-    let head = be_u32(cookie, blocks).ok_or_else(|| malformed("FLAC cookie has no metadata"))?;
+    first_streaminfo(cookie, blocks)
+}
+
+/// The STREAMINFO body of the FLAC metadata blocks that start at `blocks`.
+fn first_streaminfo(bytes: &[u8], blocks: usize) -> Result<Vec<u8>, OpenError> {
+    let head = be_u32(bytes, blocks).ok_or_else(|| malformed("FLAC cookie has no metadata"))?;
     let kind = (head >> 24) & 0x7F;
     let len = head & 0x00FF_FFFF;
     if kind != 0 || usize::try_from(len).ok() != Some(STREAMINFO_BYTES) {
         return Err(malformed("FLAC cookie does not start with STREAMINFO"));
     }
     let start = blocks + 4;
-    cookie
+    bytes
         .get(start..start + STREAMINFO_BYTES)
         .map(<[u8]>::to_vec)
         .ok_or_else(|| malformed("FLAC STREAMINFO is truncated"))
@@ -253,13 +259,25 @@ pub fn flac_cookie(streaminfo: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A STREAMINFO body from codec extradata: the 34-byte body itself, or a
-/// `fLaC` marker and its first block.
+/// A STREAMINFO body from FLAC codec extradata, in each form it comes in:
+/// the 34-byte body (from a native FLAC file), the `fLaC` marker and its
+/// blocks (a Matroska CodecPrivate), or a `dfLa` body, version 0 and flags
+/// and then the blocks (from MP4). A whole `dfLa` box, as a cookie holds
+/// it, is taken too. The blocks after STREAMINFO are not kept: the cookie
+/// AudioToolbox writes holds STREAMINFO alone.
 pub fn streaminfo_from_extradata(extra: &[u8]) -> Option<Vec<u8>> {
     if extra.len() == STREAMINFO_BYTES {
         return Some(extra.to_vec());
     }
-    flac_streaminfo(extra).ok()
+    if let Ok(info) = flac_streaminfo(extra) {
+        return Some(info);
+    }
+    // A `dfLa` body. A whole box cannot pass here: its `dfLa` type would
+    // be the first block header, and 0x64 is not STREAMINFO.
+    if extra.first() == Some(&0) {
+        return first_streaminfo(extra, 4).ok();
+    }
+    None
 }
 
 /// An `OpusHead` for a mono or stereo stream, mapping family 0.

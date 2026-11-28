@@ -6,7 +6,9 @@
 //!    `IsoBmffFile` reads each, this crate decodes every packet, and the
 //!    first edit cuts the pre-skip and the end trim. The result has the
 //!    sample count libopus (through ffmpeg) gives for the same file, and
-//!    matches its samples to at least `MIN_SNR_DB`.
+//!    matches its samples to at least `MIN_SNR_DB` over every frame it
+//!    decodes. A frame libopus conceals instead is held only to libopus's
+//!    level (`CONCEALED_LEVEL_DB`).
 //!    The same encode in MP4 gives exactly the Ogg file's samples.
 //! 2. This crate's encoder, muxed by `OggMux` and `Mp4Mux`, reads back in
 //!    ffprobe with the pre-skip, and both ffmpeg decoders give back
@@ -27,6 +29,7 @@
 )]
 
 use std::fs::File;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -35,11 +38,20 @@ use cutlass_container::{Demux, Mux, NewStream, TrackDuration};
 use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
 use cutlass_isobmff::{IsoBmffFile, Mp4Mux};
 use cutlass_ogg::{OggDemux, OggMux};
-use cutlass_opus::{Mode, OpusDecoder, OpusEncoder, OpusHead, Toc};
+use cutlass_opus::{Mode, OpusDecoder, OpusEncoder, OpusHead, Toc, parse_packet};
 
 /// libopus's float decoder and this one differ by rounding only; the
 /// vectors' worst stereo case is far above this.
 const MIN_SNR_DB: f64 = 60.0;
+/// A frame of one byte or less carries no audio, and libopus conceals it
+/// (`opus_decode_frame` treats it as lost). RFC 6716 leaves concealment to
+/// the decoder and libopus changes its own between versions, so these
+/// frames are kept out of `MIN_SNR_DB` and held to this: this crate's
+/// concealment is within this many dB of libopus's level. Silence or a
+/// blow-up fails it. ffmpeg 9's native encoder can end a stream with a
+/// TOC-only packet, as it does for the ten seconds here; older ffmpeg may
+/// write none, and the test does not count on one.
+const CONCEALED_LEVEL_DB: f64 = 6.0;
 const SECONDS: u32 = 10;
 
 fn has_libopus() -> bool {
@@ -127,6 +139,25 @@ struct Ours {
     frame_sizes: Vec<u32>,
     /// The track's ticks per second.
     scale: i64,
+    /// Samples per channel of `pcm` in frames libopus conceals.
+    concealed: Vec<Range<usize>>,
+}
+
+/// Per frame of `packet`, whether libopus conceals it: a frame of one byte
+/// or less (`opus_decode_frame`). The streams of a multistream packet have
+/// the same frames; a frame is concealed when any stream's is.
+fn lost_frames(packet: &[u8], streams: usize) -> Vec<bool> {
+    let mut lost = Vec::new();
+    let mut rest = packet;
+    for stream in 0..streams {
+        let frames = parse_packet(rest, stream + 1 < streams).expect("packet");
+        lost.resize(lost.len().max(frames.frames.len()), false);
+        for (flag, &(_, len)) in lost.iter_mut().zip(&frames.frames) {
+            *flag |= len <= 1;
+        }
+        rest = &rest[frames.consumed..];
+    }
+    lost
 }
 
 /// Reads `file` with the Cutlass demuxer for its extension, decodes every
@@ -153,6 +184,8 @@ fn ours(file: &Path) -> Ours {
     let mut first = None;
     let mut modes = [0; 3];
     let mut frame_sizes = Vec::new();
+    // Frames libopus conceals, in decoded samples per channel.
+    let mut lost = Vec::new();
     while let Some(packet) = demux.read_packet().expect("read") {
         if packet.stream() != stream.id().get() {
             continue;
@@ -167,6 +200,12 @@ fn ours(file: &Path) -> Ours {
         if !frame_sizes.contains(&toc.frame_samples) {
             frame_sizes.push(toc.frame_samples);
         }
+        let at = decoded.len() / channels;
+        let frame = toc.frame_samples as usize;
+        let frames = lost_frames(packet.bytes(), usize::from(head.streams));
+        for (i, _) in frames.iter().enumerate().filter(|(_, lost)| **lost) {
+            lost.push(at + i * frame..at + (i + 1) * frame);
+        }
         decoded.extend(decoder.decode(packet.bytes()).expect("decode"));
     }
     let edit = stream.edits()[0];
@@ -174,6 +213,11 @@ fn ours(file: &Path) -> Ours {
     let start = usize::try_from(start).expect("start");
     let length = usize::try_from(edit.duration() * 48_000 / scale).expect("duration");
     let pcm = decoded[start * channels..(start + length) * channels].to_vec();
+    let concealed = lost
+        .into_iter()
+        .map(|span| span.start.max(start) - start..span.end.min(start + length).max(start) - start)
+        .filter(|span| !span.is_empty())
+        .collect();
     Ours {
         channels,
         pcm,
@@ -181,6 +225,7 @@ fn ours(file: &Path) -> Ours {
         modes,
         frame_sizes,
         scale,
+        concealed,
     }
 }
 
@@ -194,6 +239,56 @@ fn snr_db(reference: &[f32], test: &[f32]) -> f64 {
         return f64::INFINITY;
     }
     10.0 * (signal / noise).log10()
+}
+
+/// The samples of some frames, as libopus and as this crate decode them.
+#[derive(Default)]
+struct Pair {
+    libopus: Vec<f32>,
+    ours: Vec<f32>,
+}
+
+/// How this crate's decode agrees with libopus's `reference` of the same
+/// file.
+struct Agreement {
+    /// SNR over the frames libopus decodes.
+    snr: f64,
+    /// Samples per channel in frames libopus conceals.
+    concealed: usize,
+    /// This crate's level over libopus's in those frames, in dB. Mean
+    /// squares under -60 dBFS count as silence: 0 dB when there are none.
+    concealed_level: f64,
+}
+
+impl Agreement {
+    fn new(reference: &[f32], ours: &Ours) -> Self {
+        let channels = ours.channels;
+        let mut lost = vec![false; ours.pcm.len() / channels];
+        for span in &ours.concealed {
+            lost[span.clone()].fill(true);
+        }
+        let (mut decoded, mut concealed) = (Pair::default(), Pair::default());
+        let frames = reference.chunks(channels).zip(ours.pcm.chunks(channels));
+        for ((theirs, mine), &lost) in frames.zip(&lost) {
+            let pair = if lost { &mut concealed } else { &mut decoded };
+            pair.libopus.extend_from_slice(theirs);
+            pair.ours.extend_from_slice(mine);
+        }
+        let level = |x: &[f32]| {
+            let energy: f64 = x.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+            10.0 * (energy / x.len().max(1) as f64 + 1e-6).log10()
+        };
+        Self {
+            snr: snr_db(&decoded.libopus, &decoded.ours),
+            concealed: concealed.ours.len() / channels,
+            concealed_level: level(&concealed.ours) - level(&concealed.libopus),
+        }
+    }
+
+    /// Written so that a NaN fails.
+    fn passes(&self) -> bool {
+        self.snr >= MIN_SNR_DB && self.concealed_level.abs() <= CONCEALED_LEVEL_DB
+    }
 }
 
 /// Encodes `source` with ffmpeg into `out`, with `args` after the input.
@@ -324,18 +419,21 @@ fn files_ffmpeg_writes_decode_like_libopus() {
                 .flat_map(|f| [f[0], f[2], f[1], f[4], f[5], f[3]])
                 .collect();
         }
-        let snr = snr_db(&reference, &ours_ogg.pcm);
+        let agree = Agreement::new(&reference, &ours_ogg);
         eprintln!(
             "{name}.opus: {} ch, pre-skip {}, SILK/hybrid/CELT packets {:?}, frame sizes {:?}, \
-             {} samples (libopus {}), SNR {snr:.1} dB",
+             {} samples (libopus {}), SNR {:.1} dB; {} concealed samples at {:+.1} dB",
             ours_ogg.channels,
             ours_ogg.pre_skip,
             ours_ogg.modes,
             ours_ogg.frame_sizes,
             ours_ogg.pcm.len() / ours_ogg.channels,
             reference.len() / ours_ogg.channels,
+            agree.snr,
+            agree.concealed,
+            agree.concealed_level,
         );
-        if reference.len() != ours_ogg.pcm.len() || snr < MIN_SNR_DB {
+        if reference.len() != ours_ogg.pcm.len() || !agree.passes() {
             failures.push(format!("{name}.opus"));
         }
         if ours_ogg.channels > 2 {
@@ -353,12 +451,13 @@ fn files_ffmpeg_writes_decode_like_libopus() {
         ffmpeg_encode(&source, args, &mp4);
         let ours_mp4 = ours(&mp4);
         let reference = ffmpeg_decode(&mp4, "libopus");
-        let snr = snr_db(
+        let agree = Agreement::new(
             &reference[..ours_mp4.pcm.len().min(reference.len())],
-            &ours_mp4.pcm,
+            &ours_mp4,
         );
         eprintln!(
-            "{name}.mp4: {} Hz track, {} samples, the Ogg file's samples {}, SNR {snr:.1} dB",
+            "{name}.mp4: {} Hz track, {} samples, the Ogg file's samples {}, SNR {:.1} dB; \
+             {} concealed samples at {:+.1} dB",
             ours_mp4.scale,
             ours_mp4.pcm.len() / ours_mp4.channels,
             if ours_mp4.pcm == ours_ogg.pcm {
@@ -366,8 +465,11 @@ fn files_ffmpeg_writes_decode_like_libopus() {
             } else {
                 "NOT"
             },
+            agree.snr,
+            agree.concealed,
+            agree.concealed_level,
         );
-        if ours_mp4.pcm != ours_ogg.pcm || (ours_mp4.scale == 48_000 && snr < MIN_SNR_DB) {
+        if ours_mp4.pcm != ours_ogg.pcm || (ours_mp4.scale == 48_000 && !agree.passes()) {
             failures.push(format!("{name}.mp4"));
         }
     }

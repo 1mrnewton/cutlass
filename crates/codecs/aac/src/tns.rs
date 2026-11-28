@@ -160,6 +160,9 @@ pub fn apply(
 fn reflections_to_lpc(k: &[f32]) -> Vec<f32> {
     let mut a = vec![0.0; k.len()];
     for (m, &km) in k.iter().enumerate() {
+        // `dequant` gives the coefficient with its sign turned; the step-up
+        // takes the coefficient itself.
+        let km = -km;
         let mut next = a.clone();
         for j in 0..m {
             next[j] = a[j] + km * a[m - 1 - j];
@@ -194,6 +197,7 @@ fn apply_filter(
 #[cfg(test)]
 mod tests {
     use super::dequant;
+    use crate::bits::{BitReader, BitSink, BitWriter};
 
     #[test]
     fn four_bit_coefficients_match_the_sine_grid() {
@@ -211,6 +215,42 @@ mod tests {
         let compressed = super::reflection(4, true, true);
         let full = dequant(12, 4);
         assert!((compressed - full).abs() < 1.0e-6);
+    }
+
+    /// ISO/IEC 14496-3, 4.6.9.3: code `c` of a 3-bit grid is the reflection
+    /// coefficient `sin(c * pi / 7)` for `c >= 0`, and the filter is
+    /// `y(n) = x(n) - a1 * y(n-1) - a2 * y(n-2)`.
+    #[test]
+    fn a_two_tap_filter_has_the_impulse_response_of_the_specification() {
+        let mut writer = BitWriter::with_cap(8);
+        // One filter, 3-bit grid, one band long, order 2, upward, not
+        // compressed, codes 1 and 2.
+        for (value, width) in [
+            (1, 2),
+            (0, 1),
+            (1, 6),
+            (2, 5),
+            (0, 1),
+            (0, 1),
+            (1, 3),
+            (2, 3),
+        ] {
+            writer.write_bits(value, width).unwrap();
+        }
+        let bytes = writer.finish();
+        let windows = super::read_tns(&mut BitReader::new(&bytes), 1, false).unwrap();
+        let bands = [0u16, 4];
+        let mut coeffs = vec![1.0, 0.0, 0.0, 0.0];
+        super::apply(&mut coeffs, &windows, &bands, 1, 1, 4);
+        let k1 = (std::f32::consts::PI / 7.0).sin();
+        let k2 = (2.0 * std::f32::consts::PI / 7.0).sin();
+        let a1 = k1 * (1.0 + k2);
+        let a2 = k2;
+        let y2 = a1 * a1 - a2;
+        let expect = [1.0, -a1, y2, -a1 * y2 + a2 * a1];
+        for (got, want) in coeffs.iter().zip(expect) {
+            assert!((got - want).abs() < 1.0e-5, "{coeffs:?} {expect:?}");
+        }
     }
 
     #[test]

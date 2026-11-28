@@ -241,8 +241,10 @@ fn read_long(reader: &mut BitReader<'_>, width: u32) -> Option<u64> {
 pub(crate) fn render_point(x0: i32, y0: i32, x1: i32, y1: i32, x: i32) -> i32 {
     let dy = y1 - y0;
     let adx = x1 - x0;
-    let err = dy.abs() * (x - x0);
-    let off = err / adx;
+    // A book may code a Y far past the floor's range, and the product then
+    // passes 32 bits. The quotient is at most `dy`.
+    let err = i64::from(dy.abs()) * i64::from(x - x0);
+    let off = (err / i64::from(adx)) as i32;
     if dy < 0 { y0 - off } else { y0 + off }
 }
 
@@ -310,8 +312,10 @@ pub(crate) fn gain(y: i32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChannelFloor, INVERSE_DB, floor1_curve, render_line, render_point};
-    use crate::setup::Floor1;
+    use super::{ChannelFloor, INVERSE_DB, Status, floor1_curve, render_line, render_point};
+    use crate::bits::BitReader;
+    use crate::codebook::{BookSpec, Budget, Codebook};
+    use crate::setup::{Floor1, Floor1Class};
 
     #[test]
     fn render_point_rounds_toward_the_first_point() {
@@ -365,5 +369,33 @@ mod tests {
         for (x, &value) in spectrum.iter().enumerate() {
             assert_eq!(value, INVERSE_DB[curve[x] as usize]);
         }
+    }
+
+    /// A floor 1 book may hold far more entries than the Y range, so a
+    /// hostile packet codes a Y in the hundred thousands, and the next
+    /// point is predicted from it across the whole X range.
+    #[test]
+    fn floor1_values_far_past_the_range_predict_without_overflow() {
+        let class = Floor1Class {
+            dimensions: 2,
+            subclass_bits: 0,
+            masterbook: 0,
+            subclass_books: vec![Some(0)],
+        };
+        let xs = vec![0, 1 << 15, 1, (1 << 15) - 1];
+        let floor = Floor1::new(vec![0], vec![class], 1, 15, xs).unwrap();
+        let spec = BookSpec {
+            dimensions: 1,
+            lengths: vec![17; 1 << 17],
+            lookup: None,
+        };
+        let book = Codebook::build(&spec, &mut Budget::default()).unwrap();
+        // All ones: the floor is used, both ends are 255, and both coded
+        // values are entry 131071.
+        let packet = [0xff; 7];
+        let mut channel = ChannelFloor::default();
+        let status = channel.decode_floor1(&floor, &[book], &mut BitReader::new(&packet));
+        assert_eq!(status, Status::Used);
+        assert_eq!(channel.ys, [255, 255, 0, 0]);
     }
 }

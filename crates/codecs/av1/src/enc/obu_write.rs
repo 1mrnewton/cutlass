@@ -411,10 +411,9 @@ pub fn tile_size_bytes_for(max_tile_len: usize) -> u32 {
     }
 }
 
-/// Upscaled width to coded frame width (spec 7.16).
+/// Upscaled width to coded frame width (spec 5.9.8), as decoders take it.
 pub fn downscaled_width(upscaled_width: u32, superres_denom: u32) -> u32 {
-    let d = superres_denom.max(1);
-    (upscaled_width * 8 + d / 2) / d
+    crate::dec::obu::superres_width(upscaled_width, superres_denom)
 }
 
 /// SkipModeFrame[0..2] when skip mode is allowed (spec 5.9.22).
@@ -1838,8 +1837,9 @@ mod tests {
                 o.size_from_ref = SizeFromRef::Never;
             }
             if h.frame_size_override_flag {
-                h.upscaled_width = 1 + rng.below(1 << seq.frame_width_bits) as u32;
-                h.frame_height = 1 + rng.below(1 << seq.frame_height_bits) as u32;
+                // At most the sequence's maximum (5.9.5).
+                h.upscaled_width = 1 + rng.below(u64::from(seq.max_frame_width)) as u32;
+                h.frame_height = 1 + rng.below(u64::from(seq.max_frame_height)) as u32;
             } else {
                 h.upscaled_width = seq.max_frame_width;
                 h.frame_height = seq.max_frame_height;

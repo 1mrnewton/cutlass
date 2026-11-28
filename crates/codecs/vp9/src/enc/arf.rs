@@ -451,7 +451,8 @@ impl Profile {
             for d in -range..=range {
                 // b[i] against a[i + d], over the i both cover.
                 let (lo, hi) = ((-d).max(0), (n - d).min(n));
-                if hi - lo < n / 2 {
+                // (At least one: the mean below is over them.)
+                if hi - lo < (n / 2).max(1) {
                     continue;
                 }
                 let (lo, hi) = (lo as usize, hi as usize);

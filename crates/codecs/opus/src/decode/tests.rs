@@ -134,6 +134,12 @@ fn the_rfc_8251_vectors_match_every_final_range_and_pass_opus_compare() {
 
 /// A CELT-only stream from this crate's encoder, 20 ms packets.
 fn encoded(channels: usize, frames: usize) -> (Vec<Packet>, Vec<f32>) {
+    encoded_at(channels, &vec![1.0; frames])
+}
+
+/// As [`encoded`], one 20 ms frame per entry of `levels`, each frame's
+/// tones scaled by its level.
+fn encoded_at(channels: usize, levels: &[f32]) -> (Vec<Packet>, Vec<f32>) {
     let layout = if channels == 2 {
         ChannelLayout::stereo()
     } else {
@@ -142,11 +148,12 @@ fn encoded(channels: usize, frames: usize) -> (Vec<Packet>, Vec<f32>) {
     let mut params = CodecParams::audio(CodecId::Opus, 48_000, layout.clone());
     params.bitrate = 64_000 * channels as u32;
     let mut encoder = crate::OpusEncoder::open(&params).unwrap();
-    let samples: Vec<f32> = (0..frames * 960)
+    let samples: Vec<f32> = (0..levels.len() * 960)
         .flat_map(|i| {
             let t = i as f32 / 48_000.0;
-            let left = 0.4 * (2.0 * std::f32::consts::PI * 440.0 * t).sin();
-            let right = 0.3 * (2.0 * std::f32::consts::PI * 660.0 * t).sin();
+            let level = levels[i / 960];
+            let left = level * 0.4 * (2.0 * std::f32::consts::PI * 440.0 * t).sin();
+            let right = level * 0.3 * (2.0 * std::f32::consts::PI * 660.0 * t).sin();
             if channels == 2 {
                 vec![left, right]
             } else {
@@ -399,5 +406,186 @@ fn hostile_packets_fail_closed() {
             decoder.decode(&packets[0].data).unwrap(),
             fresh.decode(&packets[0].data).unwrap()
         );
+    }
+}
+
+/// A packet of `toc` and `len` fixed pseudo-random payload bytes. Any
+/// payload is a valid SILK, hybrid, or CELT frame.
+fn noise_packet(toc: u8, seed: u32, len: usize) -> Vec<u8> {
+    let mut state = seed;
+    let mut data = vec![toc];
+    for _ in 0..len {
+        state = (state.wrapping_mul(1_103_515_245).wrapping_add(12_345)) & 0x7fff_ffff;
+        data.push((state >> 16) as u8);
+    }
+    data
+}
+
+/// The switch from hybrid to CELT conceals 5 ms of the hybrid stream to
+/// fade from. The new packet's narrower bandwidth must not reach that
+/// concealment. The final ranges are libopus 1.6.1's for these packets.
+#[test]
+fn a_narrower_celt_packet_after_a_hybrid_packet_decodes() {
+    // Hybrid fullband 20 ms, then CELT narrowband 20 ms twice, all mono.
+    let packets = [
+        (noise_packet(0x78, 1, 40), 0x022c_a610),
+        (noise_packet(0x98, 2, 40), 0x6835_5100),
+        (noise_packet(0x98, 3, 40), 0x008d_e41d),
+    ];
+    let mut decoder = OpusDecoder::with_head(OpusHead::simple(1, 0, 48_000), 48_000).unwrap();
+    for (data, range) in &packets {
+        let out = decoder.decode(data).unwrap();
+        assert_eq!(out.len(), 960);
+        assert!(out.iter().all(|x| x.is_finite()));
+        assert_eq!(decoder.final_range(), *range);
+    }
+    // Hybrid, then CELT wideband.
+    let mut decoder = OpusDecoder::with_head(OpusHead::simple(1, 0, 48_000), 48_000).unwrap();
+    decoder.decode(&noise_packet(0x78, 1, 40)).unwrap();
+    decoder.decode(&noise_packet(0xb8, 2, 40)).unwrap();
+    assert_eq!(decoder.final_range(), 0x00f8_a600);
+}
+
+/// A lost frame is concealed in the mode of the frame before it, with
+/// that frame's bands, whatever bandwidth the lost frame's TOC names.
+#[test]
+fn a_lost_narrowband_frame_after_a_hybrid_packet_is_concealed() {
+    let mut decoder = OpusDecoder::with_head(OpusHead::simple(1, 0, 48_000), 48_000).unwrap();
+    decoder.decode(&noise_packet(0x78, 1, 40)).unwrap();
+    // SILK narrowband 20 ms with a one-byte frame: lost.
+    let out = decoder.decode(&[0x08, 0x00]).unwrap();
+    assert_eq!(out.len(), 960);
+    assert!(out.iter().all(|x| x.is_finite()));
+    assert_eq!(decoder.final_range(), 0);
+    decoder.decode(&noise_packet(0x08, 4, 20)).unwrap();
+    assert_eq!(decoder.final_range(), 0x026c_360a);
+}
+
+/// A gap is any multiple of 2.5 ms, but concealment runs on 2.5, 5, 10, or
+/// 20 ms at a time: 12.5 ms is concealed as 10 ms and then 2.5 ms.
+#[test]
+fn a_gap_between_frame_lengths_is_concealed_in_pieces() {
+    let after_one_packet = |toc: u8| {
+        let mut decoder = OpusDecoder::with_head(OpusHead::simple(1, 0, 48_000), 48_000).unwrap();
+        decoder.decode(&noise_packet(toc, 1, 40)).unwrap();
+        decoder
+    };
+    // SILK wideband, hybrid fullband, and CELT fullband, 20 ms mono.
+    for toc in [0x48, 0x78, 0xf8] {
+        for (gap, rest) in [(600, 120), (720, 240)] {
+            let whole = after_one_packet(toc).conceal(gap).unwrap();
+            let mut decoder = after_one_packet(toc);
+            let mut pieces = decoder.conceal(480).unwrap();
+            pieces.extend(decoder.conceal(rest).unwrap());
+            assert!(pieces.iter().any(|x| *x != 0.0));
+            assert!(whole == pieces, "TOC {toc:#x}, {gap} samples");
+        }
+        for steps in 1..=48 {
+            let out = after_one_packet(toc).conceal(steps * 120).unwrap();
+            assert_eq!(out.len(), steps * 120);
+        }
+    }
+}
+
+/// Whether a CELT-only packet's frame codes its energies intra, not
+/// predicted from the frame before (the header of RFC 6716 section 4.3).
+fn intra_energy(packet: &[u8]) -> bool {
+    let mut rd = crate::range::RangeDecoder::new(&packet[1..]);
+    let total = (packet.len() as i32 - 1) * 8;
+    if rd.bit_logp(15) {
+        return true;
+    }
+    if rd.tell() + 16 <= total && rd.bit_logp(1) {
+        let octave = rd.dec_uint(6);
+        rd.dec_bits(4 + octave);
+        rd.dec_bits(3);
+        if rd.tell() + 2 <= total {
+            rd.dec_icdf(&[2, 1, 0], 2);
+        }
+    }
+    if rd.tell() + 3 <= total {
+        rd.bit_logp(3);
+    }
+    rd.tell() + 3 <= total && rd.bit_logp(3)
+}
+
+/// The packets that carry a drop in level are lost, sent as their TOC
+/// alone (as ffmpeg's native encoder sends silence). The encoder predicts
+/// the next packet's energies from its own quiet state, and the decoder
+/// must not add them to the loud state it last decoded: as libopus 1.6.1
+/// does, it decays its energies through the loss and makes the first
+/// prediction after it safe. The audio after the gap is never louder than
+/// the concealment before it, and comes back to the source's level.
+#[test]
+fn audio_after_a_long_loss_does_not_burst() {
+    // 0.4 s loud, then the same tones 40 dB down.
+    let levels: Vec<f32> = (0..60).map(|k| if k < 20 { 1.0 } else { 0.01 }).collect();
+    let mean_square = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
+    for channels in [1usize, 2] {
+        let (packets, samples) = encoded_at(channels, &levels);
+        let quiet = mean_square(&samples[30 * 960 * channels..]);
+        // Packets 20 on are lost, up to one that predicts its energies.
+        let resume = (40..50).find(|&k| !intra_energy(&packets[k].data)).unwrap();
+        let head = OpusHead::simple(channels as u8, 0, 48_000);
+        let mut decoder = OpusDecoder::with_head(head, 48_000).unwrap();
+        // Each packet's level against the quiet source, in dB.
+        let mut db = Vec::new();
+        for (k, packet) in packets.iter().enumerate().take(60) {
+            let data = if (20..resume).contains(&k) {
+                &packet.data[..1]
+            } else {
+                &packet.data[..]
+            };
+            let out = decoder.decode(data).unwrap();
+            assert!(out.iter().all(|x| x.is_finite()));
+            db.push(10.0 * (mean_square(&out) / quiet).log10());
+        }
+        let shown: Vec<String> = db[resume - 1..].iter().map(|d| format!("{d:.1}")).collect();
+        let shown = format!(
+            "{channels} ch, from the last concealed packet {}: {shown:?}",
+            resume - 1
+        );
+        eprintln!("{shown}");
+        let concealed = db[resume - 1];
+        assert!(
+            db[resume..].iter().all(|&d| d <= concealed + 1.0),
+            "{shown}"
+        );
+        assert!(db[55..].iter().all(|&d| d.abs() <= 1.0), "{shown}");
+    }
+}
+
+/// Three lost packets in a steady tone are concealed by repeating its last
+/// pitch period, which libopus 1.6.1 fades by how much the last two periods
+/// decayed, and by 0.8 a frame after the first: about 0, 2 and 4 dB down
+/// on these tones. The concealment stays near the tone's level instead of
+/// dying out.
+#[test]
+fn pitch_concealment_holds_a_steady_tone() {
+    let mean_square = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
+    for channels in [1usize, 2] {
+        let (packets, _) = encoded(channels, 30);
+        let head = OpusHead::simple(channels as u8, 0, 48_000);
+        let mut decoder = OpusDecoder::with_head(head, 48_000).unwrap();
+        let mut energies = Vec::new();
+        for (k, packet) in packets.iter().enumerate().take(23) {
+            let lost = (20..23).contains(&k);
+            let data = if lost {
+                &packet.data[..1]
+            } else {
+                &packet.data[..]
+            };
+            energies.push(mean_square(&decoder.decode(data).unwrap()));
+        }
+        let last = energies[19];
+        let db: Vec<f32> = energies[20..]
+            .iter()
+            .map(|e| 10.0 * (e / last).log10())
+            .collect();
+        let all = 10.0 * (energies[20..].iter().sum::<f32>() / (3.0 * last)).log10();
+        let shown = format!("{channels} ch: lost packets {db:.1?} dB, together {all:.1} dB");
+        eprintln!("{shown}");
+        assert!(db.iter().all(|d| (-6.0..=1.0).contains(d)), "{shown}");
+        assert!(all >= -3.0, "{shown}");
     }
 }

@@ -12,7 +12,7 @@ An MPEG-4 Visual (MPEG-4 Part 2, ISO/IEC 14496-2) decoder and encoder for rectan
 | S-VOPs with global motion (GMC) | Up to three warping points. |
 | Quarter-sample motion | Accepted, with the workarounds old DivX and Xvid streams need. |
 | H.263 and MPEG quantizers | Both. A stream may carry its own matrices. |
-| Interlace | Accepted, including field motion and field DCT. |
+| Interlace | Accepted, including field motion and field DCT, and the edge workaround libavcodec 55.66.100 to 57.66.103 streams need. |
 | Data partitioning and RVLC | Accepted, except together with interlace. |
 | Resync markers (video packets) | Accepted. |
 | Short header | H.263 baseline. |
@@ -36,7 +36,7 @@ A layer above the pixel cap, or more than three VOPs in one packet, returns `Cod
 
 | | Simple (default) | Advanced Simple (`ADVANCED_SIMPLE` in `CodecParams::extra`) |
 | --- | --- | --- |
-| Pictures | An I-VOP, then P-VOPs | Every other later picture is a B-VOP between two P-VOPs |
+| Pictures | An I-VOP, then P-VOPs | Every other later picture is a B-VOP between two P-VOPs, unless they are more than 65535 ticks apart, past FFmpeg's 16-bit B-VOP distances |
 | Motion | Half-sample, one or four vectors | Quarter-sample, one or four vectors |
 | Search range | ±8 pixels, so every vector fits `fcode` 1 | Same |
 | Quantizer | H.263, 1 to 31 | H.263, 1 to 31 |
@@ -81,7 +81,7 @@ Run with `cargo test -p cutlass-mpeg4`.
 
 The standard does not fix the inverse transform bit for bit. The checked-in comparisons use FFmpeg decodes stored in the repository and must match byte for byte. Against FFmpeg on a 600-frame 1080p stream that FFmpeg wrote, the decoder's pictures differ by at most 1 in any sample (80.9 dB PSNR).
 
-- **Checked-in streams** (`tests/decode/lifecycle.rs`). Three FFmpeg-written streams, Advanced Simple with B-VOPs and quarter samples, data partitioned, and interlaced, must decode to the FFmpeg output stored beside them. The same file covers display order and times, reset, damage that lasts until the next I-VOP, hostile bytes, and headers out of band.
+- **Checked-in streams** (`tests/decode/lifecycle.rs`). Three FFmpeg-written streams, Advanced Simple with B-VOPs and quarter samples, data partitioned, and interlaced, must decode to the FFmpeg output stored beside them, and so must an interlaced stream whose user data names libavcodec 56.60.100. The same file covers display order and times, reset, damage that lasts until the next I-VOP, hostile bytes, and headers out of band.
 - **Packed bitstreams** (`tests/decode/packed.rs`): pictures leave in display order with the right times, also after a failed B-VOP.
 - **MP4** (`tests/mp4.rs`). FFmpeg-written MP4 files go through the workspace ISOBMFF demuxer. An `mp4v` entry is MPEG-4 Visual only when its `esds` object type is 0x20.
 - **Encoder** (unit tests in `src/enc.rs` and `src/engine.rs`). Streams are decoded back by this crate's decoder: intra, predicted, four-vector, bidirectional, quarter-sample, MPEG-quantizer, and padded sizes. With FFmpeg installed, FFmpeg must reconstruct the same samples. Stored digests keep part of that check running where FFmpeg is absent. A one-second 64×48 stream must land within 25% of 200, 400, and 800 kbit/s.

@@ -273,6 +273,13 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
             }
         }
         let lossless = self.c.lossless;
+        // The specification holds a dequantized value to 8 + bit depth
+        // bits. Past that, an 8-bit one keeps its low 16 bits, as in
+        // FFmpeg's `vp9` (whose 8-bit coefficients are `int16_t`) and in
+        // libvpx's 8-bit transforms (which read theirs as `int16_t`).
+        // libvpx's Walsh-Hadamard reads its 32 bits whole, so lossless
+        // blocks, where the two differ, keep theirs.
+        let wrap = !P::HIGH && !lossless;
         for plane in 0..3 {
             let tx = if plane == 0 { b.tx } else { b.uv_tx };
             let (ssx, ssy) = self.plane_ss(plane);
@@ -312,7 +319,9 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
                         let n = usize::from(rec.n);
                         if rec.eob > 0 {
                             for k in *coef_at..*coef_at + n {
-                                self.s.coef.0[usize::from(t.pos[k])] = t.val[k];
+                                let v = t.val[k];
+                                self.s.coef.0[usize::from(t.pos[k])] =
+                                    if wrap { i32::from(v as i16) } else { v };
                             }
                             self.add_residual(
                                 plane,

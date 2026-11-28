@@ -11,6 +11,7 @@
 //! sets it, and the least common multiple of the track timescales otherwise.
 
 use crate::alac;
+use crate::flac;
 use crate::legacy::{
     CodecId, ColorTags, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams,
 };
@@ -210,6 +211,7 @@ impl<W: Write + Seek> IsoBmffMux<W> {
         else {
             return Err(Error::Missing { what: "track" });
         };
+        check_flac(track.params.sample_entry, &extradata)?;
         track.params.extradata = extradata;
         Ok(())
     }
@@ -311,6 +313,7 @@ impl<W: Write + Seek> Mux for IsoBmffMux<W> {
             });
         }
         let sample_entry = entry_code(params)?;
+        check_flac(sample_entry, &params.extradata)?;
         let mut stored = params.clone();
         if stored.track_id == 0 {
             stored.track_id = u32::try_from(self.tracks.len() + 1).unwrap_or(1);
@@ -543,6 +546,19 @@ impl<W: Write + Seek> IsoBmffMux<W> {
         self.sequence = self.sequence.saturating_add(1);
         Ok(())
     }
+}
+
+const NOT_FLAC_CONFIG: Error = Error::Unsupported {
+    what: "FLAC configuration that is not a STREAMINFO, a fLaC header, or a dfLa body",
+};
+
+/// Refuses configuration for a `fLaC` entry that `dfLa` cannot be written
+/// from. Empty configuration may still arrive before finish.
+fn check_flac(sample_entry: [u8; 4], extradata: &[u8]) -> Result<(), Error> {
+    if &sample_entry == b"fLaC" && !extradata.is_empty() && flac::dfla(extradata).is_none() {
+        return Err(NOT_FLAC_CONFIG);
+    }
+    Ok(())
 }
 
 fn entry_code(params: &StreamParams) -> Result<[u8; 4], Error> {
@@ -1095,6 +1111,14 @@ fn stsd(track: &TrackOut) -> Result<Vec<u8>, Error> {
                 audio.channels = facts.channels;
                 audio.bits_per_sample = facts.bits;
             }
+            // The encapsulation fills the entry from STREAMINFO.
+            if &code == b"fLaC"
+                && let Some(facts) = flac::facts(&track.params.extradata)
+            {
+                audio.channels = facts.channels;
+                audio.bits_per_sample = facts.bits;
+                audio.sample_rate = facts.rate;
+            }
             entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
             if &code == b"lpcm" {
                 entry.extend(lpcm_description(&audio)?);
@@ -1107,7 +1131,12 @@ fn stsd(track: &TrackOut) -> Result<Vec<u8>, Error> {
             entry.extend_from_slice(&audio.channels.to_be_bytes());
             entry.extend_from_slice(&audio.bits_per_sample.to_be_bytes());
             entry.extend_from_slice(&[0, 0, 0, 0]);
-            let rate = u32::from(u16::try_from(audio.sample_rate).unwrap_or(u16::MAX)) << 16;
+            let rate = if &code == b"fLaC" {
+                flac::entry_rate(audio.sample_rate)
+            } else {
+                u16::try_from(audio.sample_rate).unwrap_or(u16::MAX)
+            };
+            let rate = u32::from(rate) << 16;
             entry.extend_from_slice(&rate.to_be_bytes());
             entry.extend(config_boxes(track)?);
         }
@@ -1152,7 +1181,15 @@ fn config_boxes(track: &TrackOut) -> Result<Vec<u8>, Error> {
     } else if &code == b"ec-3" {
         out.extend(box_bytes(b"dec3", &track.params.extradata));
     } else if &code == b"fLaC" {
-        out.extend(box_bytes(b"dfLa", &track.params.extradata));
+        // Extradata is a bare STREAMINFO, a native `fLaC` header, or a
+        // `dfLa` body; the box holds version, flags, and the blocks.
+        if track.params.extradata.is_empty() {
+            return Err(Error::Missing {
+                what: "FLAC STREAMINFO",
+            });
+        }
+        let dfla = flac::dfla(&track.params.extradata).ok_or(NOT_FLAC_CONFIG)?;
+        out.extend(box_bytes(b"dfLa", &dfla));
     } else if matches!(&code, b"mp4a" | b"mp4v")
         && (!track.params.extradata.is_empty() || track.params.codec == CodecId::Mpeg2)
     {

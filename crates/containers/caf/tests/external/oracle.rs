@@ -512,3 +512,128 @@ fn e_ac_3_this_crate_writes_is_read_by_audiotoolbox() {
         "{decoded} of {frames} frames"
     );
 }
+
+/// The body of the first `kind` box in an MP4 file.
+fn box_body<'a>(bytes: &'a [u8], kind: &[u8; 4]) -> &'a [u8] {
+    let at = bytes
+        .windows(4)
+        .position(|window| window == kind)
+        .expect("box");
+    let size = u32::from_be_bytes(bytes[at - 4..at].try_into().expect("size")) as usize;
+    &bytes[at + 4..at - 4 + size]
+}
+
+/// The `fLaC` marker and the metadata blocks after it, up to the one
+/// flagged last: what a Matroska CodecPrivate holds.
+fn native_header(bytes: &[u8]) -> &[u8] {
+    let mut at = 4;
+    loop {
+        let head = &bytes[at..at + 4];
+        at += 4 + u32::from_be_bytes([0, head[1], head[2], head[3]]) as usize;
+        if head[0] & 0x80 != 0 {
+            return &bytes[..at];
+        }
+    }
+}
+
+/// FFmpeg's MD5 of the decoded sound of `file`.
+fn pcm_md5(file: &Path) -> String {
+    let out = run(
+        "ffmpeg",
+        &[
+            "-v",
+            "error",
+            "-i",
+            path(file),
+            "-map",
+            "0:a",
+            "-f",
+            "md5",
+            "-",
+        ],
+    )
+    .unwrap_or_else(|| panic!("ffmpeg cannot decode {}", file.display()));
+    String::from_utf8(out).expect("utf-8").trim().to_owned()
+}
+
+/// FFmpeg encodes FLAC and copies it into MP4. The `dfLa` body there, the
+/// native file's header (a Matroska CodecPrivate's form) and the bare
+/// STREAMINFO are each the configuration of a CAF written here. Each file
+/// must hold the cookie AudioToolbox writes and decode to the source
+/// samples in FFmpeg and in afconvert. The frames come from FFmpeg's own
+/// CAF copy, which has no cookie.
+#[test]
+fn flac_from_mp4_or_a_flac_file_becomes_a_caf_that_decodes_to_the_source() {
+    if !tool("ffmpeg") {
+        eprintln!("skipped: ffmpeg is not on PATH");
+        return;
+    }
+    let apple = tool("afconvert");
+    if !apple {
+        eprintln!("afconvert is not on PATH: checking the decode with ffmpeg only");
+    }
+    let dir = TempDir::new("flac-forms");
+    let (wav, frames) = source(&dir);
+    let flac = dir.join("source.flac");
+    let ffmpeg = |args: &[&str]| {
+        let mut all = vec!["-v", "error", "-y"];
+        all.extend_from_slice(args);
+        run("ffmpeg", &all).expect("ffmpeg");
+    };
+    ffmpeg(&["-i", path(&wav), "-c:a", "flac", path(&flac)]);
+    let mp4 = dir.join("copy.mp4");
+    let caf = dir.join("copy.caf");
+    for copy in [&mp4, &caf] {
+        ffmpeg(&["-i", path(&flac), "-c", "copy", path(copy)]);
+    }
+    let dfla = box_body(&std::fs::read(&mp4).expect("mp4"), b"dfLa").to_vec();
+    let native = native_header(&std::fs::read(&flac).expect("flac")).to_vec();
+    let streaminfo = dfla[8..42].to_vec();
+    assert!(
+        native.len() > 42,
+        "FFmpeg's file has blocks after STREAMINFO"
+    );
+    let mut apple_cookie = vec![0, 0, 0, 0x32];
+    apple_cookie.extend(b"dfLa");
+    apple_cookie.extend([0, 0, 0, 0, 0x80, 0, 0, 0x22]);
+    apple_cookie.extend(&streaminfo);
+    let units: Vec<(Vec<u8>, i64)> = packets(&caf)
+        .into_iter()
+        .map(|packet| {
+            let frames = packet.timestamp().duration().expect("duration");
+            (packet.bytes().to_vec(), frames)
+        })
+        .collect();
+    let expected = pcm_md5(&wav);
+    for (name, config) in [
+        ("mp4", dfla),
+        ("native", native),
+        ("streaminfo", streaminfo.clone()),
+    ] {
+        let file = dir.join(&format!("ours-{name}.caf"));
+        let stream = NewStream {
+            params: StreamParams::try_audio(StreamCodec::Known(CodecId::Flac), 44_100, 2, config)
+                .expect("params"),
+            timescale: Timescale::new(44_100),
+            language: None,
+        };
+        write_caf(&file, stream, &units);
+        let demux = open(&file);
+        assert_eq!(demux.cookie(), Some(&apple_cookie[..]), "{name}");
+        assert_eq!(
+            demux.streams()[0].params().extradata(),
+            streaminfo,
+            "{name}"
+        );
+        assert_eq!(
+            pcm_md5(&file),
+            expected,
+            "{name}: ffmpeg decodes other samples"
+        );
+        if apple {
+            let decoded = af_decode(&file, &dir, "LEI16")
+                .unwrap_or_else(|| panic!("afconvert cannot decode {name}"));
+            assert!(decoded == frames, "{name}: afconvert decodes other samples");
+        }
+    }
+}

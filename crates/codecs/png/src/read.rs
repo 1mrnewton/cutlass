@@ -9,7 +9,7 @@ use cutlass_decode::{
 };
 
 use crate::crc::{crc32, crc32_update};
-use crate::limits::{MAX_CHUNK, MAX_IDAT, MAX_INFLATED_META, edge_ok};
+use crate::limits::{MAX_CHUNK, MAX_IDAT, MAX_INFLATED_META, MAX_INFLATED_META_TOTAL, edge_ok};
 use crate::raster::{
     Pass, adam_pass, bytes_per_pixel, filtered_len, full_pass, pixel_bits, pixel_offset, row_bytes,
     sample_count, unfilter, unpack,
@@ -64,6 +64,8 @@ struct Parsed {
     physical: Option<PhysicalPixel>,
     texts: Vec<TextItem>,
     idat: Vec<u8>,
+    /// Inflated metadata bytes still allowed in this datastream.
+    meta_budget: usize,
 }
 
 struct Flags {
@@ -178,6 +180,7 @@ fn empty_parsed() -> Parsed {
         physical: None,
         texts: Vec::new(),
         idat: Vec::new(),
+        meta_budget: MAX_INFLATED_META_TOTAL,
     }
 }
 
@@ -210,9 +213,18 @@ fn on_chunk(
         b"sBIT" => read_sbit(at, data, flags, parsed)?,
         b"bKGD" => read_bkgd(at, data, flags, header, parsed)?,
         b"pHYs" => read_phys(at, data, flags, parsed)?,
-        b"tEXt" => parsed.texts.push(read_text(at, data, false)?),
-        b"zTXt" => parsed.texts.push(read_text(at, data, true)?),
-        b"iTXt" => parsed.texts.push(read_itxt(at, data)?),
+        b"tEXt" => {
+            let text = read_text(at, data, false, &mut parsed.meta_budget)?;
+            parsed.texts.push(text);
+        }
+        b"zTXt" => {
+            let text = read_text(at, data, true, &mut parsed.meta_budget)?;
+            parsed.texts.push(text);
+        }
+        b"iTXt" => {
+            let text = read_itxt(at, data, &mut parsed.meta_budget)?;
+            parsed.texts.push(text);
+        }
         _ => {
             if kind[0] & 0x20 == 0 {
                 return Err(malformed(at, "critical chunk"));
@@ -396,7 +408,7 @@ fn read_iccp(
     if rest.first() != Some(&0) {
         return Err(malformed(at, "iccp"));
     }
-    let profile = inflate(&rest[1..], MAX_INFLATED_META).map_err(zlib_err)?;
+    let profile = inflate_meta(&rest[1..], &mut parsed.meta_budget)?;
     if profile.is_empty() {
         return Err(malformed(at, "iccp"));
     }
@@ -489,13 +501,18 @@ fn read_phys(
     Ok(())
 }
 
-fn read_text(at: usize, data: &[u8], compressed: bool) -> Result<TextItem, CodecError> {
+fn read_text(
+    at: usize,
+    data: &[u8],
+    compressed: bool,
+    budget: &mut usize,
+) -> Result<TextItem, CodecError> {
     let (keyword, rest) = split_null(data).ok_or(malformed(at, "text"))?;
     let text = if compressed {
         if rest.first() != Some(&0) {
             return Err(malformed(at, "text"));
         }
-        inflate(&rest[1..], MAX_INFLATED_META).map_err(zlib_err)?
+        inflate_meta(&rest[1..], budget)?
     } else {
         rest.to_vec()
     };
@@ -508,7 +525,7 @@ fn read_text(at: usize, data: &[u8], compressed: bool) -> Result<TextItem, Codec
     })
 }
 
-fn read_itxt(at: usize, data: &[u8]) -> Result<TextItem, CodecError> {
+fn read_itxt(at: usize, data: &[u8], budget: &mut usize) -> Result<TextItem, CodecError> {
     let (keyword, rest) = split_null(data).ok_or(malformed(at, "text"))?;
     if rest.len() < 2 {
         return Err(malformed(at, "text"));
@@ -521,7 +538,7 @@ fn read_itxt(at: usize, data: &[u8]) -> Result<TextItem, CodecError> {
     let (language, after_language) = split_null(&rest[2..]).ok_or(malformed(at, "text"))?;
     let (translated, payload) = split_null(after_language).ok_or(malformed(at, "text"))?;
     let text = if flag == 1 {
-        inflate(payload, MAX_INFLATED_META).map_err(zlib_err)?
+        inflate_meta(payload, budget)?
     } else {
         payload.to_vec()
     };
@@ -532,6 +549,14 @@ fn read_itxt(at: usize, data: &[u8]) -> Result<TextItem, CodecError> {
         text,
         compressed: flag == 1,
     })
+}
+
+/// Inflates one text or profile within the per-chunk cap and what is left
+/// of the datastream's total.
+fn inflate_meta(src: &[u8], budget: &mut usize) -> Result<Vec<u8>, CodecError> {
+    let out = inflate(src, MAX_INFLATED_META.min(*budget)).map_err(zlib_err)?;
+    *budget = budget.saturating_sub(out.len());
+    Ok(out)
 }
 
 fn before_palette(at: usize, flags: &Flags) -> Result<(), CodecError> {

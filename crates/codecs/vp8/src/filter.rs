@@ -90,6 +90,7 @@ fn common(buf: &mut [u8], at: usize, step: usize, outer: bool) {
 /// (Sections 15.3 and 15.4). Every lane takes the same steps and a
 /// select, so the loop vectorizes.
 #[inline]
+#[allow(clippy::needless_range_loop)] // `i` indexes all eight tap rows.
 fn normal_lanes(r: &mut [[u8; 16]; 8], edge: i16, interior: i16, hev_t: i16, macroblock: bool) {
     let s8 = |x: i16| x.clamp(-128, 127);
     let u8c = |x: i16| x.clamp(0, 255) as u8;

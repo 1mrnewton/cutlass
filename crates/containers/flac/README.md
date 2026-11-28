@@ -4,13 +4,13 @@ Reader and writer for native FLAC files: the `fLaC` marker, the metadata blocks,
 
 ## What it supports
 
-One packet is one FLAC frame, from its header to its CRC-16. The stream timescale is the sample rate, and the stream's extradata is the 34-byte STREAMINFO body.
+One packet is one FLAC frame, from its header to its CRC-16. The stream timescale is the sample rate, and the stream's extradata is the 34-byte STREAMINFO body. The writer takes that body, the `fLaC` marker and metadata blocks a Matroska CodecPrivate holds, or the `dfLa` body (version, flags, then the blocks) an MP4 demuxer gives, so a FLAC track from any of them remuxes to a file.
 
 | Part of the file | Reading | Writing |
 | --- | --- | --- |
 | STREAMINFO | Read; must be the first block and appear once | Written first, then filled in at `finish` with the sample count, block and frame sizes, and the MD5 an encoder handed over |
 | SEEKTABLE | Read, at most once; placeholder points dropped | Reserved up front (128 points by default) and filled at `finish`, one point about every 10 seconds |
-| Other metadata blocks (comments, pictures, padding, cue sheet, application) | Skipped by their length, not read | Not written |
+| Other metadata blocks (comments, pictures, padding, cue sheet, application) | Skipped by their length, not read | Those in the extradata given to `add_stream` are written after the SEEKTABLE as they came, except SEEKTABLE and PADDING, which describe the file they came from |
 | Frames, fixed or variable block size | Split where the next valid header starts and the CRC-16 closes the frame | Each packet is checked: header, CRC-16, frame or sample number, duration |
 | Timestamps | Frame number times the block size, or the coded sample number | Must continue from the previous frame |
 | ID3v1 tag at the end | Left out of the sound data | Not written |
@@ -25,13 +25,13 @@ What is refused when reading:
 - A frame longer than `Limits::max_packet_bytes`: `ReadError::HostileSize`.
 - Bytes that are not a frame header where a frame should start: `ReadError::Source`.
 
-What the writer refuses, as `MuxError`: a codec other than FLAC, a second stream, a channel count outside one to eight, a sample rate of zero or 1,048,576 and above, extradata that is not this stream's STREAMINFO, a frame whose CRC-16 fails, a frame that does not match the stream or is not the next one, a change of blocking strategy or bit depth, and a finish whose duration is not the number of samples written.
+What the writer refuses, as `MuxError`: a codec other than FLAC, a second stream, a channel count outside one to eight, a sample rate of zero or 1,048,576 and above, extradata that is not this stream's STREAMINFO in one of the three forms, extradata with more metadata blocks than `MAX_METADATA_BLOCKS` leaves room for, a frame whose CRC-16 fails, a frame that does not match the stream or is not the next one, a change of blocking strategy or bit depth, and a finish whose duration is not the number of samples written.
 
 ## Using it
 
 - `FlacDemux::open(reader, length)` opens a `Read + Seek` source; `open_limited` takes caller `Limits`. It implements `cutlass_container::Demux`.
 - `FlacDemux::stream_info`, `seek_points` and `first_frame` expose what open read. `damaged_tail` is `true` after a read reached a cut last frame, which is not returned.
-- `FlacMux::new(writer)` and `FlacMux::with_seek_points(writer, slots)` take a `Write + Seek`. `FlacMux` implements `cutlass_container::Mux`. `set_config` takes the STREAMINFO an encoder produces at the end, which carries the MD5.
+- `FlacMux::new(writer)` and `FlacMux::with_seek_points(writer, slots)` take a `Write + Seek`. `FlacMux` implements `cutlass_container::Mux`. `set_config` takes the STREAMINFO an encoder produces at the end, which carries the MD5, in any of the three forms; the other blocks in it are not written, because the header may already be out.
 - `probe(header)` accepts the four-byte `fLaC` marker. `FlacFamily` is the same check as a `Probe` type.
 - `parse_header`, `FrameHeader`, `StreamInfo`, `SeekPoint`, `crc8` and `crc16` are public for callers that frame FLAC themselves.
 
@@ -61,8 +61,8 @@ fn count_samples(path: &std::path::Path) -> Result<i64, Box<dyn std::error::Erro
 cargo test -p cutlass-flac-container
 ```
 
-- `src/tests.rs` muxes and demuxes hand-built frames: round trips with fixed and variable block sizes, seeking with and without a SEEKTABLE, every metadata refusal, a cut last frame, cancel, and each writer refusal. One test flips single bits at every byte of a small file and reads and seeks it.
-- `tests/external/oracle.rs` demuxes files written by the `flac` tool and by FFmpeg and compares every frame's bytes with `flac --analyze` and every packet's time and size with `ffprobe`, then decodes the packets and checks the MD5. It also checks random seeks, and remuxes each file and has `flac -t`, `metaflac` and `ffprobe` read the result. These tests return without checking anything when `flac`, `ffmpeg`, `ffprobe` or `metaflac` is not installed.
+- `src/tests.rs` muxes and demuxes hand-built frames: round trips with fixed and variable block sizes, seeking with and without a SEEKTABLE, every metadata refusal, a cut last frame, cancel, and each writer refusal. Extradata in the Matroska and MP4 forms is muxed and its kept blocks are read back. One test flips single bits at every byte of a small file and reads and seeks it.
+- `tests/external/oracle.rs` demuxes files written by the `flac` tool and by FFmpeg and compares every frame's bytes with `flac --analyze` and every packet's time and size with `ffprobe`, then decodes the packets and checks the MD5. It also checks random seeks, and remuxes each file and has `flac -t`, `metaflac` and `ffprobe` read the result. It remuxes the FLAC in FFmpeg's MP4 and Matroska files, from their `dfLa` body and CodecPrivate, and has FFmpeg decode the same sound. These tests return without checking anything when `flac`, `ffmpeg`, `ffprobe` or `metaflac` is not installed.
 - `tests/external/e2e.rs` runs a recording through demux, decode, encode and mux and has `flac -t` and FFmpeg read the result. It needs private sample files and is skipped when their folder or the tools are absent.
 - `tests/external/fuzz.rs` is an in-process campaign over `probe`, `FlacDemux` and `FlacMux`. A short run (2000 seeds or 20 seconds, whichever comes first) is part of the normal suite. The long run is `#[ignore]`d:
 
@@ -99,8 +99,8 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 - The writer reserves at most 65,535 seek points and remembers at most 16,777,216 frame starts for the table.
 - STREAMINFO stores the sample count in 36 bits. A longer stream is written with the count zero, which means unknown.
 - A file that starts with an ID3v2 tag does not open.
-- Tags, cover pictures and cue sheets are not exposed when reading, and the writer cannot store them.
-- Ogg FLAC and FLAC in MP4 are not handled here.
+- Tags, cover pictures and cue sheets are not exposed when reading. The writer stores them only as blocks that come in the extradata.
+- Ogg FLAC is not handled here. FLAC in MP4 is read and written by `cutlass-isobmff`; this crate takes the `dfLa` body it gives as extradata.
 - There is no forward-only open; the reader must seek.
 - A frame in the middle of a file whose CRC-16 fails is still returned, cut at the next header that carries the expected number. Finding that cut can read ahead as far as `Limits::max_packet_bytes`. Only a cut last frame is reported, through `damaged_tail`.
 - Sound data is taken to end at an ID3v1 tag when the last 128 bytes of the file start with `TAG`.

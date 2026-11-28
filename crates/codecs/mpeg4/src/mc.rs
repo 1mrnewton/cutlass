@@ -326,6 +326,31 @@ pub(crate) fn chroma_block(
     hpel(&src, w, h, cx & 1, cy & 1, rounding, dst);
 }
 
+/// Predicts an 8x4 chroma field block like [`chroma_block`]. With
+/// `overlap`, the fifth fetched row comes from that plane's top field at
+/// the block's first row instead: FFmpeg's `FF_BUG_IEDGE` layout, where
+/// the padded Cr block overwrites the last row of the padded Cb block.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chroma_field_block(
+    r: &RefPlane<'_>,
+    overlap: Option<&RefPlane<'_>>,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    rows: Rows,
+    rounding: bool,
+    dst: &mut [u8],
+) {
+    let mut src = [0u8; 9 * 5];
+    let (sx, sy) = (x + (cx >> 1), y + (cy >> 1));
+    r.fetch(sx, sy, 9, 5, rows, &mut src);
+    if let Some(other) = overlap {
+        other.fetch(sx, sy, 9, 1, Rows::Field(0), &mut src[36..]);
+    }
+    hpel(&src, 8, 4, cx & 1, cy & 1, rounding, dst);
+}
+
 /// Averages `other` into `dst` with upward rounding, for bidirectional
 /// prediction.
 pub(crate) fn average(dst: &mut [u8], other: &[u8]) {

@@ -3,17 +3,19 @@
 //! A file is the `fLaC` marker, metadata blocks with STREAMINFO first, and
 //! frames. One packet is one frame, header to CRC-16, as the codec crate
 //! decodes it. The stream timescale is the sample rate. The stream's
-//! extradata is the 34-byte STREAMINFO body.
+//! extradata is the 34-byte STREAMINFO body. The muxer also takes the
+//! `fLaC` marker and blocks of a Matroska CodecPrivate and an MP4 `dfLa`
+//! body.
 //!
 //! | Capability | Demux | Mux |
 //! | --- | --- | --- |
-//! | Metadata | STREAMINFO, SEEKTABLE read; other blocks skipped by length | STREAMINFO and SEEKTABLE written |
+//! | Metadata | STREAMINFO, SEEKTABLE read; other blocks skipped by length | STREAMINFO and SEEKTABLE written, then the extradata's other blocks but SEEKTABLE and PADDING |
 //! | Frames | Split at the next valid header whose CRC-16 closes the frame | Checked: header, CRC-16, numbering, duration |
 //! | Timestamps | Frame number times the block size, or the sample number | From the sample count |
 //! | Seek | SEEKTABLE, else a bounded bisection, then a frame walk | Points about every 10 s |
 //! | Finish | — | STREAMINFO sample count, sizes, and MD5 written back |
 //! | ID3v2 before `fLaC` | Refused as unsupported | Not written |
-//! | Ogg FLAC, MP4 `dfLa` | Not in this crate | Not in this crate |
+//! | Ogg FLAC, MP4 `dfLa` | Not in this crate | A `dfLa` body is taken as extradata |
 
 #![forbid(unsafe_code)]
 

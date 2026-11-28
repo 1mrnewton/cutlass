@@ -1044,6 +1044,23 @@ mod tests {
         decode_all(&frames, yuv);
     }
 
+    /// A 64×64 stream (a key frame and two inter frames, 8-bit) whose
+    /// every coded tx block holds one coefficient that dequantizes past
+    /// the 16 bits the specification allows: the DC or the first AC
+    /// coefficient, either sign. FFmpeg 9.0.2's `vp9` and libvpx 1.17.0
+    /// (`-c:v libvpx-vp9`) decode it to the same pictures, which the
+    /// fixture holds: both keep the value's low 16 bits.
+    #[test]
+    fn coefficients_past_16_bits_keep_their_low_16_as_in_ffvp9_and_libvpx() {
+        let frames = [
+            include_bytes!("../fixtures/vp9_wrap16_0.bin").as_slice(),
+            include_bytes!("../fixtures/vp9_wrap16_1.bin").as_slice(),
+            include_bytes!("../fixtures/vp9_wrap16_2.bin").as_slice(),
+        ];
+        let yuv = include_bytes!("../fixtures/vp9_wrap16.yuv");
+        decode_all(&frames, yuv);
+    }
+
     fn decode_all(frames: &[&[u8]], yuv: &[u8]) {
         let mut decoder = Decoder::new();
         let mut got = Vec::new();

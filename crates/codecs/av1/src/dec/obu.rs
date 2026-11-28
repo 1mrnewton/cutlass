@@ -940,8 +940,16 @@ fn superres_params(r: &mut BitReader<'_>, seq: &SequenceHeader, h: &mut FrameHea
     };
     h.superres_denom = if h.use_superres { r.f(3)? + 9 } else { 8 };
     h.upscaled_width = h.frame_width;
-    h.frame_width = (h.upscaled_width * 8 + h.superres_denom / 2) / h.superres_denom;
+    h.frame_width = superres_width(h.upscaled_width, h.superres_denom);
     Ok(())
+}
+
+/// `FrameWidth` of an upscaled width under `SuperresDenom` (5.9.8), held
+/// at 16 or the upscaled width if less: Annex A wants a frame at least 16
+/// wide, and libaom (which codes such frames) and libdav1d keep it there.
+pub fn superres_width(upscaled_width: u32, superres_denom: u32) -> u32 {
+    let d = superres_denom.max(1);
+    ((upscaled_width * 8 + d / 2) / d).max(upscaled_width.min(16))
 }
 
 fn compute_image_size(h: &mut FrameHeader) {
@@ -953,6 +961,9 @@ fn frame_size(r: &mut BitReader<'_>, seq: &SequenceHeader, h: &mut FrameHeader) 
     if h.frame_size_override_flag {
         h.frame_width = r.f(seq.frame_width_bits)? + 1;
         h.frame_height = r.f(seq.frame_height_bits)? + 1;
+        if h.frame_width > seq.max_frame_width || h.frame_height > seq.max_frame_height {
+            return Err(malformed("frame size past the sequence maximum"));
+        }
     } else {
         h.frame_width = seq.max_frame_width;
         h.frame_height = seq.max_frame_height;
@@ -1980,5 +1991,27 @@ mod metadata_tests {
             parse_metadata(&[]),
             Err(CodecError::Truncated { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod superres_tests {
+    use super::{BitReader, FrameHeader, SequenceHeader, superres_params};
+
+    #[test]
+    fn a_narrow_superres_frame_stays_16_wide() {
+        // use_superres 1, coded_denom 7: SuperresDenom 16.
+        let seq = SequenceHeader {
+            enable_superres: true,
+            ..SequenceHeader::default()
+        };
+        for (upscaled, coded) in [(24, 16), (40, 20), (12, 12), (16, 16), (31, 16), (33, 17)] {
+            let mut h = FrameHeader {
+                frame_width: upscaled,
+                ..FrameHeader::default()
+            };
+            superres_params(&mut BitReader::new(&[0xf0]), &seq, &mut h).expect("superres");
+            assert_eq!((h.upscaled_width, h.frame_width), (upscaled, coded));
+        }
     }
 }

@@ -1119,6 +1119,18 @@ impl Av1Core {
         let mut r = self.decode_unit(data, tag);
         // A message with no frame after it in its unit belongs to none.
         self.unit_t35.clear();
+        // With more than one spatial layer in the operating point, a unit
+        // shows its highest layer only: its last shown frame, as libdav1d
+        // and libaom output by default.
+        if r.is_ok()
+            && self
+                .seq
+                .as_ref()
+                .is_some_and(|s| s.operating_point_idc >> 8 > 1)
+            && self.queue.len() > q0 + 1
+        {
+            self.queue.drain(q0..self.queue.len() - 1);
+        }
         if r.is_ok() && wait {
             for j in &self.unit_jobs {
                 if let Err(e) = j.wait() {
@@ -1170,6 +1182,11 @@ impl Av1Core {
     }
 
     fn decode_unit(&mut self, data: &[u8], tag: u64) -> R<()> {
+        // A unit is a temporal unit, which starts with no frame header
+        // seen (`SeenFrameHeader = 0`, 7.5): a frame whose tile groups
+        // did not all come is dropped, and the next frame header is not
+        // taken for its copy.
+        self.pending = None;
         for obu in split_obus(data)? {
             // 7.5: an OBU of a layer outside the operating point is dropped.
             if obu.obu_type != OBU_SEQUENCE_HEADER
@@ -1197,9 +1214,19 @@ impl Av1Core {
                     // describe (6.7.1). A repeated header changes nothing.
                     if self.seq.as_ref() != Some(&s) {
                         self.hdr = HdrMetadata::default();
+                        // Nor can its frames refer to those of the last
+                        // (7.5: it starts with a shown key frame), nor
+                        // finish a frame whose header the last began; as
+                        // libdav1d and libaom, its references are dropped.
+                        if self.seq.is_some() {
+                            self.ref_hdr = Default::default();
+                            self.slots = Default::default();
+                            self.pending = None;
+                        }
                     }
                     self.seq = Some(s);
                 }
+                OBU_TEMPORAL_DELIMITER => self.pending = None,
                 OBU_METADATA => match parse_metadata(obu.payload)? {
                     Metadata::ContentLight(light) => self.hdr.content_light = Some(light),
                     Metadata::MasteringDisplay(display) => {

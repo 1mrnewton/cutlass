@@ -161,6 +161,7 @@ Decoder gaps:
 
 - The refusals listed under "What it supports". The one most likely to meet a real file: an access unit that holds an auxiliary picture (NAL type 19), a sequence parameter set extension (type 13), or a reserved or unspecified NAL type fails as a whole instead of that one unit being skipped.
 - A damaged picture is not repaired. The bad-input tests only check that a later IDR picture still decodes.
+- A lost reference picture, seen as a `frame_num` gap the sequence does not allow, is concealed as FFmpeg conceals it: each missing frame repeats the last reference and is not shown. Pictures after the loss match FFmpeg's when they are P pictures; B pictures that reach the missing frame through list modification or direct prediction need not.
 - Film grain follows H.274, whose random source is not fixed, so grained pictures need not match another decoder.
 - The opener `register_decoders` adds does not give the decoder threads, so the app decodes H.264 on one thread.
 

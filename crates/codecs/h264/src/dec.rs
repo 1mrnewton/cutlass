@@ -381,6 +381,9 @@ pub(crate) struct Frame<S: Sample = u8> {
     time_scale: u32,
     fixed_rate: bool,
     nonexisting: bool,
+    /// Pictures with one stamp hold the same samples: a frame repeated in
+    /// place of a lost one keeps the stamp of the frame it repeats.
+    stamp: u64,
     /// The picture is three monochrome colour planes. Reconstruction swaps one
     /// plane into `y` and the same plane of every reference.
     separate_plane: bool,
@@ -1781,18 +1784,28 @@ fn finish_picture<S: Sample>(
     mut pic: Frame<S>,
 ) -> Result<Vec<Frame<S>>, CodecError> {
     let max_ref = dpb_max(dpb, &pic);
+    let mut reset = false;
     if pic.referenced {
         if pic.adaptive {
-            apply_mmco(dpb, &mut pic, _poc)?;
+            reset = apply_mmco(dpb, &mut pic, _poc)?;
         } else {
             mark_ref(dpb, &pic, max_ref);
         }
     }
     let reorder = pic_reorder(&pic);
+    // Clause C.4.4: a picture that reset the memory with operation 5 is
+    // stored once every picture before it has been output, as after an
+    // IDR picture; its order count now starts again from 0.
+    let mut out = if reset {
+        take_output(dpb, 0)
+    } else {
+        Vec::new()
+    };
     pic.seal();
     dpb.push(pic);
     dpb.retain(|frame| frame.referenced || frame.output);
-    Ok(take_output(dpb, reorder))
+    out.extend(take_output(dpb, reorder));
+    Ok(out)
 }
 
 fn dpb_max<S: Sample>(dpb: &[Frame<S>], pic: &Frame<S>) -> usize {
@@ -1825,13 +1838,15 @@ fn mark_ref<S: Sample>(dpb: &mut [Frame<S>], pic: &Frame<S>, max_ref: usize) {
     }
 }
 
-/// Clause 8.2.5. Adaptive marking replaces the sliding window for this picture.
+/// Clause 8.2.5. Adaptive marking replaces the sliding window for this
+/// picture. Returns whether operation 5 reset the memory.
 fn apply_mmco<S: Sample>(
     dpb: &mut [Frame<S>],
     pic: &mut Frame<S>,
     poc: &mut Poc,
-) -> Result<(), CodecError> {
+) -> Result<bool, CodecError> {
     let mut current_long = false;
+    let mut reset = false;
     for mark in pic.mmco.clone() {
         match mark.op {
             1 | 3 => {
@@ -1891,6 +1906,7 @@ fn apply_mmco<S: Sample>(
                 poc.prev_frame_num = 0;
                 poc.prev_frame_num_offset = 0;
                 poc.max_long = None;
+                reset = true;
             }
             6 => {
                 let idx = i32::try_from(mark.arg).unwrap_or(i32::MAX);
@@ -1930,7 +1946,27 @@ fn apply_mmco<S: Sample>(
             what: "reference frames",
         });
     }
-    Ok(())
+    if reset {
+        // Clause 8.2.1: the picture's order counts become relative to
+        // `tempPicOrderCnt`, and the next picture's are counted from
+        // them, with a most significant part of 0.
+        let temp = if pic.field && pic.bottom {
+            pic.field_poc[1]
+        } else if pic.field {
+            pic.field_poc[0]
+        } else {
+            pic.field_poc[0].min(pic.field_poc[1])
+        };
+        pic.field_poc = pic.field_poc.map(|order| order.saturating_sub(temp));
+        pic.poc = pic.poc.saturating_sub(temp);
+        poc.prev_poc_msb = 0;
+        poc.prev_poc_lsb = if pic.field && pic.bottom {
+            0
+        } else {
+            pic.field_poc[0]
+        };
+    }
+    Ok(reset)
 }
 
 fn short_at<S: Sample>(
@@ -2001,6 +2037,10 @@ fn oldest_short<S: Sample>(
 /// Clause 8.2.5.2. Each missing frame_num becomes a non-existing short-term reference
 /// and can slide an older reference out. Those pictures are not displayed and are not
 /// eligible as inter references.
+///
+/// A gap the sequence does not allow is a loss of pictures. As FFmpeg does, each
+/// missing frame is then a copy of the latest short-term reference, two order counts
+/// after it, which the pictures that follow predict from.
 fn fill_frame_num_gap<S: Sample>(
     sps: &Sps,
     state: &mut Poc,
@@ -2018,11 +2058,23 @@ fn fill_frame_num_gap<S: Sample>(
     if frame_num == state.prev_frame_num || frame_num == unused {
         return Ok(());
     }
-    if !sps.gaps_allowed {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "frame_num gap",
-        });
+    let lost = !sps.gaps_allowed;
+    let mut repeated = None;
+    if lost {
+        repeated = latest_short(dpb, sps, state.prev_frame_num).cloned();
+        // As FFmpeg does, only the last `max_num_ref_frames` missing
+        // frames are made: the earlier ones would slide out unused.
+        let missing = frame_num.wrapping_add(max_fn).wrapping_sub(unused) % max_fn;
+        let keep = u32::from(sps.max_num_ref_frames);
+        if missing > keep {
+            let first = frame_num.wrapping_add(max_fn).wrapping_sub(keep) % max_fn;
+            let before = first.wrapping_add(max_fn).wrapping_sub(1) % max_fn;
+            if before < state.prev_frame_num {
+                state.prev_frame_num_offset = state.prev_frame_num_offset.wrapping_add(max_fn);
+            }
+            state.prev_frame_num = before;
+            unused = first;
+        }
     }
     let mut steps = 0u32;
     while unused != frame_num {
@@ -2034,7 +2086,13 @@ fn fill_frame_num_gap<S: Sample>(
         }
         steps += 1;
         let (poc, offset) = ghost_order(sps, state, unused)?;
-        let ghost = absent_frame(sps, unused, poc);
+        let ghost = match &repeated {
+            Some(prev) => copied_frame(sps, prev, unused),
+            None => absent_frame(sps, unused, poc),
+        };
+        if repeated.is_some() {
+            repeated = Some(ghost.clone());
+        }
         mark_ref(dpb, &ghost, ghost.max_ref);
         state.prev_frame_num = unused;
         state.prev_frame_num_offset = offset;
@@ -2043,6 +2101,49 @@ fn fill_frame_num_gap<S: Sample>(
         unused = unused.wrapping_add(1) % max_fn;
     }
     Ok(())
+}
+
+/// A stamp no picture has had.
+pub(crate) fn next_stamp() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The short-term reference decoded last, of the sequence's size, that holds
+/// samples: the one whose frame_num is nearest before `current`.
+fn latest_short<'a, S: Sample>(
+    dpb: &'a [Frame<S>],
+    sps: &Sps,
+    current: u32,
+) -> Option<&'a Frame<S>> {
+    let max_fn = 1u32 << sps.log2_max_frame_num;
+    dpb.iter()
+        .filter(|frame| {
+            frame.referenced
+                && !frame.long_term
+                && !frame.nonexisting
+                && frame.w == sps.width as usize
+                && frame.h == sps.height as usize
+        })
+        .max_by_key(|frame| wrapped(frame, current, max_fn))
+}
+
+/// A missing frame that repeats `prev`, as a short-term reference that is not shown.
+fn copied_frame<S: Sample>(sps: &Sps, prev: &Frame<S>, frame_num: u32) -> Frame<S> {
+    let mut frame = prev.clone();
+    frame.frame_num = frame_num;
+    frame.poc = prev.poc.saturating_add(2);
+    frame.field_poc = prev.field_poc.map(|order| order.saturating_add(2));
+    frame.referenced = true;
+    frame.long_term = false;
+    frame.long_idx = -1;
+    frame.output = false;
+    frame.key = false;
+    frame.adaptive = false;
+    frame.mmco = Vec::new();
+    frame.max_ref = usize::from(sps.max_num_ref_frames).clamp(1, 16);
+    frame.max_fn = 1u32 << sps.log2_max_frame_num;
+    frame
 }
 
 fn ghost_order(sps: &Sps, state: &Poc, frame_num: u32) -> Result<(i32, u32), CodecError> {
@@ -2096,6 +2197,7 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         time_scale: sps.time_scale,
         fixed_rate: sps.fixed_frame_rate,
         nonexisting: true,
+        stamp: next_stamp(),
         separate_plane: sps.separate,
         field: false,
         mbaff: false,
@@ -4423,6 +4525,7 @@ fn new_frame<S: Sample>(
         time_scale: sps.time_scale,
         fixed_rate: sps.fixed_frame_rate,
         nonexisting: false,
+        stamp: next_stamp(),
         separate_plane: sps.separate,
         field: header.field,
         mbaff: sps.mbaff && !header.field,
@@ -4643,9 +4746,17 @@ fn make_slice<'a, S: Sample>(
             let Some(index) = at.checked_sub(1) else {
                 return (-1, 0);
             };
-            let slot = slots
-                .get(index)
-                .map_or(-1, |&slot| i8::try_from(slot).unwrap_or(-1));
+            // A frame repeated in place of a lost one is the frame it
+            // repeats wherever pictures are compared, as FFmpeg compares
+            // buffers: the first in the buffer with the same samples.
+            let slot = slots.get(index).map_or(-1, |&slot| {
+                let first = dpb.get(slot).map_or(slot, |frame| {
+                    dpb.iter()
+                        .position(|other| other.stamp == frame.stamp)
+                        .unwrap_or(slot)
+                });
+                i8::try_from(first).unwrap_or(-1)
+            });
             (slot, pocs.get(index).copied().unwrap_or(0))
         })
     });
@@ -5575,9 +5686,121 @@ mod tests {
             .collect();
         assert_eq!(live, vec![(2, true, false), (3, true, false)]);
         assert_eq!(poc.prev_frame_num, 3);
+        // Without gaps allowed the missing frames repeat the latest
+        // reference, two order counts on each.
         sps.gaps_allowed = false;
+        let mut dpb = vec![held(0), held(1)];
         poc.prev_frame_num = 1;
-        assert!(super::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 4).is_err());
+        super::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 4).unwrap();
+        let live: Vec<_> = dpb
+            .iter()
+            .filter(|frame| frame.referenced)
+            .map(|frame| (frame.frame_num, frame.nonexisting, frame.output, frame.poc))
+            .collect();
+        assert_eq!(live, vec![(2, false, false, 3), (3, false, false, 5)]);
+        // Of a longer gap, only as many frames as there are references
+        // are made, as FFmpeg makes them.
+        let mut dpb = vec![held(0), held(1)];
+        poc.prev_frame_num = 1;
+        super::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 9).unwrap();
+        let live: Vec<_> = dpb
+            .iter()
+            .filter(|frame| frame.referenced)
+            .map(|frame| (frame.frame_num, frame.poc))
+            .collect();
+        assert_eq!(live, vec![(7, 3), (8, 5)]);
+        assert_eq!(poc.prev_frame_num, 8);
+    }
+
+    #[test]
+    fn a_lost_reference_is_concealed_with_the_one_before_it() {
+        // The P picture with frame_num 2 is lost and the sequence allows
+        // no gaps. FFmpeg repeats the picture before it in its place, so
+        // the skipped picture after the loss shows 10, as it does here.
+        let sets = TinySets::default();
+        let mut decoder = tiny_decoder(&sets);
+        let mut shown = decoder.push(&tiny_pcm_p(&sets, 1, 0, 10, false)).unwrap();
+        shown.extend(
+            decoder
+                .push(&tiny_p(&sets, 3, 0, |bits| bits.ue(1)))
+                .unwrap(),
+        );
+        shown.extend(decoder.drain().unwrap());
+        let firsts: Vec<u8> = shown.iter().map(|frame| frame.picture.y()[0]).collect();
+        assert_eq!(firsts, vec![128, 10, 10]);
+    }
+
+    #[test]
+    fn pictures_after_a_lost_reference_match_ffmpeg() {
+        // Four references, so the pictures after the loss predict from the
+        // repeated frame and from the frame it repeats, side by side, and
+        // FFmpeg deblocks between the two as between one picture.
+        let Some(ff) = ffmpeg_bin() else {
+            eprintln!("skipped: no ffmpeg");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cutlass-h264-lost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (width, height, frames) = (96usize, 80usize, 12usize);
+        let whole = dir.join("whole.h264");
+        let encoded = Command::new(&ff)
+            .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size={width}x{height}:rate=30"))
+            .args(["-frames:v", &frames.to_string(), "-c:v", "libx264"])
+            .args([
+                "-x264-params",
+                "bframes=0:ref=4:keyint=30:scenecut=0:threads=1",
+            ])
+            .args(["-f", "h264"])
+            .arg(&whole)
+            .status();
+        if !encoded.is_ok_and(|status| status.success()) {
+            eprintln!("skipped: ffmpeg has no libx264");
+            return;
+        }
+        let units = access_units(&std::fs::read(&whole).unwrap());
+        for lost in [vec![3], vec![2, 5, 6]] {
+            let kept: Vec<Vec<u8>> = units
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !lost.contains(index))
+                .map(|(_, unit)| unit.clone())
+                .collect();
+            let damaged = dir.join("damaged.h264");
+            let yuv = dir.join("damaged.yuv");
+            std::fs::write(&damaged, kept.concat()).unwrap();
+            let decoded = Command::new(&ff)
+                .args(["-y", "-loglevel", "quiet", "-threads", "1", "-i"])
+                .arg(&damaged)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&yuv)
+                .status()
+                .unwrap();
+            assert!(decoded.success());
+            let reference = std::fs::read(&yuv).unwrap();
+            let mut codec = CodecParams::video(CodecId::H264, width as u32, height as u32);
+            codec.nal_length_size = 0;
+            let mut decoder = H264Decoder::open(&codec).unwrap();
+            let mut got = Vec::new();
+            for (n, unit) in kept.iter().enumerate() {
+                got.extend(
+                    decoder
+                        .push(&Packet::video(unit.clone(), n as i64, 1, 30, n == 0))
+                        .unwrap(),
+                );
+            }
+            got.extend(decoder.drain().unwrap());
+            let mut samples = Vec::new();
+            for picture in &got {
+                samples.extend_from_slice(picture.picture.y());
+                samples.extend_from_slice(picture.picture.u());
+                samples.extend_from_slice(picture.picture.v());
+            }
+            assert_eq!(got.len(), kept.len(), "{lost:?}");
+            assert!(samples == reference, "{lost:?}: differs from ffmpeg");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -5633,11 +5856,19 @@ mod tests {
             arg: 0,
             arg2: 0,
         }];
-        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        current.field_poc = [7, 5];
+        current.poc = 5;
+        poc.prev_poc_msb = 64;
+        poc.prev_poc_lsb = 7;
+        assert!(super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap());
         assert!(dpb.iter().all(|frame| !frame.referenced));
         assert_eq!(current.frame_num, 0);
         assert_eq!(poc.prev_frame_num, 0);
         assert!(poc.max_long.is_none());
+        // Clause 8.2.1: the order counts less `tempPicOrderCnt`, and the
+        // next picture counts from the top field's.
+        assert_eq!((current.field_poc, current.poc), ([2, 0], 0));
+        assert_eq!((poc.prev_poc_msb, poc.prev_poc_lsb), (0, 2));
     }
 
     #[test]
@@ -5759,6 +5990,7 @@ mod tests {
             time_scale: 0,
             fixed_rate: false,
             nonexisting: false,
+            stamp: super::next_stamp(),
             separate_plane: false,
             field: false,
             mbaff: false,
@@ -5871,7 +6103,11 @@ mod tests {
     }
 
     fn ffmpeg() -> Option<std::path::PathBuf> {
-        for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+        for candidate in [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/usr/bin/ffmpeg",
+        ] {
             let path = std::path::PathBuf::from(candidate);
             if path.is_file() {
                 return Some(path);
@@ -6907,6 +7143,58 @@ mod tests {
         );
     }
 
+    /// A P picture of one I_PCM macroblock whose samples are all `value`,
+    /// with `pic_order_cnt_lsb` `order`. `reset` marks it with
+    /// `memory_management_control_operation` 5, else by the sliding window.
+    fn tiny_pcm_p(sets: &TinySets, frame_num: u32, order: i32, value: u8, reset: bool) -> Packet {
+        let mut bits = tiny_head(sets, 5, frame_num, order);
+        bits.bit(false);
+        bits.bit(false);
+        if reset {
+            bits.bit(true);
+            bits.ue(5);
+            bits.ue(0);
+            tiny_tail(&mut bits, false, false);
+        } else {
+            tiny_tail(&mut bits, true, false);
+        }
+        bits.ue(0);
+        bits.ue(30);
+        while bits.n != 0 {
+            bits.bit(false);
+        }
+        for _ in 0..384 {
+            bits.u(8, u32::from(value));
+        }
+        bits.bit(true);
+        tiny_packet(1, i64::from(value), &bits.finish())
+    }
+
+    #[test]
+    fn pictures_after_a_memory_reset_count_their_order_from_it() {
+        // Clause 8.2.1: after operation 5 the picture's order count is
+        // reduced by itself, to 0, so the picture after it, at count 50,
+        // is shown after the one at 100 that reset. FFmpeg shows them in
+        // this order too.
+        let sets = TinySets {
+            order_type: 0,
+            ..TinySets::default()
+        };
+        let mut decoder = tiny_decoder(&sets);
+        let packets = [
+            tiny_pcm_p(&sets, 1, 100, 10, true),
+            tiny_pcm_p(&sets, 1, 50, 20, false),
+            tiny_pcm_p(&sets, 2, 60, 30, false),
+        ];
+        let mut shown = Vec::new();
+        for packet in &packets {
+            shown.extend(decoder.push(packet).unwrap());
+        }
+        shown.extend(decoder.drain().unwrap());
+        let firsts: Vec<u8> = shown.iter().map(|frame| frame.picture.y()[0]).collect();
+        assert_eq!(firsts, vec![128, 10, 20, 30]);
+    }
+
     #[test]
     fn weights_outside_their_range_are_rejected() {
         let sets = TinySets {
@@ -7197,9 +7485,10 @@ mod tests {
             }))
             .unwrap();
         assert!(decoder.drain().is_err());
-        // A unit that fails before it decodes anything, at its frame number.
-        let gap = tiny_p(&sets, 9, 0, |bits| bits.ue(1));
-        assert!(decoder.push(&gap).is_err());
+        // A unit that fails before it decodes anything, at its slice type.
+        let mut bits = tiny_head(&sets, 10, 3, 0);
+        bits.bit(true);
+        assert!(decoder.push(&tiny_packet(1, 3, &bits.finish())).is_err());
         assert_eq!(decoder.drain().unwrap().len(), 2);
     }
 

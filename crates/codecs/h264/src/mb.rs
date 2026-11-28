@@ -6651,6 +6651,7 @@ mod intra8 {
             time_scale: 0,
             fixed_rate: false,
             nonexisting: false,
+            stamp: crate::dec::next_stamp(),
             separate_plane: false,
             mbaff: false,
             field: false,

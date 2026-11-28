@@ -226,7 +226,11 @@ fn slice(intra: bool, plane: u8) -> Vec<u8> {
 }
 
 fn ffmpeg_bin() -> Option<std::path::PathBuf> {
-    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+    for candidate in [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ] {
         let path = std::path::PathBuf::from(candidate);
         if path.is_file() {
             return Some(path);

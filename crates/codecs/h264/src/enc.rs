@@ -169,7 +169,9 @@ impl H264Encoder {
             },
             self.qp,
         );
-        self.idr_pic_id = self.idr_pic_id.wrapping_add(1);
+        // Clause 7.4.3: `idr_pic_id` lies in 0 to 65535. Two IDR pictures
+        // in a row still differ, 65535 then 0.
+        self.idr_pic_id = (self.idr_pic_id + 1) & 0xFFFF;
         self.next_fn = 1;
         self.display = 1;
         let unit = self.unit(3, 5, &slice);
@@ -3223,6 +3225,35 @@ mod tests {
     use cutlass_encode::{VideoEncoder, VideoInput};
 
     use crate::dec::H264Decoder;
+
+    #[test]
+    fn idr_pic_id_stays_in_its_range() {
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        encoder.idr_pic_id = 65_535;
+        let mut ids = Vec::new();
+        for pts in 0..2 {
+            let packets = encoder
+                .push(&VideoInput {
+                    picture: Yuv420p::solid(16, 16, 40, 80, 160).unwrap(),
+                    pts,
+                    duration: 1,
+                    timescale: 30,
+                    force_keyframe: true,
+                })
+                .unwrap();
+            let nals = crate::nal::access_unit(&packets[0].data, 0).unwrap();
+            let slice = nals.iter().find(|nal| nal.kind == 5).expect("idr slice");
+            let mut bits = crate::bits::Bits::new(&slice.rbsp);
+            for _ in 0..3 {
+                bits.ue().unwrap();
+            }
+            bits.u(4).unwrap();
+            ids.push(bits.ue().unwrap());
+        }
+        assert_eq!(ids, vec![65_535, 0]);
+    }
 
     fn settle(encoder: &mut H264Encoder, input: &VideoInput) -> Vec<Packet> {
         let packets = encoder.push(input).unwrap();

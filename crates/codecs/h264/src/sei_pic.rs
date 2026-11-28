@@ -472,7 +472,11 @@ fn pps() -> Vec<u8> {
 }
 
 fn ffmpeg_bin() -> Option<PathBuf> {
-    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+    for candidate in [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ] {
         let path = PathBuf::from(candidate);
         if path.is_file() {
             return Some(path);

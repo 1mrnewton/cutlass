@@ -80,16 +80,37 @@ fn vpcc_colour(extra: &[u8]) -> (ColorPrimaries, Transfer) {
     let (Some(&primaries), Some(&transfer)) = (extra.get(7), extra.get(8)) else {
         return (ColorPrimaries::Bt601, Transfer::Bt601);
     };
+    // ISO/IEC 23091-2 codes, mapped as the other decoders map them.
+    // Unspecified and unknown codes keep BT.601.
     let primaries = match primaries {
         1 => ColorPrimaries::Bt709,
+        4 => ColorPrimaries::Bt470m,
         5 | 6 => ColorPrimaries::Bt601,
+        7 => ColorPrimaries::Smpte240m,
+        8 => ColorPrimaries::Film,
         9 => ColorPrimaries::Bt2020,
+        10 => ColorPrimaries::Smpte428,
+        11 => ColorPrimaries::Smpte431,
+        12 => ColorPrimaries::Smpte432,
+        22 => ColorPrimaries::Ebu3213,
         _ => ColorPrimaries::Bt601,
     };
+    // Transfer 6 (SMPTE 170M) is BT.709's curve; `Transfer::Bt601` is
+    // the BT.470 gammas, codes 4 and 5.
     let transfer = match transfer {
-        1 => Transfer::Bt709,
-        6 => Transfer::Bt601,
+        1 | 6 => Transfer::Bt709,
+        4 | 5 => Transfer::Bt601,
         14 | 15 => Transfer::Bt2020,
+        7 => Transfer::Smpte240m,
+        8 => Transfer::Linear,
+        9 => Transfer::Log100,
+        10 => Transfer::LogSqrt,
+        11 => Transfer::Iec61966_2_4,
+        12 => Transfer::Bt1361,
+        13 => Transfer::Srgb,
+        16 => Transfer::Pq,
+        17 => Transfer::Smpte428,
+        18 => Transfer::Hlg,
         _ => Transfer::Bt601,
     };
     (primaries, transfer)
@@ -327,6 +348,33 @@ mod tests {
             assert!(y.iter().all(|&s| s.abs_diff(141) <= 3), "luma");
             assert!(u.iter().all(|&s| s.abs_diff(59) <= 3), "cb");
             assert!(v.iter().all(|&s| s.abs_diff(189) <= 3), "cr");
+        }
+    }
+
+    /// Every `vpcC` colour code the codec types name maps to that name
+    /// (ISO/IEC 23091-2, as the other decoders map them): transfer 6 is
+    /// BT.709's curve, not the BT.470 gammas, and PQ, HLG and the wide
+    /// primaries are not BT.601. Unspecified codes stay BT.601.
+    #[test]
+    fn vpcc_colour_codes_map_as_the_standard_names_them() {
+        let vpcc =
+            |primaries: u8, transfer: u8| vec![1, 0, 0, 0, 0, 10, 0x80, primaries, transfer, 1];
+        let cases = [
+            (vpcc(1, 1), ColorPrimaries::Bt709, Transfer::Bt709),
+            (vpcc(6, 6), ColorPrimaries::Bt601, Transfer::Bt709),
+            (vpcc(5, 4), ColorPrimaries::Bt601, Transfer::Bt601),
+            (vpcc(9, 16), ColorPrimaries::Bt2020, Transfer::Pq),
+            (vpcc(9, 18), ColorPrimaries::Bt2020, Transfer::Hlg),
+            (vpcc(12, 13), ColorPrimaries::Smpte432, Transfer::Srgb),
+            (vpcc(2, 2), ColorPrimaries::Bt601, Transfer::Bt601),
+            (Vec::new(), ColorPrimaries::Bt601, Transfer::Bt601),
+        ];
+        for (extra, primaries, transfer) in cases {
+            assert_eq!(
+                super::vpcc_colour(&extra),
+                (primaries, transfer),
+                "vpcC {extra:?}"
+            );
         }
     }
 

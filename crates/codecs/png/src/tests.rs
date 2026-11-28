@@ -378,6 +378,29 @@ fn a_text_keyword_with_a_leading_space_is_refused() {
 }
 
 #[test]
+fn many_small_compressed_texts_cannot_inflate_without_bound() {
+    // Each zTXt is about a kilobyte that inflates to the per-chunk cap.
+    // Without a cap on the total, a few megabytes of these chunks would
+    // hold gigabytes of text.
+    let payload = crate::zlib::deflate(&vec![b'a'; crate::limits::MAX_INFLATED_META]);
+    let mut text = b"Comment\0\0".to_vec();
+    text.extend_from_slice(&payload);
+    let one = chunk(b"zTXt", &text);
+    let mut extra = Vec::new();
+    for _ in 0..12 {
+        extra.extend_from_slice(&one);
+    }
+    let result = decode_bytes(&png_of(ihdr(1, 1, 8, 0, 0), &[0, 1], &extra));
+    assert!(
+        matches!(result, Err(cutlass_decode::CodecError::Limit { .. })),
+        "{:?}",
+        result.map(|image| image.texts.len())
+    );
+    let few = decode_bytes(&png_of(ihdr(1, 1, 8, 0, 0), &[0, 1], &one)).expect("one text");
+    assert_eq!(few.texts[0].text.len(), crate::limits::MAX_INFLATED_META);
+}
+
+#[test]
 fn text_after_idat_is_kept() {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&SIGNATURE);

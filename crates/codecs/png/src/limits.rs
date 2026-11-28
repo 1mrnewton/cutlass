@@ -19,6 +19,11 @@ pub(crate) const MAX_IDAT: usize = 128 * 1024 * 1024;
 /// Largest inflated text or profile.
 pub(crate) const MAX_INFLATED_META: usize = 1024 * 1024;
 
+/// Largest sum of every inflated text and profile in one datastream. A
+/// kilobyte of deflate can inflate to a megabyte, so without this bound
+/// many small compressed chunks would hold far more than the file.
+pub(crate) const MAX_INFLATED_META_TOTAL: usize = 8 * 1024 * 1024;
+
 pub(crate) fn edge_ok(width: u32, height: u32) -> bool {
     width > 0
         && height > 0

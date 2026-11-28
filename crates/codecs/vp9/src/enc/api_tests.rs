@@ -2818,6 +2818,59 @@ fn a_region_of_interest_map_codes_its_segments_features() {
 }
 
 #[test]
+fn strides_whose_planes_pass_usize_are_refused() {
+    // A stride so large that the plane's end overflows `usize`: refused
+    // as a plane too short, not a panic (nor, wrapped, let through).
+    let (y, c) = (vec![0u8; 256], vec![128u8; 64]);
+    let mut encoder = Vp9Encoder::with_quantizer(16, 16, 120).expect("encoder");
+    for stride in [usize::MAX, usize::MAX / 15 + 1] {
+        let planes = [(&y[..], stride), (&c[..], 8), (&c[..], 8)];
+        assert!(encoder.push_planes(planes, 0.0, (0, 1, 30)).is_err());
+        let planes = [(&y[..], 16), (&c[..], 8), (&c[..], stride)];
+        assert!(encoder.encode_planes(planes, 0.0).is_err());
+    }
+    let mut alpha = Vp9Encoder::with_options(
+        16,
+        16,
+        super::Vp9Options {
+            alpha: true,
+            ..lag0(120)
+        },
+    )
+    .expect("encoder");
+    let planes = [(&y[..], 16), (&c[..], 8), (&c[..], 8), (&y[..], usize::MAX)];
+    assert!(alpha.push_planes_alpha(planes, 0.0, (0, 1, 30)).is_err());
+    // The pictures still code.
+    let planes = [(&y[..], 16), (&c[..], 8), (&c[..], 8), (&y[..], 16)];
+    assert_eq!(
+        alpha
+            .push_planes_alpha(planes, 0.0, (1, 1, 30))
+            .expect("picture")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn region_of_interest_deltas_at_their_types_least_are_refused() {
+    // -128 and -32768 are past the ranges (-63 to 63, -255 to 255) too:
+    // they are refused as the others are, not let through (nor a panic
+    // taking their absolute value).
+    let mut encoder = Vp9Encoder::with_options(16, 16, lag0(120)).expect("encoder");
+    let fine = super::RoiMap {
+        map: vec![0; 4],
+        ..super::RoiMap::default()
+    };
+    assert!(encoder.set_roi_map(Some(fine.clone())).is_ok());
+    let mut lf = fine.clone();
+    lf.delta_lf[3] = i8::MIN;
+    assert!(encoder.set_roi_map(Some(lf)).is_err());
+    let mut q = fine;
+    q.delta_q[5] = i16::MIN;
+    assert!(encoder.set_roi_map(Some(q)).is_err());
+}
+
+#[test]
 fn a_finer_region_of_interest_comes_back_nearer_the_source() {
     // The left half of the picture 40 indices finer: it comes back nearer
     // the source than without the map (its blocks weigh rate against

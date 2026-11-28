@@ -976,7 +976,11 @@ impl Vp9Encoder {
             if r.map.len() != blocks || r.map.iter().any(|&s| s > 7) {
                 return bad("vp9 region of interest map size or segment");
             }
-            if r.delta_q.iter().any(|d| d.abs() > 255) || r.delta_lf.iter().any(|d| d.abs() > 63) {
+            // (`unsigned_abs`: the types' least values are past the ranges
+            // too, and have no `abs`.)
+            if r.delta_q.iter().any(|d| d.unsigned_abs() > 255)
+                || r.delta_lf.iter().any(|d| d.unsigned_abs() > 63)
+            {
                 return bad("vp9 region of interest delta");
             }
             for (f, &skip) in r.ref_frame.iter().zip(&r.skip) {
@@ -1092,7 +1096,7 @@ impl Vp9Encoder {
             });
         };
         let (w, h) = (c.width as usize, c.height as usize);
-        if a.1 < w || a.0.len() < (h - 1) * a.1 + w {
+        if !plane_fits(a.0.len(), a.1, w, h) {
             return Err(CodecError::InvalidApi {
                 what: "alpha plane",
             });
@@ -2761,13 +2765,24 @@ fn check_planes<P>(
     let (w, h) = (width as usize, height as usize);
     for (p, (data, stride)) in planes.iter().enumerate() {
         let (pw, ph) = if p == 0 { (w, h) } else { (cw, ch) };
-        if *stride < pw || data.len() < (ph - 1) * stride + pw {
+        if !plane_fits(data.len(), *stride, pw, ph) {
             return Err(CodecError::InvalidApi {
                 what: "picture planes",
             });
         }
     }
     Ok(())
+}
+
+/// Whether `len` samples hold a plane of `ph` rows of `pw`, rows `stride`
+/// apart (a plane whose end overflows `usize` does not fit).
+fn plane_fits(len: usize, stride: usize, pw: usize, ph: usize) -> bool {
+    stride >= pw
+        && ph
+            .saturating_sub(1)
+            .checked_mul(stride)
+            .and_then(|n| n.checked_add(pw))
+            .is_some_and(|end| end <= len)
 }
 
 /// Two passes, and one pass up to [`POOL_SPEED`], keep the last [`POOL`]

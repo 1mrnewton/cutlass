@@ -15,8 +15,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, DecodeFactory, Decoder, Output, Packet, PictureInfo,
-    PictureOutput, PixelFormat, SequenceTiming, VideoDecoder, VideoOutput, Yuv420High, Yuv420p,
-    Yuv420p10,
+    PictureOutput, PixelFormat, VideoDecoder, VideoOutput, Yuv420High, Yuv420p, Yuv420p10,
 };
 
 use crate::frame::{Frame, OutSamples, Spares};
@@ -1146,11 +1145,7 @@ fn video_output(samples: OutSamples, meta: &Meta) -> Option<VideoOutput> {
         transfer: vui.transfer,
         matrix: vui.matrix,
         sample_aspect: vui.sample_aspect,
-        timing: SequenceTiming {
-            num_units: vui.num_units,
-            time_scale: vui.time_scale,
-            fixed: vui.fixed_rate,
-        },
+        timing: vui.timing(),
     })
 }
 

@@ -1,7 +1,9 @@
 //! Sequence and picture parameter sets (clauses 7.3.2.2, 7.3.2.3, 7.3.4,
 //! 7.3.7, and Annex E), and the tile scan of clause 6.5.1.
 
-use cutlass_decode::{CodecError, ColorMatrix, ColorPrimaries, ColorRange, SampleAspect, Transfer};
+use cutlass_decode::{
+    CodecError, ColorMatrix, ColorPrimaries, ColorRange, SampleAspect, SequenceTiming, Transfer,
+};
 
 use crate::bits::Bits;
 
@@ -118,10 +120,40 @@ pub struct Vui {
     pub sample_aspect: SampleAspect,
     pub num_units: u32,
     pub time_scale: u32,
+    /// Whether the picture rate is fixed: not when the HRD parameters
+    /// say so (`fixed_pic_rate_within_cvs_flag` of the highest sub-layer).
     pub fixed_rate: bool,
+    /// Clock ticks of one picture, from the HRD parameters.
+    pub ticks_per_picture: u32,
+    /// `field_seq_flag`: each picture is a field.
+    pub field_seq: bool,
 }
 
 impl Vui {
+    /// The timing as `SequenceTiming` holds it, whose frame rate is
+    /// `time_scale / (2 * num_units)` as in H.264. An HEVC clock tick
+    /// is a picture, or `elemental_duration_in_tc_minus1 + 1` ticks are
+    /// (clause E.3.1), so the time scale doubles; with `field_seq_flag`
+    /// each picture is a field, and the frame takes two.
+    pub fn timing(&self) -> SequenceTiming {
+        if self.num_units == 0 || self.time_scale == 0 {
+            return SequenceTiming::ABSENT;
+        }
+        let ticks = u64::from(self.num_units) * u64::from(self.ticks_per_picture);
+        let scale = u64::from(self.time_scale) * if self.field_seq { 1 } else { 2 };
+        // Both fit in 32 bits once their common factors of two go.
+        let shift = ticks.trailing_zeros().min(scale.trailing_zeros());
+        let (ticks, scale) = (ticks >> shift, scale >> shift);
+        match (u32::try_from(ticks), u32::try_from(scale)) {
+            (Ok(num_units), Ok(time_scale)) => SequenceTiming {
+                num_units,
+                time_scale,
+                fixed: self.fixed_rate,
+            },
+            _ => SequenceTiming::ABSENT,
+        }
+    }
+
     fn unspecified() -> Self {
         Self {
             range: ColorRange::Limited,
@@ -132,6 +164,8 @@ impl Vui {
             num_units: 0,
             time_scale: 0,
             fixed_rate: false,
+            ticks_per_picture: 1,
+            field_seq: false,
         }
     }
 }
@@ -581,7 +615,7 @@ fn parse_vui(bits: &mut Bits<'_>, max_sub_layers: u8) -> Result<Vui, CodecError>
         let _bottom = bits.ue()?;
     }
     let _neutral_chroma = bits.bit()?;
-    let _field_seq = bits.bit()?;
+    vui.field_seq = bits.bit()?;
     let _frame_field_info = bits.bit()?;
     if bits.bit()? {
         for _ in 0..4 {
@@ -596,7 +630,9 @@ fn parse_vui(bits: &mut Bits<'_>, max_sub_layers: u8) -> Result<Vui, CodecError>
             let _ticks = bits.ue()?;
         }
         if bits.bit()? {
-            hrd_parameters(bits, true, max_sub_layers)?;
+            let rate = hrd_parameters(bits, true, max_sub_layers)?;
+            vui.fixed_rate = rate.is_some();
+            vui.ticks_per_picture = rate.unwrap_or(1);
         }
     }
     if bits.bit()? {
@@ -610,7 +646,14 @@ fn parse_vui(bits: &mut Bits<'_>, max_sub_layers: u8) -> Result<Vui, CodecError>
     Ok(vui)
 }
 
-fn hrd_parameters(bits: &mut Bits<'_>, common: bool, max_sub_layers: u8) -> Result<(), CodecError> {
+/// `hrd_parameters()` (clause E.2.2). Returns the clock ticks of one
+/// picture of the highest sub-layer when its picture rate is fixed.
+fn hrd_parameters(
+    bits: &mut Bits<'_>,
+    common: bool,
+    max_sub_layers: u8,
+) -> Result<Option<u32>, CodecError> {
+    let mut rate = None;
     let mut nal = false;
     let mut vcl = false;
     let mut sub_pic = false;
@@ -633,8 +676,9 @@ fn hrd_parameters(bits: &mut Bits<'_>, common: bool, max_sub_layers: u8) -> Resu
         let general = bits.bit()?;
         let within = if general { true } else { bits.bit()? };
         let mut low_delay = false;
+        rate = None;
         if within {
-            let _duration = bits.ue()?;
+            rate = Some(bits.ue()?.saturating_add(1));
         } else {
             low_delay = bits.bit()?;
         }
@@ -656,7 +700,7 @@ fn hrd_parameters(bits: &mut Bits<'_>, common: bool, max_sub_layers: u8) -> Resu
             }
         }
     }
-    Ok(())
+    Ok(rate)
 }
 
 fn aspect(idc: u32) -> SampleAspect {
@@ -1046,7 +1090,7 @@ fn spacing(coded: &[u32], total: u32, uniform: bool) -> Result<Vec<u32>, CodecEr
 
 #[cfg(test)]
 mod tests {
-    use super::{Bits, StRps, diagonal, parse_st_rps};
+    use super::{Bits, StRps, Vui, diagonal, parse_st_rps};
 
     #[test]
     fn diagonal_scan_runs_up_right() {
@@ -1073,5 +1117,88 @@ mod tests {
         let rps = parse_st_rps(&mut bits, &[reference], 1, 2, false).unwrap();
         assert_eq!(rps.negative, vec![-1, -2]);
         assert!(rps.positive.is_empty());
+    }
+
+    /// Bits, most significant first, padded with a stop bit.
+    fn pack(fields: &[(u32, u64)]) -> Vec<u8> {
+        let mut bits = Vec::new();
+        for &(n, value) in fields {
+            bits.extend((0..n).rev().map(|i| (value >> i) & 1 == 1));
+        }
+        bits.push(true);
+        bits.chunks(8)
+            .map(|c| {
+                c.iter()
+                    .enumerate()
+                    .fold(0u8, |b, (i, &v)| b | u8::from(v) << (7 - i))
+            })
+            .collect()
+    }
+
+    /// A VUI with only timing information: `num_units` and `time_scale`,
+    /// `field_seq_flag`, and HRD parameters for one sub-layer when
+    /// `elemental` is set (`fixed_pic_rate_general_flag` and
+    /// `elemental_duration_in_tc_minus1`), or no HRD.
+    fn vui(num_units: u32, time_scale: u32, field_seq: bool, hrd: Option<(bool, u64)>) -> Vui {
+        // Aspect, overscan, signal type, chroma location; neutral chroma,
+        // field_seq_flag, frame field info, default display window.
+        let mut fields = vec![(4, 0), (1, 0), (1, u64::from(field_seq)), (1, 0), (1, 0)];
+        // Timing, without a POC proportionality.
+        fields.extend([
+            (1, 1),
+            (32, u64::from(num_units)),
+            (32, u64::from(time_scale)),
+        ]);
+        fields.push((1, 0));
+        match hrd {
+            None => fields.push((1, 0)),
+            Some((fixed, elemental)) => {
+                // Present; no NAL or VCL parameters.
+                fields.extend([(1, 1), (1, 0), (1, 0)]);
+                if fixed {
+                    // fixed_pic_rate_general_flag, elemental duration as
+                    // ue(v), then cpb_cnt_minus1 0 as ue(v).
+                    let v = elemental + 1;
+                    let len = 64 - v.leading_zeros();
+                    fields.extend([(1, 1), (len - 1, 0), (len, v), (1, 1)]);
+                } else {
+                    // Neither flag: low_delay_hrd_flag 1.
+                    fields.extend([(1, 0), (1, 0), (1, 1)]);
+                }
+            }
+        }
+        // No bitstream restriction.
+        fields.push((1, 0));
+        let data = pack(&fields);
+        super::parse_vui(&mut Bits::new(&data), 1).unwrap()
+    }
+
+    #[test]
+    fn vui_timing_is_reported_as_a_frame_rate_of_time_scale_over_twice_num_units() {
+        // A tick of 1/25 s, one picture a tick: 25 pictures a second.
+        let timing = vui(1, 25, false, None).timing();
+        assert_eq!(
+            (timing.num_units, timing.time_scale, timing.fixed),
+            (1, 50, true)
+        );
+        // Fields as pictures: 50 fields, 25 frames a second.
+        let timing = vui(1, 50, true, None).timing();
+        assert_eq!((timing.num_units, timing.time_scale), (1, 50));
+        // Each picture lasts two ticks of 1/100 s: 50 pictures a second.
+        let timing = vui(1, 100, false, Some((true, 1))).timing();
+        assert_eq!(
+            (timing.num_units, timing.time_scale, timing.fixed),
+            (1, 100, true)
+        );
+        // The HRD says the picture rate is not fixed.
+        assert!(!vui(1001, 30_000, false, Some((false, 0))).timing().fixed);
+        // A time scale too large to double halves the tick count.
+        let timing = vui(2, u32::MAX, false, None).timing();
+        assert_eq!((timing.num_units, timing.time_scale), (1, u32::MAX));
+        // No timing information.
+        assert_eq!(
+            Vui::unspecified().timing(),
+            cutlass_decode::SequenceTiming::ABSENT
+        );
     }
 }

@@ -25,6 +25,7 @@ Decoder details:
 - Multistream output channels follow the mapping table in the header, including silent channels, in the Vorbis channel order. The header's output gain is applied.
 - The pre-skip is not removed. The container's edit says how many samples to drop from the start.
 - A packet whose `duration` is shorter than its decoded length carries the difference as `skip_trailing`.
+- A frame of one byte or less is lost, as in libopus. CELT concealment follows libopus 1.6.1: up to 100 ms by pitch, then noise whose band energies fall toward the background level. The first frame decoded after a loss predicts its energies safely, so it does not burst.
 
 Encoder details:
 
@@ -81,7 +82,7 @@ Other public items:
 
 - Unit tests sit beside each module: the range coder, packet framing, the header, SILK, CELT, and the decoder and encoder lifecycles.
 - `the_rfc_8251_vectors_match_every_final_range_and_pass_opus_compare` decodes the twelve RFC 8251 test vectors in stereo and in mono and compares every final range. With `CUTLASS_OPUS_COMPARE` naming the RFC `opus_compare` tool, each output must pass it. The vectors are not in the repository: `CUTLASS_OPUS_VECTORS` names their folder, and the test skips without it.
-- `tests/interop.rs`: FFmpeg, with libopus and with its own Opus encoder, writes `.opus` and `.mp4` files covering SILK, hybrid, CELT, 2.5 to 60 ms frames, and 5.1. They are read by `cutlass-ogg` or `cutlass-isobmff` and decoded here. The sample count must equal libopus's and the samples must match to at least 60 dB. Files written here must open in FFmpeg with the input's sample count.
+- `tests/interop.rs`: FFmpeg, with libopus and with its own Opus encoder, writes `.opus` and `.mp4` files covering SILK, hybrid, CELT, 2.5 to 60 ms frames, and 5.1. They are read by `cutlass-ogg` or `cutlass-isobmff` and decoded here. The sample count must equal libopus's and the samples must match to at least 60 dB over every frame libopus decodes. Frames libopus conceals are held only to within 6 dB of its level. Files written here must open in FFmpeg with the input's sample count.
 - `tests/encoder_oracle.rs`: every file written here must decode in FFmpeg. The VBR mean must be within 10% of the request on every item that is not sparse, every CBR packet must have the exact size, and the mean log-spectral distance must be at most 1.5 dB above libopus's at 64, 96, and 128 kb/s stereo.
 - `tests/campaign.rs`: seeded in-process campaigns on every test run, 2 seconds each by default. Damaged and random packets go into the decoder, and random settings and hostile samples into the encoder. Nothing may panic and every sample must be finite. These are not libFuzzer runs.
 
@@ -121,6 +122,7 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 - Output stops at 8 channels. Ambisonic mapping families 2 and 3 are refused.
 - Family 255 has no speaker positions. Its channels are labeled by count only so that a buffer can be built.
 - Nothing outside this crate calls `conceal`, `conceal_output`, or `decode_fec`.
+- The CELT pitch concealment is an older libopus design than 1.6.1's, and it fades faster: 12 dB or more a 20 ms frame, where libopus fades 2 to 4 dB.
 - The decoder copies its whole stream state before every packet, so that a failed packet can be undone. The encoder does the same on every push.
 - Opus in WebM does not open in Cutlass: the Matroska container is not built.
 - The app's export writes Opus alone, in an `.opus` file. A movie with Opus sound is refused.

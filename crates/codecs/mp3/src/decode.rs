@@ -526,8 +526,10 @@ impl Decoder for Mp3Decoder {
         if self.held.is_empty() {
             self.held_start = first;
         }
+        // The sample index follows the packet's timestamp, which may sit at
+        // either end of the range: every step from it saturates.
         if missing > 0 {
-            self.invalid_until = self.invalid_until.max(first + missing);
+            self.invalid_until = self.invalid_until.max(first.saturating_add(missing));
         }
         let start = self.held_start;
         let mut combined = std::mem::take(&mut self.held);
@@ -536,13 +538,19 @@ impl Decoder for Mp3Decoder {
         let hold = gapless.padding.saturating_sub(DECODER_DELAY) as usize;
         let emit = total.saturating_sub(hold);
         self.held = combined.split_off(emit * channels);
-        self.held_start = start + emit as i64;
+        self.held_start = start.saturating_add(emit as i64);
         if emit == 0 {
             return Ok(Vec::new());
         }
         let valid_from = lead.max(self.invalid_until);
-        let skip = (valid_from - start).clamp(0, emit as i64) as u32;
-        Ok(vec![self.output(combined, shape, start - lead, skip, 0)?])
+        let skip = valid_from.saturating_sub(start).clamp(0, emit as i64) as u32;
+        Ok(vec![self.output(
+            combined,
+            shape,
+            start.saturating_sub(lead),
+            skip,
+            0,
+        )?])
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
@@ -575,12 +583,12 @@ impl Decoder for Mp3Decoder {
             return Ok(Vec::new());
         }
         let valid_from = lead.max(self.invalid_until);
-        let skip = (valid_from - start).clamp(0, total as i64) as u32;
+        let skip = valid_from.saturating_sub(start).clamp(0, total as i64) as u32;
         let trailing = (trailing as u32).min(total as u32 - skip);
         Ok(vec![self.output(
             pcm,
             shape,
-            start - lead,
+            start.saturating_sub(lead),
             skip,
             trailing,
         )?])
@@ -594,6 +602,8 @@ impl Decoder for Mp3Decoder {
         self.held_start = 0;
         self.invalid_until = 0;
         self.clock = 0;
-        self.drained = false;
+        // No frame has passed the filterbank yet, so there is no tail to
+        // release until one does.
+        self.drained = true;
     }
 }

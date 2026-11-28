@@ -228,6 +228,15 @@ fn parse_audio(
         }
         configured.extradata = cookie;
     }
+    if codec == CodecId::Flac
+        && let Some(facts) = crate::flac::facts(&configured.extradata)
+    {
+        // The encapsulation halves a rate above 65535 in the entry and
+        // names STREAMINFO the stream's true rate, count, and depth.
+        channels = facts.channels;
+        bits = facts.bits;
+        rate = facts.rate;
+    }
     Ok(SampleDesc {
         fourcc,
         codec,

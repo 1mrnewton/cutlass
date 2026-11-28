@@ -24,6 +24,10 @@ pub(crate) const VOP_START: u8 = 0xB6;
 /// The largest frame edge a VOL may declare: the field is 13 bits.
 pub(crate) const MAX_EDGE: u32 = 8191;
 
+/// The most seconds one `modulo_time_base` may count. The encoder keeps
+/// under it, so its streams decode here.
+pub(crate) const MAX_MODULO_TIME_BASE: u32 = 3600;
+
 /// `video_object_type_indication` of the Simple Studio and Core Studio
 /// objects, which use a different syntax.
 const STUDIO_TYPES: [u8; 2] = [0x0E, 0x0F];
@@ -475,7 +479,7 @@ pub(crate) fn parse_vop(payload: &[u8], vol: &Vol, divx_413: bool) -> Result<Vop
     let mut modulo_time_base = 0;
     while r.bit() {
         modulo_time_base += 1;
-        if r.overrun() || modulo_time_base > 3600 {
+        if r.overrun() || modulo_time_base > MAX_MODULO_TIME_BASE {
             return Err(r.malformed("modulo_time_base"));
         }
     }

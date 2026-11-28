@@ -10,7 +10,7 @@ use cutlass_container::{
 };
 
 use crate::format::{PLACEHOLDER, SeekPoint, StreamInfo, crc8, crc16};
-use crate::{FlacDemux, FlacMux};
+use crate::{FlacDemux, FlacMux, MAX_METADATA_BLOCKS};
 
 const RATE: u32 = 44_100;
 
@@ -458,6 +458,116 @@ fn finish_checks_durations_and_config_supplies_the_signature() {
     mux.finish(&duration(4096)).expect("finish");
     let bytes = mux.into_inner().into_inner();
     assert_eq!(open(&bytes).expect("open").stream_info().md5, [0; 16]);
+}
+
+/// The metadata blocks of a native file, type and body, up to the one
+/// flagged last.
+fn blocks_of(bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut at = 4;
+    loop {
+        let head = &bytes[at..at + 4];
+        let len = u32::from_be_bytes([0, head[1], head[2], head[3]]) as usize;
+        out.push((head[0] & 0x7F, bytes[at + 4..at + 4 + len].to_vec()));
+        at += 4 + len;
+        if head[0] & 0x80 != 0 {
+            return out;
+        }
+    }
+}
+
+#[test]
+fn extradata_from_matroska_or_mp4_is_taken_and_its_comments_are_kept() {
+    // A VORBIS_COMMENT with the vendor "Lavf" and no comments.
+    let comment = vec![4, 0, 0, 0, b'L', b'a', b'v', b'f', 0, 0, 0, 0];
+    let application = b"test1234".to_vec();
+    // A Matroska CodecPrivate as mkvmerge copies a native header, with the
+    // SEEKTABLE and PADDING of the file it came from.
+    let matroska = header_with(&[
+        (0, info_body()),
+        (3, SeekPoint::placeholder().to_bytes().to_vec()),
+        (4, comment.clone()),
+        (1, vec![0; 16]),
+        (2, application.clone()),
+    ]);
+    // `dfLa` bodies as an MP4 demuxer gives them: version and flags, then
+    // the blocks.
+    let dfla = |blocks: &[(u8, Vec<u8>)]| {
+        let mut body = vec![0, 0, 0, 0];
+        body.extend_from_slice(&header_with(blocks)[4..]);
+        body
+    };
+    let mp4 = dfla(&[(0, info_body()), (4, comment.clone())]);
+    let ffmpeg_mp4 = dfla(&[(0, info_body())]);
+    let cases = [
+        (matroska, 2, vec![3, 4, 2]),
+        (mp4.clone(), 0, vec![4]),
+        (ffmpeg_mp4.clone(), 0, vec![]),
+        (ffmpeg_mp4, 1, vec![3]),
+    ];
+    for (extra, slots, after) in cases {
+        let mut mux = FlacMux::with_seek_points(Cursor::new(Vec::new()), slots);
+        mux.add_stream(stream(extra.clone())).expect("stream");
+        // A late configuration in the same form is taken too.
+        mux.set_config(TrackId::new(0), &extra).expect("config");
+        let mut written = Vec::new();
+        for index in 0..2u64 {
+            let packet = packet(frame(index, 4096, false, 0), index * 4096, 4096);
+            mux.write_packet(&packet).expect("write");
+            written.push(packet);
+        }
+        mux.finish(&duration(8192)).expect("finish");
+        let bytes = mux.into_inner().into_inner();
+        let blocks = blocks_of(&bytes);
+        let mut kinds = vec![0];
+        kinds.extend_from_slice(&after);
+        assert_eq!(
+            blocks.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+            kinds,
+            "{extra:x?}"
+        );
+        for (kind, body) in &blocks {
+            match kind {
+                4 => assert_eq!(body, &comment),
+                2 => assert_eq!(body, &application),
+                _ => {}
+            }
+        }
+        let mut demux = open(&bytes).expect("open");
+        assert_eq!(demux.stream_info().total_samples, 8192);
+        assert_eq!(read_all(&mut demux), written);
+    }
+    // A `dfLa` body of another version, or one whose STREAMINFO does not
+    // match the stream, is refused.
+    let mut version = mp4.clone();
+    version[0] = 1;
+    let mut stereo = StreamInfo::parse(&info_body()).expect("info");
+    stereo.channels = 2;
+    for extra in [version, dfla(&[(0, stereo.to_bytes().to_vec())])] {
+        let mut mux = FlacMux::new(Cursor::new(Vec::new()));
+        assert!(mux.add_stream(stream(extra)).is_err());
+    }
+    // Kept blocks may fill the file up to the reader's block limit, with
+    // STREAMINFO and SEEKTABLE, and not past it.
+    let room = MAX_METADATA_BLOCKS as usize - 2;
+    let many = |count: usize| {
+        let mut blocks = vec![(0, info_body())];
+        blocks.extend(std::iter::repeat_n((2, application.clone()), count));
+        dfla(&blocks)
+    };
+    let mut mux = FlacMux::with_seek_points(Cursor::new(Vec::new()), 1);
+    mux.add_stream(stream(many(room))).expect("stream");
+    mux.write_packet(&packet(frame(0, 4096, false, 0), 0, 4096))
+        .expect("write");
+    mux.finish(&duration(4096)).expect("finish");
+    let bytes = mux.into_inner().into_inner();
+    assert_eq!(blocks_of(&bytes).len(), room + 2);
+    assert_eq!(
+        open(&bytes).expect("open").stream_info().total_samples,
+        4096
+    );
+    let mut mux = FlacMux::new(Cursor::new(Vec::new()));
+    assert!(mux.add_stream(stream(many(room + 1))).is_err());
 }
 
 #[test]

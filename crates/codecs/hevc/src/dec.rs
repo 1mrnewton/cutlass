@@ -31,6 +31,9 @@ const MAX_SPS: usize = 16;
 const MAX_PPS: usize = 64;
 /// Most threads a decoder uses.
 const MAX_THREADS: usize = 16;
+/// Longest edge of the planar pictures in a `VideoOutput`, below the
+/// 16,888 samples a stream may have.
+const MAX_PLANAR_EDGE: u32 = 16_880;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Marking {
@@ -457,7 +460,7 @@ impl HevcDecoder {
                             add_slice(pending, Arc::new(nal), header)?;
                         }
                     } else if !skipping && let Some(pending) = current.as_mut() {
-                        let header = parse(state, &nal, pending.independent.as_ref())?;
+                        let header = parse(state, &nal, Some(pending))?;
                         add_slice(pending, Arc::new(nal), header)?;
                     }
                 }
@@ -487,6 +490,15 @@ impl HevcDecoder {
                 what: "slice references a missing parameter set",
             });
         };
+        let [left, right, top, bottom] = sps.crop;
+        if self.form == OutForm::Planes
+            && (sps.width - left - right > MAX_PLANAR_EDGE
+                || sps.height - top - bottom > MAX_PLANAR_EDGE)
+        {
+            return Err(CodecError::Limit {
+                what: "picture size",
+            });
+        }
         let irap = nal.is_irap();
         if irap {
             state.no_rasl_output =
@@ -510,13 +522,21 @@ impl HevcDecoder {
         } else {
             let prev_lsb = state.prev_tid0_poc & (max_lsb - 1);
             let prev_msb = state.prev_tid0_poc - prev_lsb;
-            if lsb < prev_lsb && prev_lsb - lsb >= max_lsb / 2 {
-                prev_msb + max_lsb
+            let msb = if lsb < prev_lsb && prev_lsb - lsb >= max_lsb / 2 {
+                prev_msb.checked_add(max_lsb)
             } else if lsb > prev_lsb && lsb - prev_lsb > max_lsb / 2 {
-                prev_msb - max_lsb
+                prev_msb.checked_sub(max_lsb)
             } else {
-                prev_msb
-            }
+                Some(prev_msb)
+            };
+            // The order count has 32 bits (clause 8.3.1).
+            let Some(msb) = msb else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "slice_pic_order_cnt_lsb",
+                });
+            };
+            msb
         };
         let poc = msb + lsb;
         if nal.temporal_id == 0 && !nal.is_rasl() && !nal.is_radl() && !nal.is_sub_layer_non_ref() {
@@ -543,7 +563,13 @@ impl HevcDecoder {
         let mut lt_curr = Vec::new();
         for lt in &header.long_term {
             let (value, exact) = if lt.msb {
-                (poc + lt.poc, true)
+                let Some(value) = poc.checked_add(lt.poc) else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "delta_poc_msb_cycle_lt",
+                    });
+                };
+                (value, true)
             } else {
                 (lt.poc, false)
             };
@@ -570,7 +596,12 @@ impl HevcDecoder {
         ];
         for (values, used, list) in deltas {
             for (&delta, &used) in values.iter().zip(used.iter()) {
-                let target = poc + delta;
+                let Some(target) = poc.checked_add(delta) else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "short_term_ref_pic_set",
+                    });
+                };
                 let found = state.dpb.iter().enumerate().position(|(i, p)| {
                     p.marking == Marking::Short && keep[i] != Marking::Long && p.poc == target
                 });
@@ -935,10 +966,16 @@ fn make_job<P: Pixel>(
     }
 }
 
-fn parse(state: &State, nal: &Nal, prev: Option<&SliceHeader>) -> Result<SliceHeader, CodecError> {
-    let lookup = |id: u8| state.sets(id).map(|(s, p)| ((*s).clone(), (*p).clone()));
-    let prev = prev.cloned();
-    slice::parse_header(nal, &lookup, prev.as_ref()).map(|(header, _, _)| header)
+/// Read a slice segment header. A segment after the first of its picture
+/// (`pending`) is read with the parameter sets the picture started with:
+/// a set sent again between its segments counts from the next picture on.
+fn parse(state: &State, nal: &Nal, pending: Option<&Pending>) -> Result<SliceHeader, CodecError> {
+    let lookup = |id: u8| match pending {
+        Some(p) if p.pic.pps.id == id => Some(((*p.pic.sps).clone(), (*p.pic.pps).clone())),
+        _ => state.sets(id).map(|(s, p)| ((*s).clone(), (*p).clone())),
+    };
+    let prev = pending.and_then(|p| p.independent.as_ref());
+    slice::parse_header(nal, &lookup, prev).map(|(header, _, _)| header)
 }
 
 /// Reference picture lists of one slice (clause 8.3.4).

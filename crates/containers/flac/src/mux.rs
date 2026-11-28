@@ -7,6 +7,11 @@
 //! the MD5 signature an encoder handed over) and the seek points. A
 //! cancelled or failed mux leaves the count at zero, which a reader takes
 //! as "unknown", so the frames already written still play.
+//!
+//! Extradata may carry metadata blocks after STREAMINFO, as a Matroska
+//! CodecPrivate or an MP4 `dfLa` body does. They are written after the
+//! SEEKTABLE as they came, but for SEEKTABLE and PADDING, which describe
+//! the file they came from.
 
 use std::io::{Seek, SeekFrom, Write};
 
@@ -16,8 +21,10 @@ use cutlass_container::{
     TrackDuration, TrackId,
 };
 
+use crate::demux::MAX_METADATA_BLOCKS;
 use crate::format::{
-    FrameHeader, Header, SEEK_POINT_LEN, STREAMINFO_LEN, SeekPoint, StreamInfo, crc16, parse_header,
+    FrameHeader, Header, LAST, PADDING, SEEK_POINT_LEN, SEEKTABLE, STREAMINFO, STREAMINFO_LEN,
+    SeekPoint, StreamInfo, crc16, extra_blocks, parse_header,
 };
 
 /// Seek points reserved when none are asked for.
@@ -31,6 +38,9 @@ struct Track {
     rate: u32,
     channels: u8,
     config: Option<StreamInfo>,
+    /// The extradata's other metadata blocks, type and body, written after
+    /// the SEEKTABLE.
+    kept: Vec<(u8, Vec<u8>)>,
 }
 
 /// One frame start the seek table can point at.
@@ -191,18 +201,28 @@ impl<W: Write + Seek> FlacMux<W> {
 
     fn write_header(&mut self) -> Result<(), MuxError> {
         let info = self.stream_info(false)?;
+        let kept = self.track.as_ref().map_or(&[][..], |track| &track.kept);
+        let last_if = |is_last: bool| if is_last { LAST } else { 0 };
         let mut head = b"fLaC".to_vec();
-        let last = if self.seek_slots == 0 { 0x80 } else { 0 };
-        head.extend_from_slice(&[last, 0, 0, STREAMINFO_LEN as u8]);
+        let last = last_if(self.seek_slots == 0 && kept.is_empty());
+        head.extend_from_slice(&[last | STREAMINFO, 0, 0, STREAMINFO_LEN as u8]);
         head.extend_from_slice(&info.to_bytes());
         let seektable_at = head.len() as u64;
         if self.seek_slots > 0 {
             let len = self.seek_slots as usize * SEEK_POINT_LEN;
             let len_bytes = u32::try_from(len).unwrap_or(0).to_be_bytes();
-            head.extend_from_slice(&[0x80 | 3, len_bytes[1], len_bytes[2], len_bytes[3]]);
+            let last = last_if(kept.is_empty());
+            head.extend_from_slice(&[last | SEEKTABLE, len_bytes[1], len_bytes[2], len_bytes[3]]);
             for _ in 0..self.seek_slots {
                 head.extend_from_slice(&SeekPoint::placeholder().to_bytes());
             }
+        }
+        for (index, (kind, body)) in kept.iter().enumerate() {
+            // A block body came from a 24-bit length field.
+            let len_bytes = u32::try_from(body.len()).unwrap_or(0).to_be_bytes();
+            let last = last_if(index + 1 == kept.len());
+            head.extend_from_slice(&[last | kind, len_bytes[1], len_bytes[2], len_bytes[3]]);
+            head.extend_from_slice(body);
         }
         self.out.write_all(&head).map_err(|error| io(&error))?;
         self.seektable_at = seektable_at;
@@ -465,11 +485,19 @@ impl<W: Write + Seek + Send> Mux for FlacMux<W> {
             }));
         }
         let extra = stream.params.extradata();
-        let config = if extra.is_empty() {
-            None
+        let (config, kept): (_, Vec<_>) = if extra.is_empty() {
+            (None, Vec::new())
         } else {
             match StreamInfo::from_extra(extra) {
-                Some(info) if info.sample_rate == rate && info.channels == channels => Some(info),
+                Some(info) if info.sample_rate == rate && info.channels == channels => {
+                    let kept = extra_blocks(extra)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|block| !matches!(block.kind, STREAMINFO | PADDING | SEEKTABLE))
+                        .map(|block| (block.kind, block.body.to_vec()))
+                        .collect();
+                    (Some(info), kept)
+                }
                 _ => {
                     return Err(
                         self.fail(rejected("the extradata is not this stream's STREAMINFO"))
@@ -477,10 +505,17 @@ impl<W: Write + Seek + Send> Mux for FlacMux<W> {
                 }
             }
         };
+        // STREAMINFO and SEEKTABLE come first; the file must still open.
+        if kept.len() + 2 > MAX_METADATA_BLOCKS as usize {
+            return Err(self.fail(rejected(
+                "the extradata has more metadata blocks than a file may hold",
+            )));
+        }
         self.track = Some(Track {
             rate,
             channels,
             config,
+            kept,
         });
         Ok(TrackId::new(0))
     }
@@ -522,8 +557,10 @@ impl<W: Write + Seek + Send> Mux for FlacMux<W> {
         self.status
     }
 
-    /// Takes a STREAMINFO an encoder handed over. The latest one is written
-    /// at finish; a different rate, channel count, or depth is refused.
+    /// Takes a STREAMINFO an encoder handed over, in any form
+    /// [`StreamInfo::from_extra`] reads. The latest one is written at
+    /// finish; a different rate, channel count, or depth is refused. Other
+    /// blocks in it are not written: the header may already be out.
     fn set_config(&mut self, track: TrackId, config: &[u8]) -> Result<(), MuxError> {
         self.building()?;
         if track != TrackId::new(0) {

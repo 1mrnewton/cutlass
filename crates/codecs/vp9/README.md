@@ -39,8 +39,10 @@ Decoder (`Vp9Decoder`, over `Decoder`):
 
 Encoder (`Vp9Encoder`, `EngineEncoder`):
 
-- Profiles 0 to 3, any size up to 65536×65536 (odd sizes too), quantizer
-  index 0 (lossless, Walsh-Hadamard) to 255.
+- Profiles 0 to 3, any size within level 6.2 (odd sizes too): at most
+  16832 a side and 35,651,584 luma samples, the limits the decoder reads.
+  A larger size is refused at open with `Limit`. Quantizer index 0
+  (lossless, Walsh-Hadamard) to 255.
 - Partitions from 64×64 to 8×8 (rectangles below speed 4), 4×4 intra
   blocks on key frames (each 4×4 with its own mode), and inter blocks
   under 8×8 (4×4, 8×4, 4×8, each sub-block with its own mode and vector,

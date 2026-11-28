@@ -394,6 +394,122 @@ fn files_muxed_here_pass_flac_metaflac_and_ffprobe() {
     }
 }
 
+/// The body of the first `kind` box in an MP4 file.
+fn box_body<'a>(bytes: &'a [u8], kind: &[u8; 4]) -> &'a [u8] {
+    let at = bytes
+        .windows(4)
+        .position(|window| window == kind)
+        .expect("box");
+    let size = u32::from_be_bytes(bytes[at - 4..at].try_into().expect("size")) as usize;
+    &bytes[at + 4..at - 4 + size]
+}
+
+/// The `fLaC` marker and the metadata blocks after it, up to the one
+/// flagged last: a Matroska CodecPrivate.
+fn native_header(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .windows(4)
+        .position(|window| window == b"fLaC")
+        .expect("marker");
+    let mut at = start + 4;
+    loop {
+        let head = &bytes[at..at + 4];
+        at += 4 + u32::from_be_bytes([0, head[1], head[2], head[3]]) as usize;
+        if head[0] & 0x80 != 0 {
+            return &bytes[start..at];
+        }
+    }
+}
+
+/// FFmpeg's MD5 of the decoded sound of `path`.
+fn pcm_md5(path: &Path) -> String {
+    let out = run(
+        "ffmpeg",
+        &[
+            "-v",
+            "error",
+            "-i",
+            path_str(path),
+            "-map",
+            "0:a",
+            "-f",
+            "md5",
+            "-",
+        ],
+    );
+    String::from_utf8(out).expect("utf-8").trim().to_owned()
+}
+
+/// FFmpeg copies a six-channel FLAC file into MP4 and Matroska. The `dfLa`
+/// body and the CodecPrivate it wrote are the configuration a copy back to
+/// `.flac` gets from those demuxers; the copy must decode to the same
+/// samples. For six channels FFmpeg adds a comment block naming the channel
+/// mask to the CodecPrivate, and it must stay.
+#[test]
+fn configuration_from_mp4_and_matroska_remuxes_to_flac_that_ffmpeg_decodes() {
+    if !have("ffmpeg") || !have("ffprobe") {
+        return;
+    }
+    let dir = scratch("container-config-forms");
+    let source = dir.join("source.flac");
+    run(
+        "ffmpeg",
+        &[
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2:sample_rate=48000",
+            "-ac",
+            "6",
+            "-c:a",
+            "flac",
+            path_str(&source),
+        ],
+    );
+    let copy = |name: &str| {
+        let out = dir.join(name);
+        run(
+            "ffmpeg",
+            &[
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                path_str(&source),
+                "-c",
+                "copy",
+                path_str(&out),
+            ],
+        );
+        std::fs::read(out).expect("read")
+    };
+    let dfla = box_body(&copy("copy.mp4"), b"dfLa").to_vec();
+    assert_eq!(&dfla[..8], &[0, 0, 0, 0, 0x80, 0, 0, 0x22]);
+    let private = native_header(&copy("copy.mka")).to_vec();
+    // STREAMINFO, then the VORBIS_COMMENT FFmpeg adds.
+    assert_eq!(private[4] & 0x7F, 0);
+    assert_eq!(private.get(42).map(|head| head & 0x7F), Some(4));
+    let comment = private[42..].to_vec();
+    let mut demux = open(&source);
+    let packets = read_all(&mut demux);
+    let want = pcm_md5(&source);
+    assert!(want.starts_with("MD5="), "{want}");
+    for (name, config) in [("mp4", &dfla), ("mka", &private)] {
+        let out = dir.join(format!("from-{name}.flac"));
+        mux_packets(&out, config, 48_000, 6, &packets);
+        assert_eq!(pcm_md5(&out), want, "{name}");
+        assert_eq!(ffprobe_packets(&out), ffprobe_packets(&source), "{name}");
+        assert_eq!(read_all(&mut open(&out)), packets, "{name}");
+        let header = native_header(&std::fs::read(&out).expect("read")).to_vec();
+        let kept = header.windows(comment.len()).any(|bytes| bytes == comment);
+        assert_eq!(kept, name == "mka", "{name}");
+        eprintln!("{name}: the .flac copy decodes as the source does");
+    }
+}
+
 /// Rewrites a libFLAC frame header to the variable-block strategy.
 fn as_variable(frame: &[u8], sample: u64) -> Vec<u8> {
     let mut header = FrameHeader::parse(frame).expect("header");

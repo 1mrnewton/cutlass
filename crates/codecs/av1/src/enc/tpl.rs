@@ -365,7 +365,8 @@ pub fn analyze<P: Pixel>(
     }
     // Propagate backwards in coding order.
     for &f in order.iter().rev() {
-        if !frames[f].analyze {
+        // A frame one sample wide or high has no passes, so nothing to spread.
+        if !frames[f].analyze || half[f].is_none() {
             continue;
         }
         for br in 0..rows {

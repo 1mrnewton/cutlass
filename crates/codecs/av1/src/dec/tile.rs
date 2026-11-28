@@ -25,7 +25,7 @@ use crate::spec::tables::{
 
 use super::cdf::CdfContext;
 use super::decoder::Mirror;
-use super::frame::{FrameState, Picture, lf_dims};
+use super::frame::{FrameState, LF_LOSSLESS, Picture, lf_dims};
 use super::msac::{Hot, Msac};
 use super::obu::{
     FrameHeader, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER,
@@ -3891,7 +3891,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             let dims = lf_dims(
                 block_width(psz).trailing_zeros() - 2,
                 block_height(psz).trailing_zeros() - 2,
-            );
+            ) | if self.b.lossless { LF_LOSSLESS } else { 0 };
             let st = self.fs.mi_stride;
             for r in (0..rows).step_by(step_y) {
                 let at = self.fs.mi_row(r0 + r) + c0;

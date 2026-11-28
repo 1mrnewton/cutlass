@@ -1166,4 +1166,27 @@ mod tests {
         let mut whole = Av1Decoder::open(&params).expect("decoder");
         assert_eq!(pictures(&mut whole, &packets).len(), 10);
     }
+
+    #[test]
+    fn a_picture_one_sample_wide_or_high_encodes() {
+        for (width, height) in [(1, 9), (9, 1), (1, 1)] {
+            let mut params = CodecParams::video(CodecId::Av1, width, height);
+            params.pixel = PixelFormat::Yuv444p;
+            let mut encoder = Av1Encoder::open(&params).expect("encoder");
+            let mut packets = Vec::new();
+            for i in 0..3 {
+                packets.extend(
+                    encoder
+                        .push_frame(&frame(PixelFormat::Yuv444p, width, height, i))
+                        .expect("push"),
+                );
+            }
+            packets.extend(encoder.drain().expect("drain"));
+            assert_eq!(packets.len(), 3, "{width}x{height}");
+            let mut decoder = Av1Decoder::open(&params).expect("decoder");
+            let shown = pictures(&mut decoder, &packets);
+            assert_eq!(shown.len(), 3, "{width}x{height}");
+            assert_eq!((shown[0].width, shown[0].height), (width, height));
+        }
+    }
 }

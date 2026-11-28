@@ -502,7 +502,7 @@ pub fn written(codec: CodecId, extradata: &[u8], webm: bool) -> Result<Written> 
         CodecId::Aac => audio("A_AAC", keep),
         CodecId::Opus => audio("A_OPUS", keep),
         CodecId::Vorbis => audio("A_VORBIS", keep),
-        CodecId::Flac => audio("A_FLAC", flac_private(&keep)),
+        CodecId::Flac => audio("A_FLAC", flac_private(&keep)?),
         CodecId::Mp3 => audio("A_MPEG/L3", Vec::new()),
         CodecId::Ac3 => audio("A_AC3", Vec::new()),
         CodecId::Eac3 => audio("A_EAC3", Vec::new()),
@@ -644,16 +644,58 @@ pub fn opus_head(config: &[u8]) -> Result<Vec<u8>> {
     Ok(head)
 }
 
-/// `A_FLAC` CodecPrivate is the `fLaC` marker and the metadata blocks. A
-/// bare 34-byte STREAMINFO gets the marker and a last-block header.
-fn flac_private(extra: &[u8]) -> Vec<u8> {
-    if extra.len() == 34 {
-        let mut out = b"fLaC".to_vec();
-        out.extend_from_slice(&[0x80, 0, 0, 34]);
-        out.extend_from_slice(extra);
-        return out;
+/// `A_FLAC` CodecPrivate is the `fLaC` marker and the metadata blocks,
+/// STREAMINFO first and the last one flagged. Extradata comes as a bare
+/// 34-byte STREAMINFO (from a native file), already in this form (from
+/// Matroska), or as an MP4 `dfLa` body: version 0 and flags, then the
+/// blocks. Every block is kept, as the codec mapping asks. Empty stays empty
+/// for the caller to refuse; anything else that is not FLAC configuration
+/// is refused here.
+fn flac_private(extra: &[u8]) -> Result<Vec<u8>> {
+    const STREAMINFO_LEN: usize = 34;
+    const LAST: u8 = 0x80;
+    let refused = || {
+        Error::unsupported(
+            "FLAC configuration that is not a STREAMINFO, a fLaC header, or a dfLa body",
+        )
+    };
+    if extra.is_empty() {
+        return Ok(Vec::new());
     }
-    extra.to_vec()
+    let mut out = b"fLaC".to_vec();
+    if extra.len() == STREAMINFO_LEN {
+        out.extend_from_slice(&[LAST, 0, 0, 34]);
+        out.extend_from_slice(extra);
+        return Ok(out);
+    }
+    // The marker and the `dfLa` version and flags are both four bytes.
+    let mut rest = match extra {
+        [b'f', b'L', b'a', b'C', rest @ ..] | [0, _, _, _, rest @ ..] => rest,
+        _ => return Err(refused()),
+    };
+    loop {
+        let [head, l0, l1, l2, tail @ ..] = rest else {
+            return Err(refused());
+        };
+        let kind = head & !LAST;
+        let len = (usize::from(*l0) << 16) | (usize::from(*l1) << 8) | usize::from(*l2);
+        let body = tail.get(..len).ok_or_else(refused)?;
+        // STREAMINFO (type 0, 34 bytes) first and only there; 127 is
+        // forbidden.
+        let first = out.len() == 4;
+        if kind == 127 || (kind == 0) != first || (first && len != STREAMINFO_LEN) {
+            return Err(refused());
+        }
+        rest = &tail[len..];
+        // Bytes after the block flagged last are not configuration; blocks
+        // that end with the data get the flag.
+        let last = *head & LAST != 0 || rest.is_empty();
+        out.extend_from_slice(&[if last { LAST | kind } else { kind }, *l0, *l1, *l2]);
+        out.extend_from_slice(body);
+        if last {
+            return Ok(out);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -846,5 +888,57 @@ mod tests {
                 .expect("prores")
                 .strip_prores
         );
+    }
+
+    #[test]
+    fn flac_codec_private_comes_from_each_form_of_configuration() {
+        // The `dfLa` body FFmpeg 9.0.2 writes for a one-second 44.1 kHz mono
+        // sine in MP4: version 0, flags 0, then STREAMINFO flagged last.
+        let dfla: [u8; 42] = [
+            0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x22, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00,
+            0x55, 0x00, 0x01, 0x87, 0x0a, 0xc4, 0x40, 0xf0, 0x00, 0x00, 0xac, 0x44, 0xa4, 0x84,
+            0xb6, 0x60, 0xd9, 0xe0, 0x33, 0xb0, 0x9b, 0xed, 0x9e, 0x68, 0x6a, 0x74, 0x73, 0xec,
+        ];
+        let mut private = b"fLaC".to_vec();
+        private.extend_from_slice(&dfla[4..]);
+        // STREAMINFO, then a comment block flagged last.
+        let comment = [0x84, 0, 0, 8, 4, 0, 0, 0, b'L', b'a', b'v', b'f'];
+        let mut private_comment = private.clone();
+        private_comment[4] = 0;
+        private_comment.extend_from_slice(&comment);
+        let mut dfla_comment = dfla.to_vec();
+        dfla_comment[4] = 0;
+        dfla_comment.extend_from_slice(&comment);
+        // A block list that ends with the data gets the last flag.
+        let mut unflagged = dfla_comment.clone();
+        unflagged[42] = 0x04;
+        for (extra, expected) in [
+            (&dfla[8..], &private),
+            (&private[..], &private),
+            (&dfla[..], &private),
+            (&private_comment[..], &private_comment),
+            (&dfla_comment[..], &private_comment),
+            (&unflagged[..], &private_comment),
+        ] {
+            let flac = written(CodecId::Flac, extra, false).expect("flac");
+            assert_eq!(flac.codec_id, "A_FLAC");
+            assert_eq!(&flac.private, expected, "{extra:x?}");
+        }
+        // What is not FLAC configuration is refused, not written.
+        let mut version_1 = dfla;
+        version_1[0] = 1;
+        let mut not_first = private.clone();
+        not_first[4] = 0x84;
+        for extra in [
+            &[1, 2, 3][..],
+            b"OpusHead\x01\x01\x38\x01\x44\xac\0\0\0\0\0",
+            &dfla[..41],
+            &private_comment[..45],
+            &version_1,
+            &not_first,
+        ] {
+            assert!(written(CodecId::Flac, extra, false).is_err(), "{extra:x?}");
+        }
+        assert!(written(CodecId::Flac, &[], false).is_err());
     }
 }

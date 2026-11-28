@@ -142,7 +142,7 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 
 | Limit | Value | Error past it |
 | --- | --- | --- |
-| Picture edge | 16,888 samples | `CodecError::Limit { what: "picture size" }` |
+| Picture edge | 16,888 samples; 16,880 after cropping through `VideoDecoder`, the most its pictures hold | `CodecError::Limit { what: "picture size" }` |
 | Picture area | 35,651,584 luma samples (level 6.2) | the same |
 | Pictures in the buffer | 16 | `CodecError::Malformed` |
 | NAL units in one access unit | 4096 | `Limit { what: "nal units in one access unit" }` |

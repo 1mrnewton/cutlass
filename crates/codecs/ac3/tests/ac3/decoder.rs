@@ -375,6 +375,27 @@ fn gapless_side_data_trims_the_delay_and_padding_exactly() {
     assert_eq!(audible_pcm, full.pcm[from..from + audible_pcm.len()]);
 }
 
+#[test]
+fn a_timestamp_at_either_end_of_the_range_decodes_with_gapless_side_data() {
+    let data = fixture("eac3_stereo_48000.eac3");
+    let all = units(&data);
+    for pts in [i64::MAX, i64::MIN] {
+        let mut decoder = open(CodecId::Eac3, Options::default());
+        let mut frames = 0usize;
+        for unit in all.iter().take(3) {
+            let mut packet = Packet::audio(unit.clone(), pts, 1536, 48_000);
+            packet.side.push(SideData::Gapless {
+                encoder_delay: 256,
+                trailing_padding: 100,
+                sample_rate: 48_000,
+            });
+            frames += samples(decoder.push(&packet).expect("push")).len() / 2;
+        }
+        frames += samples(decoder.drain().expect("drain")).len() / 2;
+        assert_eq!(frames, 3 * 1536);
+    }
+}
+
 // ---- lifecycle ----
 
 #[test]

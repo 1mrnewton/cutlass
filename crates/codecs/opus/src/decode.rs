@@ -50,6 +50,8 @@ struct StreamDecoder {
     /// Samples per channel of one frame, at the API rate.
     frame_size: usize,
     stream_channels: usize,
+    /// The CELT band after the last coded one in the last decoded frame.
+    end_band: usize,
     range_final: u32,
 }
 
@@ -73,6 +75,7 @@ impl StreamDecoder {
             bandwidth: Bandwidth::Full,
             frame_size: (rate / 400) as usize,
             stream_channels: channels,
+            end_band: Bandwidth::Full.celt_end_band(),
             range_final: 0,
         })
     }
@@ -88,6 +91,7 @@ impl StreamDecoder {
         self.bandwidth = Bandwidth::Full;
         self.frame_size = (self.rate / 400) as usize;
         self.stream_channels = self.channels;
+        self.end_band = Bandwidth::Full.celt_end_band();
         self.range_final = 0;
     }
 
@@ -231,7 +235,7 @@ impl StreamDecoder {
         if data.is_none() {
             frame_size = frame_size.min(self.frame_size.max(f2_5));
         }
-        let (audiosize, mode) = match data {
+        let (mut audiosize, mode) = match data {
             Some(_) => (self.frame_size, self.mode),
             None => match self.prev_mode {
                 None => {
@@ -267,6 +271,15 @@ impl StreamDecoder {
                 done += got;
             }
             return Ok(frame_size);
+        }
+        // Concealment runs on 2.5, 5, 10, or 20 ms. A length between two of
+        // those is cut to the lower one, and the caller asks for the rest.
+        if data.is_none() && audiosize < f20 {
+            if audiosize > f10 {
+                audiosize = f10;
+            } else if mode != Mode::SilkOnly && audiosize > f5 && audiosize < f10 {
+                audiosize = f5;
+            }
         }
 
         let mut pcm_transition = vec![0f32; f5 * ch];
@@ -374,7 +387,14 @@ impl StreamDecoder {
             }
         }
         let start_band = if mode == Mode::CeltOnly { 0 } else { 17 };
-        let end_band = self.bandwidth.celt_end_band();
+        // A concealed frame is in the mode of the frame before it, so it
+        // keeps that frame's bands. The lost frame's TOC may name a
+        // bandwidth that mode does not have.
+        let end_band = if data.is_some() {
+            self.bandwidth.celt_end_band()
+        } else {
+            self.end_band
+        };
         if redundancy {
             transition = false;
         }
@@ -493,6 +513,7 @@ impl StreamDecoder {
         };
         self.prev_mode = Some(mode);
         self.prev_redundancy = redundancy && !celt_to_silk;
+        self.end_band = end_band;
         Ok(audiosize)
     }
 

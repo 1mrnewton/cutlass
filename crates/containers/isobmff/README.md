@@ -37,7 +37,7 @@ The sample entry names the codec:
 | `ac-3`, `sac3`, `ec-3` | AC-3, E-AC-3 |
 | `sowt`, `twos`, `raw `, `in24`, `in32`, `fl32`, `fl64`, `lpcm`, `NONE` | PCM |
 
-The configuration boxes `avcC`, `hvcC`, `av1C`, `vpcC`, `esds`, `alac`, `dOps`, `dac3`, `dec3`, and `dfLa` are kept as the stream's extradata. Three entries are reshaped: an ALAC track gives the bare magic cookie (the `alac` box joined with its `chan` box), `IsoBmffFile` turns an Opus `dOps` into an `OpusHead`, and a ProRes entry, which has no configuration box, gives its fourcc. A QuickTime Motion JPEG entry gives its fourcc too, followed by the two `fiel` bytes when that box is present. An unknown sample entry is `CodecId::Unknown` and its packets are still returned.
+The configuration boxes `avcC`, `hvcC`, `av1C`, `vpcC`, `esds`, `alac`, `dOps`, `dac3`, `dec3`, and `dfLa` are kept as the stream's extradata. Three entries are reshaped: an ALAC track gives the bare magic cookie (the `alac` box joined with its `chan` box), `IsoBmffFile` turns an Opus `dOps` into an `OpusHead`, and a ProRes entry, which has no configuration box, gives its fourcc. A QuickTime Motion JPEG entry gives its fourcc too, followed by the two `fiel` bytes when that box is present. A FLAC track gives the `dfLa` body (version, flags, then the metadata blocks), and its rate, channel count and depth come from STREAMINFO, because the entry's rate field stops at 65535 Hz. An unknown sample entry is `CodecId::Unknown` and its packets are still returned.
 
 Writing, with `IsoBmffMux`:
 
@@ -50,6 +50,8 @@ Writing, with `IsoBmffMux`:
 | `ThreeGp` | `3gp4` | `3gp4`, `isom` |
 
 The default layout is `ftyp`, `mdat`, `moov`. `moov_at_end: false` puts `moov` first and holds the payloads in memory until `finish`. `fragmented: true` writes `moov` with `mvex`, then `moof`/`mdat` pairs, then `mfra`, under the brands `iso5`, `iso6`, `mp41`. Decode times on a track must start at 0 and continue by each packet's duration. `set_edits` writes an `elst`.
+
+A `fLaC` entry takes its extradata as a bare 34-byte STREAMINFO (what a native FLAC file gives), as the `fLaC` marker and metadata blocks of a Matroska CodecPrivate, or as a `dfLa` body. Its `dfLa` box holds STREAMINFO and every other block except SEEKTABLE and PADDING, which describe the file the blocks came from. The entry's channel count and depth come from STREAMINFO, and a rate above 65535 Hz is written halved until it fits (48000 for 96 and 192 kHz), as Xiph's FLAC encapsulation says.
 
 `Mp4Mux` is the export muxer. It accepts H.264, HEVC, MPEG-4 Visual, MPEG-2, ProRes, VP8, AV1, and Motion JPEG pictures, and AAC, ALAC, Opus, AC-3, E-AC-3, and 16-bit PCM sound. Motion JPEG is written only to a QuickTime movie. An AV1 track is an `av01` entry with its `av1C` record in a file that lists the `av01` brand; each sample is the temporal unit without its temporal delimiter, padding and redundant frame headers, every OBU with a size (AV1 Codec ISO Media File Format Binding 2.1 and 2.4).
 
@@ -64,6 +66,7 @@ What is refused:
 - A `sidx` that points at another `sidx`, a HEIF item with more than one extent, and a HEIF construction method other than 0 or 1: `Error::Unsupported`.
 - A seek on a track whose `stss` is empty: `Error::SeekLimited`. Reading such a track in order still works.
 - In the muxer, Vorbis, JPEG, PNG, WebP, and GIF tracks: `Error::CodecRejected`.
+- In `IsoBmffMux`, FLAC extradata in none of the three forms: `Error::Unsupported`. A FLAC track with no extradata at `finish`: `Error::Missing`.
 
 ## Using it
 
@@ -106,7 +109,7 @@ cargo test -p cutlass-isobmff
 ```
 
 - Unit tests in `src/behavior.rs` build files by hand and through the muxer. They cover both index places, the sample tables, negative composition offsets, edit lists, the display matrix, seek, fragments, a HEIF item, an unknown codec, and hostile input (short header, wrong family, size past the parent, 40 nested boxes, external reference).
-- `src/oracle.rs` compares against FFmpeg. `ffmpeg_and_gstreamer_see_the_same_packets` reads FFmpeg's progressive MP4, fragmented MP4, and QuickTime files and compares packet count, payload hash, size, duration, keyframe flag, and composition offset with `ffmpeg -c copy -f framehash`. `ffmpeg_reads_files_this_muxer_wrote` does the reverse for files this muxer wrote. `ffmpeg_motion_jpeg_files_demux_and_remux` covers Motion JPEG. These tests print `not available` and pass when `ffmpeg` or `ffprobe` is not on the `PATH`. GStreamer's `gst-discoverer-1.0` is asked for the codec and width when it is installed.
+- `src/oracle.rs` compares against FFmpeg. `ffmpeg_and_gstreamer_see_the_same_packets` reads FFmpeg's progressive MP4, fragmented MP4, and QuickTime files and compares packet count, payload hash, size, duration, keyframe flag, and composition offset with `ffmpeg -c copy -f framehash`. `ffmpeg_reads_files_this_muxer_wrote` does the reverse for files this muxer wrote. `ffmpeg_motion_jpeg_files_demux_and_remux` covers Motion JPEG. `ffmpeg_decodes_flac_written_from_each_form_of_configuration` remuxes FFmpeg's FLAC-in-MP4 (44.1 kHz mono and 96 kHz stereo) from each form of FLAC extradata and has FFmpeg decode the same sound. These tests print `not available` and pass when `ffmpeg` or `ffprobe` is not on the `PATH`. GStreamer's `gst-discoverer-1.0` is asked for the codec and width when it is installed.
 - Two fuzz loops run only when asked: `ISOBMFF_FUZZ_SECS=<seconds>` for probe, open, read, and seek on mutated input, and `ISOBMFF_MUX_FUZZ_SECS=<seconds>` for a mux round trip. Without the variable they print `not run` and pass.
 - Four tests read real media from a folder kept outside the repository, and one of them rewrites the files only when `ISOBMFF_LOCAL_WRITE=1`. They pass without checking anything when the folder or the named file is absent.
 - `open_and_seek_stay_under_a_coarse_bound` opens a 4000-sample file and fails if open takes 2 s or a seek takes 500 ms.
@@ -159,7 +162,8 @@ Gaps:
 - `sidx` is parsed and tested on its own; no test seeks a whole file through it. The muxer does not write `sidx`.
 - The muxer always writes `co64` with one sample per chunk. `mvhd`, `tkhd`, `mdhd`, and `elst` are version 0, so a duration above `u32::MAX` is stored as `u32::MAX`.
 - If a write fails in the middle of a fragment after its `moof` went out, that `moof` is not taken back.
-- The FFmpeg comparison in this crate uses H.264, AAC, and Motion JPEG files. Most other sample entries are tested with hand-built entries. The AV1, VP9, FLAC, and MP3 entries have no test in this crate.
+- The FFmpeg comparison in this crate uses H.264, AAC, Motion JPEG, and FLAC files. Most other sample entries are tested with hand-built entries. The AV1, VP9, and MP3 entries have no test in this crate.
+- `Mp4Mux` does not take FLAC; only `IsoBmffMux` writes a `fLaC` entry.
 - FFmpeg (`ffmpeg` and `ffprobe` share one library) is the only tool the packet comparison uses. GStreamer confirms codec and width only.
 
 ## Specifications
@@ -170,4 +174,5 @@ These are the documents the source comments name:
 - ISO/IEC 14496-1, for the `esds` object type indications.
 - Encapsulation of Opus in ISO Base Media File Format, version 0.6.8, and RFC 7845 (`OpusHead`).
 - Apple's `ALACMagicCookieDescription.txt`, for the ALAC cookie.
+- Xiph's Encapsulation of FLAC in ISO Base Media File Format, version 0.0.4, and RFC 9639 (the metadata blocks in `dfLa`).
 - SMPTE RDD 36, for the color bytes of a ProRes frame header.

@@ -412,6 +412,10 @@ pub struct Ac3Encoder {
     cancel: Arc<AtomicBool>,
     /// This substream's bit rate. A 7.1 program's public rate is the sum.
     rate: u32,
+    /// The bit rate the caller asked for. Zero splits a 7.1 program's rate
+    /// differently from the same sum asked for by number, so a reset opens
+    /// with this.
+    asked: u32,
     /// Dependent `chanmap` when this encoder writes that substream.
     chanmap: Option<u16>,
     /// The back-pair frame of a 7.1 program.
@@ -457,6 +461,7 @@ impl Ac3Encoder {
             });
         };
         let (acmod, lfeon, order) = coding(&config.layout)?;
+        let asked = config.bit_rate;
         let eac3 = config.format == Format::Eac3;
         let blocks = if eac3 { config.blocks } else { MAX_BLOCKS };
         if !matches!(blocks, 1 | 2 | 3 | 6) {
@@ -574,6 +579,7 @@ impl Ac3Encoder {
             order,
             config,
             rate: bit_rate,
+            asked,
             chanmap,
             program: None,
             program_peaks: VecDeque::new(),
@@ -612,6 +618,7 @@ impl Ac3Encoder {
             back_at: split.backs,
         });
         core.order = split.core;
+        core.asked = config.bit_rate;
         core.config.layout = config.layout;
         core.config.bit_rate = core_rate + back_rate;
         Ok(core)
@@ -1454,7 +1461,11 @@ impl Encoder for Ac3Encoder {
     }
 
     fn reset(&mut self) {
-        let Ok(fresh) = Self::new(self.config.clone()) else {
+        let config = EncoderConfig {
+            bit_rate: self.asked,
+            ..self.config.clone()
+        };
+        let Ok(fresh) = Self::new(config) else {
             return;
         };
         let cancel = Arc::clone(&self.cancel);

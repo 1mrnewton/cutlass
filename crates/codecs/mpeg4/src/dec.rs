@@ -140,17 +140,29 @@ impl Decoder {
     }
 
     /// Reads the decoder configuration: VOS, visual object, VOL, and user
-    /// data headers. A VOP in it is an error.
-    pub(crate) fn configure(&mut self, extra: &[u8]) -> Result<(), CodecError> {
-        let mut flushed = Vec::new();
-        for unit in units(extra) {
+    /// data headers. A VOP in it is an error. A layer of another size puts
+    /// the picture the old layer held in `pictures`.
+    pub(crate) fn configure(
+        &mut self,
+        extra: &[u8],
+        pictures: &mut Vec<Image>,
+    ) -> Result<(), CodecError> {
+        let units = units(extra);
+        // Checked whole first: a configuration that fails changes nothing.
+        for unit in &units {
             if unit.code == VOP_START {
                 return Err(CodecError::Malformed {
                     at_bit: 0,
                     what: "VOP in the decoder configuration",
                 });
             }
-            self.header(unit.code, unit.payload, &mut flushed)?;
+            if is_vol(unit.code) {
+                let vol = parse_vol(unit.payload)?;
+                self.check_size(vol.width, vol.height)?;
+            }
+        }
+        for unit in units {
+            self.header(unit.code, unit.payload, pictures)?;
         }
         Ok(())
     }
@@ -200,6 +212,10 @@ impl Decoder {
                     }
                     out.timed = true;
                     self.packed_extra += coded - 1;
+                }
+                // A layer of another size before the failure has already
+                // displayed the picture the old layer held.
+                if coded > 0 || !out.pictures.is_empty() {
                     self.partial = Some(out);
                 }
                 return Err(error);
@@ -477,7 +493,24 @@ impl Decoder {
     fn short(&mut self, data: &[u8], pictures: &mut Vec<Image>) -> Result<bool, CodecError> {
         let hdr: ShortHeader = parse_short_header(data)?;
         self.check_size(hdr.width, hdr.height)?;
-        self.set_source(Source::Short(hdr.width, hdr.height), pictures);
+        let source = Source::Short(hdr.width, hdr.height);
+        if self.source != Some(source) {
+            // The first picture of another layer decodes apart from the
+            // layer in force: one that fails must leave that layer its VOL,
+            // its references and the picture it holds.
+            let mut next = Self::with_max_pixels(self.max_pixels);
+            next.source = Some(source);
+            let mut first = Vec::new();
+            let decoded = next.short(data, &mut first)?;
+            self.set_source(source, pictures);
+            pictures.append(&mut first);
+            self.vol = None;
+            self.low_delay = true;
+            self.grid = next.grid;
+            self.newer = next.newer;
+            self.spare = next.spare;
+            return Ok(decoded);
+        }
         self.vol = None;
         // Short-header pictures have no B-VOPs.
         self.low_delay = true;
@@ -684,6 +717,94 @@ mod tests {
         // falls, and the search stays on.
         assert!(decoder.padding_score <= -3, "{}", decoder.padding_score);
         assert!(!decoder.no_padding);
+    }
+
+    #[test]
+    fn predicted_ac_levels_saturate_instead_of_overflowing() {
+        use crate::bits::BitWriter;
+
+        const MBW: usize = 40;
+        let mut vol = BitWriter::new();
+        vol.put(1, 0); // random_accessible_vol
+        vol.put(8, 1); // simple object
+        vol.put(1, 0); // is_object_layer_identifier
+        vol.put(4, 1); // square pixels
+        vol.put(1, 0); // vol_control_parameters
+        vol.put(2, 0); // rectangular
+        vol.put(1, 1);
+        vol.put(16, 25);
+        vol.put(1, 1);
+        vol.put(1, 0); // fixed_vop_rate
+        vol.put(1, 1);
+        vol.put(13, MBW as u32 * 16);
+        vol.put(1, 1);
+        vol.put(13, 16);
+        vol.put(1, 1);
+        vol.put(1, 0); // interlaced
+        vol.put(1, 1); // obmc_disable
+        vol.put(1, 0); // sprite
+        vol.put(1, 0); // not_8_bit
+        vol.put(1, 1); // quant_type: MPEG
+        vol.put(1, 1); // load_intra_quant_mat: 255 everywhere
+        vol.put(8, 255);
+        vol.put(8, 0);
+        vol.put(1, 0); // load_nonintra_quant_mat
+        vol.put(1, 1); // complexity_estimation_disable
+        vol.put(1, 1); // resync_marker_disable
+        vol.put(1, 0); // data_partitioned
+        vol.put(1, 0); // scalability
+        vol.stuff();
+
+        let mut vop = BitWriter::new();
+        vop.put(2, 0); // I-VOP
+        vop.put(1, 0); // modulo_time_base
+        vop.put(1, 1);
+        vop.put(5, 0); // vop_time_increment
+        vop.put(1, 1);
+        vop.put(1, 1); // vop_coded
+        vop.put(3, 0); // intra_dc_vlc_thr
+        vop.put(5, 31); // vop_quant
+        // Every macroblock predicts its AC levels from the left, and every
+        // luma block adds the largest level to the first of them, so the
+        // sum grows by 2047 a block along the row.
+        for _ in 0..MBW {
+            vop.put(1, 1); // mcbpc: intra, no chroma coded
+            vop.put(1, 1); // ac_pred_flag
+            vop.put(2, 0b11); // cbpy: four luma blocks
+            for _ in 0..4 {
+                vop.put(3, 0b011); // dct_dc_size_luminance 0
+                vop.put(7, 0b000_0011); // escape
+                vop.put(2, 0b11); // fixed length
+                vop.put(1, 1); // last
+                vop.put(6, 0); // run
+                vop.put(1, 1);
+                vop.put(12, 2047); // level
+                vop.put(1, 1);
+            }
+            for _ in 0..2 {
+                vop.put(2, 0b11); // dct_dc_size_chrominance 0
+            }
+        }
+        vop.stuff();
+
+        let mut data = vec![0, 0, 1, 0x20];
+        data.extend(vol.finish());
+        data.extend([0, 0, 1, 0xB6]);
+        data.extend(vop.finish());
+        let mut decoder = Decoder::with_max_pixels(MBW as u64 * 16 * 16);
+        decoder.decode(&data).expect("decode");
+        let shown = decoder.drain();
+        let [image] = shown.as_slice() else {
+            panic!("{} pictures", shown.len());
+        };
+        // Past the first block the saturated sum is the same level, so
+        // every block of the row decodes to the same samples.
+        let width = MBW * 16;
+        for row in image.bytes[..width * 16].chunks(width) {
+            for block in row.chunks(8).skip(1) {
+                assert_eq!(block, &row[8..16]);
+            }
+        }
     }
 
     #[test]

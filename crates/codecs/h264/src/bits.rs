@@ -9,6 +9,9 @@ pub struct Bits<'a> {
     cache: u64,
     /// Valid low bits of `cache`.
     bits: u32,
+    /// Position of the last bit of `data` that is set, the stop bit of an
+    /// RBSP, or 0 when none is.
+    stop: usize,
 }
 
 impl<'a> Bits<'a> {
@@ -18,6 +21,7 @@ impl<'a> Bits<'a> {
             index: 0,
             cache: 0,
             bits: 0,
+            stop: stop_bit(data),
         }
     }
 
@@ -28,6 +32,7 @@ impl<'a> Bits<'a> {
             index: (bit / 8).min(data.len()),
             cache: 0,
             bits: 0,
+            stop: stop_bit(data),
         };
         let skip = (bit % 8) as u32;
         if skip > 0 {
@@ -93,20 +98,11 @@ impl<'a> Bits<'a> {
         }
     }
 
-    /// Clause 7.2. `true` while a syntax element can still follow.
+    /// Clause 7.2. `true` while a syntax element can still follow: a bit
+    /// after the next one is set. CAVLC asks once a macroblock and SEI once
+    /// a message, so this does not look through the rest of the data.
     pub fn more_rbsp(&self) -> bool {
-        let start = self.pos();
-        let total = self.data.len() * 8;
-        if start >= total {
-            return false;
-        }
-        let mut ones = 0u32;
-        for abs in start..total {
-            if bit_at(self.data, abs) {
-                ones += 1;
-            }
-        }
-        ones > 1 || (ones == 1 && !bit_at(self.data, start))
+        self.pos() < self.stop
     }
 
     pub fn rbsp_trailing(&mut self) -> Result<(), CodecError> {
@@ -156,9 +152,10 @@ impl<'a> Bits<'a> {
     }
 }
 
-fn bit_at(data: &[u8], abs: usize) -> bool {
-    let byte = data[abs / 8];
-    ((byte >> (7 - (abs % 8))) & 1) == 1
+fn stop_bit(data: &[u8]) -> usize {
+    data.iter()
+        .rposition(|&byte| byte != 0)
+        .map_or(0, |at| at * 8 + 7 - data[at].trailing_zeros() as usize)
 }
 
 pub fn vlc(
@@ -197,5 +194,17 @@ mod tests {
         assert!(!bits.more_rbsp());
         bits.u(1).unwrap();
         assert!(!bits.more_rbsp());
+    }
+
+    #[test]
+    fn more_rbsp_is_true_while_a_bit_after_the_next_is_set() {
+        for value in 0..=u16::MAX {
+            let data = value.to_be_bytes();
+            for at in 0..=16 {
+                let bits = Bits::at(&data, at).unwrap();
+                let set = (at + 1..16).any(|bit| (value >> (15 - bit)) & 1 == 1);
+                assert_eq!(bits.more_rbsp(), set, "{value:016b} at {at}");
+            }
+        }
     }
 }

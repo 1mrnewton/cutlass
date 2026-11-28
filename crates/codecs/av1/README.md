@@ -161,9 +161,9 @@ environment variables override encoder constants.
 cargo test --release -p cutlass-av1
 ```
 
-- `tests/fixtures.rs` decodes every stream in `fixtures/` (178 files, 87
+- `tests/fixtures.rs` decodes every stream in `fixtures/` (180 files, 89
   streams; each `.ivf` is one stream, and `name_N.obu` files are one stream
-  with a packet per file) through `Av1Decoder`. Each shown frame of 86 streams
+  with a packet per file) through `Av1Decoder`. Each shown frame of 88 streams
   must match the libdav1d digest stored in `tests/libdav1d-digests.txt`. The
   last stream, `wide.ivf` (16448x64), must be refused with `Limit`. This needs
   no FFmpeg, so it runs in CI.

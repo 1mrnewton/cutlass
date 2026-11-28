@@ -622,6 +622,35 @@ fn open_rejects_the_sizes_and_formats_outside_profile_0() {
     decoder.reset();
 }
 
+/// Level 6.2 is the largest the spec defines, and this crate's decoder
+/// refuses streams past it, so the encoder opens only at sizes inside it.
+#[test]
+fn the_encoder_opens_at_every_size_its_decoder_reads_and_no_other() {
+    let past_edge = Vp9Encoder::with_quantizer(geom::LEVEL_MAX_EDGE + 1, 8, 0);
+    assert!(
+        matches!(past_edge, Err(CodecError::Limit { .. })),
+        "{:?}",
+        past_edge.err()
+    );
+    let past_area = Vp9Encoder::with_quantizer(geom::LEVEL_MAX_EDGE, 2_119, 0);
+    assert!(
+        matches!(past_area, Err(CodecError::Limit { .. })),
+        "{:?}",
+        past_area.err()
+    );
+    let (width, height) = (geom::LEVEL_MAX_EDGE, 8);
+    let mut encoder = Vp9Encoder::with_quantizer(width, height, 0).expect("encoder");
+    let key = encoder
+        .push(&input(solid(width, height, 40, 90, 140)))
+        .expect("key")
+        .remove(0);
+    let params = CodecParams::with_format(CodecId::Vp9, width, height, PixelFormat::Yuv420p);
+    let mut decoder = Vp9Decoder::open(&params).expect("decoder");
+    let shown = decoder.push_all(&key).expect("picture");
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].frame.width, width);
+}
+
 #[test]
 fn show_existing_and_a_superframe_round_trip() {
     let params = CodecParams::with_format(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
@@ -4094,4 +4123,190 @@ fn complexity_aq_in_one_pass_takes_libvpx_golden_budget() {
     let two = two_pass(opts, (w, h), 30, &frame);
     assert_decodes(&two, (w, h), 30);
     assert!(segmented(&two).is_empty(), "two passes segmented");
+}
+
+#[test]
+fn a_max_q_under_min_q_gives_way_to_it_in_every_rate_mode() {
+    // A fixed quantizer held such a pair to `min_q`; with a bitrate, and
+    // for a layered alt-ref at a fixed quantizer, the quantizer was
+    // clamped between the two as given, which panics.
+    let (w, h) = (64u32, 64u32);
+    let clip = |i: u32| noisy(w, h, i * 2, i);
+    let base = super::Vp9Options {
+        bitrate: 200_000,
+        min_q: 200,
+        max_q: 100,
+        threads: 1,
+        speed: 10,
+        lag: Some(0),
+        ..super::Vp9Options::default()
+    };
+    let lookahead = super::Vp9Options {
+        lag: Some(16),
+        ..base
+    };
+    let modes = [
+        ("vbr", base),
+        ("vbr with the lookahead", lookahead),
+        (
+            "cbr",
+            super::Vp9Options {
+                cbr_buffer_ms: 1000,
+                ..base
+            },
+        ),
+        (
+            "layers",
+            super::Vp9Options {
+                temporal_layers: 3,
+                ..base
+            },
+        ),
+        (
+            "arf layers at a fixed quantizer",
+            super::Vp9Options {
+                bitrate: 0,
+                alt_ref_layers: 3,
+                ..lookahead
+            },
+        ),
+    ];
+    let check = |name: &str, packets: &[Packet]| {
+        assert_decodes(packets, (w, h), 26);
+        let headers = all_headers(packets);
+        for (i, hd) in headers.iter().enumerate() {
+            assert!(
+                hd.show_existing || hd.base_qindex == 200,
+                "{name}: frame {i} q {}",
+                hd.base_qindex
+            );
+        }
+        headers.iter().filter(|hd| hd.show_existing).count()
+    };
+    for (name, opts) in modes {
+        let shown = check(name, &encode_with(opts, (w, h), 26, clip));
+        // (The layered alt-refs, shown as they are, were coded.)
+        assert_eq!(shown > 0, opts.alt_ref_layers > 1, "{name}");
+    }
+    check("two passes", &two_pass(lookahead, (w, h), 26, &clip));
+}
+
+#[test]
+fn pictures_one_sample_wide_or_high_code_at_the_realtime_speeds() {
+    // Speeds 9 and 10 at a bitrate find how far the picture moved from
+    // the sums of its columns and rows; with one of either, an offset at
+    // which the two pictures' sums share none was divided by.
+    for (w, h) in [(1u32, 4u32), (4, 1), (1, 1)] {
+        let opts = super::Vp9Options {
+            bitrate: 100_000,
+            speed: 10,
+            threads: 1,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let (cw, ch) = (w.div_ceil(2) as usize, h.div_ceil(2) as usize);
+        let chroma = vec![128u8; cw * ch];
+        let mut decoder = Decoder::new();
+        for i in 0..3u8 {
+            let luma: Vec<u8> = (0..w * h).map(|k| 40 + 30 * i + k as u8).collect();
+            let (data, _) = encoder
+                .encode_planes(
+                    [(&luma, w as usize), (&chroma, cw), (&chroma, cw)],
+                    1.0 / 30.0,
+                )
+                .expect("encode");
+            let picture = decoder.decode(&data).expect("decode").expect("shown");
+            assert_eq!(picture.y.len(), (w * h) as usize, "{w}x{h} picture {i}");
+        }
+    }
+}
+
+#[test]
+fn a_cut_to_white_at_max_q_decodes_alike_in_ffmpeg_and_libvpx() {
+    // The white picture's 16×16 blocks have a residual of 255 throughout,
+    // whose DC at q 236 (`max_q`) rounded to a level that dequantizes past
+    // 16 bits. The specification rules that out, and FFmpeg and libvpx,
+    // which keep 8-bit coefficients in 16 bits, decoded the picture black.
+    let (w, h) = (16u32, 16u32);
+    let packets = encode_with(lag0(255), (w, h), 5, |i| {
+        let v = if i < 4 { 0 } else { 255 };
+        solid(w, h, v, v, v)
+    });
+    let mut decoder = Decoder::new();
+    let mut expect = Vec::new();
+    let mut frames = Vec::new();
+    for packet in &packets {
+        let picture = decoder.decode(&packet.data).expect("ours").expect("shown");
+        expect.extend_from_slice(&picture.y);
+        expect.extend_from_slice(&picture.u);
+        expect.extend_from_slice(&picture.v);
+        frames.push(packet.data.clone());
+    }
+    assert_eq!(frames.len(), 5);
+    let white = &expect[expect.len() - (w * h * 3 / 2) as usize..];
+    assert!(
+        white.iter().all(|&v| v >= 240),
+        "white decodes as {white:?}"
+    );
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        require_or_skip("ffmpeg");
+        return;
+    };
+    let wrapped = wrap_ivf(w, h, &frames);
+    for name in ["vp9", "libvpx-vp9"] {
+        let yuv = ffmpeg_yuv(&ffmpeg, name, &wrapped);
+        assert_eq!(first_mismatch(&yuv, &expect), None, "{name}");
+    }
+}
+
+#[test]
+fn a_picture_refused_for_its_planes_leaves_no_alpha_behind() {
+    use super::Vp9Options;
+    use crate::decode::Vp9AlphaDecoder;
+
+    // The alpha plane went into the alpha encoder's lookahead before the
+    // picture's planes were checked, and the picture pushed again at the
+    // same time took the refused one's alpha.
+    let (w, h) = (64_u32, 48_u32);
+    for lag in [Some(0), None] {
+        let opts = Vp9Options {
+            qindex: 0,
+            alpha: true,
+            threads: 1,
+            lag,
+            ..Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let mut coded = Vec::new();
+        for n in 0..3 {
+            let frame = moving(w, h, n * 2);
+            let (refused, alpha) = (alpha_plane(w, h, n + 10), alpha_plane(w, h, n));
+            let clock = (i64::from(n), 1, 30);
+            let u = (&frame.u.samples[..], frame.u.stride);
+            let v = (&frame.v.samples[..], frame.v.stride);
+            // A luma plane a row short.
+            let rows = frame.y.stride * (h as usize - 1);
+            let short = (&frame.y.samples[..rows], frame.y.stride);
+            let bad = [short, u, v, (&refused[..], w as usize)];
+            assert!(encoder.push_planes_alpha(bad, 1.0 / 30.0, clock).is_err());
+            let y = (&frame.y.samples[..], frame.y.stride);
+            let good = [y, u, v, (&alpha[..], w as usize)];
+            coded.extend(
+                encoder
+                    .push_planes_alpha(good, 1.0 / 30.0, clock)
+                    .expect("push"),
+            );
+        }
+        coded.extend(encoder.flush_alpha().expect("flush"));
+        assert_eq!(coded.len(), 3);
+        let mut alpha_decoder = Vp9AlphaDecoder::new();
+        for (n, c) in coded.iter().enumerate() {
+            let plane = alpha_decoder
+                .decode(&c.alpha)
+                .expect("alpha")
+                .expect("shown");
+            let source = alpha_plane(w, h, u32::try_from(n).expect("n"));
+            assert!(plane.samples == source, "lag {lag:?} picture {n}");
+        }
+    }
 }

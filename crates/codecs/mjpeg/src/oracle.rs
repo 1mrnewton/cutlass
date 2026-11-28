@@ -166,11 +166,17 @@ fn source_args(width: u32, height: u32) -> Vec<String> {
             "-vf".into(),
             scale,
         ],
+        // FFmpeg 9's testsrc2 rounds an odd size down to even, so the
+        // pattern is drawn a little larger and scaled to the size asked.
         None => vec![
             "-f".into(),
             "lavfi".into(),
             "-i".into(),
-            format!("testsrc2=size={width}x{height}:rate=10"),
+            format!(
+                "testsrc2=size={}x{}:rate=10,{scale}",
+                width.next_multiple_of(2),
+                height.next_multiple_of(2),
+            ),
         ],
     }
 }
@@ -296,14 +302,22 @@ fn ffmpeg_motion_jpeg_matches_djpeg_exactly_and_ffmpeg_within_one() {
                 assert_eq!(ours, want, "{pix_fmt} frame {index}");
             } else {
                 // djpeg ignores the studio-range comment. FFmpeg honours it
-                // but upsamples chroma its own way, so compare on average.
+                // but upsamples chroma its own way. The BT.601 luma of the
+                // RGB is Y whatever the chroma, so its mean difference shows
+                // the range alone, on sharp test patterns too.
                 let reference = ffmpeg_planes(&tools, &dir, frame, "rgb24");
+                let luma = |rgb: &[u8]| -> Vec<f64> {
+                    rgb.as_chunks::<3>()
+                        .0
+                        .iter()
+                        .map(|&[r, g, b]| {
+                            0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b)
+                        })
+                        .collect()
+                };
                 let mean = |a: &[u8], b: &[u8]| {
-                    a.iter()
-                        .zip(b)
-                        .map(|(x, y)| f64::from(x.abs_diff(*y)))
-                        .sum::<f64>()
-                        / a.len() as f64
+                    let (a, b) = (luma(a), luma(b));
+                    a.iter().zip(&b).map(|(x, y)| (x - y).abs()).sum::<f64>() / a.len() as f64
                 };
                 let studio = mean(&ours, &reference);
                 let full = mean(&want, &reference);

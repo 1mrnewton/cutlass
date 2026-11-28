@@ -332,6 +332,53 @@ fn gapless_timestamps_count_from_the_first_valid_sample() {
     assert_eq!(audio.skip_leading, 0);
 }
 
+#[test]
+fn gapless_timestamps_at_either_end_of_the_range_do_not_overflow() {
+    let file = demux(&fixture("sine_44100_j128_crc.mp3"));
+    let decoded_from = |base: i64| {
+        let mut decoder = open(file.rate, file.channels);
+        let mut samples = 0;
+        for index in 0..file.packets.len() {
+            let mut packet = file.packet_gapless(index);
+            packet.pts = base.saturating_add(file.pts[index]);
+            samples += crate::common::samples(decoder.push(&packet).expect("push")).len();
+        }
+        samples + crate::common::samples(decoder.drain().expect("drain")).len()
+    };
+    let expected = decoded_from(0);
+    for base in [i64::MAX, i64::MAX - 1_000, i64::MIN, i64::MIN + 1_000] {
+        assert_eq!(decoded_from(base), expected, "{base}");
+    }
+}
+
+#[test]
+fn drain_right_after_reset_returns_nothing() {
+    let file = demux(&fixture("sweep_22050_mono64.mp3"));
+    let mut decoder = open(file.rate, file.channels);
+    for index in 0..4 {
+        let mut packet = file.packet(index);
+        // A padding shorter than the decoder delay makes drain release
+        // the filterbank tail.
+        packet.side.push(SideData::Gapless {
+            encoder_delay: 576,
+            trailing_padding: 0,
+            sample_rate: file.rate,
+        });
+        decoder.push(&packet).expect("push");
+    }
+    decoder.reset();
+    assert!(decoder.drain().expect("drain").is_empty());
+    // The tail is still released once frames follow the reset.
+    let mut packet = file.packet(0);
+    packet.side.push(SideData::Gapless {
+        encoder_delay: 576,
+        trailing_padding: 0,
+        sample_rate: file.rate,
+    });
+    decoder.push(&packet).expect("push");
+    assert!(!decoder.drain().expect("drain").is_empty());
+}
+
 // ---- malformed input ----
 
 #[test]

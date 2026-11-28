@@ -97,12 +97,14 @@ pub(crate) fn quantize(rgba: &[u8]) -> Indexed {
         entry[2] += u64::from(pixel[2]);
         entry[3] += 1;
     }
-    let mut buckets = vec![Bucket {
-        colors: pixels
-            .iter()
-            .map(|(key, total)| (*key, u32::try_from(total[3]).unwrap_or(u32::MAX)))
-            .collect(),
-    }];
+    let mut colors: Vec<(u16, u32)> = pixels
+        .iter()
+        .map(|(key, total)| (*key, u32::try_from(total[3]).unwrap_or(u32::MAX)))
+        .collect();
+    // The map's order changes from run to run, and a cut between colors
+    // that tie along a channel follows the order they arrive in.
+    colors.sort_unstable();
+    let mut buckets = vec![Bucket { colors }];
     while buckets.len() < 256 {
         let Some((at, _)) = buckets
             .iter()
@@ -164,6 +166,25 @@ mod tests {
                 indexed.palette[usize::from(*index)],
                 [pixel[0], pixel[1], pixel[2]]
             );
+        }
+    }
+
+    #[test]
+    fn the_same_frame_gets_the_same_palette_every_time() {
+        // More colors than the palette holds, many of them sharing a value
+        // in the channel a bucket is cut along.
+        let mut rgba = Vec::new();
+        let mut state = 7u32;
+        for _ in 0..20_000 {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let [red, green, blue, _] = state.to_be_bytes();
+            rgba.extend([red, green, blue, 255]);
+        }
+        let first = quantize(&rgba);
+        for _ in 0..8 {
+            let again = quantize(&rgba);
+            assert_eq!(again.palette, first.palette);
+            assert_eq!(again.indexes, first.indexes);
         }
     }
 

@@ -15,6 +15,12 @@
 //! - `packets.m4v`: 48x32, 3 pictures, `-ps 40 -q:v 4 -g 10 -bf 0`.
 //!   Simple: video packets without data partitioning.
 //!
+//! - `iedge.m4v`: an FFmpeg 6.1.1 encode, 48x64, 5 pictures of
+//!   `testsrc2` scrolled by `scroll=h=0.1:v=0.13`, `-flags
+//!   +ildct+ilme+bitexact -bf 1 -me_range 64 -q:v 6`, with user data
+//!   `Lavc56.60.100` put before the first VOP. Field predictions past the
+//!   edge then decode with FFmpeg's `FF_BUG_IEDGE`.
+//!
 //! Each `.yuv` is FFmpeg's decode of its stream with `-threads 1
 //! -cpuflags 0 -flags +bitexact -idct simple -fps_mode passthrough
 //! -noautoscale -f rawvideo -pix_fmt yuv420p`.
@@ -78,6 +84,19 @@ fn fixtures_decode_like_ffmpeg() {
             "{name} differs from FFmpeg"
         );
     }
+}
+
+/// Streams libavcodec 55.66.100 to 57.66.103 wrote take part of a Cb
+/// field prediction past the edge from Cr, as FFmpeg decodes them.
+#[test]
+fn old_libavcodec_field_predictions_past_the_edge_match_ffmpeg() {
+    let packets = split(&fixture("iedge.m4v"));
+    let got = decode_all(&mut open(), &packets);
+    assert_eq!(got.len(), 5);
+    assert!(
+        joined(&got) == fixture("iedge.yuv"),
+        "iedge differs from FFmpeg"
+    );
 }
 
 #[test]

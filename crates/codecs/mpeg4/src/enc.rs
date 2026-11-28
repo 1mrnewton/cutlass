@@ -26,6 +26,10 @@ use crate::vop::clip_block;
 
 const TIME_RESOLUTION: u32 = 25;
 
+/// The longest distance, in layer ticks, between the references of a
+/// B-VOP. FFmpeg holds `pp_time` and `pb_time` in 16 bits.
+const MAX_B_DISTANCE: i32 = 65_535;
+
 /// Seconds already written into the VOP clock. `last` is the base from
 /// before the latest non-B picture, which a B-VOP measures from.
 #[derive(Default)]
@@ -1939,6 +1943,19 @@ impl Pictures {
             self.held = Some(between);
             return Err(error);
         }
+        if pp > MAX_B_DISTANCE {
+            // FFmpeg keeps B-VOP distances in 16 bits: further apart, it
+            // drops the B-VOP or scales its direct vectors wrongly. Both
+            // pictures are P-VOPs instead, in display order.
+            let first = self.encode_p(&between)?;
+            self.finish_reference(&between, first.len());
+            let second = self.encode_p(&picture)?;
+            self.finish_reference(&picture, second.len());
+            return Ok(vec![
+                access(first, &between, false),
+                access(second, &picture, false),
+            ]);
+        }
         let past = self.reference.clone();
         let predicted = self.encode_p(&picture)?;
         self.note(predicted.len(), picture.duration);
@@ -3076,6 +3093,49 @@ mod tests {
             ours.extend_from_slice(picture);
         }
         ffmpeg_matches(&ffmpeg, &stream, &ours, "one-second");
+    }
+
+    /// References more than 65535 ticks apart: FFmpeg's 16-bit B-VOP
+    /// distances dropped every B-VOP between them.
+    #[test]
+    fn references_far_apart_hold_no_bidirectional_picture() {
+        for (duration, bidirectional) in [(65_535i64, false), (30_000, true)] {
+            let mut encoder =
+                super::Pictures::open(super::Profile::AdvancedSimple, 32, 32, 0, false)
+                    .expect("open");
+            let mut packets = Vec::new();
+            for n in 0..5usize {
+                let (y, u, v) = moving(32, 32, n);
+                packets.extend(
+                    encoder
+                        .push(super::PictureIn {
+                            y: &y,
+                            u: &u,
+                            v: &v,
+                            pts: i64::try_from(n).unwrap_or(0) * duration,
+                            duration,
+                            timescale: 65_535,
+                            keyframe: false,
+                        })
+                        .expect("push"),
+                );
+            }
+            packets.extend(encoder.drain().expect("drain"));
+            let mut stream = encoder.headers().to_vec();
+            for packet in &packets {
+                stream.extend_from_slice(&packet.bytes);
+            }
+            let kinds: Vec<u8> = (0..5).map(|n| vop_kind(&stream, n)).collect();
+            assert_eq!(kinds.contains(&2), bidirectional, "{duration}: {kinds:?}");
+            let pts: Vec<i64> = packets.iter().map(|p| p.pts / duration).collect();
+            let pictures = decode_all(&stream);
+            assert_eq!(pictures.len(), 5, "{pts:?}");
+            let Some(ffmpeg) = ffmpeg_bin() else {
+                eprintln!("ffmpeg is not installed; the distant references were not checked");
+                return;
+            };
+            ffmpeg_matches(&ffmpeg, &stream, &pictures.concat(), "distant");
+        }
     }
 
     #[test]

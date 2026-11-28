@@ -91,11 +91,15 @@ pub fn residual(bits: &mut Bits<'_>, nc: i32, max_coeff: usize) -> Result<Vec<i3
     Ok(out)
 }
 
+/// Clause 9.2.2.1. Outside Baseline, Main and Extended, `level_prefix` is
+/// bounded only by the range scaled coefficients must keep, so a 14-bit
+/// stream at QP′Y 0 under a scaling list of ones can need 26. Past 28 is
+/// refused, as FFmpeg refuses it.
 fn level(bits: &mut Bits<'_>, suffix: &mut u32, bump: bool) -> Result<i32, CodecError> {
     let mut prefix = 0u32;
     while !bits.bit()? {
         prefix += 1;
-        if prefix > 20 {
+        if prefix > 28 {
             return Err(bits.malformed("level prefix"));
         }
     }

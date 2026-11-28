@@ -4310,3 +4310,61 @@ fn a_picture_refused_for_its_planes_leaves_no_alpha_behind() {
         }
     }
 }
+
+#[test]
+fn a_cancelled_alpha_push_leaves_no_alpha_behind() {
+    use super::Vp9Options;
+    use crate::decode::Vp9AlphaDecoder;
+    use std::sync::atomic::Ordering;
+
+    // The alpha plane went into the alpha encoder's lookahead before the
+    // stream's encoder saw the cancel flag, so a caller that lowered the
+    // flag and pushed the picture again had it take the cancelled one's
+    // alpha.
+    let (w, h) = (64_u32, 48_u32);
+    for lag in [Some(0), None] {
+        let opts = Vp9Options {
+            qindex: 0,
+            alpha: true,
+            threads: 1,
+            lag,
+            ..Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let cancel = encoder.cancel_flag();
+        let mut coded = Vec::new();
+        for n in 0..3 {
+            let frame = moving(w, h, n * 2);
+            let (cancelled, alpha) = (alpha_plane(w, h, n + 10), alpha_plane(w, h, n));
+            let clock = (i64::from(n), 1, 30);
+            let y = (&frame.y.samples[..], frame.y.stride);
+            let u = (&frame.u.samples[..], frame.u.stride);
+            let v = (&frame.v.samples[..], frame.v.stride);
+            request_video_cancel(&cancel);
+            let refused = encoder.push_planes_alpha(
+                [y, u, v, (&cancelled[..], w as usize)],
+                1.0 / 30.0,
+                clock,
+            );
+            assert!(matches!(refused, Err(CodecError::Cancelled)), "{refused:?}");
+            cancel.store(false, Ordering::Relaxed);
+            let good = [y, u, v, (&alpha[..], w as usize)];
+            coded.extend(
+                encoder
+                    .push_planes_alpha(good, 1.0 / 30.0, clock)
+                    .expect("push"),
+            );
+        }
+        coded.extend(encoder.flush_alpha().expect("flush"));
+        assert_eq!(coded.len(), 3);
+        let mut alpha_decoder = Vp9AlphaDecoder::new();
+        for (n, c) in coded.iter().enumerate() {
+            let plane = alpha_decoder
+                .decode(&c.alpha)
+                .expect("alpha")
+                .expect("shown");
+            let source = alpha_plane(w, h, u32::try_from(n).expect("n"));
+            assert!(plane.samples == source, "lag {lag:?} picture {n}");
+        }
+    }
+}

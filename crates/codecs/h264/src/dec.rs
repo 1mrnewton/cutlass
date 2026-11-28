@@ -7389,6 +7389,119 @@ mod tests {
             .data
     }
 
+    /// Writes `level` as a CAVLC escape, clause 9.2.2.1: the shortest
+    /// `level_prefix` of 15 or more that holds it, at `suffix_length`.
+    /// `first` is the first level after fewer than three trailing ones.
+    fn level_escape(bits: &mut Pack, level: i32, suffix_length: u32, first: bool) {
+        let mut code = 2 * level.unsigned_abs() - if level > 0 { 2 } else { 1 };
+        if first {
+            code -= 2;
+        }
+        code -= 15 << suffix_length;
+        if suffix_length == 0 {
+            code -= 15;
+        }
+        let offset = |prefix: u32| if prefix == 15 { 0 } else { (1 << (prefix - 3)) - 4096 };
+        let mut prefix = 15;
+        while code >= offset(prefix) + (1 << (prefix - 3)) {
+            prefix += 1;
+        }
+        for _ in 0..prefix {
+            bits.bit(false);
+        }
+        bits.bit(true);
+        bits.u(prefix - 3, code - offset(prefix));
+    }
+
+    /// One 16×16 IDR picture of 10-bit 4:2:0 under `sets`, decoded: an
+    /// Intra_16x16 DC-predicted macroblock at QP `qp` with no chroma
+    /// residual, whose luma residual `data` writes from its DC levels on.
+    fn deep_intra16(sets: &TinySets, qp: i32, luma_ac: bool, data: fn(&mut Pack)) -> Vec<u16> {
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let mut unit = tiny_sets(sets);
+        let mut bits = tiny_head(sets, 7, 0, 0);
+        bits.bit(false);
+        bits.bit(false);
+        bits.se(qp - 26);
+        bits.ue(1);
+        bits.ue(if luma_ac { 15 } else { 3 });
+        bits.ue(0);
+        bits.se(0);
+        data(&mut bits);
+        bits.bit(true);
+        unit.extend(crate::nal::annex_b_nal(3, 5, &bits.finish()));
+        let mut pictures = decoder
+            .push(&Packet::video(unit, 0, 1, 30, true))
+            .unwrap();
+        pictures.extend(decoder.drain().unwrap());
+        assert_eq!(pictures.len(), 1);
+        let Some(ten) = pictures[0].yuv420p10.as_ref() else {
+            panic!("no 10-bit samples");
+        };
+        ten.y().to_vec()
+    }
+
+    /// A conforming 10-bit level that needs `level_prefix` 21: under an
+    /// Intra Y list of ones at QP′Y 0, the DC level 129 041 transforms to
+    /// 129 041 and scales to 20 163, both inside the 10-bit range of
+    /// ±2^17. FFmpeg decodes it to 827 throughout the luma.
+    #[test]
+    fn a_deep_level_with_twenty_one_prefix_zeros_is_read() {
+        let sets = TinySets {
+            profile: 110,
+            depth: 2,
+            scaling: Some(|bits| {
+                // List 0 is all ones; the rest fall back.
+                bits.bit(true);
+                bits.se(-7);
+                bits.se(-1);
+                for _ in 1..8 {
+                    bits.bit(false);
+                }
+            }),
+            ..TinySets::default()
+        };
+        let luma = deep_intra16(&sets, -12, false, |bits| {
+            // TotalCoeff 1, TrailingOnes 0; total_zeros 0.
+            bits.u(6, 0b000101);
+            level_escape(bits, 129_041, 0, true);
+            bits.bit(true);
+        });
+        // dcY = (129 041 × 10 + 32) >> 6 = 20 163; (20 163 + 32) >> 6 = 315.
+        assert!(luma.iter().all(|&sample| sample == 512 + 315), "{luma:?}");
+    }
+
+    /// Levels no conforming stream holds: at QP′Y 63 two AC levels of
+    /// 100 000 scale to 1 843 200 000 each, and the transform's first sum
+    /// of them is past `i32::MAX`. Scaled coefficients are held to ±2^21,
+    /// so the block's top-left corner is far above white and its
+    /// bottom-right far below black.
+    #[test]
+    fn levels_past_the_conformance_range_give_held_samples() {
+        let sets = TinySets {
+            profile: 110,
+            depth: 2,
+            ..TinySets::default()
+        };
+        let luma = deep_intra16(&sets, 51, true, |bits| {
+            // No DC levels, and none in AC blocks 0 to 14.
+            for _ in 0..16 {
+                bits.bit(true);
+            }
+            // Block 15: TotalCoeff 2, TrailingOnes 0, at scan places 1
+            // and 2; total_zeros 0.
+            bits.u(8, 0b0000_0111);
+            level_escape(bits, 100_000, 0, true);
+            level_escape(bits, 100_000, 2, false);
+            bits.u(3, 0b111);
+        });
+        assert_eq!(luma[12 * 16 + 12], 1023);
+        assert_eq!(luma[15 * 16 + 15], 0);
+        assert!(luma[..12 * 16].iter().all(|&sample| sample == 512));
+    }
+
     enum SpsTail {
         Interlaced,
         Deep,
@@ -7500,10 +7613,17 @@ mod tests {
     /// `mbs_wide` and `mbs_high` say more, 4-bit frame numbers, and
     /// deblocking under each slice's control.
     struct TinySets {
-        /// 66, or 244 for 4:4:4.
+        /// 66; 100, 110 or 122 for 4:2:0 under a High profile; or 244 for
+        /// 4:4:4.
         profile: u32,
         /// `separate_colour_plane_flag` of a 4:4:4 stream.
         separate: bool,
+        /// `bit_depth_luma_minus8` and `bit_depth_chroma_minus8` under a
+        /// High profile.
+        depth: u32,
+        /// Writes the scaling lists after `seq_scaling_matrix_present_flag`
+        /// under a High profile.
+        scaling: Option<fn(&mut Pack)>,
         refs: u32,
         mbs_wide: u32,
         /// Rows of macroblocks, or of pairs when `mbaff`.
@@ -7529,6 +7649,8 @@ mod tests {
             Self {
                 profile: 66,
                 separate: false,
+                depth: 0,
+                scaling: None,
                 refs: 4,
                 mbs_wide: 1,
                 mbs_high: 1,
@@ -7549,13 +7671,20 @@ mod tests {
         bits.u(8, 0);
         bits.u(8, 30);
         bits.ue(0);
-        if sets.profile == 244 {
-            bits.ue(3);
-            bits.bit(sets.separate);
-            bits.ue(0);
-            bits.ue(0);
+        if matches!(sets.profile, 100 | 110 | 122 | 244) {
+            if sets.profile == 244 {
+                bits.ue(3);
+                bits.bit(sets.separate);
+            } else {
+                bits.ue(1);
+            }
+            bits.ue(sets.depth);
+            bits.ue(sets.depth);
             bits.bit(false);
-            bits.bit(false);
+            bits.bit(sets.scaling.is_some());
+            if let Some(scaling) = sets.scaling {
+                scaling(&mut bits);
+            }
         }
         bits.ue(0);
         bits.ue(sets.order_type);

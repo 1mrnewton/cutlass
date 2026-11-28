@@ -554,3 +554,34 @@ fn audio_after_a_long_loss_does_not_burst() {
         assert!(db[55..].iter().all(|&d| d.abs() <= 1.0), "{shown}");
     }
 }
+
+/// Three lost packets in a steady tone are concealed by repeating its last
+/// pitch period, which libopus 1.6.1 fades by how much the last two periods
+/// decayed, and by 0.8 a frame after the first: about 0, 2 and 4 dB down
+/// on these tones. The concealment stays near the tone's level instead of
+/// dying out.
+#[test]
+fn pitch_concealment_holds_a_steady_tone() {
+    let mean_square = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
+    for channels in [1usize, 2] {
+        let (packets, _) = encoded(channels, 30);
+        let head = OpusHead::simple(channels as u8, 0, 48_000);
+        let mut decoder = OpusDecoder::with_head(head, 48_000).unwrap();
+        let mut energies = Vec::new();
+        for (k, packet) in packets.iter().enumerate().take(23) {
+            let lost = (20..23).contains(&k);
+            let data = if lost { &packet.data[..1] } else { &packet.data[..] };
+            energies.push(mean_square(&decoder.decode(data).unwrap()));
+        }
+        let last = energies[19];
+        let db: Vec<f32> = energies[20..]
+            .iter()
+            .map(|e| 10.0 * (e / last).log10())
+            .collect();
+        let all = 10.0 * (energies[20..].iter().sum::<f32>() / (3.0 * last)).log10();
+        let shown = format!("{channels} ch: lost packets {db:.1?} dB, together {all:.1} dB");
+        eprintln!("{shown}");
+        assert!(db.iter().all(|d| (-6.0..=1.0).contains(d)), "{shown}");
+        assert!(all >= -3.0, "{shown}");
+    }
+}

@@ -1097,8 +1097,12 @@ impl Vp9Encoder {
                 what: "alpha plane",
             });
         }
-        // The picture's planes too, before its alpha goes in: a refused
-        // picture leaves none behind for the next one at its time.
+        // The picture's planes and the cancel flag too, before its alpha
+        // goes in: a refused picture leaves none behind for the next one
+        // at its time.
+        if c.cancel.load(Ordering::Relaxed) {
+            return Err(CodecError::Cancelled);
+        }
         check_planes(c.width, c.height, c.opts.chroma_dims(w, h), &[y, u, v])?;
         lane.wait(a, seconds, clock);
         let coded = c.push_planes([y, u, v], seconds, clock)?;

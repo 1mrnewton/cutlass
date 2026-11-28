@@ -191,7 +191,7 @@ fn chroma_dc(pred_dc: [i32; 4], levels: &[i32; 4], quant: SpQuant, weight: &[u8;
     let mut out = [0i32; 4];
     for index in 0..4 {
         let scaled = (i64::from(spatial[index]) * scale) << shift;
-        out[index] = i32::try_from(scaled >> 5).unwrap_or(0);
+        out[index] = recon::hold(scaled >> 5);
     }
     out
 }

@@ -138,12 +138,25 @@ pub fn dequant8(qp: i32, weights: &[u8; 64]) -> Option<[i32; 64]> {
     }))
 }
 
+/// A scaled coefficient held to −2²¹..2²¹ − 1. Clauses 8.5.10 to 8.5.13
+/// keep every scaled coefficient of a conforming stream, and every value
+/// the transforms make from them, within −2^(7 + bitDepth)..2^(7 + bitDepth)
+/// − 1, so this changes nothing for one at 14 bits or fewer. Levels no
+/// conforming stream holds scale to a value inside the range, so the
+/// transforms after them stay well inside 32 bits and give defined samples.
+#[inline(always)]
+pub(crate) fn hold(scaled: i64) -> i32 {
+    const LIMIT: i64 = 1 << 21;
+    scaled.clamp(-LIMIT, LIMIT - 1) as i32
+}
+
 /// A level scaled by a multiplier from [`dequant4`] or [`dequant8`]. The
 /// rounding add and shift are the clause's for every `qp`: below 24 (4×4)
 /// or 36 (8×8) they are its rounding shift, and above it they drop out.
+/// The result is held as [`scale4`]'s is.
 #[inline(always)]
 pub fn dequantize(level: i32, mul: i32) -> i32 {
-    ((i64::from(level) * i64::from(mul) + 32) >> 6) as i32
+    hold((i64::from(level) * i64::from(mul) + 32) >> 6)
 }
 
 pub fn scale4(coeff: i32, qp: i32, i: usize, j: usize, weight: i32) -> i32 {
@@ -155,7 +168,7 @@ pub fn scale4(coeff: i32, qp: i32, i: usize, j: usize, weight: i32) -> i32 {
     } else {
         (v + (1i64 << (3 - q))) >> (4 - q)
     };
-    scaled as i32
+    hold(scaled)
 }
 
 pub fn scale8(coeff: i32, qp: i32, i: usize, j: usize, weight: i32) -> i32 {
@@ -167,7 +180,7 @@ pub fn scale8(coeff: i32, qp: i32, i: usize, j: usize, weight: i32) -> i32 {
     } else {
         (v + (1i64 << (5 - q))) >> (6 - q)
     };
-    scaled as i32
+    hold(scaled)
 }
 
 /// Every coefficient of `block` after the first is zero. The values are
@@ -219,8 +232,11 @@ fn idct4_full(block: &mut [i32; 16]) {
     }
 }
 
+/// The Intra_16x16 DC levels transformed and scaled, clause 8.5.10, each
+/// held as [`scale4`]'s is. The sums are 64-bit, so any levels add exactly.
 pub fn luma_dc(coeff: &[i32; 16], qp: i32, weight00: i32) -> [i32; 16] {
-    let mut temp = [0i32; 16];
+    let coeff = coeff.map(i64::from);
+    let mut temp = [0i64; 16];
     for i in 0..4 {
         let z0 = coeff[i * 4] + coeff[i * 4 + 1];
         let z1 = coeff[i * 4] - coeff[i * 4 + 1];
@@ -232,7 +248,7 @@ pub fn luma_dc(coeff: &[i32; 16], qp: i32, weight00: i32) -> [i32; 16] {
         temp[i * 4 + 3] = z1 + z2;
     }
     let mut out = [0i32; 16];
-    let ls = weight00 * NORM4[(qp.rem_euclid(6)) as usize][0];
+    let ls = i64::from(weight00 * NORM4[(qp.rem_euclid(6)) as usize][0]);
     let q = qp / 6;
     for i in 0..4 {
         let z0 = temp[i] + temp[8 + i];
@@ -241,31 +257,34 @@ pub fn luma_dc(coeff: &[i32; 16], qp: i32, weight00: i32) -> [i32; 16] {
         let z3 = temp[4 + i] + temp[12 + i];
         let f = [z0 + z3, z1 + z2, z1 - z2, z0 - z3];
         for (row, value) in f.iter().enumerate() {
-            let v = i64::from(*value) * i64::from(ls);
+            let v = value * ls;
             let scaled = if qp >= 36 {
                 v << (q - 6)
             } else {
                 (v + (1i64 << (5 - q))) >> (6 - q)
             };
-            out[row * 4 + i] = scaled as i32;
+            out[row * 4 + i] = hold(scaled);
         }
     }
     out
 }
 
+/// The 4:2:0 chroma DC levels transformed and scaled, clause 8.5.11.2,
+/// each held as [`scale4`]'s is. The sums are 64-bit, as in [`luma_dc`].
 pub fn chroma_dc(c00: i32, c01: i32, c10: i32, c11: i32, qp: i32, weight00: i32) -> [i32; 4] {
+    let [c00, c01, c10, c11] = [c00, c01, c10, c11].map(i64::from);
     let f = [
         c00 + c01 + c10 + c11,
         c00 - c01 + c10 - c11,
         c00 + c01 - c10 - c11,
         c00 - c01 - c10 + c11,
     ];
-    let ls = weight00 * NORM4[(qp.rem_euclid(6)) as usize][0];
+    let ls = i64::from(weight00 * NORM4[(qp.rem_euclid(6)) as usize][0]);
     let q = qp / 6;
     let mut out = [0i32; 4];
     for (slot, value) in f.iter().enumerate() {
-        let v = i64::from(*value) * i64::from(ls);
-        out[slot] = ((v << q) >> 5) as i32;
+        let v = value * ls;
+        out[slot] = hold((v << q) >> 5);
     }
     out
 }
@@ -273,7 +292,8 @@ pub fn chroma_dc(c00: i32, c01: i32, c10: i32, c11: i32, qp: i32, weight00: i32)
 /// Inverse 2×4 Hadamard and scale for a 4:2:2 chroma DC block.
 ///
 /// `raster` is row-major, index `y * 2 + x`. The scale matches the Intra_16x16
-/// DC scale: round when `qp < 36`, otherwise shift.
+/// DC scale: round when `qp < 36`, otherwise shift. Each value is held as
+/// [`scale4`]'s is.
 pub fn chroma_dc422(raster: &[i32; 8], qp: i32, weight: i32) -> [i32; 8] {
     let mut temp = [0i64; 8];
     for y in 0..4 {
@@ -298,7 +318,7 @@ pub fn chroma_dc422(raster: &[i32; 8], qp: i32, weight: i32) -> [i32; 8] {
             } else {
                 (v + (1i64 << (5 - q))) >> (6 - q)
             };
-            out[y * 2 + x] = scaled as i32;
+            out[y * 2 + x] = hold(scaled);
         }
     }
     out

@@ -4680,8 +4680,12 @@ fn cabac_levels(
                 abs += 1;
             }
             if abs >= 15 {
+                // The Exp-Golomb suffix of coeff_abs_level_minus1. A 14-bit
+                // stream at QP′Y 0 under a scaling list of ones can need 22
+                // ones; past 23 the rest is not read, as in FFmpeg, and the
+                // level is held when it is scaled.
                 let mut zeros = 0i32;
-                while cab.bypass()? == 1 && zeros < 20 {
+                while cab.bypass()? == 1 && zeros < 23 {
                     zeros += 1;
                 }
                 let mut mag = 1i32;

@@ -8,6 +8,10 @@
 //! as `2/N` when `N` is the full window) reconstructs at half amplitude; that
 //! was measured on an impulse, so this pair uses `2/n`.
 //!
+//! Both sums run through a complex FFT of `2n` points: radix 2 for the
+//! 1024- and 128-line blocks, and one mixed-radix step over the factor 15
+//! for the 960- and 120-line blocks. The direct sums stay as the test oracle.
+//!
 //! Window shapes are the sine window and the Kaiser-Bessel derived window
 //! (alpha 4 on a long slope, alpha 6 on a short slope), ISO/IEC 14496-3
 //! filterbank. The left slope of a frame uses the previous frame's shape.
@@ -381,11 +385,7 @@ pub fn mdct(input: &[f32], output: &mut [f32]) -> Result<(), CodecError> {
             what: "mdct length",
         });
     }
-    if n.is_power_of_two() {
-        mdct_fft(input, output);
-    } else {
-        mdct_direct(input, output);
-    }
+    mdct_fft(input, output);
     Ok(())
 }
 
@@ -396,14 +396,12 @@ pub fn imdct(spec: &[f32], output: &mut [f32]) -> Result<(), CodecError> {
             what: "imdct length",
         });
     }
-    if n.is_power_of_two() {
-        imdct_fft(spec, output);
-    } else {
-        imdct_direct(spec, output);
-    }
+    imdct_fft(spec, output);
     Ok(())
 }
 
+/// The analysis sum term by term, the oracle for [`mdct_fft`].
+#[cfg(test)]
 fn mdct_direct(input: &[f32], output: &mut [f32]) {
     let n = output.len();
     let n_f = n as f64;
@@ -432,6 +430,8 @@ fn mdct_direct(input: &[f32], output: &mut [f32]) {
     }
 }
 
+/// The synthesis sum term by term, the oracle for [`imdct_fft`].
+#[cfg(test)]
 fn imdct_direct(spec: &[f32], output: &mut [f32]) {
     let n = spec.len();
     let scale = 2.0 / n as f64;
@@ -502,7 +502,113 @@ fn imdct_fft(spec: &[f32], output: &mut [f32]) {
     }
 }
 
+/// Forward complex DFT in place, `X[k] = Σ x[j] e^(-2πi·jk/n)`.
+///
+/// A power of two goes straight to the radix-2 transform. Any other length
+/// is `odd · m` with `m` a power of two (1920 = 15 · 128 for a 960-sample
+/// frame, 240 = 15 · 16 for its short window), done as one Cooley-Tukey
+/// step: `odd` radix-2 transforms of the samples `odd` apart, a twiddle, then
+/// `m` direct transforms of length `odd`.
 fn fft(re: &mut [f64], im: &mut [f64]) {
+    let n = re.len();
+    if n == 0 {
+        return;
+    }
+    let odd = n >> n.trailing_zeros();
+    if odd == 1 {
+        fft_radix2(re, im);
+    } else {
+        fft_mixed(re, im, odd);
+    }
+}
+
+fn fft_mixed(re: &mut [f64], im: &mut [f64], odd: usize) {
+    let n = re.len();
+    let m = n / odd;
+    let n_f = n as f64;
+    // Row `j1` holds the transform of `x[odd·j2 + j1]` over `j2`, times
+    // `e^(-2πi·j1·k1/n)` at column `k1`.
+    let mut rows_re = vec![0.0; n];
+    let mut rows_im = vec![0.0; n];
+    for (j1, (row_re, row_im)) in rows_re
+        .chunks_exact_mut(m)
+        .zip(rows_im.chunks_exact_mut(m))
+        .enumerate()
+    {
+        for (j2, (r, i)) in row_re.iter_mut().zip(row_im.iter_mut()).enumerate() {
+            *r = re[odd * j2 + j1];
+            *i = im[odd * j2 + j1];
+        }
+        fft_radix2(row_re, row_im);
+        if j1 == 0 {
+            continue;
+        }
+        // The twiddle steps by a rotation and is set exactly every 32
+        // columns, as the direct sums do.
+        let step = -2.0 * std::f64::consts::PI * j1 as f64 / n_f;
+        let (sd, cd) = step.sin_cos();
+        let (mut wr, mut wi) = (1.0, 0.0);
+        for (k1, (r, i)) in row_re.iter_mut().zip(row_im.iter_mut()).enumerate() {
+            if k1 % 32 == 0 {
+                (wi, wr) = (step * k1 as f64).sin_cos();
+            }
+            let (xr, xi) = (*r, *i);
+            *r = xr * wr - xi * wi;
+            *i = xr * wi + xi * wr;
+            (wr, wi) = (wr * cd - wi * sd, wr * sd + wi * cd);
+        }
+    }
+    // `X[k1 + m·k2] = Σ_j1 row[j1][k1] · e^(-2πi·j1·k2/odd)`, column by
+    // column. Rows `j` and `odd - j` share a cosine and have opposite sines,
+    // so each column is summed over mirrored pairs: with
+    // `a = Σ row·cos` and `b = Σ row·sin`, `X[k2] = a - i·b` and
+    // `X[odd - k2] = a + i·b`.
+    let roots: Vec<(f64, f64)> = (0..odd)
+        .map(|r| {
+            let (s, c) = (2.0 * std::f64::consts::PI * r as f64 / odd as f64).sin_cos();
+            (c, s)
+        })
+        .collect();
+    let half = odd / 2;
+    let mut sum = vec![(0.0, 0.0); half + 1];
+    let mut diff = vec![(0.0, 0.0); half + 1];
+    for k1 in 0..m {
+        let x0 = (rows_re[k1], rows_im[k1]);
+        let mut total = x0;
+        for j in 1..=half {
+            let (ar, ai) = (rows_re[j * m + k1], rows_im[j * m + k1]);
+            let (br, bi) = (rows_re[(odd - j) * m + k1], rows_im[(odd - j) * m + k1]);
+            sum[j] = (ar + br, ai + bi);
+            diff[j] = (ar - br, ai - bi);
+            total.0 += ar + br;
+            total.1 += ai + bi;
+        }
+        re[k1] = total.0;
+        im[k1] = total.1;
+        for k2 in 1..=half {
+            let (mut ar, mut ai) = x0;
+            let (mut br, mut bi) = (0.0, 0.0);
+            let mut power = 0usize;
+            for j in 1..=half {
+                power += k2;
+                if power >= odd {
+                    power -= odd;
+                }
+                let (c, s) = roots[power];
+                ar += sum[j].0 * c;
+                ai += sum[j].1 * c;
+                br += diff[j].0 * s;
+                bi += diff[j].1 * s;
+            }
+            re[k1 + m * k2] = ar + bi;
+            im[k1 + m * k2] = ai - br;
+            re[k1 + m * (odd - k2)] = ar - bi;
+            im[k1 + m * (odd - k2)] = ai + br;
+        }
+    }
+}
+
+fn fft_radix2(re: &mut [f64], im: &mut [f64]) {
     let n = re.len();
     let mut j = 0usize;
     for i in 1..n {
@@ -597,6 +703,71 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(worst < 1.0e-3, "{worst}");
+    }
+
+    /// Largest difference between two transforms, in units of the largest
+    /// output of the direct sum.
+    fn worst_relative(fast: &[f32], slow: &[f32]) -> f32 {
+        let peak = slow.iter().fold(0.0f32, |max, v| max.max(v.abs()));
+        assert!(peak > 0.0);
+        fast.iter()
+            .zip(slow)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max)
+            / peak
+    }
+
+    /// Every block length of both frame sizes, against the direct sums on
+    /// random input. The FFT path must agree to within two float steps of the peak.
+    #[test]
+    fn transforms_match_the_direct_sums_at_every_block_length() {
+        let mut state = 0x2545_F491u32;
+        let mut random = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+        };
+        for n in [1024usize, 960, 128, 120] {
+            for _ in 0..4 {
+                let input: Vec<f32> = (0..n * 2).map(|_| random()).collect();
+                let mut fast = vec![0.0; n];
+                let mut slow = vec![0.0; n];
+                mdct(&input, &mut fast).unwrap();
+                super::mdct_direct(&input, &mut slow);
+                let worst = worst_relative(&fast, &slow);
+                assert!(worst < 2.0 * f32::EPSILON, "mdct {n}: {worst}");
+
+                let spec: Vec<f32> = (0..n).map(|_| random()).collect();
+                let mut fast = vec![0.0; n * 2];
+                let mut slow = vec![0.0; n * 2];
+                imdct(&spec, &mut fast).unwrap();
+                super::imdct_direct(&spec, &mut slow);
+                let worst = worst_relative(&fast, &slow);
+                assert!(worst < 2.0 * f32::EPSILON, "imdct {n}: {worst}");
+            }
+        }
+    }
+
+    /// Lengths with an odd factor other than 15, down to an odd length
+    /// alone, against a plain DFT.
+    #[test]
+    fn the_mixed_radix_fft_matches_a_plain_dft() {
+        for n in [1usize, 3, 5, 6, 15, 30, 45, 240, 1920] {
+            let re: Vec<f64> = (0..n).map(|j| ((j * 7 + 3) % 11) as f64 - 5.0).collect();
+            let im: Vec<f64> = (0..n).map(|j| ((j * 5 + 1) % 13) as f64 - 6.0).collect();
+            let mut got_re = re.clone();
+            let mut got_im = im.clone();
+            super::fft(&mut got_re, &mut got_im);
+            for k in 0..n {
+                let (mut want_re, mut want_im) = (0.0, 0.0);
+                for j in 0..n {
+                    let angle = -2.0 * std::f64::consts::PI * ((j * k) % n) as f64 / n as f64;
+                    want_re += re[j] * angle.cos() - im[j] * angle.sin();
+                    want_im += re[j] * angle.sin() + im[j] * angle.cos();
+                }
+                let err = (got_re[k] - want_re).hypot(got_im[k] - want_im);
+                assert!(err < 1.0e-9 * n as f64, "n {n} k {k}: {err}");
+            }
+        }
     }
 
     fn round_trip(frame: usize, seqs: &[Sequence], kbd: &[bool], signal: &[f32]) -> f64 {

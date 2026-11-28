@@ -729,11 +729,15 @@ impl CeltDecoder {
         self.last_periodic = !noise;
     }
 
+    /// The periodic branch of `celt_decode_lost` (libopus 1.6.1): the last
+    /// pitch period of the LPC excitation, repeated and scaled by how fast
+    /// the last two periods decayed, through the LPC synthesis filter, and
+    /// folded at its end so that it blends with the next frame's MDCT.
     fn conceal_pitch(&mut self, n: usize) {
         let cc = self.channels;
         let overlap = OVERLAP;
-        let mut fade = 1.0f32;
-        let pitch_index = if !self.last_periodic {
+        let first = !self.last_periodic;
+        let pitch_index = if first {
             let mut lp = vec![0f32; DECODE_BUFFER_SIZE >> 1];
             let chans: Vec<&[f32]> = self
                 .decode_mem
@@ -749,22 +753,30 @@ impl CeltDecoder {
                 DECODE_BUFFER_SIZE - poffset,
                 poffset - 100,
             );
-            let index = poffset.saturating_sub(t).max(1);
+            let index = poffset.saturating_sub(t).clamp(1, MAX_PERIOD);
             self.last_pitch_index = index;
             index
         } else {
-            fade = 0.8;
-            self.last_pitch_index.max(1)
+            self.last_pitch_index.clamp(1, MAX_PERIOD)
         };
-        let len = n + overlap;
-        let out_at = DECODE_BUFFER_SIZE - MAX_PERIOD;
+        // Each frame after the first of a loss fades further.
+        let fade = if first { 1.0f32 } else { 0.8 };
+        // Two pitch periods of excitation, to see whether the signal decays.
+        let exc_length = (2 * pitch_index).min(MAX_PERIOD);
+        // A whole MDCT window: the frame and the overlap into the next.
+        let ext_len = n + overlap;
+        // `hist[LPC_ORDER + k]` is sample `k` of the last MAX_PERIOD.
+        let hist_at = DECODE_BUFFER_SIZE - MAX_PERIOD - LPC_ORDER;
+        let pf = self.postfilter;
         for ch in 0..cc {
             let mem = &mut self.decode_mem[ch];
-            let mut e = vec![0f32; MAX_PERIOD + 2 * overlap];
-            let mut exc: Vec<f32> = mem[out_at..out_at + MAX_PERIOD].to_vec();
-            if !self.last_periodic {
+            let mut exc: Vec<f32> = mem[hist_at..DECODE_BUFFER_SIZE].to_vec();
+            if first {
+                // LPC of the last MAX_PERIOD samples before the loss, to work
+                // on the excitation.
                 let mut ac = [0f32; LPC_ORDER + 1];
-                pitch::autocorr(&exc, &mut ac, Some(&WINDOW), LPC_ORDER);
+                pitch::autocorr(&exc[LPC_ORDER..], &mut ac, Some(&WINDOW), LPC_ORDER);
+                // A -40 dB noise floor, and lag windowing for stability.
                 ac[0] *= 1.0001;
                 for (i, a) in ac.iter_mut().enumerate().skip(1) {
                     let f = 0.008 * i as f32;
@@ -773,70 +785,83 @@ impl CeltDecoder {
                 pitch::lpc(&mut self.lpc[ch], &ac);
             }
             let lpc = self.lpc[ch];
-            let mut fmem = [0f32; LPC_ORDER];
-            for (i, v) in fmem.iter_mut().enumerate() {
-                *v = mem[out_at + MAX_PERIOD - 1 - i];
+            // The excitation of the last `exc_length` samples, the filter
+            // primed with the samples just before them.
+            let from = LPC_ORDER + MAX_PERIOD - exc_length;
+            let mut fir_mem = [0f32; LPC_ORDER];
+            for (i, v) in fir_mem.iter_mut().enumerate() {
+                *v = exc[from - 1 - i];
             }
-            pitch::fir(&mut exc, &lpc, &mut fmem);
-            let period = pitch_index.min(MAX_PERIOD / 2);
-            let mut e1 = 1f32;
-            let mut e2 = 1f32;
-            for i in 0..period {
-                let a = exc[MAX_PERIOD - period + i];
-                let b = exc[(MAX_PERIOD).saturating_sub(2 * period) + i];
+            pitch::fir(&mut exc[from..], &lpc, &mut fir_mem);
+            let exc = &exc[LPC_ORDER..];
+            // How much the last pitch period lost against the one before,
+            // so that a decaying sound is not held.
+            let decay_length = exc_length >> 1;
+            let (mut e1, mut e2) = (1f32, 1f32);
+            for i in 0..decay_length {
+                let a = exc[MAX_PERIOD - decay_length + i];
+                let b = exc[MAX_PERIOD - 2 * decay_length + i];
                 e1 += a * a;
                 e2 += b * b;
             }
-            e1 = e1.min(e2);
-            let mut decay = (0.5 * e1 / e2).sqrt();
-            let mut offset = MAX_PERIOD as i64 - pitch_index as i64;
+            let decay = (e1.min(e2) / e2).sqrt();
+            // The last period repeated, each repetition `decay` lower, with
+            // the energy of the decoded signal it copies.
+            let offset = MAX_PERIOD - pitch_index;
+            let mut e = vec![0f32; ext_len];
+            let mut attenuation = fade * decay;
             let mut s1 = 0f32;
-            for (i, slot) in e.iter_mut().enumerate().take(len + overlap) {
-                if offset + i as i64 >= MAX_PERIOD as i64 {
-                    offset -= pitch_index as i64;
-                    decay *= decay;
+            let mut j = 0;
+            for slot in &mut e {
+                if j >= pitch_index {
+                    j -= pitch_index;
+                    attenuation *= decay;
                 }
-                let at = (offset + i as i64).clamp(0, MAX_PERIOD as i64 - 1) as usize;
-                *slot = decay * exc[at];
-                let tmp = mem[out_at + at];
+                *slot = attenuation * exc[offset + j];
+                let tmp = mem[DECODE_BUFFER_SIZE - MAX_PERIOD + offset + j];
                 s1 += tmp * tmp;
+                j += 1;
             }
-            for (i, v) in fmem.iter_mut().enumerate() {
-                *v = mem[out_at + MAX_PERIOD - 1 - i];
+            // Back to the signal, continuing from the last decoded sample.
+            let mut iir_mem = [0f32; LPC_ORDER];
+            for (i, v) in iir_mem.iter_mut().enumerate() {
+                *v = mem[DECODE_BUFFER_SIZE - 1 - i];
             }
-            for v in e.iter_mut().take(len + overlap) {
-                *v *= fade;
-            }
-            pitch::iir(&mut e[..len + overlap], &lpc, &mut fmem);
-            let s2: f32 = e[..len + overlap].iter().map(|v| v * v).sum();
+            pitch::iir(&mut e, &lpc, &mut iir_mem);
+            // The synthesis can come out louder than what it copies when the
+            // signal changed in the window: then it is scaled down, the
+            // gain ramping in over the overlap, or muted if it exploded.
+            let s2: f32 = e.iter().map(|v| v * v).sum();
             // Written to catch NaN too, as the reference does.
             if s1.partial_cmp(&(0.2 * s2)) != Some(std::cmp::Ordering::Greater) {
-                e[..len + overlap].fill(0.0);
+                e.fill(0.0);
             } else if s1 < s2 {
-                let ratio = ((0.5 * s1 + 1.0) / (s2 + 1.0)).sqrt();
-                for v in e.iter_mut().take(len + overlap) {
-                    *v *= ratio;
+                let ratio = ((s1 + 1.0) / (s2 + 1.0)).sqrt();
+                for (i, v) in e.iter_mut().enumerate() {
+                    let gain = WINDOW
+                        .get(i)
+                        .map_or(ratio, |&w| 1.0 - w * (1.0 - ratio));
+                    *v *= gain;
                 }
             }
-            // Post-filter the previous frame's MDCT overlap, without fading.
-            let pf = self.postfilter;
-            postfilter::comb_filter_inplace(mem, DECODE_BUFFER_SIZE, overlap, pf, pf, 0);
-            mem.copy_within(out_at + n..DECODE_BUFFER_SIZE + overlap, out_at);
-            for i in 0..overlap / 2 {
-                let tmp = WINDOW[i] * e[n + overlap - 1 - i] + WINDOW[overlap - i - 1] * e[n + i];
-                mem[DECODE_BUFFER_SIZE + i] = WINDOW[overlap - i - 1] * tmp;
-                mem[DECODE_BUFFER_SIZE + overlap - i - 1] = WINDOW[i] * tmp;
-            }
-            mem[DECODE_BUFFER_SIZE - n..DECODE_BUFFER_SIZE].copy_from_slice(&e[..n]);
-            // Pre-filter the overlap for the next frame, whose post-filter
-            // will run over it again.
+            // The previous frame's overlap is dropped: the extrapolation
+            // continues the signal itself.
+            mem.copy_within(n..DECODE_BUFFER_SIZE, 0);
+            mem[DECODE_BUFFER_SIZE - n..DECODE_BUFFER_SIZE + overlap].copy_from_slice(&e);
+            // The next frame runs the post-filter over the overlap again,
+            // so it is pre-filtered here, then folded as an MDCT overlap
+            // (`prefilter_and_fold`).
             let neg = Comb {
                 gain: -pf.gain,
                 ..pf
             };
-            let mut pre = vec![0f32; overlap];
+            let mut pre = [0f32; OVERLAP];
             postfilter::comb_filter_fir(&mut pre, mem, DECODE_BUFFER_SIZE, overlap, neg, neg, 0);
-            mem[DECODE_BUFFER_SIZE..DECODE_BUFFER_SIZE + overlap].copy_from_slice(&pre);
+            for i in 0..overlap / 2 {
+                let tmp = WINDOW[i] * pre[overlap - 1 - i] + WINDOW[overlap - 1 - i] * pre[i];
+                mem[DECODE_BUFFER_SIZE + i] = WINDOW[overlap - 1 - i] * tmp;
+                mem[DECODE_BUFFER_SIZE + overlap - 1 - i] = WINDOW[i] * tmp;
+            }
         }
     }
 }

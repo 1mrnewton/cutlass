@@ -194,7 +194,13 @@ pub fn analyze(
     block.extend_from_slice(history);
     block.extend_from_slice(current);
     let mut spec = vec![0.0; frame];
-    transform_block(windows, &block, seq, prev_kbd, kbd, &mut spec, false)?;
+    let shape = Shape {
+        seq,
+        prev_kbd,
+        kbd,
+        short_left: false,
+    };
+    transform_block(windows, &block, shape, &mut spec, false)?;
     Ok(spec)
 }
 
@@ -211,14 +217,22 @@ pub fn synthesize(
             what: "synthesis block",
         });
     }
-    if overlap.started && !transition_ok(overlap.prev, seq) {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "window sequence",
-        });
-    }
+    // A sequence the previous one may not lead to, as when a lost packet
+    // took the stop window after a short block, still decodes. As in
+    // FFmpeg, a long block after a block that ended on a short slope
+    // overlaps it on that short slope, so the previous block's tail
+    // reconstructs and only the current block's own left half is off.
+    let short_left = overlap.started
+        && !transition_ok(overlap.prev, seq)
+        && matches!(overlap.prev, Sequence::LongStart | Sequence::EightShort);
     let mut time = vec![0.0; frame * 2];
-    transform_block(windows, spec, seq, overlap.prev_kbd, kbd, &mut time, true)?;
+    let shape = Shape {
+        seq,
+        prev_kbd: overlap.prev_kbd,
+        kbd,
+        short_left,
+    };
+    transform_block(windows, spec, shape, &mut time, true)?;
     let mut pcm = vec![0.0; frame];
     let mut delay = vec![0.0; frame];
     for i in 0..frame {
@@ -235,33 +249,39 @@ pub fn synthesize(
     Ok(pcm)
 }
 
-fn transform_block(
-    windows: &Windows,
-    input: &[f32],
+/// The window of one block: its sequence, the shapes of its two halves, and
+/// whether a long block's left half takes the short slope of a stop window.
+#[derive(Clone, Copy)]
+struct Shape {
     seq: Sequence,
     prev_kbd: bool,
     kbd: bool,
+    short_left: bool,
+}
+
+fn transform_block(
+    windows: &Windows,
+    input: &[f32],
+    shape: Shape,
     output: &mut [f32],
     synthesis: bool,
 ) -> Result<(), CodecError> {
-    if seq == Sequence::EightShort {
-        short_block(windows, input, prev_kbd, kbd, output, synthesis)
+    if shape.seq == Sequence::EightShort {
+        short_block(windows, input, shape.prev_kbd, shape.kbd, output, synthesis)
     } else {
-        long_block(windows, input, seq, prev_kbd, kbd, output, synthesis)
+        long_block(windows, input, shape, output, synthesis)
     }
 }
 
 fn long_block(
     windows: &Windows,
     input: &[f32],
-    seq: Sequence,
-    prev_kbd: bool,
-    kbd: bool,
+    shape: Shape,
     output: &mut [f32],
     synthesis: bool,
 ) -> Result<(), CodecError> {
     let frame = windows.frame;
-    let window = long_window(windows, seq, prev_kbd, kbd);
+    let window = long_window(windows, shape);
     if synthesis {
         let mut time = vec![0.0; frame * 2];
         imdct(input, &mut time)?;
@@ -318,48 +338,44 @@ fn short_block(
     Ok(())
 }
 
-fn long_window(windows: &Windows, seq: Sequence, prev_kbd: bool, kbd: bool) -> Vec<f32> {
+fn long_window(windows: &Windows, shape: Shape) -> Vec<f32> {
+    let Shape {
+        seq,
+        prev_kbd,
+        kbd,
+        short_left,
+    } = shape;
     let frame = windows.frame;
     let sb = frame / 8;
     let point0 = frame / 2 - sb / 2;
-    let prev = windows.long(prev_kbd);
-    let curr = windows.long(kbd);
-    let short = windows.short(kbd);
     let mut w = vec![0.0; frame * 2];
-    match seq {
-        Sequence::OnlyLong => {
-            copy_half(&mut w, prev, curr);
+    if seq == Sequence::EightShort {
+        return w;
+    }
+    if short_left || seq == Sequence::LongStop {
+        let prev_short = windows.short(prev_kbd);
+        w[point0..point0 + sb].copy_from_slice(prev_short);
+        for sample in w.iter_mut().take(frame).skip(point0 + sb) {
+            *sample = 1.0;
         }
-        Sequence::LongStart => {
-            w[..frame].copy_from_slice(prev);
-            for i in 0..point0 {
-                w[frame + i] = 1.0;
-            }
-            for i in 0..sb {
-                w[frame + point0 + i] = short[sb - 1 - i];
-            }
+    } else {
+        w[..frame].copy_from_slice(windows.long(prev_kbd));
+    }
+    if seq == Sequence::LongStart {
+        let short = windows.short(kbd);
+        for i in 0..point0 {
+            w[frame + i] = 1.0;
         }
-        Sequence::LongStop => {
-            let prev_short = windows.short(prev_kbd);
-            w[point0..point0 + sb].copy_from_slice(prev_short);
-            for sample in w.iter_mut().take(frame).skip(point0 + sb) {
-                *sample = 1.0;
-            }
-            for i in 0..frame {
-                w[frame + i] = curr[frame - 1 - i];
-            }
+        for i in 0..sb {
+            w[frame + point0 + i] = short[sb - 1 - i];
         }
-        Sequence::EightShort => {}
+    } else {
+        let curr = windows.long(kbd);
+        for i in 0..frame {
+            w[frame + i] = curr[frame - 1 - i];
+        }
     }
     w
-}
-
-fn copy_half(dest: &mut [f32], prev: &[f32], curr: &[f32]) {
-    let frame = prev.len();
-    dest[..frame].copy_from_slice(prev);
-    for i in 0..frame {
-        dest[frame + i] = curr[frame - 1 - i];
-    }
 }
 
 fn short_window(windows: &Windows, first: bool, prev_kbd: bool, kbd: bool) -> Vec<f32> {
@@ -829,23 +845,48 @@ mod tests {
         assert!(err < 1.0e-3, "{err}");
     }
 
+    fn ramp(len: usize, step: f32) -> Vec<f32> {
+        (0..len)
+            .map(|i| ((i * 37) % 101) as f32 * step - 0.5)
+            .collect()
+    }
+
+    /// A stop window lost after a short block: the long block that follows
+    /// overlaps on the short slope, as FFmpeg does, and so reconstructs the
+    /// same samples a stop window with that spectrum would.
     #[test]
-    fn an_illegal_second_window_does_not_replace_overlap() {
+    fn a_long_block_after_a_short_block_overlaps_on_the_short_slope() {
+        let windows = Windows::new(128).unwrap();
+        let mut lost = Overlap::new(128);
+        for seq in [
+            Sequence::OnlyLong,
+            Sequence::LongStart,
+            Sequence::EightShort,
+        ] {
+            synthesize(&windows, &mut lost, &ramp(128, 0.01), seq, false).unwrap();
+        }
+        let mut stopped = lost.clone();
+        let spec = ramp(128, 0.02);
+        let after_loss = synthesize(&windows, &mut lost, &spec, Sequence::OnlyLong, false).unwrap();
+        let after_stop =
+            synthesize(&windows, &mut stopped, &spec, Sequence::LongStop, false).unwrap();
+        assert_eq!(after_loss, after_stop);
+        assert_eq!(lost.delay, stopped.delay);
+        // The sequence that follows is judged against the block decoded.
+        synthesize(&windows, &mut lost, &spec, Sequence::OnlyLong, false).unwrap();
+    }
+
+    /// A short block straight after a long one decodes with its own windows
+    /// and leaves the next block free to stop.
+    #[test]
+    fn a_short_block_after_a_long_block_still_decodes() {
         let windows = Windows::new(128).unwrap();
         let mut overlap = Overlap::new(128);
-        let spec = vec![0.0; 128];
+        let spec = ramp(128, 0.01);
         synthesize(&windows, &mut overlap, &spec, Sequence::OnlyLong, false).unwrap();
-        let before = overlap.delay.clone();
-        let err =
-            synthesize(&windows, &mut overlap, &spec, Sequence::EightShort, false).unwrap_err();
-        assert!(matches!(
-            err,
-            cutlass_decode::CodecError::Malformed {
-                what: "window sequence",
-                ..
-            }
-        ));
-        assert_eq!(overlap.delay, before);
+        let pcm = synthesize(&windows, &mut overlap, &spec, Sequence::EightShort, false).unwrap();
+        assert!(pcm.iter().all(|s| s.is_finite()));
+        synthesize(&windows, &mut overlap, &spec, Sequence::LongStop, false).unwrap();
         assert!(!transition_ok(Sequence::OnlyLong, Sequence::EightShort));
         assert!(transition_ok(Sequence::OnlyLong, Sequence::LongStart));
     }

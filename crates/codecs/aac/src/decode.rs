@@ -1498,6 +1498,57 @@ mod tests {
         assert_eq!(decoder.push_packet(&short).unwrap().len(), 1024);
     }
 
+    /// A packet lost between a short window and its stop window: the long
+    /// units after it decode, as FFmpeg decodes them, instead of failing
+    /// until the stream happens to switch to short windows again.
+    #[test]
+    fn long_units_after_a_lost_stop_window_decode() {
+        let mut start = BitWriter::with_cap(64);
+        for (value, width) in [
+            (0, 3),
+            (0, 4),
+            (150, 8),
+            (0, 1),
+            (1, 2),
+            (0, 1),
+            (1, 6),
+            (0, 1),
+        ] {
+            put(&mut start, value, width);
+        }
+        for (value, width) in [(13, 4), (1, 5), (256, 9), (0, 1), (0, 1), (0, 1), (7, 3)] {
+            put(&mut start, value, width);
+        }
+        let mut short = BitWriter::with_cap(64);
+        for (value, width) in [
+            (0, 3),
+            (0, 4),
+            (0, 8),
+            (0, 1),
+            (2, 2),
+            (0, 1),
+            (0, 4),
+            (0, 7),
+        ] {
+            put(&mut short, value, width);
+        }
+        for (value, width) in [(0, 1), (0, 1), (0, 1), (7, 3)] {
+            put(&mut short, value, width);
+        }
+        let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
+        let mut decoder = AacDecoder::open(&params).unwrap();
+        decoder
+            .push_packet(&Packet::audio(start.finish(), 0, 1024, 48_000))
+            .unwrap();
+        decoder
+            .push_packet(&Packet::audio(short.finish(), 1024, 1024, 48_000))
+            .unwrap();
+        let long = Packet::audio(silent_frame(), 2048, 1024, 48_000);
+        for _ in 0..3 {
+            assert_eq!(decoder.push_packet(&long).unwrap().len(), 1024);
+        }
+    }
+
     fn refuse_platform(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
         Err(CodecError::Unsupported {
             what: "platform aac",
